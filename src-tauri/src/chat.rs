@@ -49,8 +49,11 @@ const MAX_TOKENS_SETTING: &str = "chat_max_tokens";
 const FOLLOWUP_MAX_TOKENS: u32 = 1024;
 /// How much of an answer the follow-up pass reads back.
 const FOLLOWUP_ANSWER_CHARS: usize = 6_000;
-/// Hard stop on the tool loop — chat is pay-per-token (SPEC §15).
-const MAX_TOOL_ROUNDS: usize = 8;
+/// Hard stop on the tool loop — chat is pay-per-token (SPEC §15). Raised from
+/// 8 when the write tools landed (M8): a real turn now reads before it writes
+/// (search → read → act → confirm), and each round can still carry several
+/// parallel tool calls.
+const MAX_TOOL_ROUNDS: usize = 12;
 /// Tool results dominate a chat's context; keep each one bounded.
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
 /// What the sidebar shows behind a chip's disclosure.
@@ -578,6 +581,7 @@ pub fn send(
     session_id: Option<i64>,
     text: &str,
     today: &str,
+    today_iso: &str,
 ) -> Result<i64> {
     let text = text.trim();
     if text.is_empty() {
@@ -623,6 +627,8 @@ pub fn send(
 
     let app = app.clone();
     let question = text.to_string();
+    let today = today.to_string();
+    let today_iso = today_iso.to_string();
     std::thread::spawn(move || {
         // Model resolution can hit /v1/models on first use; it happens here so
         // the command returns immediately and no HTTP runs on a runtime thread.
@@ -635,6 +641,8 @@ pub fn send(
                 system: &system,
                 effort: effort.as_deref(),
                 question: &question,
+                today: &today,
+                today_iso: &today_iso,
             };
             answer(&app, &run, &cancel)
         });
@@ -677,6 +685,10 @@ struct Run<'a> {
     effort: Option<&'a str>,
     /// The question being answered — context for the follow-up suggestions.
     question: &'a str,
+    /// Today, display-formatted and as YYYY-MM-DD — the write tools stamp
+    /// job prompts and practice file names with these (tools::ToolCtx).
+    today: &'a str,
+    today_iso: &'a str,
 }
 
 /// SPEC §9 tool loop: send → run `tool_use` locally → append `tool_result` →
@@ -767,9 +779,14 @@ fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
 
         let mut results = Vec::with_capacity(turn.tool_calls.len());
         for call in &turn.tool_calls {
-            let outcome = with_conn(app, |conn| {
-                Ok(crate::tools::execute(conn, &call.name, &call.input))
-            })?;
+            // Executed WITHOUT holding the DB lock: write tools that enqueue
+            // jobs re-enter the connection through the job runner, and a held
+            // guard here would deadlock. Each tool locks its own window.
+            let ctx = crate::tools::ToolCtx {
+                today: run.today,
+                today_iso: run.today_iso,
+            };
+            let outcome = crate::tools::execute(app, &call.name, &call.input, &ctx);
             let mut event = ChatEvent::new(session_id, "tool_result");
             event.tool_id = Some(call.id.clone());
             event.summary = Some(outcome.summary.clone());

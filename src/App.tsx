@@ -1,18 +1,13 @@
 import { useState } from "react";
-import {
-  QueryClient,
-  QueryClientProvider,
-  useQuery,
-} from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { listClasses, type ClassInfo } from "@/lib/classes";
+import { queryClient } from "@/lib/query";
 import { dragWindow } from "@/lib/window";
-
-const queryClient = new QueryClient();
 
 function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
   const { data: classes, error } = useQuery({

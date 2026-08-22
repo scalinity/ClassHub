@@ -439,7 +439,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* "What did Module 1 of Biostats cover about measures of central tendency?"
   streams an answer grounded in extracts with cited file paths, and history survives relaunch.
 
-- [ ] **M8 — Chat write-actions.**
+- [x] **M8 — Chat write-actions.**
   All write tools per §9: synthesis triggering (visible in Job Center), deadline/grade/note
   tools, `propose_file_moves` routing into the M9 confirm queue (build the queue data model
   now; full UI lands in M9), `generate_practice` producing a practice exam HTML.

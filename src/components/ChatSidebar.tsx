@@ -22,6 +22,7 @@ import {
   EFFORT_LEVELS,
   closeChat,
   formatSessionDate,
+  isWriteTool,
   loadModels,
   newChat,
   removeKey,
@@ -83,6 +84,8 @@ const STARTERS = [
   "Explain the hardest concept in {class} in plain terms",
   "Where do my notes go further than the {class} slides?",
   "What should I review before the next {class} deadline?",
+  "Make me a practice exam for the latest module of {class}",
+  "Distill the newest module of {class} into a note I can skim",
 ];
 
 function pickStarters(classes: readonly ClassInfo[]): string[] {
@@ -425,12 +428,14 @@ function EmptyState({
   return (
     <div className="mt-6">
       <p className="font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-        READS YOUR MATERIAL
+        READS YOUR MATERIAL · ACTS ON IT
       </p>
       <p className="mt-2.5 text-[13px] leading-relaxed text-muted-foreground">
         Questions are answered from the extracted slides, notebooks, notes and
-        study guides in your classes — with the file it read cited inline, so you
-        can open the source in a click.
+        study guides in your classes, with every file it read cited inline. Ask
+        and it also records deadlines and grades, writes notes, and kicks off
+        guide synthesis or a practice exam. File moves stay proposals you
+        approve.
       </p>
       <div className="mt-4 space-y-1.5">
         {starters.map((text) => (
@@ -578,7 +583,8 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
                 : "text-muted-foreground/50")
           }
         >
-          »
+          {/* ✎ marks a chip that changed something; » only ever read. */}
+          {isWriteTool(item.name) ? "✎" : "»"}
         </span>
         <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em]">
           {toolLabel(item.name)}
@@ -792,9 +798,15 @@ function SettingsPane({ chat }: { chat: ChatSnapshot }) {
         WHAT ASKING CAN DO
       </p>
       <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
-        Read only, for now: it searches and reads your extracts, notes and study
-        guides. It cannot write notes, change deadlines, start synthesis, or move
-        files — file moves stay proposals you approve.
+        It reads your extracts, notes and study guides — and it can act: record
+        and amend deadlines and grades, write notes into a class's Notes folder,
+        start guide synthesis, and generate practice exams (both run as jobs in
+        the Job Center). Chips marked ✎ changed something; overwritten or
+        deleted data is kept in the audit log.
+      </p>
+      <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+        The one thing it never does is move files: reorganizations are only
+        proposals, and nothing moves until you approve each one.
       </p>
     </div>
   );

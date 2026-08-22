@@ -1,15 +1,33 @@
 import { useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, FolderOpen, RefreshCw } from "lucide-react";
+import {
+  ChevronLeft,
+  FileQuestion,
+  FolderOpen,
+  NotepadText,
+  RefreshCw,
+  type LucideIcon,
+} from "lucide-react";
 
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GuideViewer } from "@/components/GuideViewer";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import type { ClassInfo } from "@/lib/classes";
-import { listGuides, MASTER_OUTPUT_PATH, synthesizeModule } from "@/lib/guides";
+import {
+  formatGeneratedAt,
+  listGuides,
+  MASTER_OUTPUT_PATH,
+  synthesizeModule,
+} from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
-import { openInDefaultApp, scanClass } from "@/lib/materials";
+import {
+  listNotes,
+  listPractice,
+  openInDefaultApp,
+  scanClass,
+  type ManagedFile,
+} from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
 
 const ACCENTS: Record<string, string> = {
@@ -60,6 +78,26 @@ export function ClassWorkspace({
     placeholderData: (prev) => prev,
   });
   const guideMap = new Map((guides ?? []).map((g) => [g.scope, g]));
+
+  // Practice exams and notes (M8): both chat-written, both listed from disk.
+  // The practice query re-runs when a practice job settles (finalize verifies
+  // the file before the status flips, same ordering as guides); the notes
+  // query is invalidated by the hub-changed push (lib/query.ts).
+  const practiceJobs = jobs.filter(
+    (j) => j.kind === "practice" && j.classId === info.id,
+  );
+  const activePractice = practiceJobs.filter(
+    (j) => j.status === "running" || j.status === "queued",
+  );
+  const { data: practice } = useQuery({
+    queryKey: ["practice", info.id, practiceJobs.length - activePractice.length],
+    queryFn: () => listPractice(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const { data: notes } = useQuery({
+    queryKey: ["notes", info.id],
+    queryFn: () => listNotes(info.id),
+  });
 
   const [viewScope, setViewScope] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
@@ -204,6 +242,82 @@ export function ClassWorkspace({
         </div>
       </section>
 
+      {(activePractice.length > 0 || (practice?.length ?? 0) > 0) && (
+        <section className="mt-12">
+          <div className="flex items-baseline justify-between border-b pb-3">
+            <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+              PRACTICE EXAMS
+            </h2>
+            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+              {(practice?.length ?? 0) === 1
+                ? "1 EXAM"
+                : `${practice?.length ?? 0} EXAMS`}
+            </span>
+          </div>
+          <div className="mt-3 space-y-1">
+            {activePractice.map((job) => (
+              <div
+                key={job.id}
+                className="flex h-8 items-center gap-2 rounded-md px-2 font-mono text-[10px] tracking-[0.14em] text-(--accent)"
+              >
+                <span
+                  aria-hidden
+                  className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+                />
+                {job.status === "running" ? "GENERATING" : "QUEUED"}
+                {` — ${job.scope && job.scope !== "master" ? job.scope.toUpperCase() : "SEMESTER"}`}
+                <span className="font-normal text-muted-foreground/70">
+                  · LIVE IN THE JOB CENTER
+                </span>
+              </div>
+            ))}
+            {(practice ?? []).map((exam) => (
+              <ManagedRow
+                key={exam.relPath}
+                icon={FileQuestion}
+                file={exam}
+                strippedExt=".html"
+                stamp={formatGeneratedAt(exam.modifiedAt)}
+                onView={(name) =>
+                  setViewFile({ relPath: exam.relPath, name, kind: "html" })
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {(notes?.length ?? 0) > 0 && (
+        <section className="mt-12">
+          <div className="flex items-baseline justify-between border-b pb-3">
+            <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+              NOTES
+            </h2>
+            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+              {(notes?.length ?? 0) === 1 ? "1 NOTE" : `${notes?.length} NOTES`}
+            </span>
+          </div>
+          <div className="mt-3 space-y-1">
+            {(notes ?? []).map((note) => (
+              <ManagedRow
+                key={note.relPath}
+                icon={NotepadText}
+                file={note}
+                strippedExt=".md"
+                stamp={formatGeneratedAt(note.modifiedAt)}
+                onView={(name) =>
+                  setViewFile({
+                    relPath: note.relPath,
+                    name,
+                    kind: note.name.toLowerCase().endsWith(".md") ? "md" : "other",
+                  })
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       {viewedGuide && (
         <GuideViewer
           classId={info.id}
@@ -219,6 +333,41 @@ export function ClassWorkspace({
         />
       )}
     </main>
+  );
+}
+
+/** A row in an app-managed listing (practice exams, notes) — FileRow's shape. */
+function ManagedRow({
+  icon: Icon,
+  file,
+  strippedExt,
+  stamp,
+  onView,
+}: {
+  icon: LucideIcon;
+  file: ManagedFile;
+  strippedExt: string;
+  stamp: string;
+  onView: (name: string) => void;
+}) {
+  const name = file.name.toLowerCase().endsWith(strippedExt)
+    ? file.name.slice(0, -strippedExt.length)
+    : file.name;
+  return (
+    <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
+      <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
+      <button
+        type="button"
+        title={`View ${name}`}
+        onClick={() => onView(name)}
+        className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+      >
+        {name}
+      </button>
+      <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
+        {stamp}
+      </span>
+    </div>
   );
 }
 

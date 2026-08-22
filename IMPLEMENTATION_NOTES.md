@@ -483,6 +483,122 @@ doesn't cover.
   11 SVGs, zero forbidden APIs, no external refs, clean `</html>`, `guides`
   upsert fresh.
 
+## M8 — Chat write-actions (2026-08-22)
+
+### What exists now
+
+- **Nine write tools** in `tools.rs` beside the four read tools (SPEC §9):
+  `upsert_deadline` / `complete_deadline` / `delete_deadline`,
+  `upsert_grade_category` / `add_grade_item`, `write_note`,
+  `trigger_synthesis`, `generate_practice`, `propose_file_moves`. Thirteen
+  schemas ride every loop round (~2k tokens) — one `json!` array still fits
+  the loop fine. `MAX_TOOL_ROUNDS` 8 → 12: a real turn reads before it writes.
+- **Tool execution moved off the held DB lock.** `tools::execute(app, name,
+  input, &ToolCtx)` — each tool takes the connection for exactly its window.
+  The M7 shape (execute inside the caller's `with_conn`) deadlocks the moment
+  a write tool enqueues a job, because `jobs::enqueue` re-enters the same
+  non-reentrant mutex. `ToolCtx` carries `today` (display) and `today_iso`
+  (YYYY-MM-DD), both client-formatted; `send_chat` gained `todayIso`.
+- **Reversible or auditable, per tool** (the `audit_log` table from migration
+  0001 finally earns its keep — no M9 retrofit needed):
+  - Deadlines and grades are reversible through their own tools; every write
+    also lands an `audit_log` row (`chat.*` actions), and `delete_deadline`'s
+    payload carries the entire deleted row.
+  - `write_note` parks the replaced content in the audit payload on overwrite
+    — a chat write can never silently destroy a note.
+  - Synthesis/practice triggers: the jobs table is already the record.
+  - `propose_file_moves` is inert by construction: rows in `move_proposals`
+    (migration 0003), status `pending`, `source='chat'`, `confidence` NULL
+    (sort_proposal jobs fill it in M9). One pending proposal per source file —
+    a re-proposal updates the row instead of stacking. Validation: source
+    exists on disk, both paths AIBHS-root-relative in the same class, dest not
+    app-managed, dest not already existing. Paths are stored class-relative
+    (the `files.rel_path` convention).
+- **Practice pipeline** (SPEC §8.3): `prompts/practice.md` is an exam-paper
+  contract in the guide document family — points ledger as the signature
+  (header rubric table, per-question `PTS` tags, sticky self-scoring strip,
+  countdown timer), solutions behind `<details>` with citation chips and
+  partial-credit notes, citations only inside solutions, chunked-writing
+  clause, same one-script/offline constraints. `guides::generate_practice`
+  names the file `Practice/<scope> — YYYY-MM-DD.html` (numeric suffix on a
+  same-day collision), `finalize_practice` demotes success-with-no-file to
+  failure (guides pattern). **No practice table** — the directory listing is
+  the record (`list_practice`); dated artifacts have no staleness by design.
+- `notes.rs`: `write_note` (title→filename sanitization, 1 MB cap),
+  `list_notes`; `list_dir_files` shared with the practice listing. Commands
+  `list_notes` / `list_practice` feed the workspace sections.
+- **`hub-changed` push**: emitted per successful write with `{area}`;
+  `src/lib/query.ts` now owns the shared `QueryClient` and maps areas to
+  invalidations (deadlines/grades → classes; notes → notes; proposals →
+  nothing until M9). This is the whole no-manual-refresh mechanism.
+- **Overview upgrades**: deadlines carry `[#id]` (what amend/complete/delete
+  address); the detailed overview adds a per-class Grades line (weights sum
+  with ≠100 warning, computed weighted grade per SPEC §11 — renormalized over
+  categories that have items); the snapshot header counts pending move
+  proposals.
+- `chat_system.md`: the write-policy section replaces the read-only one — act
+  when asked and recap, ids come from the overview, job triggers only on a
+  clear request and reported as queued (never done), moves are proposals only.
+- **UI**: class cards carry a nearest-deadline line (accent `DUE <date>` +
+  muted title; overdue open deadlines included deliberately — an overdue line
+  is the most urgent thing on the card). Workspace gains PRACTICE EXAMS and
+  NOTES sections (hidden while empty; `ManagedRow` mirrors FileRow; the
+  practice viewer passes `allow-scripts`, so the exam's timer and scoring run
+  inside the sandbox). Chat write chips carry ✎ instead of »; settings and
+  empty-state copy updated; two write-flavored starters added.
+
+### Verified (through the real chat loop, driven via AX automation)
+
+- **Deadline**: created → card flipped to `DUE SEP 3 11:59 PM · Problem Set 1`
+  live; then one three-write turn amended it (audit has before/after), marked
+  it done, and deleted it (audit keeps the full row). Deadlines table empty
+  again; audit rows 1/7/8/9 tell the story.
+- **Note**: a search→read→write turn produced a genuinely grounded quick
+  reference — real slide citations, the ★EXAM median-position trap pulled from
+  the master guide — and the NOTES section appeared with no refresh.
+- **Grades**: three categories + Quiz 1 9/10 through chat; weights line and
+  the computed 90.0% both correct. Test rows removed after verification
+  (nothing displays grades until M11; the audit rows remain).
+- **Synthesis**: chat queued module_guide job 103 — Job Center row and the
+  module chip (`SYNTHESIZING…`) live; the model volunteered that the guide was
+  fresh but honored the explicit ask. Cancelled from the panel (child killed)
+  since completing a redundant resynthesis had no value.
+- **Practice**: job 102 end-to-end — 625 s, 19 turns, 71 KB exam: 19
+  questions / 100 pts / 90 min, rubric table, per-question PTS tags, sticky
+  score strip with 90:00 countdown, MC click feedback, 27 solution citation
+  chips; 1 script, 1 style, 0 external refs, 0 forbidden APIs, no CONTINUE
+  remnant, clean `</html>`. Questions ground in the real notebooks (the
+  Florida county `var`/`sd` output). Renders and runs in the sandboxed viewer.
+- **Proposal**: one pending `move_proposals` row (source='chat'), file
+  untouched on disk, honest "nothing has moved" answer. Deliberately left in
+  the queue as the M9 fixture — M9's acceptance requires chat-proposed moves
+  to surface there.
+
+### Gotchas
+
+- **Subscription auth runs on a long-lived setup token**, exported as
+  `CLAUDE_CODE_OAUTH_TOKEN` in `~/.zshrc` — the browser-login cloud creds
+  expire (and had expired). Spawns keep that var (only `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_AUTH_TOKEN` are stripped), and the init event still reports
+  `apiKeySource none` + `five_hour`, so the M3 self-check accepts it
+  unchanged. Consequence: launch the dev app from an environment that has the
+  token — a non-interactive shell does not source `~/.zshrc`, which is exactly
+  how the expired-cloud-creds 401 surfaced this session.
+- Two tauri dev instances collide on vite port 1420 (both projects hard-code
+  it). Coexist without touching repo files:
+  `npm run tauri dev -- --config '{"build":{"devUrl":"http://localhost:1425","beforeDevCommand":"npm run dev -- --port 1425"}}'`.
+- The connection mutex is not reentrant — never execute a tool while holding
+  the guard if it can reach `jobs::enqueue`.
+- `json!({...})` borrows interpolated variables (`to_value(&expr)`), so values
+  stay usable after building an audit payload — no clones needed.
+- Driving the app via AX (for verification): synthetic `click at` coordinates
+  do nothing in the WKWebView; `perform action "AXPress"` works. An
+  aria-label surfaces as AXDescription, but a button named by its text content
+  surfaces as AXTitle (HTML `title` attr → AXHelp) — search both. `result` is
+  a reserved word in AppleScript. ⌘J only lands in the chat input when the
+  panel freshly mounts (autofocus); after AX presses elsewhere, toggle the
+  panel closed and open again before pasting.
+
 ## M7 — Chat sidebar, read-only (2026-08-22)
 
 ### Shape

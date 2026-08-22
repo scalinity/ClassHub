@@ -1,5 +1,7 @@
-//! SPEC §9 — the chat agent's read tools: `get_overview`, `list_material`,
-//! `search_material`, `read_material`.
+//! SPEC §9 — the chat agent's tools: four read tools (`get_overview`,
+//! `list_material`, `search_material`, `read_material`) and, since M8, the
+//! write tools (deadlines, grades, notes, synthesis triggers, practice exams,
+//! file-move proposals).
 //!
 //! Retrieval is agentic, not vector-based (SPEC §1: no embeddings API): the
 //! agent greps the pre-extracted markdown under `.classhub/extracts/` plus
@@ -7,6 +9,20 @@
 //! Every path crossing the tool boundary is relative to the AIBHS root and
 //! starts with a class folder name, so a path the agent reads back is a path it
 //! can hand straight to `read_material` — and one the sidebar can open.
+//!
+//! Write policy: every write is immediate and its result text states exactly
+//! what changed. Destructive writes (note overwrite, deadline delete) park the
+//! prior state in `audit_log` first, so nothing a chat turn does is
+//! unrecoverable; job triggers are recorded by the jobs table itself, and file
+//! moves are only ever proposals in `move_proposals` — nothing moves without
+//! approval. After a successful write the backend emits `hub-changed`, which
+//! the frontend turns into query invalidation, so the UI reflects the change
+//! without a manual refresh.
+//!
+//! Tools execute WITHOUT holding the DB lock across the call: write tools
+//! that enqueue jobs re-enter the connection through the job runner, and a
+//! held guard there would deadlock. Each tool takes the lock for exactly the
+//! window it needs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,8 +31,29 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Per-turn context for the write tools: today as display text (job prompt
+/// stamps) and as YYYY-MM-DD (practice file names). Both are formatted
+/// client-side — std Rust cannot format a local date.
+pub struct ToolCtx<'a> {
+    pub today: &'a str,
+    pub today_iso: &'a str,
+}
+
+fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let db = app.state::<crate::Db>();
+    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&guard)
+}
+
+/// Tells the frontend that hub data changed (src/lib/query.ts maps areas to
+/// query invalidations — the "no manual refresh" half of the write contract).
+fn emit_hub_change(app: &AppHandle, area: &str) {
+    let _ = app.emit("hub-changed", json!({ "area": area }));
+}
 
 const EXTRACTS_DIR: &str = ".classhub/extracts";
 const GUIDES_DIR: &str = "Study Guides";
@@ -67,8 +104,9 @@ impl Outcome {
     }
 }
 
-/// Tool schemas sent with every request (SPEC §9 read tools; write tools land
-/// in M8).
+/// Tool schemas sent with every request (SPEC §9: four read tools, nine write
+/// tools). Thirteen schemas ride every round of the loop — roughly two
+/// thousand tokens, a fine price for the model always seeing its full reach.
 pub fn definitions() -> Value {
     json!([
         {
@@ -140,20 +178,167 @@ pub fn definitions() -> Value {
                 "required": ["path"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "upsert_deadline",
+            "description": "Record a deadline, or amend one by passing its id (get_overview lists each open deadline's [#id]). Takes effect immediately and shows up in the app.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name, e.g. 'Biostatistics for AI'." },
+                    "title": { "type": "string", "description": "What is due, e.g. 'Problem Set 2'." },
+                    "kind": { "type": "string", "enum": ["assignment", "exam", "quiz", "project", "other"], "description": "Defaults to 'other'." },
+                    "due_at": { "type": "string", "description": "ISO date: YYYY-MM-DD, or YYYY-MM-DDTHH:MM when the time matters." },
+                    "notes": { "type": "string", "description": "Optional detail worth keeping with the deadline." },
+                    "id": { "type": "integer", "description": "Pass an existing deadline's id to amend it; omit to create. When amending, only the fields you pass change." }
+                },
+                "required": ["class", "title", "due_at"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "complete_deadline",
+            "description": "Mark a deadline done by id (get_overview lists ids).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The deadline's id." }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "delete_deadline",
+            "description": "Delete a deadline by id. The deleted row is kept in the audit log, but prefer complete_deadline for anything that was real — delete is for mistakes and duplicates.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The deadline's id." }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "upsert_grade_category",
+            "description": "Create or reweight a grade category (e.g. Homework at 30%). Weights are percentages that should sum to 100 across the class; the result reports the current sum.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "name": { "type": "string", "description": "Category name, e.g. 'Homework'. Matching an existing name (case-insensitive) updates it." },
+                    "weight": { "type": "number", "description": "Percentage weight, 0–100." }
+                },
+                "required": ["class", "name", "weight"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "add_grade_item",
+            "description": "Record a graded item (score out of max) in an existing grade category. The result includes the recomputed current weighted grade.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "category": { "type": "string", "description": "An existing category's name — create it with upsert_grade_category first if needed." },
+                    "name": { "type": "string", "description": "The item, e.g. 'Quiz 1'." },
+                    "score": { "type": "number", "description": "Points earned." },
+                    "max_score": { "type": "number", "description": "Points possible." },
+                    "graded_at": { "type": "string", "description": "Optional ISO date the grade was received." }
+                },
+                "required": ["class", "category", "name", "score", "max_score"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "write_note",
+            "description": "Write a markdown note into the class's Notes folder as '<title>.md'. A title matching an existing note overwrites it — read the existing note first when amending (the replaced version is kept in the audit log). Cite the written path in your answer so it can be opened.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "title": { "type": "string", "description": "Note title; becomes the file name." },
+                    "content_md": { "type": "string", "description": "The full markdown content of the note." }
+                },
+                "required": ["class", "title", "content_md"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "trigger_synthesis",
+            "description": "Queue a study-guide synthesis job — one module's guide, or 'master' for the semester master. It appears in the Job Center immediately and runs on the Claude subscription: long (10–30+ minutes) and token-heavy, so trigger only on a clear request, one job per ask, and never re-trigger a scope that is already queued or running. The master runs exclusively after the queue drains. Report the job as queued, never as done.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "scope": { "type": "string", "description": "A module folder name as get_overview lists it (e.g. 'Module 1'), or 'master' for the semester master." }
+                },
+                "required": ["class", "scope"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "generate_practice",
+            "description": "Queue a practice-exam job for a module or the whole semester, optionally focused on given topics. Same rules as trigger_synthesis: subscription job, visible in the Job Center, report it as queued. The exam lands in Study Guides/Practice/ and the workspace's practice list when it succeeds.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "scope": { "type": "string", "description": "A module folder name, or 'master' for semester-wide." },
+                    "focus": { "type": "string", "description": "Optional topics to emphasize, e.g. 'hypothesis testing and p-values'." }
+                },
+                "required": ["class", "scope"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "propose_file_moves",
+            "description": "Propose file reorganizations. This NEVER moves anything: each entry lands in the confirm queue as a proposal awaiting explicit approval. Paths are AIBHS-root-relative (starting with the class folder name), exactly as list_material returns them; destinations may name folders that don't exist yet.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "moves": {
+                        "type": "array",
+                        "description": "One entry per file to move.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": { "type": "string", "description": "Current path of an existing file, AIBHS-root-relative." },
+                                "to": { "type": "string", "description": "Proposed new path including the file name, AIBHS-root-relative, same class." },
+                                "reason": { "type": "string", "description": "One line on why this destination." }
+                            },
+                            "required": ["from", "to"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["moves"],
+                "additionalProperties": false
+            }
         }
     ])
 }
 
 /// Runs one tool call. Failures come back as tool results, not transport
 /// errors — the model can correct a bad path or a thin query on its own.
-pub fn execute(conn: &Connection, name: &str, input: &Value) -> Outcome {
+pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Outcome {
     let result = match name {
-        "get_overview" => overview_text(conn, true).map(Outcome::ok),
-        "list_material" => list_material(conn, input),
-        "search_material" => search_material(conn, input),
-        "read_material" => read_material(conn, input),
+        "get_overview" => with_conn(app, |conn| overview_text(conn, true)).map(Outcome::ok),
+        "list_material" => with_conn(app, |conn| list_material(conn, input)),
+        "search_material" => with_conn(app, |conn| search_material(conn, input)),
+        "read_material" => with_conn(app, |conn| read_material(conn, input)),
+        "upsert_deadline" => upsert_deadline(app, input),
+        "complete_deadline" => complete_deadline(app, input),
+        "delete_deadline" => delete_deadline(app, input),
+        "upsert_grade_category" => upsert_grade_category(app, input),
+        "add_grade_item" => add_grade_item(app, input),
+        "write_note" => write_note(app, input),
+        "trigger_synthesis" => trigger_synthesis(app, input, ctx),
+        "generate_practice" => generate_practice(app, input, ctx),
+        "propose_file_moves" => propose_file_moves(app, input),
         other => Err(anyhow::anyhow!(
-            "unknown tool '{other}' — available: get_overview, list_material, search_material, read_material"
+            "unknown tool '{other}' — the available tools are listed in the tools parameter"
         )),
     };
     result.unwrap_or_else(|e| Outcome::err(format!("{e:#}")))
@@ -263,6 +448,16 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
         classes.len(),
         root.display()
     );
+    let pending_moves: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    )?;
+    if pending_moves > 0 {
+        out.push_str(&format!(
+            "{pending_moves} file move proposal(s) awaiting Daniel's approval\n"
+        ));
+    }
 
     for class in classes {
         let (color, room, instructors, credits, exam_start, exam_end): (
@@ -373,22 +568,27 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
                 .join("; ");
             out.push_str(&format!("Guides: {described}\n"));
         }
+        if detailed {
+            out.push_str(&grades_line(conn, class.id)?);
+        }
     }
 
     let mut deadline_stmt = conn.prepare(
-        "SELECT c.display_name, d.title, d.kind, d.due_at, d.notes
+        "SELECT d.id, c.display_name, d.title, d.kind, d.due_at, d.notes
          FROM deadlines d JOIN classes c ON c.id = d.class_id
          WHERE d.status = 'open' ORDER BY d.due_at LIMIT 25",
     )?;
     let deadlines = deadline_stmt
         .query_map([], |row| {
-            let class: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            let kind: String = row.get(2)?;
-            let due: String = row.get(3)?;
-            let notes: Option<String> = row.get(4)?;
+            let id: i64 = row.get(0)?;
+            let class: String = row.get(1)?;
+            let title: String = row.get(2)?;
+            let kind: String = row.get(3)?;
+            let due: String = row.get(4)?;
+            let notes: Option<String> = row.get(5)?;
+            // The [#id] is what upsert/complete/delete_deadline address.
             Ok(format!(
-                "- {due} · {class} · {title} ({kind}){}",
+                "- [#{id}] {due} · {class} · {title} ({kind}){}",
                 notes.map(|n| format!(" — {n}")).unwrap_or_default()
             ))
         })?
@@ -761,6 +961,705 @@ fn safe_join(root: &Path, rel_path: &str) -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Write tools — deadlines (SPEC §9/§11; rows carry source='agent')
+
+const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "project", "other"];
+
+/// ISO date, optionally with a time: YYYY-MM-DD[THH:MM[:SS]]. Stored as given;
+/// lexicographic order is chronological order for this shape.
+fn valid_due_at(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if b.len() < 10 || !digits(0..4) || b[4] != b'-' || !digits(5..7) || b[7] != b'-' || !digits(8..10)
+    {
+        return false;
+    }
+    match b.len() {
+        10 => true,
+        16 => b[10] == b'T' && digits(11..13) && b[13] == b':' && digits(14..16),
+        19 => {
+            b[10] == b'T'
+                && digits(11..13)
+                && b[13] == b':'
+                && digits(14..16)
+                && b[16] == b':'
+                && digits(17..19)
+        }
+        _ => false,
+    }
+}
+
+fn audit(conn: &Connection, action: &str, payload: Value) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
+        params![action, payload.to_string(), now_secs()],
+    )?;
+    Ok(())
+}
+
+fn upsert_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        match input.get("id").and_then(Value::as_i64) {
+            Some(id) => amend_deadline(conn, &class, id, input),
+            None => create_deadline(conn, &class, input),
+        }
+    })?;
+    emit_hub_change(app, "deadlines");
+    Ok(outcome)
+}
+
+fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result<Outcome> {
+    let title = str_arg(input, "title")?;
+    let kind = opt_str_arg(input, "kind").unwrap_or_else(|| "other".to_string());
+    if !DEADLINE_KINDS.contains(&kind.as_str()) {
+        bail!("kind must be one of: {}", DEADLINE_KINDS.join(", "));
+    }
+    let due_at = str_arg(input, "due_at")?;
+    if !valid_due_at(&due_at) {
+        bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
+    }
+    let notes = opt_str_arg(input, "notes");
+    conn.execute(
+        "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'agent')",
+        params![class.id, title, kind, due_at, notes],
+    )?;
+    let id = conn.last_insert_rowid();
+    audit(
+        conn,
+        "chat.upsert_deadline",
+        json!({ "id": id, "classId": class.id, "title": title, "kind": kind,
+                "dueAt": due_at, "notes": notes, "created": true }),
+    )?;
+    Ok(Outcome::ok(format!(
+        "Deadline recorded — {title} ({kind}) due {due_at} · {} [#{id}]\n\
+         Amend with upsert_deadline(id: {id}); close with complete_deadline when it's done.",
+        class.display_name
+    )))
+}
+
+fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -> Result<Outcome> {
+    let before = conn
+        .query_row(
+            "SELECT class_id, title, kind, due_at, notes, status FROM deadlines WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))?;
+    let (class_id, old_title, old_kind, old_due, old_notes, status) = before;
+    if class_id != class.id {
+        bail!("deadline #{id} belongs to a different class");
+    }
+
+    let title = opt_str_arg(input, "title").unwrap_or_else(|| old_title.clone());
+    let kind = opt_str_arg(input, "kind").unwrap_or_else(|| old_kind.clone());
+    if !DEADLINE_KINDS.contains(&kind.as_str()) {
+        bail!("kind must be one of: {}", DEADLINE_KINDS.join(", "));
+    }
+    let due_at = opt_str_arg(input, "due_at").unwrap_or_else(|| old_due.clone());
+    if !valid_due_at(&due_at) {
+        bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
+    }
+    let notes = opt_str_arg(input, "notes").or_else(|| old_notes.clone());
+    conn.execute(
+        "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
+        params![title, kind, due_at, notes, id],
+    )?;
+    audit(
+        conn,
+        "chat.upsert_deadline",
+        json!({ "id": id, "classId": class.id,
+                "before": { "title": old_title, "kind": old_kind, "dueAt": old_due, "notes": old_notes },
+                "after": { "title": title, "kind": kind, "dueAt": due_at, "notes": notes } }),
+    )?;
+    Ok(Outcome::ok(format!(
+        "Deadline amended — {title} ({kind}) due {due_at} · {} [#{id}]{}",
+        class.display_name,
+        if status == "done" { "\n(It is marked done.)" } else { "" }
+    )))
+}
+
+fn complete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let id = int_arg(input, "id")?;
+        let (title, class_name, status) = deadline_brief(conn, id)?;
+        if status == "done" {
+            return Ok(Outcome::ok(format!(
+                "Deadline was already done — {title} · {class_name} [#{id}]"
+            )));
+        }
+        conn.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
+        audit(conn, "chat.complete_deadline", json!({ "id": id }))?;
+        Ok(Outcome::ok(format!(
+            "Deadline done — {title} · {class_name} [#{id}]"
+        )))
+    })?;
+    emit_hub_change(app, "deadlines");
+    Ok(outcome)
+}
+
+fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let id = int_arg(input, "id")?;
+        let row = conn
+            .query_row(
+                "SELECT class_id, title, kind, due_at, notes, status, source
+                 FROM deadlines WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))?;
+        let (class_id, title, kind, due_at, notes, status, source) = row;
+        conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        // The full row rides the audit entry, so a deletion is recoverable.
+        audit(
+            conn,
+            "chat.delete_deadline",
+            json!({ "id": id, "classId": class_id, "title": title, "kind": kind,
+                    "dueAt": due_at, "notes": notes, "status": status, "source": source }),
+        )?;
+        Ok(Outcome::ok(format!(
+            "Deadline deleted — {title} (was due {due_at}) [#{id}]\nThe full row is kept in the audit log."
+        )))
+    })?;
+    emit_hub_change(app, "deadlines");
+    Ok(outcome)
+}
+
+fn deadline_brief(conn: &Connection, id: i64) -> Result<(String, String, String)> {
+    conn.query_row(
+        "SELECT d.title, c.display_name, d.status
+         FROM deadlines d JOIN classes c ON c.id = d.class_id WHERE d.id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()?
+    .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))
+}
+
+// ---------------------------------------------------------------------------
+// Write tools — grades (SPEC §11 math: weighted over graded categories only)
+
+fn upsert_grade_category(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        let name = str_arg(input, "name")?;
+        let weight = float_arg(input, "weight")?;
+        if !(0.0..=100.0).contains(&weight) {
+            bail!("weight is a percentage between 0 and 100");
+        }
+        let existing: Option<(i64, f64)> = conn
+            .query_row(
+                "SELECT id, weight FROM grade_categories
+                 WHERE class_id = ?1 AND LOWER(name) = LOWER(?2)",
+                params![class.id, name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let verb = match existing {
+            Some((id, old_weight)) => {
+                conn.execute(
+                    "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
+                    params![name, weight, id],
+                )?;
+                audit(
+                    conn,
+                    "chat.upsert_grade_category",
+                    json!({ "id": id, "classId": class.id, "name": name,
+                            "weight": weight, "previousWeight": old_weight }),
+                )?;
+                "updated"
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO grade_categories (class_id, name, weight) VALUES (?1, ?2, ?3)",
+                    params![class.id, name, weight],
+                )?;
+                audit(
+                    conn,
+                    "chat.upsert_grade_category",
+                    json!({ "id": conn.last_insert_rowid(), "classId": class.id,
+                            "name": name, "weight": weight }),
+                )?;
+                "created"
+            }
+        };
+        Ok(Outcome::ok(format!(
+            "Grade category {verb} — {name} at {}% · {}\n{}",
+            trim_num(weight),
+            class.display_name,
+            weights_line(conn, class.id)?
+        )))
+    })?;
+    emit_hub_change(app, "grades");
+    Ok(outcome)
+}
+
+fn add_grade_item(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        let category = str_arg(input, "category")?;
+        let found: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, name FROM grade_categories
+                 WHERE class_id = ?1 AND LOWER(name) = LOWER(?2)",
+                params![class.id, category],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((category_id, category_name)) = found else {
+            let names: Vec<String> = conn
+                .prepare("SELECT name FROM grade_categories WHERE class_id = ?1 ORDER BY id")?
+                .query_map([class.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            bail!(
+                "no grade category '{category}' in {} — {}",
+                class.display_name,
+                if names.is_empty() {
+                    "create one with upsert_grade_category first".to_string()
+                } else {
+                    format!("existing: {}", names.join(", "))
+                }
+            );
+        };
+        let name = str_arg(input, "name")?;
+        let score = float_arg(input, "score")?;
+        let max_score = float_arg(input, "max_score")?;
+        if max_score <= 0.0 {
+            bail!("max_score must be positive");
+        }
+        if score < 0.0 {
+            bail!("score cannot be negative");
+        }
+        let graded_at = opt_str_arg(input, "graded_at");
+        conn.execute(
+            "INSERT INTO grade_items (category_id, name, score, max_score, graded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![category_id, name, score, max_score, graded_at],
+        )?;
+        audit(
+            conn,
+            "chat.add_grade_item",
+            json!({ "id": conn.last_insert_rowid(), "categoryId": category_id, "name": name,
+                    "score": score, "maxScore": max_score, "gradedAt": graded_at }),
+        )?;
+        let grade = weighted_grade(conn, class.id)?
+            .map(|pct| format!("\nCurrent weighted grade over graded items: {pct:.1}%."))
+            .unwrap_or_default();
+        Ok(Outcome::ok(format!(
+            "Grade recorded — {name}: {}/{} in {category_name} · {}{grade}",
+            trim_num(score),
+            trim_num(max_score),
+            class.display_name
+        )))
+    })?;
+    emit_hub_change(app, "grades");
+    Ok(outcome)
+}
+
+/// "Weights now: Homework 30% + Exams 40% = 70% — 30% unassigned."
+fn weights_line(conn: &Connection, class_id: i64) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT name, weight FROM grade_categories WHERE class_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let total: f64 = rows.iter().map(|(_, w)| w).sum();
+    let listed = rows
+        .iter()
+        .map(|(name, weight)| format!("{name} {}%", trim_num(*weight)))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    Ok(format!(
+        "Weights now: {listed} = {}%{}",
+        trim_num(total),
+        if (total - 100.0).abs() < 0.01 {
+            String::new()
+        } else if total < 100.0 {
+            format!(" — {}% unassigned", trim_num(100.0 - total))
+        } else {
+            format!(" — {}% over 100", trim_num(total - 100.0))
+        }
+    ))
+}
+
+/// SPEC §11: current weighted grade over graded items. Categories with no
+/// items are excluded and the remaining weights renormalized.
+fn weighted_grade(conn: &Connection, class_id: i64) -> Result<Option<f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.weight, SUM(i.score), SUM(i.max_score)
+         FROM grade_categories c JOIN grade_items i ON i.category_id = c.id
+         WHERE c.class_id = ?1 GROUP BY c.id",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            Ok((
+                row.get::<_, f64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut weight_sum = 0.0;
+    let mut acc = 0.0;
+    for (weight, score, max) in rows {
+        if max > 0.0 && weight > 0.0 {
+            weight_sum += weight;
+            acc += weight * (score / max);
+        }
+    }
+    Ok((weight_sum > 0.0).then(|| acc / weight_sum * 100.0))
+}
+
+/// Grades summary for the detailed overview (the agent needs category names
+/// and current state to record into the right place).
+fn grades_line(conn: &Connection, class_id: i64) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT c.name, c.weight, COUNT(i.id), SUM(i.score), SUM(i.max_score)
+         FROM grade_categories c LEFT JOIN grade_items i ON i.category_id = c.id
+         WHERE c.class_id = ?1 GROUP BY c.id ORDER BY c.id",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                row.get::<_, Option<f64>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok("Grades: no categories yet\n".to_string());
+    }
+    let mut weight_total = 0.0;
+    let parts = rows
+        .iter()
+        .map(|(name, weight, count, score, max)| {
+            weight_total += weight;
+            let detail = match (score, max) {
+                (Some(s), Some(m)) if *m > 0.0 => {
+                    format!("{count} item(s), {:.1}%", s / m * 100.0)
+                }
+                _ => "no items yet".to_string(),
+            };
+            format!("{name} {}% ({detail})", trim_num(*weight))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let grade = match weighted_grade(conn, class_id)? {
+        Some(pct) => format!("current weighted grade {pct:.1}%"),
+        None => "nothing graded yet".to_string(),
+    };
+    Ok(format!(
+        "Grades: {parts} · weights sum {}%{} · {grade}\n",
+        trim_num(weight_total),
+        if (weight_total - 100.0).abs() < 0.01 { "" } else { " (≠100!)" }
+    ))
+}
+
+fn trim_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write tools — notes, synthesis triggers, practice, move proposals
+
+fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        let title = str_arg(input, "title")?;
+        let content = str_arg(input, "content_md")?;
+        let written = crate::notes::write_note(conn, class.id, &title, &content)?;
+        // The replaced content rides the audit entry — an overwrite can never
+        // silently destroy a note.
+        audit(
+            conn,
+            "chat.write_note",
+            json!({ "classId": class.id, "relPath": written.rel_path,
+                    "created": written.created, "previousContent": written.previous }),
+        )?;
+        let lines = content.lines().count();
+        Ok(Outcome::ok(format!(
+            "Note {} — {}/{} ({lines} line{})\n{}",
+            if written.created { "written" } else { "updated" },
+            class.folder_name,
+            written.rel_path,
+            if lines == 1 { "" } else { "s" },
+            if written.created {
+                "Cite it by that full path so it can be opened from the answer."
+            } else {
+                "The previous version is kept in the audit log."
+            }
+        )))
+    })?;
+    emit_hub_change(app, "notes");
+    Ok(outcome)
+}
+
+/// `master` (and natural synonyms) selects the semester master; anything else
+/// must match one of the class's module folders — same tolerant matching as
+/// classes, so "module 1" or "m1" finds "Module 1".
+fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Option<String>> {
+    let needle = squash(scope);
+    if ["master", "semester", "semestermaster", "wholesemester", "all"]
+        .contains(&needle.as_str())
+    {
+        return Ok(None);
+    }
+    let modules: Vec<String> = module_counts(conn, class.id)?
+        .into_keys()
+        .filter(|m| m != "(class folder)")
+        .collect();
+    if modules.is_empty() {
+        bail!("{} has no module folders yet", class.display_name);
+    }
+    let mut exact = Vec::new();
+    let mut partial = Vec::new();
+    let mut loose = Vec::new();
+    for module in &modules {
+        let candidate = squash(module);
+        if candidate == needle {
+            exact.push(module);
+        } else if candidate.contains(&needle) {
+            partial.push(module);
+        } else if is_subsequence(&needle, &candidate) {
+            loose.push(module);
+        }
+    }
+    for tier in [exact, partial, loose] {
+        match tier.len() {
+            1 => return Ok(Some(tier[0].clone())),
+            0 => {}
+            n => bail!(
+                "'{scope}' matches {n} modules ({}) — be specific",
+                tier.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+    bail!(
+        "no module matches '{scope}' in {}. Modules: {} — or 'master' for the semester master",
+        class.display_name,
+        modules.join(", ")
+    )
+}
+
+fn trigger_synthesis(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let (class, scope) = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        let scope = resolve_scope(conn, &class, &str_arg(input, "scope")?)?;
+        Ok((class, scope))
+    })?;
+    // Enqueued outside the DB lock — the job runner takes the lock itself.
+    match scope {
+        None => {
+            let job_id = crate::guides::synthesize_master(app, class.id, ctx.today)?;
+            Ok(Outcome::ok(format!(
+                "Semester master synthesis queued — {} (job #{job_id})\n\
+                 Exclusive job: it waits for running jobs to drain, then runs alone — often \
+                 30+ minutes. Progress is live in the Job Center; the guide appears in the \
+                 workspace when it succeeds.",
+                class.display_name
+            )))
+        }
+        Some(module_rel) => {
+            let job_id =
+                crate::guides::synthesize_module(app, class.id, &module_rel, ctx.today)?;
+            Ok(Outcome::ok(format!(
+                "Module guide synthesis queued — {module_rel} · {} (job #{job_id})\n\
+                 Progress is live in the Job Center; the guide appears on the module row when \
+                 it succeeds (typically 10–30 minutes).",
+                class.display_name
+            )))
+        }
+    }
+}
+
+fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let focus = opt_str_arg(input, "focus");
+    let (class, scope) = with_conn(app, |conn| {
+        let class = resolve_class(conn, &str_arg(input, "class")?)?;
+        let scope = resolve_scope(conn, &class, &str_arg(input, "scope")?)?;
+        Ok((class, scope))
+    })?;
+    let scope_rel = scope.as_deref().unwrap_or("master");
+    let (job_id, output_rel) = crate::guides::generate_practice(
+        app,
+        class.id,
+        scope_rel,
+        focus.as_deref(),
+        ctx.today,
+        ctx.today_iso,
+    )?;
+    Ok(Outcome::ok(format!(
+        "Practice exam queued — {} · {} (job #{job_id})\n\
+         It will land at {}/{output_rel} and show in the workspace's practice list when \
+         the job succeeds (live in the Job Center now).{}",
+        if scope_rel == "master" { "semester scope" } else { scope_rel },
+        class.display_name,
+        class.folder_name,
+        focus
+            .map(|f| format!("\nFocus: {f}"))
+            .unwrap_or_default()
+    )))
+}
+
+fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let outcome = with_conn(app, |conn| {
+        let moves = input
+            .get("moves")
+            .and_then(Value::as_array)
+            .filter(|m| !m.is_empty())
+            .context("missing required argument 'moves' (a non-empty array)")?;
+        let root = crate::db::aibhs_root(conn)?;
+
+        // Everything validates before anything inserts, so one bad entry can
+        // be corrected without half a batch landing in the queue.
+        let validated = moves
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                validate_move(conn, &root, entry)
+                    .with_context(|| format!("move {} of {}", index + 1, moves.len()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        for mv in &validated {
+            // One pending proposal per source file — a re-proposal replaces it
+            // instead of stacking duplicates in the queue.
+            let updated = conn.execute(
+                "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, created_at = ?3
+                 WHERE class_id = ?4 AND source_rel_path = ?5 AND status = 'pending'",
+                params![mv.dest_rel, mv.reason, now_secs(), mv.class_id, mv.source_rel],
+            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO move_proposals
+                     (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
+                      source, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, 'chat', 'pending', ?5)",
+                    params![mv.class_id, mv.source_rel, mv.dest_rel, mv.reason, now_secs()],
+                )?;
+            }
+        }
+
+        let mut text = format!(
+            "{} file move(s) proposed — nothing has moved; each waits for Daniel's approval\n",
+            validated.len()
+        );
+        for mv in &validated {
+            text.push_str(&format!("- {} → {}\n", mv.from_display, mv.to_display));
+        }
+        text.push_str(
+            "The approval queue UI arrives in an upcoming milestone; until then the proposals wait.",
+        );
+        Ok(Outcome::ok(text))
+    })?;
+    emit_hub_change(app, "proposals");
+    Ok(outcome)
+}
+
+struct ValidatedMove {
+    class_id: i64,
+    /// Class-relative, matching the files-table convention.
+    source_rel: String,
+    dest_rel: String,
+    reason: String,
+    from_display: String,
+    to_display: String,
+}
+
+fn validate_move(conn: &Connection, root: &Path, entry: &Value) -> Result<ValidatedMove> {
+    let from = str_arg(entry, "from")?;
+    let to = str_arg(entry, "to")?;
+    let reason =
+        opt_str_arg(entry, "reason").unwrap_or_else(|| "proposed in chat".to_string());
+    let (from_class, source_rel) = split_class_path(conn, &from)?;
+    let (to_class, dest_rel) = split_class_path(conn, &to)?;
+    if from_class.id != to_class.id {
+        bail!("'{from}' and '{to}' are in different classes — a move stays within one class");
+    }
+    if !root.join(&from).is_file() {
+        bail!("'{from}' is not a file on disk — use paths exactly as list_material returns them");
+    }
+    if source_rel == dest_rel {
+        bail!("'{from}' already has that path");
+    }
+    if Path::new(&dest_rel).file_name().is_none() {
+        bail!("'{to}' must include the destination file name");
+    }
+    let first = dest_rel.split('/').next().unwrap_or("");
+    if first.starts_with('.') || ["Study Guides", "Notes", "_Inbox"].contains(&first) {
+        bail!("'{to}' targets an app-managed folder — material belongs in module folders");
+    }
+    if root.join(&to).exists() {
+        bail!("'{to}' already exists — pick a different destination");
+    }
+    Ok(ValidatedMove {
+        class_id: from_class.id,
+        source_rel,
+        dest_rel,
+        reason,
+        from_display: from,
+        to_display: to,
+    })
+}
+
+/// Splits an AIBHS-root-relative path into its class and the class-relative
+/// remainder, rejecting traversal and unknown class folders.
+fn split_class_path(conn: &Connection, path: &str) -> Result<(ClassRow, String)> {
+    if Path::new(path)
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        bail!("'{path}' must be relative to the AIBHS root");
+    }
+    let (folder, rest) = path
+        .split_once('/')
+        .with_context(|| format!("'{path}' must start with a class folder name"))?;
+    if rest.trim().is_empty() {
+        bail!("'{path}' names no file inside the class");
+    }
+    let class = class_rows(conn)?
+        .into_iter()
+        .find(|c| c.folder_name == folder)
+        .with_context(|| {
+            format!("'{folder}' is not a class folder — start paths with the class folder name")
+        })?;
+    Ok((class, rest.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 
 fn str_arg(input: &Value, key: &str) -> Result<String> {
@@ -780,6 +1679,20 @@ fn opt_str_arg(input: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+fn int_arg(input: &Value, key: &str) -> Result<i64> {
+    input
+        .get(key)
+        .and_then(Value::as_i64)
+        .with_context(|| format!("missing required integer argument '{key}'"))
+}
+
+fn float_arg(input: &Value, key: &str) -> Result<f64> {
+    input
+        .get(key)
+        .and_then(Value::as_f64)
+        .with_context(|| format!("missing required numeric argument '{key}'"))
 }
 
 fn now_secs() -> i64 {

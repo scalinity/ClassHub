@@ -21,11 +21,15 @@ use tauri::{AppHandle, Manager};
 use crate::extract::{current_manifest, manifest_is_stale};
 
 const GUIDES_DIR: &str = "Study Guides";
+/// SPEC §8.3: practice exams are dated files, several per scope — no staleness,
+/// no `guides` row, the directory listing is the record.
+const PRACTICE_DIR: &str = "Study Guides/Practice";
 /// SPEC §5/§8.2: the guides/jobs scope value for the semester master.
 const MASTER_SCOPE: &str = "master";
 const MASTER_OUTPUT: &str = "Study Guides/Semester Master.html";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/module_guide.md");
 const MASTER_TEMPLATE: &str = include_str!("../prompts/master_guide.md");
+const PRACTICE_TEMPLATE: &str = include_str!("../prompts/practice.md");
 
 /// Continuation prompt for `--resume <session_id>` (SPEC §6): the session
 /// already holds the full original instructions and everything read so far.
@@ -216,6 +220,116 @@ pub fn synthesize_master(
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
     crate::jobs::enqueue_master_guide(app, class_id, &prompt, payload, None)
+}
+
+/// Rides `QueuedJob.payload` for practice jobs: finalize only has to verify
+/// the contracted file actually landed.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PracticePayload {
+    rel_path: String,
+}
+
+/// SPEC §8.3: practice exam synthesis, triggered from chat (M8). Scope is a
+/// module rel path or `master` (the whole semester); `focus` narrows topics.
+/// `date_label` names the file (`<scope> — <date>.html`), so it must be
+/// filename-safe (YYYY-MM-DD).
+pub fn generate_practice(
+    app: &AppHandle,
+    class_id: i64,
+    scope: &str,
+    focus: Option<&str>,
+    generated_at_label: &str,
+    date_label: &str,
+) -> Result<(i64, String)> {
+    let scope_label = if scope == MASTER_SCOPE {
+        "Semester".to_string()
+    } else {
+        Path::new(scope)
+            .file_name()
+            .context("invalid module path")?
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let (class_dir, output_rel, prompt, payload) = {
+        let db = app.state::<crate::Db>();
+        let conn = lock(&db.0);
+
+        if has_active_job(&conn, class_id, "practice", scope)? {
+            bail!("a practice exam for this scope is already queued or running");
+        }
+        let (class_name, color): (String, String) = conn.query_row(
+            "SELECT display_name, color FROM classes WHERE id = ?1",
+            [class_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let manifest = current_manifest(&conn, class_id, scope)?;
+        if manifest.is_empty() {
+            bail!("no indexed files in that scope — rescan the class first");
+        }
+
+        // Same-day exams for the same scope get a numeric suffix instead of
+        // silently overwriting the earlier one.
+        let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+        let base = format!("{PRACTICE_DIR}/{scope_label} — {date_label}");
+        let mut output_rel = format!("{base}.html");
+        let mut n = 2;
+        while class_dir.join(&output_rel).exists() {
+            output_rel = format!("{base} ({n}).html");
+            n += 1;
+        }
+
+        let (accent_light, accent_dark) = accent_values(&color);
+        let prompt = PRACTICE_TEMPLATE
+            .replace("{class}", &class_name)
+            .replace("{scope_label}", &scope_label)
+            .replace(
+                "{focus}",
+                focus.filter(|f| !f.trim().is_empty()).unwrap_or(
+                    "none — cover the whole scope evenly, weighted toward what an exam would test",
+                ),
+            )
+            .replace("{output}", &output_rel)
+            .replace("{accent_light}", accent_light)
+            .replace("{accent_dark}", accent_dark)
+            .replace("{generated_at}", generated_at_label)
+            .replace("{files}", &files_block(&conn, class_id, scope)?);
+        let payload = serde_json::to_string(&PracticePayload {
+            rel_path: output_rel.clone(),
+        })?;
+        (class_dir, output_rel, prompt, payload)
+    };
+
+    fs::create_dir_all(class_dir.join(PRACTICE_DIR))?;
+    let job_id = crate::jobs::enqueue_practice(app, class_id, scope, &prompt, payload)?;
+    Ok((job_id, output_rel))
+}
+
+/// Practice completion check (job runner, before the row leaves `running`):
+/// a "succeeded" job with no exam on disk is a failure.
+pub fn finalize_practice(app: &AppHandle, class_id: i64, payload: &str) -> Result<()> {
+    let payload: PracticePayload =
+        serde_json::from_str(payload).context("parsing practice payload")?;
+    let db = app.state::<crate::Db>();
+    let conn = lock(&db.0);
+    let abs = crate::scanner::class_dir(&conn, class_id)?.join(&payload.rel_path);
+    let written = fs::metadata(&abs)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if !written {
+        bail!("no exam file written at {}", payload.rel_path);
+    }
+    Ok(())
+}
+
+/// Practice exams for the workspace listing — the directory is the truth.
+pub fn list_practice(conn: &Connection, class_id: i64) -> Result<Vec<crate::notes::NoteFile>> {
+    let dir = crate::scanner::class_dir(conn, class_id)?.join(PRACTICE_DIR);
+    Ok(crate::notes::list_dir_files(&dir, PRACTICE_DIR)
+        .into_iter()
+        .filter(|f| f.name.to_lowercase().ends_with(".html"))
+        .collect())
 }
 
 /// SPEC §6 resumability: re-invoke a failed master run with

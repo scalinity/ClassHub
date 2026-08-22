@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { Card } from "@/components/ui/card";
 import type { ClassInfo } from "@/lib/classes";
 import {
+  formatDueDate,
   formatTimeRange,
   nextMeeting,
   relativeLabel,
@@ -95,6 +96,16 @@ export function ClassCard({
             </span>
           )}
         </div>
+        {info.nextDeadline && (
+          <p className="mt-1.5 flex items-baseline gap-2 text-[11.5px]">
+            <span className="shrink-0 font-medium tracking-[0.06em] text-(--accent)">
+              DUE {formatDueDate(info.nextDeadline.dueAt)}
+            </span>
+            <span className="min-w-0 truncate text-muted-foreground">
+              {info.nextDeadline.title}
+            </span>
+          </p>
+        )}
         <div className="mt-1.5 flex items-center justify-between gap-3">
           <p className="text-muted-foreground">
             {info.room} · {info.credits} CR

@@ -446,6 +446,8 @@ export async function sendChat(text: string) {
       sessionId: snapshot.sessionId,
       text: question,
       today: todayLabel(),
+      // YYYY-MM-DD in local time — stamps practice file names backend-side.
+      todayIso: new Date().toLocaleDateString("en-CA"),
     });
     if (snapshot.sessionId !== sessionId) {
       emitChange({
@@ -569,4 +571,21 @@ export function formatSessionDate(unixSec: number): string {
 
 export function toolLabel(name: string): string {
   return name.replace(/_/g, " ").toUpperCase();
+}
+
+/** M8 write tools — their chips carry a pen glyph instead of the read arrows. */
+const WRITE_TOOLS = new Set([
+  "upsert_deadline",
+  "complete_deadline",
+  "delete_deadline",
+  "upsert_grade_category",
+  "add_grade_item",
+  "write_note",
+  "trigger_synthesis",
+  "generate_practice",
+  "propose_file_moves",
+]);
+
+export function isWriteTool(name: string): boolean {
+  return WRITE_TOOLS.has(name);
 }

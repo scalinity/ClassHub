@@ -28,6 +28,23 @@ export function readClassFile(classId: number, relPath: string): Promise<string>
   return invoke<string>("read_class_file", { classId, relPath });
 }
 
+/** A file in an app-managed directory (notes, practice exams); disk is truth. */
+export interface ManagedFile {
+  name: string;
+  relPath: string; // class-relative, e.g. "Notes/Week 3.md"
+  modifiedAt: number; // unix seconds
+}
+
+/** Markdown notes in the class's Notes folder, newest first (M8; editor in M11). */
+export function listNotes(classId: number): Promise<ManagedFile[]> {
+  return invoke<ManagedFile[]>("list_notes", { classId });
+}
+
+/** Generated practice exams in Study Guides/Practice, newest first. */
+export function listPractice(classId: number): Promise<ManagedFile[]> {
+  return invoke<ManagedFile[]>("list_practice", { classId });
+}
+
 /** Kinds the in-app viewer can render; the rest open in their default app. */
 export const VIEWABLE_KINDS: ReadonlySet<string> = new Set([
   "html",

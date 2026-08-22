@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_job_payload.sql"),
+    include_str!("../migrations/0003_move_proposals.sql"),
 ];
 
 #[derive(Serialize)]
@@ -15,6 +16,14 @@ pub struct Meeting {
     pub weekday: u8,
     pub start_time: String,
     pub end_time: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadlineChip {
+    pub title: String,
+    /// ISO as stored: YYYY-MM-DD, optionally with THH:MM[:SS].
+    pub due_at: String,
 }
 
 #[derive(Serialize)]
@@ -30,6 +39,9 @@ pub struct ClassCard {
     pub folder_present: bool,
     /// Card-level staleness badge (SPEC §12), computed on demand.
     pub stale_guides: i64,
+    /// Nearest open deadline (SPEC §12 card contents), overdue included —
+    /// an open deadline in the past is the most urgent line on the card.
+    pub next_deadline: Option<DeadlineChip>,
     pub meetings: Vec<Meeting>,
 }
 
@@ -113,6 +125,21 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
 
         let folder_present = root.join(&folder_name).is_dir();
         let stale_guides = crate::guides::stale_guide_count(conn, id)?;
+        // ISO text sorts chronologically, so MIN(due_at) is the nearest.
+        let next_deadline = conn
+            .query_row(
+                "SELECT title, due_at FROM deadlines
+                 WHERE class_id = ?1 AND status = 'open'
+                 ORDER BY due_at LIMIT 1",
+                [id],
+                |row| {
+                    Ok(DeadlineChip {
+                        title: row.get(0)?,
+                        due_at: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
         cards.push(ClassCard {
             id,
             display_name,
@@ -123,6 +150,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             folder_name,
             folder_present,
             stale_guides,
+            next_deadline,
             meetings,
         });
     }

@@ -76,3 +76,17 @@ export function relativeLabel(next: NextMeeting): string {
   if (next.daysUntil === 1) return "TOMORROW";
   return `IN ${next.daysUntil} DAYS`;
 }
+
+/**
+ * Deadline due_at ("2026-09-03" or "2026-09-03T17:00") -> "SEP 3" (+ time when
+ * present). Parsed by parts: `new Date("YYYY-MM-DD")` is UTC midnight, which
+ * renders as the previous local day in negative offsets.
+ */
+export function formatDueDate(dueAt: string): string {
+  const [datePart, timePart] = dueAt.split("T");
+  const [y, m, d] = datePart.split("-").map(Number);
+  const label = new Date(y, (m || 1) - 1, d || 1)
+    .toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    .toUpperCase();
+  return timePart ? `${label} ${formatTime(timePart.slice(0, 5))}` : label;
+}

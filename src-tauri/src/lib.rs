@@ -3,6 +3,7 @@ mod db;
 mod extract;
 mod guides;
 mod jobs;
+mod notes;
 mod scanner;
 mod tools;
 
@@ -129,6 +130,26 @@ fn read_guide(
     guides::read_guide(&conn, class_id, &scope).map_err(|e| format!("{e:#}"))
 }
 
+/// Read-only note listing for the workspace (M8; the editor lands in M11).
+#[tauri::command]
+fn list_notes(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<notes::NoteFile>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    notes::list_notes(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Practice exams on disk (SPEC §8.3) for the workspace listing.
+#[tauri::command]
+fn list_practice(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<notes::NoteFile>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 fn list_jobs(state: tauri::State<Db>) -> Result<Vec<jobs::JobInfo>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -214,16 +235,18 @@ fn chat_history(
 }
 
 /// Records the question and answers it on a background thread; progress
-/// arrives as `chat-event`. `today` is formatted client-side for the system
-/// prompt (std Rust cannot format a local date).
+/// arrives as `chat-event`. `today` (display) and `today_iso` (YYYY-MM-DD)
+/// are formatted client-side (std Rust cannot format a local date); the
+/// write tools stamp job prompts and practice file names with them.
 #[tauri::command]
 fn send_chat(
     app: tauri::AppHandle,
     session_id: Option<i64>,
     text: String,
     today: String,
+    today_iso: String,
 ) -> Result<i64, String> {
-    chat::send(&app, session_id, &text, &today).map_err(|e| format!("{e:#}"))
+    chat::send(&app, session_id, &text, &today, &today_iso).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -288,6 +311,8 @@ pub fn run() {
             list_guides,
             read_guide,
             read_class_file,
+            list_notes,
+            list_practice,
             list_jobs,
             cancel_job,
             get_job_events,

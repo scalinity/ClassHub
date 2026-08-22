@@ -247,6 +247,18 @@ pub fn enqueue_master_guide(
     )
 }
 
+/// SPEC §8.3: practice exam synthesis, triggered from chat (M8). `payload`
+/// carries the output path guides::finalize_practice verifies on success.
+pub fn enqueue_practice(
+    app: &AppHandle,
+    class_id: i64,
+    scope: &str,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue(app, "practice", Some(class_id), Some(scope), prompt, Some(payload), None)
+}
+
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
@@ -434,6 +446,16 @@ fn run_job(
                 // in the UI; surface it as the failure it is.
                 status = "failed";
                 error = Some(format!("synthesis finished but no guide was recorded: {e:#}"));
+                summary = None;
+            }
+        }
+    }
+    if status == "succeeded" && job.kind == "practice" {
+        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+            // Same demotion as guides: success with no exam on disk is a lie.
+            if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload) {
+                status = "failed";
+                error = Some(format!("practice job finished but no exam was written: {e:#}"));
                 summary = None;
             }
         }
