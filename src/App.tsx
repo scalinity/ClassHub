@@ -5,6 +5,7 @@ import {
   useQuery,
 } from "@tanstack/react-query";
 
+import { ChatSidebar } from "@/components/ChatSidebar";
 import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
@@ -76,6 +77,7 @@ export default function App() {
           <Dashboard onOpen={setOpenClass} />
         )}
         <JobCenter />
+        <ChatSidebar />
         <AuthWarning />
       </div>
     </QueryClientProvider>

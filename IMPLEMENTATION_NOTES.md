@@ -482,3 +482,65 @@ doesn't cover.
   slider + concept-map hover readouts + scored quiz + toggles, 29 `<details>`,
   11 SVGs, zero forbidden APIs, no external refs, clean `</html>`, `guides`
   upsert fresh.
+
+## M7 — Chat sidebar, read-only (2026-08-22)
+
+### Shape
+
+- `chat.rs` owns the loop, `tools.rs` the four read tools, `prompts/chat_system.md`
+  the identity and retrieval guidance, `prompts/chat_followups.md` the follow-up
+  pass. Frontend: `lib/chat.ts` (external store, no `useEffect`) and
+  `components/ChatSidebar.tsx` (⌘J overlay).
+- Two API surfaces, deliberately: the job runner spends the Max subscription
+  through the `claude` CLI, the chat spends a console key through `reqwest`. A
+  rate-limited synthesis job therefore cannot take the chat down (SPEC §1).
+- Blocking HTTP never runs on a Tauri command thread: every request goes through
+  a plain `std::thread` (`on_worker`, and the answer thread in `send`).
+  `list_chat_models` is `async` for the same reason — sync commands run on the
+  runtime, and `reqwest::blocking` panics there.
+- Tool summaries are derived from the first line of a tool's own output
+  (`Outcome::ok`), so a chip rebuilt from persisted blocks reads exactly like the
+  live one. Same idea in `itemsFromHistory`.
+
+### Anthropic API, as of now
+
+- `output_config.effort` — `low`/`medium`/`high`/`xhigh`/`max`, no beta header.
+  Omitted means `high`. Settings exposes the ladder plus a "model default" that
+  sends nothing, because older models reject the parameter outright.
+- `thinking: {type: "adaptive", display: "summarized"}` streams `thinking_delta`
+  then one `signature_delta`. The signature must go back **unchanged** with the
+  turn or the tool loop loses its reasoning — so thinking blocks are persisted
+  with everything else. Models that predate adaptive thinking 400 rather than
+  ignore it; `rejects_thinking` catches the first refusal and resends plainly.
+- `max_tokens` is required and covers thinking *plus* text. Hardcoding it caps
+  effort, so the ceiling is read from `/v1/models` (`max_tokens` per model),
+  remembered as `"<model id> <ceiling>"` in settings, and re-learned when the
+  model changes. `FALLBACK_MAX_TOKENS` only applies when the list is silent.
+- Follow-ups are one small non-streaming call on the last exchange only (not the
+  whole conversation) asking for a JSON array of three. Best-effort: a failure
+  is logged and costs nothing but the chips. They are **not** persisted —
+  `chat_messages` has to stay Messages-API-shaped for replay.
+
+### Keychain
+
+- **A Keychain item's ACL is pinned to the binary that created it, and the dev
+  binary is ad-hoc *linker-signed* — every `cargo build` changes its code hash,
+  so macOS asks for the login password again.** "Always Allow" only pins the
+  build about to be replaced. `save_key` therefore writes through
+  `/usr/bin/security add-generic-password -A` (any application), which survives
+  rebuilds. The trade is the protection of a `0600` file in `~`; stated in the
+  Settings pane. An existing item must be removed and re-saved — the ACL cannot
+  be changed after creation.
+
+### Rendering
+
+- **Math must be lifted out before markdown parses.** `_` is emphasis and `\` is
+  an escape to a markdown parser, so `$\dfrac{\sum x_i}{n}$` cannot be recovered
+  from the HTML afterwards. `liftMath` swaps each span for a placeholder, KaTeX
+  renders it, and the HTML goes back in after parsing. The same pass matches code
+  spans purely to skip them: `$` in an R snippet is a column selector.
+- Streaming fade: the answer is split into settled markdown (whole blocks, never
+  inside an open fence) and a `tail` of the chunks as they arrived. Each chunk is
+  its own element, so React appends rather than re-mounts and settled text never
+  re-fades. Re-parsing markdown per delta would restart every animation in the
+  answer — that is the whole reason for the split.

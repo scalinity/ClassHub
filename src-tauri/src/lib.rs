@@ -1,8 +1,10 @@
+mod chat;
 mod db;
 mod extract;
 mod guides;
 mod jobs;
 mod scanner;
+mod tools;
 
 use std::sync::Mutex;
 
@@ -160,6 +162,75 @@ fn run_auth_check(app: tauri::AppHandle) -> Result<i64, String> {
     jobs::enqueue_self_check(&app).map_err(|e| format!("{e:#}"))
 }
 
+// --- Agent chat (SPEC §9) ---------------------------------------------------
+
+#[tauri::command]
+fn chat_settings(app: tauri::AppHandle) -> Result<chat::ChatSettings, String> {
+    chat::settings(&app).map_err(|e| format!("{e:#}"))
+}
+
+/// The key goes to the macOS Keychain only — never the DB, never a file.
+#[tauri::command]
+fn save_chat_key(key: String) -> Result<(), String> {
+    chat::save_key(&key).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_chat_key() -> Result<(), String> {
+    chat::delete_key().map_err(|e| format!("{e:#}"))
+}
+
+/// Live `GET /v1/models` plus the model chat will use (SPEC §9). Async so the
+/// network round-trip runs off the UI thread, where sync commands land.
+#[tauri::command]
+async fn list_chat_models(app: tauri::AppHandle) -> Result<chat::ModelList, String> {
+    chat::list_models(&app).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_chat_model(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    chat::set_model(&app, &model).map_err(|e| format!("{e:#}"))
+}
+
+/// `output_config.effort`; an empty string leaves it to the model.
+#[tauri::command]
+fn set_chat_effort(app: tauri::AppHandle, effort: String) -> Result<(), String> {
+    chat::set_effort(&app, &effort).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn list_chat_sessions(state: tauri::State<Db>) -> Result<Vec<chat::SessionInfo>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    chat::list_sessions(&conn).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn chat_history(
+    state: tauri::State<Db>,
+    session_id: i64,
+) -> Result<Vec<chat::StoredMessage>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    chat::history(&conn, session_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Records the question and answers it on a background thread; progress
+/// arrives as `chat-event`. `today` is formatted client-side for the system
+/// prompt (std Rust cannot format a local date).
+#[tauri::command]
+fn send_chat(
+    app: tauri::AppHandle,
+    session_id: Option<i64>,
+    text: String,
+    today: String,
+) -> Result<i64, String> {
+    chat::send(&app, session_id, &text, &today).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn stop_chat(app: tauri::AppHandle, session_id: i64) {
+    chat::stop(&app, session_id);
+}
+
 /// SPEC §7 step 1: scan on launch, then auto-extract whatever the scans found
 /// stale. Folders may legitimately be absent; skip those.
 fn scan_and_extract_all(app: &tauri::AppHandle) {
@@ -199,6 +270,7 @@ pub fn run() {
             jobs::startup_recovery(&conn)?;
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
+            app.manage(chat::ChatState::default());
             if let Err(e) = jobs::enqueue_self_check(app.handle()) {
                 eprintln!("startup self-check failed to enqueue: {e:#}");
             }
@@ -221,7 +293,17 @@ pub fn run() {
             get_job_events,
             get_job_tail,
             get_auth_check,
-            run_auth_check
+            run_auth_check,
+            chat_settings,
+            save_chat_key,
+            delete_chat_key,
+            list_chat_models,
+            set_chat_model,
+            set_chat_effort,
+            list_chat_sessions,
+            chat_history,
+            send_chat,
+            stop_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -432,7 +432,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a master file generates for Biostatistics (single module today — the
   pipeline must still work), resume works after a forced mid-job kill.
 
-- [ ] **M7 — Chat sidebar (read).**
+- [x] **M7 — Chat sidebar (read).**
   Keychain-backed API key settings + model picker (from `/v1/models`), SSE streaming chat with
   the four read tools (§9), tool-call chips, session persistence and picker, global sidebar
   with keyboard shortcut.
