@@ -401,7 +401,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* Biostatistics shows Module 1's real tree; adding/removing a file in Finder
   and refreshing updates the tree and the `files` table.
 
-- [ ] **M3 — Claude Code job runner.**
+- [x] **M3 — Claude Code job runner.**
   Job queue + `jobs` table, `claude -p` spawn per §6 (env stripping, tool scoping, stream-json
   parsing, log files), Tauri progress events, Job Center UI (bottom pill → panel, live output,
   cancel), startup subscription-auth self-check with UI warning.

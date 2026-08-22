@@ -113,3 +113,81 @@ doesn't cover.
   staleness in M4+ compares `extracted_sha256` vs current `sha256`.
 - Tauri v2 auto-camelCases command args (`class_id` ↔ `classId`) and serde payloads use
   `rename_all = "camelCase"` as in M1 — keep both conventions.
+
+## M3 — Claude Code job runner (2026-08-22)
+
+### What exists now
+
+- **Runner** (`src-tauri/src/jobs.rs`): `JobManager` in Tauri state — `VecDeque` queue +
+  running map, max 2 concurrent, worker `std::thread`s. Spawns `~/.local/bin/claude -p`
+  per SPEC §6: cwd = class folder, `--add-dir`, per-kind `--model` (opus for guides/
+  practice, sonnet otherwise, passed explicitly) and `--allowedTools`. **Every spawn
+  `env_remove`s `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`** (§1).
+- **`--disallowedTools Bash,WebFetch,WebSearch` is passed on every spawn** in addition
+  to `--allowedTools`. Verified on claude 2.1.237: allowedTools is additive and does
+  NOT restrict tools the user's own permissive config allows (a probe scoped to
+  `Read,Glob,Grep` happily ran Bash). Deny rules win; §6's "never allow" needs them.
+- **Streaming**: raw stream-json lines → `<app-data>/logs/job-{id}.jsonl` (`log_path`
+  column); parsed as `serde_json::Value`; condensed `ProgressEvent`s
+  (status/text/tool/tool_result/retry/result/error) buffered in-memory per session
+  (capped 2000/job) and emitted as `job://{id}/progress`. `session_id` captured from
+  the init event. A bare `jobs-changed` event fires on every state transition.
+- **Cancel**: child handle in `Arc<Mutex<Option<Child>>>`; cancel = flag + `kill()`,
+  worker finalizes the row as `cancelled`. Queued jobs cancel by queue removal (no
+  spawn). `startup_recovery()` marks rows left queued/running by a dead process as
+  failed ("interrupted by app restart") before the first scan.
+- **Self-check** (kind `self_check`, no tools, sonnet, cwd = app-data dir): verdict
+  from the init event's `apiKeySource` — anything but `"none"` kills the child
+  immediately (before any API call) and fails the check; `"none"` must then reach a
+  successful result event. `rateLimitType` from `rate_limit_event` (`five_hour` =
+  subscription rolling window) is recorded as evidence in the summary. State lives on
+  `JobManager`; `auth-check` event + `get_auth_check`/`run_auth_check` commands.
+- **Commands**: `list_jobs` (last 50, LEFT JOIN classes for name/color),
+  `run_test_job` (M3 throwaway `probe` kind), `cancel_job`, `get_job_events`
+  (snapshot for late subscribers), `get_auth_check`, `run_auth_check`.
+- **Frontend store** (`src/lib/jobs.ts`): module-level external store consumed via
+  `useSyncExternalStore` (push-based Tauri events don't fit TanStack Query; still no
+  `useEffect`). Listens to `jobs-changed`/`auth-check` globally and
+  `job://{id}/progress` per active job; a per-job seq-keyed map dedupes the
+  live-listener vs `get_job_events` backfill race (listener attaches first). A 1s
+  interval ticks `nowSec` only while a job is active (elapsed labels).
+- **Job Center** (`src/components/JobCenter.tsx`): bottom-center pill — mono register,
+  pulsing accent dot + ticking mm:ss while running, `✕ JOB FAILED` after an idle
+  failure — expanding to a floating panel: rows with per-class `--accent`, status
+  glyphs, cancel `✕` on active rows; output pane renders condensed lines with glyph
+  prefixes (`·` status, `»` tool, `←` tool result, `↻` retry, `✓`/`✕` outcome),
+  stick-to-bottom scrolling via ref callback + `onScroll` (no effects).
+  `AuthWarning`: blocking `alertdialog` overlay when the check fails, with Re-run.
+- **TEST JOB** button in the class workspace header is the M3 throwaway trigger —
+  remove when M4 lands real job actions.
+
+### Verified
+
+- Probe on Biostatistics end-to-end: live streamed init/tool/result events in the
+  panel, succeeded with `TOTAL: 13 files`, `session_id` stored, raw log persisted.
+- Mid-stream cancel: child killed (`pgrep` count 0 after), row `cancelled`; a queued
+  job cancelled before ever spawning. Three probes at once → 2 RUNNING + 1 QUEUED.
+- Stripping proof: entire dev session ran with `ANTHROPIC_API_KEY=sk-ant-dummy-not-real`
+  in the app's parent env; self-checks still reported `apiKeySource none` +
+  `five_hour` window. Negative test (env_remove temporarily disabled): init showed
+  `apiKeySource ANTHROPIC_API_KEY`, child killed pre-API-call, blocking overlay
+  appeared, Re-run check requeued a fresh self-check.
+- Light mode not re-screenshotted this session (owner was actively using the machine;
+  no system-appearance flipping). Job Center uses only M1 tokens, no new colors.
+
+### Gotchas
+
+- `--allowedTools` is additive, not restrictive — always pass `--disallowedTools`
+  for least privilege (see above).
+- An invalid `ANTHROPIC_API_KEY` makes the CLI retry 401s up to 10× with exponential
+  backoff (minutes of grinding); the self-check's early kill avoids this. Regular
+  jobs surface `api_retry` progress events so stalls are visible.
+- Stream order is not guaranteed: `rate_limit_event` arrived before init in one run
+  and after it in another. The parser assumes nothing about ordering.
+- `total_cost_usd` in result events is notional under subscription auth — nothing is
+  billed; don't surface it as money.
+- vite watches `.env` and restarts the dev server when it changes. The repo `.env`
+  (owner-added, git-ignored) is never read by the app — the chat key goes into the
+  Keychain in M7.
+- A re-run self-check queues behind running jobs (max-2); fine today, revisit
+  priority when long M5/M6 jobs exist.

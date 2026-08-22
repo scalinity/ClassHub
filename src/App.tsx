@@ -7,6 +7,7 @@ import {
 
 import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
+import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { listClasses, type ClassInfo } from "@/lib/classes";
 
 const queryClient = new QueryClient();
@@ -73,6 +74,8 @@ export default function App() {
         ) : (
           <Dashboard onOpen={setOpenClass} />
         )}
+        <JobCenter />
+        <AuthWarning />
       </div>
     </QueryClientProvider>
   );

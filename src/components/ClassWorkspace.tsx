@@ -1,9 +1,10 @@
 import type { CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, FolderOpen, RefreshCw } from "lucide-react";
+import { ChevronLeft, FlaskConical, FolderOpen, RefreshCw } from "lucide-react";
 
 import { FileTree } from "@/components/FileTree";
 import type { ClassInfo } from "@/lib/classes";
+import { openJobPanel, runTestJob } from "@/lib/jobs";
 import { openInDefaultApp, scanClass } from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
 
@@ -94,6 +95,19 @@ export function ClassWorkspace({
                 SCANNED {scannedLabel}
               </span>
             )}
+            {/* M3 throwaway trigger — replaced by real job actions in M4+. */}
+            <button
+              type="button"
+              title="Run a throwaway claude job that lists this class's files"
+              onClick={() => {
+                openJobPanel();
+                void runTestJob(info.id);
+              }}
+              className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            >
+              <FlaskConical size={11} aria-hidden />
+              TEST JOB
+            </button>
             <button
               type="button"
               onClick={() => refetch()}
