@@ -23,6 +23,19 @@ export function openInDefaultApp(classId: number, relPath: string): Promise<void
   return invoke("open_in_default_app", { classId, relPath });
 }
 
+/** Raw text of a class file for the in-app viewer (backend caps the size). */
+export function readClassFile(classId: number, relPath: string): Promise<string> {
+  return invoke<string>("read_class_file", { classId, relPath });
+}
+
+/** Kinds the in-app viewer can render; the rest open in their default app. */
+export const VIEWABLE_KINDS: ReadonlySet<string> = new Set([
+  "html",
+  "md",
+  "rmd",
+  "r",
+]);
+
 export function countFiles(nodes: TreeNode[]): number {
   return nodes.reduce(
     (total, node) => total + (node.dir ? countFiles(node.children) : 1),

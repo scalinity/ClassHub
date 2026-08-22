@@ -28,7 +28,11 @@ six sections, in this order:
    organized by topic in teaching order. Exam-oriented: definitions stated precisely,
    distinctions sharpened (e.g. population vs sample, parameter vs statistic), common
    traps called out. Mark the entries most likely to be examined as high-yield (see
-   the yield rail in the design contract).
+   the yield rail in the design contract). This section is a selection with a bar,
+   not a transcript: an entry earns its place by being examinable. When the source
+   circles one idea for ten slides, write one sharp entry. Where an entry's content
+   has structure — a taxonomy, a decision, a contrast — render that structure inline
+   as a mini-diagram or comparison table instead of prose.
 2. **Diagrams** — inline SVG only. At least: one concept map of how the module's
    topics relate, and one flowchart or process diagram of a method the module taught.
    Reproduce or adapt the source material's own key figures where they carry real
@@ -36,9 +40,11 @@ six sections, in this order:
    diagram gets a caption with a source citation.
 3. **Formula & code reference** — every formula the module introduced, with symbol
    definitions and when-to-use notes. Math is typeset as MathML (or plain HTML
-   sub/sup for trivial cases) — never an external renderer. R snippets verbatim from
-   the material in fenced style, each with its expected output where the notebooks
-   show it.
+   sub/sup for trivial cases) — never an external renderer. Annotate each formula's
+   anatomy: a short labelled note on what each symbol is doing (a well-labelled
+   formula is a visual). Code earns inclusion only by carrying a reusable pattern —
+   two or three snippets per theme, verbatim, each with its expected output where
+   the notebooks show it; never the notebooks' full transcript.
 4. **Worked examples** — pulled from the classwork and notebooks, annotated
    step-by-step: the setup, the code or calculation, the output, and why the result
    matters. Where learner work exists, use it and note what it exercises.
@@ -54,6 +60,9 @@ will". Every claim must be traceable to the source material: cite source filenam
 inline in small muted text (the citation chip device below) on each concept entry,
 diagram caption, formula, and worked example. Do not invent content the sources don't
 support; if the material only gestures at a topic, say exactly what it covered.
+Distill, never transcribe: the guide must be decisively shorter than its sources —
+the reader who wants everything has the sources; this document exists to be the
+version worth rereading the night before the exam.
 
 ## Design contract
 
@@ -100,6 +109,43 @@ rule with left padding. Standard entries: hairline gray. High-yield entries: the
 turns accent and the entry gains a small mono `★ EXAM` tag in accent. This is the one
 place the design is loud; keep everything else quiet.
 
+Visual mandate: sections 01–05 each carry at least one visual device placed inline
+with the content it explains — a hand-drawn SVG mini-diagram, a styled comparison
+table, or an annotated formula anatomy. Section 02 houses the big pieces (the
+concept map); it is not a quarantine that excuses prose walls elsewhere. If a
+section offers nothing worth drawing, its content selection is wrong — fix the
+selection.
+
+Interactive teaching devices (inline vanilla JS): interactivity is load-bearing,
+not garnish — where a concept has a parameter, a manipulable control teaches it
+better than prose. Ship at least three genuinely interactive devices, placed where
+they teach the most. Candidates:
+
+- a slider that recomputes a statistic or redraws a curve live (drive the inline
+  SVG's attributes and text labels directly — e.g. drag an outlier and watch the
+  mean chase it while the median holds),
+- hover/tap tooltips on data points and diagram nodes revealing values, formulas,
+  or citations,
+- toggles that switch a comparison between states (with/without outlier, mean vs
+  median centering, sample vs population),
+- a scored quiz: selectable options with immediate right/wrong feedback and a
+  running score.
+
+Cheaper CSS-native devices (`:hover` highlighting of related SVG nodes, `<details>`
+disclosure for worked-example steps, radio-input tab panels) remain welcome
+alongside. Script rules: ONE inline `<script>` at the end of `<body>`, vanilla JS
+only — no frameworks, no fetch/XHR/WebSocket, no localStorage, no cookies, no
+imports, no external anything. Query elements defensively. The document must stay
+fully readable and coherent with JavaScript disabled and in print: every
+interactive device renders a meaningful static default state without JS, and the
+quiz falls back to its `<details>` answers.
+
+Overflow guard: nothing may overflow the 72ch measure horizontally; the ONLY
+scrollable axis in the document is inside `<pre>` (`overflow-x: auto`). Citation
+chips wrap BETWEEN chips — each chip holds together (`display: inline-block`), and
+the chip row never carries `white-space: nowrap`. Long file names in prose wrap
+with `overflow-wrap: anywhere`.
+
 Citation chips: inline `<span class="cite">` — mono, 10px, muted, rendered like
 `[Biostatistics_Module1_Slides_class2.pptx]` — placed at the end of the entry or
 caption they support. Never let citations interrupt a sentence.
@@ -112,7 +158,8 @@ inheriting `currentColor` or CSS variables for strokes/fills, never hardcoded bl
 
 Quiz: each question numbered with a mono accent label (`Q01`…), `<details>` styled
 with a pointer-cursor summary, accent disclosure affordance, and an accent-washed
-answer panel. It must work with no JavaScript.
+answer panel. The `<details>` fallback must work with no JavaScript; with scripts
+on, upgrade to selectable options with immediate feedback and a running score.
 
 Footer: hairline rule, then in mono muted 10px: `GENERATED {generated_at} · CLASSHUB
 MODULE GUIDE`, followed by the source manifest — one line per source file:
@@ -125,12 +172,31 @@ examples, and quiz items; sections start cleanly (`break-before: page` on sectio
 02–06 is acceptable if they are long); keep the footer manifest. The guide must read
 as a beautiful printed document.
 
+## Writing strategy (hard requirement)
+
+The finished file is large — larger than one response can emit. NEVER attempt the
+whole document in a single Write call: it will hit the per-response output limit,
+be discarded, and waste the work. Build the file incrementally:
+
+1. First Write: everything through section 01 (head with the full `<style>` block,
+   header, Key concepts), ending with the literal line `<!-- CONTINUE -->` followed
+   by `</body></html>`.
+2. Then a sequence of Edit calls, each replacing `<!-- CONTINUE -->` with the next
+   chunk of markup followed by `<!-- CONTINUE -->` again. Keep every Write and Edit
+   comfortably small — roughly 20–30 KB of markup each, splitting a long section
+   across several Edits when needed.
+3. Final Edit: replace `<!-- CONTINUE -->` with the footer, leaving no marker.
+4. Verify with Grep that no `<!-- CONTINUE -->` remains and the file ends with
+   `</html>`.
+
 ## Hard constraints
 
 - ONE file, entirely self-contained: a single `<style>` block in `<head>`, inline
-  SVG only. No `<script>` of any kind, no `<link>`, no `@import`, no `url()`
-  references, no external images, fonts, or CDNs. The document must render fully
-  with networking disabled.
+  SVG, and a single inline `<script>` before `</body>` powering the interactive
+  devices. No `<link>`, no `@import`, no `url()` references, no external images,
+  fonts, or CDNs, and no network or storage APIs in the script (no fetch, XHR,
+  WebSocket, import, localStorage, or cookies). The document must render fully
+  with networking disabled and remain readable with scripts disabled.
 - Semantic HTML (`<header>`, `<section>`, `<figure>`, `<table>`, `<details>`,
   `<footer>`), `lang="en"`, viewport meta, `<title>{class} — {module} Study Guide</title>`.
 - Math as MathML or HTML sub/sup — no external math renderers, no LaTeX left as

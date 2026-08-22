@@ -427,3 +427,58 @@ doesn't cover.
   server or write the DB outside the workspace.
 - `pkill -f "tauri"` also matches macOS's *cenTAURI* system daemons
   (`AppleCentauri*`, root-owned, so the signal fails — but keep patterns tight).
+
+## Post-M6 — Interactivity contract, in-app viewer, live streaming (2026-08-22)
+
+### Contract change (owner decision, SPEC §8.1 edited)
+
+- Generated guides now ship **inline vanilla JS**: interactivity is load-bearing,
+  not garnish. Both templates mandate ≥3 genuinely interactive devices (sliders
+  driving inline SVG, tooltip readouts, comparison toggles, scored quiz over the
+  `<details>` fallback) via ONE `<script>` before `</body>` — no frameworks and
+  no network/storage APIs (fetch/XHR/WebSocket/localStorage/cookies banned), so
+  the offline contract holds; the offline check is now "no network calls in the
+  script", not "zero `<script>`". Docs must stay readable with scripts off and in
+  print (static default states required).
+- Same pass added to both templates: a distillation bar (selection over
+  transcription — run 2 came out 181 KB vs run 1's 227 KB with a scripting layer
+  added), a visual mandate (sections 01–06 each carry ≥1 inline visual), an
+  overflow guard (only `<pre>` scrolls; chips wrap between chips), and
+  `module_guide.md` gained the chunked-writing clause (closing the M6 gotcha).
+- `GuideViewer` iframe: `sandbox=""` → `sandbox="allow-scripts"` — **without**
+  `allow-same-origin`, so guide scripts run in an opaque origin with no path to
+  the app's IPC or storage.
+
+### In-app viewer + live streaming
+
+- `FileViewer.tsx`: full-screen reading room for class materials (html/md/rmd/r
+  via `VIEWABLE_KINDS`; filenames in the tree are click-to-view). Backed by
+  `read_class_file` (path-validated, 8 MB cap). Markdown renders through `marked`
+  into the shared document shell; class HTML notebooks get `allow-scripts`.
+- Live mode (WATCH LIVE on the master strip): polls the output file every 3 s and
+  rewrites the frame in place preserving scroll. Gated on freshness — until the
+  run's first Write lands, the file on disk is still the *previous* generation,
+  so the view holds a waiting state until `<!-- CONTINUE -->` appears (or the
+  phase hits VERIFY, covering the post-final-Edit window). Header mirrors the
+  real stream phase instead of claiming COMPOSING during reads.
+- Live source tail (SOURCE drawer): `partial_json` fragments are best-effort
+  unescaped (carry buffer for split escapes), kept in an 8 KB rolling buffer per
+  job, emitted as `job://{id}/tail` events with `get_job_tail` backfill.
+- Window dragging: `data-tauri-drag-region` only fires when the mousedown target
+  IS the marked element — any child under the cursor silently defeats it.
+  Replaced with explicit `startDragging()` on mousedown (`lib/window.ts`) on the
+  top strip and viewer headers; `core:window:allow-start-dragging` added
+  explicitly to the capability.
+
+### Gotchas
+
+- **Claude CLI ≥2.1.40 does not stream tool inputs by default.** Even with
+  `--include-partial-messages`, the API assembles each Write/Edit input
+  server-side and releases its `partial_json` deltas in one burst at block
+  completion — the "live" feed jumps a whole chunk at a time. Fix:
+  `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1` in the spawn env (set on
+  master jobs; documented, works with subscription auth).
+- Run 2 (job 70) verified the full new contract end to end: 1 inline script,
+  slider + concept-map hover readouts + scored quiz + toggles, 29 `<details>`,
+  11 SVGs, zero forbidden APIs, no external refs, clean `</html>`, `guides`
+  upsert fresh.

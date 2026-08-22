@@ -119,6 +119,9 @@ struct Inner {
     running: HashMap<i64, RunningJob>,
     /// Condensed progress buffers for jobs run this session (snapshot for late subscribers).
     output: HashMap<i64, JobOutput>,
+    /// Rolling tail (last few KB) of decoded Write/Edit input per job — the live
+    /// "source feed" for master synthesis. Backfill for late subscribers.
+    tails: HashMap<i64, String>,
     auth: AuthCheck,
 }
 
@@ -133,6 +136,7 @@ impl Default for JobManager {
                 queue: VecDeque::new(),
                 running: HashMap::new(),
                 output: HashMap::new(),
+                tails: HashMap::new(),
                 auth: AuthCheck {
                     status: "pending".into(),
                     detail: "Startup self-check has not run yet.".into(),
@@ -152,6 +156,14 @@ impl JobManager {
             .output
             .get(&job_id)
             .map(|o| o.events.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn tail_for(&self, job_id: i64) -> String {
+        self.lock_inner()
+            .tails
+            .get(&job_id)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -464,6 +476,64 @@ struct StreamState {
     /// signal. Approximate (JSON-escaped), which is fine for a progress label.
     write_bytes: usize,
     write_bytes_reported: usize,
+    /// Decoded source text awaiting a tail flush, and an incomplete trailing
+    /// JSON escape carried between fragments.
+    tail_pending: String,
+    tail_carry: String,
+}
+
+/// Best-effort unescape of a streamed JSON string fragment for the live source
+/// tail. `carry` holds an incomplete trailing escape (`\`, `\u12`) between
+/// fragments so sequences split across deltas decode correctly.
+fn unescape_fragment(carry: &mut String, fragment: &str) -> String {
+    let s = format!("{carry}{fragment}");
+    carry.clear();
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(&(_, next)) = chars.peek() else {
+            carry.push_str(&s[i..]); // fragment ends mid-escape
+            break;
+        };
+        match next {
+            'n' => {
+                out.push('\n');
+                chars.next();
+            }
+            't' => {
+                out.push('\t');
+                chars.next();
+            }
+            'r' => {
+                chars.next();
+            }
+            '"' | '\\' | '/' => {
+                out.push(next);
+                chars.next();
+            }
+            'u' => {
+                let Some(hex) = s.get(i + 2..i + 6) else {
+                    carry.push_str(&s[i..]);
+                    break;
+                };
+                if let Some(ch) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+                for _ in 0..5 {
+                    chars.next(); // 'u' + 4 hex digits
+                }
+            }
+            _ => {
+                out.push(next);
+                chars.next();
+            }
+        }
+    }
+    out
 }
 
 fn execute_job(
@@ -526,6 +596,11 @@ fn execute_job(
     // shorter kinds don't need the extra stream volume.
     if job.kind == "master_guide" {
         cmd.arg("--include-partial-messages");
+        // Without this the API assembles each Write/Edit input server-side and
+        // releases its partial_json deltas in one burst at block completion
+        // (CLI ≥2.1.40 gates fine-grained tool streaming behind a feature flag
+        // or this env var), reducing the live source feed to block-sized jumps.
+        cmd.env("CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING", "1");
     }
     match &class_dir {
         Some(dir) => {
@@ -748,12 +823,21 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
                                     format!("composing · ~{} KB written", stream.write_bytes / 1024),
                                 );
                             }
+                            // Live source feed: decode and flush in ~1 KB chunks.
+                            let text = unescape_fragment(&mut stream.tail_carry, chunk);
+                            stream.tail_pending.push_str(&text);
+                            if stream.tail_pending.len() >= 1024 {
+                                push_tail(app, job.id, std::mem::take(&mut stream.tail_pending));
+                            }
                         }
                     }
                 }
                 "content_block_stop" => {
                     if stream.write_block == event["index"].as_u64() {
                         stream.write_block = None;
+                        stream.tail_carry.clear();
+                        stream.tail_pending.push('\n');
+                        push_tail(app, job.id, std::mem::take(&mut stream.tail_pending));
                     }
                 }
                 _ => {}
@@ -848,6 +932,25 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
 
 fn push_event(app: &AppHandle, job_id: i64, kind: &str, text: String) {
     push_event_detail(app, job_id, kind, text, None);
+}
+
+/// Appends to the rolling per-job tail buffer (capped) and emits the chunk.
+fn push_tail(app: &AppHandle, job_id: i64, chunk: String) {
+    const TAIL_CAP: usize = 8 * 1024;
+    {
+        let mgr = app.state::<JobManager>();
+        let mut inner = mgr.lock_inner();
+        let tail = inner.tails.entry(job_id).or_default();
+        tail.push_str(&chunk);
+        if tail.len() > TAIL_CAP {
+            let mut cut = tail.len() - TAIL_CAP;
+            while cut < tail.len() && !tail.is_char_boundary(cut) {
+                cut += 1;
+            }
+            tail.drain(..cut);
+        }
+    }
+    let _ = app.emit(&format!("job://{job_id}/tail"), chunk);
 }
 
 fn push_event_detail(

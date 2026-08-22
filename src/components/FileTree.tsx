@@ -20,6 +20,7 @@ import {
   formatSize,
   openInDefaultApp,
   revealInFinder,
+  VIEWABLE_KINDS,
   type TreeNode,
 } from "@/lib/materials";
 
@@ -45,12 +46,15 @@ export function FileTree({
   classId,
   nodes,
   onEntryMissing,
+  onViewFile,
   guideControls,
 }: {
   classId: number;
   nodes: TreeNode[];
   /** A row action hit a path that vanished from disk — rescan. */
   onEntryMissing: () => void;
+  /** Open a renderable file in the in-app viewer. */
+  onViewFile: (node: TreeNode) => void;
   guideControls?: ModuleGuideControls;
 }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -74,6 +78,7 @@ export function FileTree({
           collapsed={collapsed}
           onToggle={toggle}
           onEntryMissing={onEntryMissing}
+          onViewFile={onViewFile}
           guideControls={guideControls}
         />
       ))}
@@ -88,6 +93,7 @@ interface NodeProps {
   collapsed: ReadonlySet<string>;
   onToggle: (relPath: string) => void;
   onEntryMissing: () => void;
+  onViewFile: (node: TreeNode) => void;
   guideControls?: ModuleGuideControls;
 }
 
@@ -103,6 +109,7 @@ function DirNode({
   collapsed,
   onToggle,
   onEntryMissing,
+  onViewFile,
   guideControls,
 }: NodeProps) {
   const isCollapsed = collapsed.has(node.relPath);
@@ -158,6 +165,7 @@ function DirNode({
               collapsed={collapsed}
               onToggle={onToggle}
               onEntryMissing={onEntryMissing}
+              onViewFile={onViewFile}
               guideControls={guideControls}
             />
           ))}
@@ -242,8 +250,9 @@ function GuideCluster({
   );
 }
 
-function FileRow({ node, classId, onEntryMissing }: NodeProps) {
+function FileRow({ node, classId, onEntryMissing, onViewFile }: NodeProps) {
   const Icon = KIND_ICONS[node.kind ?? ""] ?? File;
+  const viewable = VIEWABLE_KINDS.has(node.kind ?? "");
 
   const run = (action: Promise<void>) => {
     action.catch(onEntryMissing);
@@ -252,7 +261,18 @@ function FileRow({ node, classId, onEntryMissing }: NodeProps) {
   return (
     <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
       <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
-      <span className="min-w-0 flex-1 truncate text-[13px]">{node.name}</span>
+      <button
+        type="button"
+        title={viewable ? `View ${node.name}` : `Open ${node.name} in its default app`}
+        onClick={() =>
+          viewable
+            ? onViewFile(node)
+            : run(openInDefaultApp(classId, node.relPath))
+        }
+        className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+      >
+        {node.name}
+      </button>
 
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         <button

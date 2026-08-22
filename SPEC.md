@@ -260,7 +260,9 @@ Manual trigger per module from the Class Workspace. Prompt contract:
   flags a figure worth re-inspecting; Daniel's classwork files marked as "learner work" for
   the worked-examples section.
 - Output: **one self-contained HTML file** at `Study Guides/<Module name>.html`. No external
-  requests (no CDN fonts/JS/CSS). Inline CSS + inline SVG only. Print-friendly stylesheet.
+  requests (no CDN fonts/JS/CSS). Inline CSS, inline SVG, and inline vanilla JS powering
+  interactive teaching devices (owner decision 2026-08-22: interactivity is load-bearing).
+  Fully readable with scripts disabled and in print. Print-friendly stylesheet.
   Class accent color as the theme hue. Footer with generated-at timestamp and source manifest.
 - Required sections (the "guide anatomy"):
   1. **Key concepts** — dense high-yield summaries, exam-oriented

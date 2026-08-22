@@ -3,10 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, FolderOpen, RefreshCw } from "lucide-react";
 
 import { FileTree } from "@/components/FileTree";
+import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GuideViewer } from "@/components/GuideViewer";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import type { ClassInfo } from "@/lib/classes";
-import { listGuides, synthesizeModule } from "@/lib/guides";
+import { listGuides, MASTER_OUTPUT_PATH, synthesizeModule } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import { openInDefaultApp, scanClass } from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
@@ -61,6 +62,7 @@ export function ClassWorkspace({
   const guideMap = new Map((guides ?? []).map((g) => [g.scope, g]));
 
   const [viewScope, setViewScope] = useState<string | null>(null);
+  const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [synthError, setSynthError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
     setSynthError(null);
@@ -123,6 +125,15 @@ export function ClassWorkspace({
           classId={info.id}
           guide={guideMap.get("master")}
           onView={() => setViewScope("master")}
+          onWatchLive={(jobId) =>
+            setViewFile({
+              relPath: MASTER_OUTPUT_PATH,
+              name: "Semester Master",
+              kind: "html",
+              live: true,
+              jobId,
+            })
+          }
         />
       )}
 
@@ -175,6 +186,13 @@ export function ClassWorkspace({
               classId={info.id}
               nodes={tree}
               onEntryMissing={() => refetch()}
+              onViewFile={(node) =>
+                setViewFile({
+                  relPath: node.relPath,
+                  name: node.name,
+                  kind: node.kind ?? "other",
+                })
+              }
               guideControls={{
                 guides: guideMap,
                 activeScopes,
@@ -191,6 +209,13 @@ export function ClassWorkspace({
           classId={info.id}
           guide={viewedGuide}
           onClose={() => setViewScope(null)}
+        />
+      )}
+      {viewFile && (
+        <FileViewer
+          classId={info.id}
+          file={viewFile}
+          onClose={() => setViewFile(null)}
         />
       )}
     </main>

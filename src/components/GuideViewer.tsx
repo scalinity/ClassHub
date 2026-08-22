@@ -3,14 +3,16 @@ import { X } from "lucide-react";
 
 import { formatGeneratedAt, readGuide, type GuideInfo } from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
+import { dragWindow } from "@/lib/window";
 
 const headerAction =
   "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)";
 
 /**
- * SPEC §12: sandboxed in-app guide viewer. The iframe runs with an empty
- * sandbox — no scripts, no same-origin, no navigation — which the guides
- * don't need: they are self-contained HTML+CSS+SVG with <details> quizzes.
+ * SPEC §12: sandboxed in-app guide viewer. allow-scripts (without
+ * allow-same-origin) runs the guide's inline interactive devices in an
+ * opaque origin, isolated from the app: no IPC, no storage, no navigation.
+ * The guide contract additionally forbids network and storage APIs.
  */
 export function GuideViewer({
   classId,
@@ -42,7 +44,7 @@ export function GuideViewer({
     >
       {/* pl clears the macOS traffic lights (overlay title bar). */}
       <header
-        data-tauri-drag-region
+        onMouseDown={dragWindow}
         className="flex h-12 shrink-0 items-center gap-2.5 border-b bg-card pl-24 pr-3"
       >
         <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
@@ -96,7 +98,7 @@ export function GuideViewer({
           </p>
         ) : (
           <iframe
-            sandbox=""
+            sandbox="allow-scripts"
             srcDoc={html}
             title={`${guide.scope} study guide`}
             className="block h-full w-full border-0"

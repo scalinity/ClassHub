@@ -51,6 +51,8 @@ export interface JobsSnapshot {
   jobs: JobInfo[];
   auth: AuthCheck;
   output: ReadonlyMap<number, readonly ProgressEvent[]>;
+  /** Rolling decoded source text a synthesis job is writing (live tail). */
+  tails: ReadonlyMap<number, string>;
   panelOpen: boolean;
   /** Unix seconds, ticked every second while a job is active (for elapsed labels). */
   nowSec: number;
@@ -62,6 +64,7 @@ let snapshot: JobsSnapshot = {
   jobs: [],
   auth: { status: "pending", detail: "" },
   output: new Map(),
+  tails: new Map(),
   panelOpen: false,
   nowSec: Math.floor(Date.now() / 1000),
 };
@@ -113,6 +116,35 @@ export function ensureOutput(jobId: number) {
     invoke<ProgressEvent[]>("get_job_events", { jobId }).then((events) =>
       addEvents(jobId, events),
     ),
+  );
+}
+
+const TAIL_CAP = 8 * 1024;
+const subscribedTails = new Set<number>();
+
+function setTail(jobId: number, text: string) {
+  const tails = new Map(snapshot.tails);
+  tails.set(jobId, text.length > TAIL_CAP ? text.slice(-TAIL_CAP) : text);
+  emitChange({ tails });
+}
+
+/**
+ * Live source feed. Chunks carry no seq, so the backend snapshot (which
+ * already contains anything received before it resolves) replaces the buffer;
+ * later chunks append.
+ */
+export function ensureTail(jobId: number) {
+  if (subscribedTails.has(jobId)) return;
+  subscribedTails.add(jobId);
+  let backfilled = false;
+  void listen<string>(`job://${jobId}/tail`, (e) => {
+    if (!backfilled) return; // covered by the pending backfill snapshot
+    setTail(jobId, (snapshot.tails.get(jobId) ?? "") + e.payload);
+  }).then(() =>
+    invoke<string>("get_job_tail", { jobId }).then((tail) => {
+      backfilled = true;
+      setTail(jobId, tail);
+    }),
   );
 }
 

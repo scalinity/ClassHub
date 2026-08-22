@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Mirrors the backend MASTER_OUTPUT constant (guides.rs). */
+export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
+
 export interface GuideInfo {
   scope: string; // module rel path | 'master'
   relPath: string; // e.g. "Study Guides/Module 1.html"

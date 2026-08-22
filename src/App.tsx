@@ -9,6 +9,7 @@ import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { listClasses, type ClassInfo } from "@/lib/classes";
+import { dragWindow } from "@/lib/window";
 
 const queryClient = new QueryClient();
 
@@ -65,7 +66,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <div className="min-h-screen">
         {/* Drag strip clearing the macOS traffic lights (overlay title bar). */}
-        <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-10 h-9" />
+        <div onMouseDown={dragWindow} className="fixed inset-x-0 top-0 z-10 h-9" />
         {openClass ? (
           <ClassWorkspace
             info={openClass}

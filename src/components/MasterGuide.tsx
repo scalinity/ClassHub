@@ -7,7 +7,12 @@ import {
   synthesizeMaster,
   type GuideInfo,
 } from "@/lib/guides";
-import { formatElapsed, useJobs, type ProgressEvent } from "@/lib/jobs";
+import {
+  ensureTail,
+  formatElapsed,
+  useJobs,
+  type ProgressEvent,
+} from "@/lib/jobs";
 
 const monoAction =
   "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
@@ -20,7 +25,7 @@ const monoAction =
  */
 const PHASES = ["ORIENT", "READ", "COMPOSE", "VERIFY"] as const;
 
-function derivePhase(events: readonly ProgressEvent[]): {
+export function derivePhase(events: readonly ProgressEvent[]): {
   index: number;
   detail: string;
 } {
@@ -103,13 +108,17 @@ export function MasterGuideStrip({
   classId,
   guide,
   onView,
+  onWatchLive,
 }: {
   classId: number;
   guide: GuideInfo | undefined;
   onView: () => void;
+  /** Open the live document preview of the file the given job is composing. */
+  onWatchLive: (jobId: number) => void;
 }) {
-  const { jobs, output, nowSec } = useJobs();
+  const { jobs, output, tails, nowSec } = useJobs();
   const [error, setError] = useState<string | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
 
   const masterJobs = jobs.filter(
     (j) => j.kind === "master_guide" && j.classId === classId,
@@ -213,15 +222,44 @@ export function MasterGuideStrip({
       </div>
 
       {active ? (
-        <div className="mt-2.5 flex items-center justify-between gap-4">
-          <ActiveDetail
-            running={active.status === "running"}
-            events={output.get(active.id) ?? []}
-          />
-          {active.status === "running" && (
-            <PhaseRail current={derivePhase(output.get(active.id) ?? []).index} />
+        <>
+          <div className="mt-2.5 flex items-center justify-between gap-4">
+            <ActiveDetail
+              running={active.status === "running"}
+              events={output.get(active.id) ?? []}
+            />
+            {active.status === "running" && (
+              <span className="flex shrink-0 items-center gap-3">
+                <button
+                  type="button"
+                  title="Show the source text as the model writes it"
+                  aria-expanded={sourceOpen}
+                  onClick={() => {
+                    ensureTail(active.id);
+                    setSourceOpen((open) => !open);
+                  }}
+                  className={`${monoAction} ${sourceOpen ? "bg-(--accent)/12 text-(--accent)" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+                >
+                  SOURCE
+                </button>
+                <button
+                  type="button"
+                  title="Watch the document grow as it is written"
+                  onClick={() => onWatchLive(active.id)}
+                  className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+                >
+                  WATCH LIVE
+                </button>
+                <PhaseRail
+                  current={derivePhase(output.get(active.id) ?? []).index}
+                />
+              </span>
+            )}
+          </div>
+          {sourceOpen && active.status === "running" && (
+            <SourceFeed text={tails.get(active.id) ?? ""} />
           )}
-        </div>
+        </>
       ) : failed ? (
         <p className="mt-2 truncate font-mono text-[11px] text-destructive">
           ✕ LAST RUN FAILED — {failed.error ?? "unknown error"}
@@ -241,6 +279,25 @@ export function MasterGuideStrip({
         </p>
       )}
     </section>
+  );
+}
+
+/**
+ * The raw source ticker: the last few KB of the file as the model streams it,
+ * pinned to the bottom like tail -f. The inline ref runs on every commit, so
+ * new chunks keep the feed stuck to the newest line.
+ */
+function SourceFeed({ text }: { text: string }) {
+  return (
+    <pre
+      aria-label="Live source feed"
+      ref={(el) => {
+        if (el) el.scrollTop = el.scrollHeight;
+      }}
+      className="mt-3 h-44 overflow-y-auto rounded-lg border bg-muted/30 px-3.5 py-2.5 font-mono text-[10px] leading-[1.6] whitespace-pre-wrap break-all text-muted-foreground"
+    >
+      {text || "WAITING FOR THE WRITER…"}
+    </pre>
   );
 }
 

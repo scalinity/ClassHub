@@ -58,6 +58,27 @@ fn open_in_default_app(
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// In-app file viewer: raw text of a class file, rendered by the frontend
+/// (markdown, HTML, code). resolve_rel guards traversal; the cap keeps huge
+/// artifacts in their default apps.
+#[tauri::command]
+fn read_class_file(
+    state: tauri::State<Db>,
+    class_id: i64,
+    rel_path: String,
+) -> Result<String, String> {
+    const MAX_VIEW_BYTES: u64 = 8 * 1024 * 1024;
+    let path = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        scanner::resolve_rel(&conn, class_id, &rel_path).map_err(|e| format!("{e:#}"))?
+    };
+    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if size > MAX_VIEW_BYTES {
+        return Err("too large to view in-app — use its default app".into());
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("reading {rel_path}: {e}"))
+}
+
 /// SPEC §8.1: manual synthesis trigger. The label is the guide footer's
 /// display-only generated-at stamp, formatted client-side.
 #[tauri::command]
@@ -121,6 +142,12 @@ fn cancel_job(app: tauri::AppHandle, job_id: i64) -> Result<(), String> {
 #[tauri::command]
 fn get_job_events(state: tauri::State<jobs::JobManager>, job_id: i64) -> Vec<jobs::ProgressEvent> {
     state.events_for(job_id)
+}
+
+/// Rolling tail of the source text a synthesis job is currently writing.
+#[tauri::command]
+fn get_job_tail(state: tauri::State<jobs::JobManager>, job_id: i64) -> String {
+    state.tail_for(job_id)
 }
 
 #[tauri::command]
@@ -188,9 +215,11 @@ pub fn run() {
             resume_master_guide,
             list_guides,
             read_guide,
+            read_class_file,
             list_jobs,
             cancel_job,
             get_job_events,
+            get_job_tail,
             get_auth_check,
             run_auth_check
         ])
