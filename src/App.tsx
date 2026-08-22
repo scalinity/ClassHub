@@ -1,0 +1,69 @@
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
+
+import { ClassCard } from "@/components/ClassCard";
+import { listClasses } from "@/lib/classes";
+
+const queryClient = new QueryClient();
+
+function Dashboard() {
+  const { data: classes, error } = useQuery({
+    queryKey: ["classes"],
+    queryFn: listClasses,
+  });
+
+  const dateLabel = new Date()
+    .toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    })
+    .toUpperCase()
+    .replace(",", " ·");
+
+  return (
+    <div className="min-h-screen">
+      {/* Drag strip clearing the macOS traffic lights (overlay title bar). */}
+      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-10 h-9" />
+
+      <main className="mx-auto max-w-4xl px-8 pt-16 pb-20">
+        <header>
+          <p className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+            FALL 2026 · AI IN BIOMEDICAL &amp; HEALTH SCIENCES
+          </p>
+          <div className="mt-2 flex items-baseline justify-between">
+            <h1 className="text-[28px] font-semibold tracking-tight">
+              ClassHub
+            </h1>
+            <p className="font-mono text-xs text-muted-foreground">
+              {dateLabel}
+            </p>
+          </div>
+        </header>
+
+        {error ? (
+          <p className="mt-16 text-center font-mono text-xs text-destructive">
+            FAILED TO LOAD CLASSES — {String(error)}
+          </p>
+        ) : (
+          <div className="mt-10 grid gap-5 md:grid-cols-2">
+            {(classes ?? []).map((cls) => (
+              <ClassCard key={cls.id} info={cls} />
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <Dashboard />
+    </QueryClientProvider>
+  );
+}
