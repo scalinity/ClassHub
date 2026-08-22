@@ -95,9 +95,21 @@ export function ClassCard({
             </span>
           )}
         </div>
-        <p className="mt-1.5 text-muted-foreground">
-          {info.room} · {info.credits} CR
-        </p>
+        <div className="mt-1.5 flex items-center justify-between gap-3">
+          <p className="text-muted-foreground">
+            {info.room} · {info.credits} CR
+          </p>
+          {info.staleGuides > 0 && (
+            <span
+              title="A study guide's sources changed since it was generated"
+              className="shrink-0 rounded bg-class-amber/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-class-amber"
+            >
+              {info.staleGuides === 1
+                ? "GUIDE STALE"
+                : `${info.staleGuides} GUIDES STALE`}
+            </span>
+          )}
+        </div>
       </div>
 
       {!info.folderPresent && (

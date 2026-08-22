@@ -275,3 +275,77 @@ doesn't cover.
   guides, practice exams) are design surfaces. Any session authoring their prompt
   templates must read the frontend-design skill and bake its guidance into the
   template's design contract — not just into app chrome.
+
+## M5 — Module study guide synthesis (2026-08-22)
+
+### What exists now
+
+- `prompts/module_guide.md` — the §8.1 contract plus a full design contract for
+  the generated document (cool near-white paper, serif display over system sans,
+  mono apparatus, class accent injected as oklch pairs mirroring `src/index.css`
+  tokens, yield-rail signature element, hand-authored SVG style rules, MathML-only
+  math, print stylesheet). Placeholders: `{class}` `{module}` `{output}`
+  `{accent_light}` `{accent_dark}` `{generated_at}` `{files}` `{manifest}`.
+- `guides.rs`: `synthesize_module` (rejects a duplicate active job for the same
+  class+scope; captures the manifest at enqueue into the job payload),
+  `finalize_job` (verifies a non-empty output file, then upserts `guides` — runs
+  inside the job runner *before* the row leaves `running`, same ordering trick as
+  extract), `list_guides` (staleness computed on demand via
+  `extract::manifest_is_stale`), `stale_guide_count` (feeds `ClassCard.stale_guides`
+  in `list_classes`), `read_guide`. Learner work is flagged by an `Edited Files`
+  path component — a heuristic; revisit if Daniel's folder conventions change.
+- `jobs.rs`: `module_guide` finalize branch **demotes success to failure** when no
+  guide got recorded (unlike extract's log-and-continue) — a "succeeded" job with
+  no visible guide would be a lie. New: every spawn now passes
+  `--strict-mcp-config`; the user-level claude config was leaking MCP servers (web
+  search, playwright) into jobs — `--disallowedTools` does not cover MCP tools.
+  Verified post-fix: the init event's tool list has zero `mcp__` entries.
+- `generated_at` display label is formatted by the frontend at enqueue time
+  (std Rust can't format local time; chrono wasn't worth one label). The DB's
+  `guides.generated_at` (unix, set at finalize) is the truth for the viewer chrome.
+- Frontend: `lib/guides.ts`; FileTree module rows carry a guide cluster —
+  `SYNTHESIZE GUIDE` → pulsing `SYNTHESIZING…` → `VIEW GUIDE` (+ hover-revealed
+  resynthesize icon) or amber `STALE — RESYNTHESIZE`. Amber (`class-amber`) is the
+  staleness status color at both levels; the dashboard card bottom line shows
+  `GUIDE STALE` / `N GUIDES STALE`. The guides query is keyed on
+  `[classId, settledGuideJobs, tree dataUpdatedAt]` — no polling, no useEffect;
+  the finalize-before-status ordering guarantees the refetch sees the new row.
+  `GuideViewer` is a full-window overlay: sandboxed iframe (`sandbox=""`,
+  `srcDoc`), drag-region header clearing the traffic lights, generated stamp,
+  stale chip, `OPEN IN BROWSER` / `SHOW IN FINDER` (M2 opener commands), Escape or
+  autofocused close button. Job Center rows now append the scope to the class name.
+
+### Verified
+
+- Real Biostatistics Module 1 end-to-end: 29-minute opus/xhigh job, 54 turns,
+  live streaming in the Job Center (read all 11 extracts including learner work,
+  finished with self-verification greps over its own output). Guide: 178 KB,
+  all six sections, 8 hand-authored SVGs, 20 quiz answers behind `<details>`,
+  12 MathML blocks, 130 citation chips, footer with generated stamp + full
+  source manifest.
+- Offline contract: loaded in Chromium, `performance.getEntriesByType('resource')`
+  is empty; zero `<script>`/`<link>`/`<img>`. The only `http` strings are course
+  URLs inside `<pre><code>` (verbatim class R code, never fetched).
+- Print: `@media print` emulation renders white/black with print-legible accent,
+  figures `break-inside: avoid`, SVGs intact.
+- Staleness round-trip: probe file added to Module 1 → RESCAN → module chip +
+  card badge both amber; the probe was auto-extracted locally (zero tokens) and
+  **no job of any kind was enqueued** (no auto-resynthesis, SPEC §12). Probe
+  removed → rescan → both badges cleared.
+
+### Gotchas
+
+- `touch` never flips staleness — manifests compare sha256 sets, so verification
+  must add, edit, or remove real content.
+- TanStack's `refetchOnWindowFocus` did not fire in the Tauri webview when the
+  window was re-activated during verification; the RESCAN button is the reliable
+  path after out-of-app file changes. If it bites, drive invalidation from a
+  native Tauri focus event.
+- The `sandbox=""` iframe ignores synthetic keyboard scrolling (automation
+  artifact — trackpad scrolls fine); `<details>` disclosures are native HTML and
+  need no scripts, verified in the Chromium load.
+- Light-mode screenshots skipped again (owner active on the machine); M5 adds no
+  new color tokens — stale chips reuse the existing `class-amber` pair.
+- Owner instruction (2026-08-22): the learner is "Daniel" (not "Danny")
+  everywhere in prose — SPEC.md prose was updated accordingly (sanctioned
+  exception to the checkbox-only rule).

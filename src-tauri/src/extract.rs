@@ -444,12 +444,11 @@ fn soffice_bin() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Staleness groundwork (SPEC §7 step 5) — consumed by the M5 staleness badges
+// Staleness (SPEC §7 step 5) — consumed by guide generation and the badges
 
 /// One `{rel_path, sha256}` pair of a guide's `source_manifest` (SPEC §5).
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // M5 wires this into guide generation + badges
 pub struct ManifestEntry {
     pub rel_path: String,
     pub sha256: String,
@@ -457,7 +456,6 @@ pub struct ManifestEntry {
 
 /// Current `{rel_path, sha256}` set for a guide scope: `'master'` covers the
 /// whole class, anything else is a module rel-path prefix.
-#[allow(dead_code)] // M5 wires this into guide generation + badges
 pub fn current_manifest(
     conn: &Connection,
     class_id: i64,
@@ -483,7 +481,6 @@ pub fn current_manifest(
 
 /// SPEC §7 step 5: a guide is stale when its stored `source_manifest` differs
 /// from the current set (order-insensitive set comparison).
-#[allow(dead_code)] // M5 wires this into guide generation + badges
 pub fn manifest_is_stale(stored_manifest_json: &str, current: &[ManifestEntry]) -> bool {
     let Ok(stored) = serde_json::from_str::<Vec<ManifestEntry>>(stored_manifest_json) else {
         return true; // unparseable manifest = stale

@@ -1,9 +1,12 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, FolderOpen, RefreshCw } from "lucide-react";
 
 import { FileTree } from "@/components/FileTree";
+import { GuideViewer } from "@/components/GuideViewer";
 import type { ClassInfo } from "@/lib/classes";
+import { listGuides, synthesizeModule } from "@/lib/guides";
+import { useJobs } from "@/lib/jobs";
 import { openInDefaultApp, scanClass } from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
 
@@ -32,6 +35,35 @@ export function ClassWorkspace({
     queryKey: ["classTree", info.id],
     queryFn: () => scanClass(info.id),
   });
+
+  // Guide state (M5). Staleness is computed on demand backend-side; the query
+  // re-runs when a scan lands (dataUpdatedAt) or a module_guide job settles
+  // (settledGuideJobs) — the guides upsert commits before the status flips,
+  // so a refetch triggered by the transition always sees the new row.
+  const { jobs } = useJobs();
+  const guideJobs = jobs.filter(
+    (j) => j.kind === "module_guide" && j.classId === info.id,
+  );
+  const activeScopes = new Set(
+    guideJobs
+      .filter((j) => j.status === "running" || j.status === "queued")
+      .map((j) => j.scope ?? ""),
+  );
+  const settledGuideJobs = guideJobs.length - activeScopes.size;
+  const { data: guides } = useQuery({
+    queryKey: ["guides", info.id, settledGuideJobs, dataUpdatedAt],
+    queryFn: () => listGuides(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const guideMap = new Map((guides ?? []).map((g) => [g.scope, g]));
+
+  const [viewScope, setViewScope] = useState<string | null>(null);
+  const [synthError, setSynthError] = useState<string | null>(null);
+  const handleSynthesize = (scope: string) => {
+    setSynthError(null);
+    synthesizeModule(info.id, scope).catch((e) => setSynthError(String(e)));
+  };
+  const viewedGuide = viewScope ? (guideMap.get(viewScope) ?? null) : null;
 
   const style = {
     "--accent": ACCENTS[info.color] ?? "var(--class-blue)",
@@ -110,6 +142,12 @@ export function ClassWorkspace({
           </div>
         </div>
 
+        {synthError && (
+          <p className="mt-3 font-mono text-[11px] text-destructive">
+            SYNTHESIS NOT STARTED — {synthError}
+          </p>
+        )}
+
         <div className="mt-4">
           {error ? (
             <p className="py-10 text-center font-mono text-xs text-destructive">
@@ -126,10 +164,24 @@ export function ClassWorkspace({
               classId={info.id}
               nodes={tree}
               onEntryMissing={() => refetch()}
+              guideControls={{
+                guides: guideMap,
+                activeScopes,
+                onSynthesize: handleSynthesize,
+                onView: setViewScope,
+              }}
             />
           )}
         </div>
       </section>
+
+      {viewedGuide && (
+        <GuideViewer
+          classId={info.id}
+          guide={viewedGuide}
+          onClose={() => setViewScope(null)}
+        />
+      )}
     </main>
   );
 }

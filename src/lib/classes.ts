@@ -15,6 +15,8 @@ export interface ClassInfo {
   credits: number;
   folderName: string;
   folderPresent: boolean;
+  /** Guides whose sources changed since generation (card badge). */
+  staleGuides: number;
   meetings: Meeting[];
 }
 

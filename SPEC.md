@@ -1,7 +1,7 @@
 # ClassHub — End-to-End Specification
 
 ClassHub is a personal, local-only macOS desktop app (Tauri v2) that serves as the centralized
-hub for Danny's master's program (AI in Biomedical & Health Sciences, Fall 2026). It ingests
+hub for Daniel's master's program (AI in Biomedical & Health Sciences, Fall 2026). It ingests
 class material from `~/Documents/AIBHS`, synthesizes dense high-yield HTML study guides using
 the Claude Code (Max 20x) subscription, and provides an agent chat sidebar backed by the direct
 Anthropic API with agentic retrieval over pre-extracted material.
@@ -99,12 +99,12 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 ```
 ~/Documents/AIBHS/
 ├── Biostatistics for AI/                  ← one folder per class (4 total)
-│   ├── Module 1/                          ← modules created by Danny or by drop-to-sort
+│   ├── Module 1/                          ← modules created by Daniel or by drop-to-sort
 │   │   ├── Slides/                        ← .pptx lecture slides
 │   │   ├── Reading Material/              ← .pdf readings
 │   │   └── R Files/
 │   │       ├── Class Files/               ← provided .Rmd / .html
-│   │       └── Edited Files/              ← Danny's classwork (.R)
+│   │       └── Edited Files/              ← Daniel's classwork (.R)
 │   ├── Study Guides/                      ← APP-MANAGED: generated artifacts
 │   │   ├── Module 1.html
 │   │   ├── Semester Master.html
@@ -257,7 +257,7 @@ sonnet + mostly local), but **guide synthesis is never automatic**.
 Manual trigger per module from the Class Workspace. Prompt contract:
 
 - Inputs: all extracts in the module (primary) + originals via `--add-dir` when the extract
-  flags a figure worth re-inspecting; Danny's classwork files marked as "learner work" for
+  flags a figure worth re-inspecting; Daniel's classwork files marked as "learner work" for
   the worked-examples section.
 - Output: **one self-contained HTML file** at `Study Guides/<Module name>.html`. No external
   requests (no CDN fonts/JS/CSS). Inline CSS + inline SVG only. Print-friendly stylesheet.
@@ -416,7 +416,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* the Biostatistics Module 1 pptx and pdf produce faithful markdown extracts
   with bracketed figure descriptions; re-running without changes spends zero tokens.
 
-- [ ] **M5 — Module study guide synthesis.**
+- [x] **M5 — Module study guide synthesis.**
   `module_guide` prompt template per §8.1 (all six sections, self-contained HTML contract),
   Synthesize button per module, staleness badges (module + card level), `guides` manifest
   tracking, in-app sandboxed guide viewer + Open in Browser / Show in Finder.

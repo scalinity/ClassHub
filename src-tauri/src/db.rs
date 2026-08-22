@@ -25,6 +25,8 @@ pub struct ClassCard {
     pub credits: i64,
     pub folder_name: String,
     pub folder_present: bool,
+    /// Card-level staleness badge (SPEC §12), computed on demand.
+    pub stale_guides: i64,
     pub meetings: Vec<Meeting>,
 }
 
@@ -107,6 +109,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let folder_present = root.join(&folder_name).is_dir();
+        let stale_guides = crate::guides::stale_guide_count(conn, id)?;
         cards.push(ClassCard {
             id,
             display_name,
@@ -116,6 +119,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             credits,
             folder_name,
             folder_present,
+            stale_guides,
             meetings,
         });
     }

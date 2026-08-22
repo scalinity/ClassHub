@@ -1,5 +1,6 @@
 mod db;
 mod extract;
+mod guides;
 mod jobs;
 mod scanner;
 
@@ -55,6 +56,38 @@ fn open_in_default_app(
         scanner::resolve_rel(&conn, class_id, &rel_path).map_err(|e| format!("{e:#}"))?
     };
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// SPEC §8.1: manual synthesis trigger. The label is the guide footer's
+/// display-only generated-at stamp, formatted client-side.
+#[tauri::command]
+fn synthesize_module(
+    app: tauri::AppHandle,
+    class_id: i64,
+    module_rel_path: String,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    guides::synthesize_module(&app, class_id, &module_rel_path, &generated_at_label)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn list_guides(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<guides::GuideInfo>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    guides::list_guides(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn read_guide(
+    state: tauri::State<Db>,
+    class_id: i64,
+    scope: String,
+) -> Result<String, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    guides::read_guide(&conn, class_id, &scope).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -134,6 +167,9 @@ pub fn run() {
             scan_class,
             reveal_in_finder,
             open_in_default_app,
+            synthesize_module,
+            list_guides,
+            read_guide,
             list_jobs,
             cancel_job,
             get_job_events,

@@ -196,6 +196,18 @@ pub fn enqueue_extract(
     enqueue(app, "extract", Some(class_id), None, prompt, Some(payload))
 }
 
+/// SPEC §8.1: module guide synthesis (manual trigger only). `payload` carries
+/// the guides-row upsert data that guides::finalize_job records on success.
+pub fn enqueue_module_guide(
+    app: &AppHandle,
+    class_id: i64,
+    scope: &str,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue(app, "module_guide", Some(class_id), Some(scope), prompt, Some(payload))
+}
+
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
@@ -337,7 +349,7 @@ fn run_job(
 ) {
     let outcome = execute_job(&app, &job, &child_slot, &cancelled);
 
-    let (status, error, summary) = if cancelled.load(Ordering::SeqCst) {
+    let (mut status, mut error, mut summary) = if cancelled.load(Ordering::SeqCst) {
         ("cancelled", None, None)
     } else {
         match outcome {
@@ -350,13 +362,25 @@ fn run_job(
         push_event(&app, job.id, "status", "cancelled — child process killed".into());
     }
 
-    // Record keeping (SPEC §7 step 4) runs BEFORE the row leaves 'running':
+    // Kind-specific record keeping runs BEFORE the row leaves 'running':
     // the extract pipeline treats "no active job + stale columns" as a signal
-    // to enqueue, so the columns must be updated first.
+    // to enqueue, and the guides upsert must land before the UI refetches on
+    // the succeeded transition.
     if status == "succeeded" && job.kind == "extract" {
         if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
             if let Err(e) = crate::extract::finalize_job(&app, class_id, payload) {
                 eprintln!("extract job {} record keeping failed: {e:#}", job.id);
+            }
+        }
+    }
+    if status == "succeeded" && job.kind == "module_guide" {
+        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+            if let Err(e) = crate::guides::finalize_job(&app, class_id, payload) {
+                // A "succeeded" job with no recorded guide would be invisible
+                // in the UI; surface it as the failure it is.
+                status = "failed";
+                error = Some(format!("synthesis finished but no guide was recorded: {e:#}"));
+                summary = None;
             }
         }
     }
@@ -437,7 +461,10 @@ fn execute_job(
         .args(["--output-format", "stream-json", "--verbose"])
         .args(["--model", DEFAULT_MODEL])
         .args(["--effort", DEFAULT_EFFORT])
-        .args(["--disallowedTools", DISALLOWED_TOOLS]);
+        .args(["--disallowedTools", DISALLOWED_TOOLS])
+        // The user-level claude config leaks MCP servers (e.g. web search)
+        // into spawns; with no --mcp-config this loads zero MCP servers.
+        .arg("--strict-mcp-config");
     if let Some(tools) = allowed_tools(&job.kind) {
         cmd.args(["--allowedTools", tools]);
     }
