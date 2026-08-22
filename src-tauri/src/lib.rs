@@ -1,4 +1,5 @@
 mod db;
+mod extract;
 mod jobs;
 mod scanner;
 
@@ -16,9 +17,18 @@ fn list_classes(state: tauri::State<Db>) -> Result<Vec<db::ClassCard>, String> {
 }
 
 #[tauri::command]
-fn scan_class(state: tauri::State<Db>, class_id: i64) -> Result<Vec<scanner::TreeNode>, String> {
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
-    scanner::scan_class(&mut conn, class_id).map_err(|e| format!("{e:#}"))
+fn scan_class(
+    app: tauri::AppHandle,
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<scanner::TreeNode>, String> {
+    let tree = {
+        let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+        scanner::scan_class(&mut conn, class_id).map_err(|e| format!("{e:#}"))?
+    };
+    // SPEC §7: auto-extract after every scan; a no-change scan is a no-op there.
+    extract::spawn_pipeline(&app, class_id);
+    Ok(tree)
 }
 
 #[tauri::command]
@@ -53,12 +63,6 @@ fn list_jobs(state: tauri::State<Db>) -> Result<Vec<jobs::JobInfo>, String> {
     jobs::list_jobs(&conn).map_err(|e| format!("{e:#}"))
 }
 
-/// M3 throwaway trigger; real job kinds land in M4+.
-#[tauri::command]
-fn run_test_job(app: tauri::AppHandle, class_id: i64) -> Result<i64, String> {
-    jobs::enqueue_probe(&app, class_id).map_err(|e| format!("{e:#}"))
-}
-
 #[tauri::command]
 fn cancel_job(app: tauri::AppHandle, job_id: i64) -> Result<(), String> {
     jobs::cancel_job(&app, job_id).map_err(|e| format!("{e:#}"))
@@ -80,18 +84,30 @@ fn run_auth_check(app: tauri::AppHandle) -> Result<i64, String> {
     jobs::enqueue_self_check(&app).map_err(|e| format!("{e:#}"))
 }
 
-/// SPEC §7 step 1: scan on launch. Folders may legitimately be absent; skip those.
-fn scan_all_classes(conn: &mut Connection) {
-    let class_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM classes")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap_or_default();
+/// SPEC §7 step 1: scan on launch, then auto-extract whatever the scans found
+/// stale. Folders may legitimately be absent; skip those.
+fn scan_and_extract_all(app: &tauri::AppHandle) {
+    let db = app.state::<Db>();
+    let class_ids: Vec<i64> = {
+        let conn = match db.0.lock() {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        conn.prepare("SELECT id FROM classes")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default()
+    };
     for class_id in class_ids {
-        if let Err(e) = scanner::scan_class(conn, class_id) {
-            eprintln!("launch scan skipped class {class_id}: {e:#}");
+        let scanned = match db.0.lock() {
+            Ok(mut conn) => scanner::scan_class(&mut conn, class_id),
+            Err(e) => Err(anyhow::anyhow!("db lock poisoned: {e}")),
+        };
+        match scanned {
+            Ok(_) => extract::spawn_pipeline(app, class_id),
+            Err(e) => eprintln!("launch scan skipped class {class_id}: {e:#}"),
         }
     }
 }
@@ -103,14 +119,14 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let mut conn = db::open(&data_dir.join("classhub.db"))?;
+            let conn = db::open(&data_dir.join("classhub.db"))?;
             jobs::startup_recovery(&conn)?;
-            scan_all_classes(&mut conn);
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
             if let Err(e) = jobs::enqueue_self_check(app.handle()) {
                 eprintln!("startup self-check failed to enqueue: {e:#}");
             }
+            scan_and_extract_all(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -119,7 +135,6 @@ pub fn run() {
             reveal_in_finder,
             open_in_default_app,
             list_jobs,
-            run_test_job,
             cancel_job,
             get_job_events,
             get_auth_check,

@@ -11,7 +11,7 @@ export type JobStatus =
 
 export interface JobInfo {
   id: number;
-  kind: string; // probe | self_check | extract | module_guide | ...
+  kind: string; // self_check | extract | module_guide | ...
   classId: number | null;
   className: string | null;
   classColor: string | null;
@@ -30,6 +30,8 @@ export interface ProgressEvent {
   seq: number;
   kind: "status" | "text" | "tool" | "tool_result" | "retry" | "result" | "error";
   text: string;
+  /** Full tool-result text (truncated backend-side); shown behind a disclosure. */
+  detail?: string;
 }
 
 export interface AuthCheck {
@@ -155,17 +157,8 @@ export function useJobs(): JobsSnapshot {
 
 // --- Actions ---
 
-export function openJobPanel() {
-  emitChange({ panelOpen: true });
-}
-
 export function toggleJobPanel() {
   emitChange({ panelOpen: !snapshot.panelOpen });
-}
-
-/** M3 throwaway: "list the files in this class folder" via claude -p. */
-export function runTestJob(classId: number): Promise<number> {
-  return invoke<number>("run_test_job", { classId });
 }
 
 export function cancelJob(jobId: number): Promise<void> {

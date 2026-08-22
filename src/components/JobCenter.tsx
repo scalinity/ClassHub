@@ -1,5 +1,13 @@
 import { useRef, useState, type CSSProperties } from "react";
-import { Check, ChevronUp, CircleAlert, Clock, Minus, X } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  ChevronUp,
+  CircleAlert,
+  Clock,
+  Minus,
+  X,
+} from "lucide-react";
 
 import {
   cancelJob,
@@ -252,7 +260,24 @@ function OutputLine({ event }: { event: ProgressEvent }) {
         </div>
       );
     case "tool_result":
-      return <div className="text-muted-foreground/60">← {event.text}</div>;
+      if (!event.detail) {
+        return <div className="text-muted-foreground/60">← {event.text}</div>;
+      }
+      return (
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-muted-foreground/60 transition-colors hover:text-muted-foreground focus-visible:outline-2 focus-visible:outline-(--accent) [&::-webkit-details-marker]:hidden">
+            <span>← {event.text}</span>
+            <ChevronRight
+              size={10}
+              aria-hidden
+              className="shrink-0 text-muted-foreground/40 transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none"
+            />
+          </summary>
+          <pre className="mt-1.5 mb-1 max-h-48 overflow-y-auto whitespace-pre-wrap border-l pl-3 font-mono text-muted-foreground/80">
+            {event.detail}
+          </pre>
+        </details>
+      );
     case "retry":
       return <div className="italic text-muted-foreground">↻ {event.text}</div>;
     case "error":

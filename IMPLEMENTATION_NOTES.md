@@ -196,3 +196,82 @@ doesn't cover.
   Keychain in M7.
 - A re-run self-check queues behind running jobs (max-2); fine today, revisit
   priority when long M5/M6 jobs exist.
+
+## M4 — Ingestion & extraction (2026-08-22)
+
+### What exists now
+
+- **Pipeline** (`src-tauri/src/extract.rs`): `spawn_pipeline(app, class_id)` runs on a
+  background thread after *every* scan (launch scan in `lib.rs::scan_and_extract_all`,
+  and the `scan_class` command). Staleness = `extracted_sha256 IS NULL OR != sha256`
+  per file; a no-change scan finds nothing stale and does zero work / zero tokens.
+  Runs are serialized by a global `PIPELINE_LOCK`, and a class with a queued/running
+  extract job is skipped entirely (guard queried from the jobs table).
+- **Routing** by kind: `rmd|r|md` (+ `.txt` extension on kind `other`) → local copy
+  with newline normalization; `html` → dependency-free local tag-strip (drops
+  script/style/noscript payloads + comments, decodes entities incl. numeric, keeps
+  `<pre>` indentation, collapses blank runs); `pdf`/`pptx` → batched claude job.
+  Extract path = `.classhub/extracts/<rel_path>.md` (SPEC §4 mirror rule);
+  `extract_rel_path` is stored class-relative including that prefix.
+- **PPTX→PDF** (SPEC §7 step 2): `soffice --headless --convert-to pdf` into the
+  extracts mirror dir, then rename `<stem>.pdf` → `<name>.pptx.pdf` (soffice names
+  output after the stem). A `<name>.pptx.pdf.sha256` sidecar records the source hash;
+  conversion is skipped when the PDF exists and the sidecar matches — verified: the
+  re-extract run reused the PDF with no soffice spawn.
+- **Extract job**: one job per class per run covering all stale PDFs. Prompt template
+  `src-tauri/prompts/extract.md` (`{files}` placeholder, `include_str!` + replace):
+  faithful/complete markdown, structure/tables/LaTeX/code, every figure described in
+  brackets, `.pptx.pdf` treated as slide decks (`## Slide N` sections), DONE/FAILED
+  reply lines. The batch manifest rides as `QueuedJob.payload` (JSON, in-memory only —
+  restart-safe because startup_recovery fails interrupted jobs).
+- **Record keeping** (§7 step 4): local extracts update `extract_rel_path` /
+  `extracted_at` / `extracted_sha256` immediately; claude batches are finalized by
+  `extract::finalize_job` which runs **before** the job row leaves `running`
+  (jobs.rs), so a scan can never observe "no active job + stale columns" mid-window
+  and double-enqueue. Missing/empty outputs are left stale for the next scan; the
+  recorded `extracted_sha256` is the enqueue-time hash, so a source edited mid-job
+  stays stale and self-heals.
+- **Staleness groundwork** (§7 step 5): `extract::ManifestEntry`,
+  `current_manifest(conn, class_id, scope)` (`'master'` = whole class, else module
+  rel-path prefix) and `manifest_is_stale(stored_json, current)` (set comparison,
+  unparseable = stale) are ready for M5 badges — currently `#[allow(dead_code)]`.
+- **Job Center**: tool_result rows now label text lines *and* images
+  (`1 line · 57 images`), and carry the actual result text (trimmed, 4000-char cap)
+  in a new optional `detail` field on `ProgressEvent`, rendered behind a native
+  `<details>` disclosure (chevron rotates, hairline-indented `<pre>`). PDF reads
+  return rendered page images with ~no text, which is why the old label said
+  "1 lines" perpetually.
+- The M3 TEST JOB button, `run_test_job` command, probe kind, and store action are
+  gone; extract jobs are the real trigger.
+
+### Verified
+
+- Real Biostatistics Module 1: 9 text/html files extracted locally (zero tokens,
+  spot-checked: entities decoded, R code intact), pptx converted (2.2 MB PDF +
+  sidecar), one batched job extracted both PDFs — the 57-slide deck produced
+  per-slide sections with 39 bracketed figure descriptions grounded in the rendered
+  pages; live streaming observed in the Job Center. Relaunch with no source changes:
+  all four classes logged `nothing stale — zero work`, jobs table shows no extract
+  job after the batch (only a startup self_check) — zero tokens spent.
+
+### Gotchas
+
+- **poppler is a hard requirement** (`brew install poppler`): the claude CLI renders
+  PDF pages via `pdftoppm`. Without it, Read silently degrades to text-only and
+  figure "descriptions" are fabricated from prior knowledge, not observed — the
+  first extracts had to be invalidated and redone after installing it. SPEC §2
+  doesn't list it (checkbox-only edit rule); treat it as an M4 prerequisite anyway.
+- LibreOffice via brew needed a `brew update` first (cask DSL newer than local brew),
+  and Gatekeeper SIGKILLs the quarantined binary on first run (exit 137 + "Not
+  Opened" dialog) — fixed with `xattr -dr com.apple.quarantine`.
+- soffice's `-env:UserInstallation=` URL must be percent-encoded: the app-data
+  profile dir lives under `~/Library/Application Support/…` and the raw space
+  aborts soffice with a UNO RuntimeException (SIGABRT). Profile dir keeps headless
+  runs independent of any open LibreOffice GUI.
+- The tauri dev watcher rebuild **kills the app mid-job and orphans the claude
+  child** (it keeps running unsupervised). Don't save `src-tauri/` files while an
+  extract job is running; frontend saves are safe (Vite HMR only).
+- Owner instruction (2026-08-22): generated user-facing documents (module/master
+  guides, practice exams) are design surfaces. Any session authoring their prompt
+  templates must read the frontend-design skill and bake its guidance into the
+  template's design contract — not just into app chrome.

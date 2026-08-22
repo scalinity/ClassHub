@@ -409,7 +409,7 @@ Mark the checkbox when the acceptance criteria pass.
   live streamed output, is cancellable, and the self-check confirms subscription auth (with
   `ANTHROPIC_API_KEY` deliberately set in the parent env to prove stripping works).
 
-- [ ] **M4 — Ingestion & extraction.**
+- [x] **M4 — Ingestion & extraction.**
   Install LibreOffice. PPTX→PDF conversion, extract jobs per §7 (local for text formats,
   `claude -p` for PDFs), extract cache under `.classhub/extracts/`, auto-extract after scans,
   staleness computation groundwork (manifest diffing utility).

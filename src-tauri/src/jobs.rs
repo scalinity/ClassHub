@@ -25,9 +25,6 @@ const MAX_CONCURRENT: usize = 2;
 /// permits (verified against claude 2.1.237), so deny rules are passed too.
 const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch";
 
-const PROBE_PROMPT: &str = "List the files in this class folder using the Glob tool. \
-Reply with a flat list of relative paths, one per line, then a final line \
-`TOTAL: <n> files`. Do not read file contents.";
 const SELF_CHECK_PROMPT: &str = "Reply with exactly: OK";
 
 fn now() -> i64 {
@@ -57,6 +54,9 @@ pub struct ProgressEvent {
     /// status | text | tool | tool_result | retry | result | error
     pub kind: String,
     pub text: String,
+    /// Full tool-result text (truncated); the UI shows it behind a disclosure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -91,6 +91,9 @@ struct QueuedJob {
     kind: String,
     class_id: Option<i64>,
     prompt: String,
+    /// Kind-specific completion data (e.g. the extract batch manifest). Lost on
+    /// app restart, which is fine: startup_recovery fails interrupted jobs.
+    payload: Option<String>,
 }
 
 struct RunningJob {
@@ -164,7 +167,7 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         "extract" | "module_guide" | "master_guide" | "practice" => {
             Some("Read,Glob,Grep,Write")
         }
-        "sort_proposal" | "syllabus_scan" | "probe" => Some("Read,Glob,Grep"),
+        "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),
         _ => None, // self_check needs no tools
     }
 }
@@ -182,15 +185,21 @@ pub fn startup_recovery(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// M3 throwaway verification job: list files in the class folder.
-pub fn enqueue_probe(app: &AppHandle, class_id: i64) -> Result<i64> {
-    enqueue(app, "probe", Some(class_id), None, PROBE_PROMPT)
+/// SPEC §7 step 3: one batched extract job per class per run. `payload` is the
+/// JSON batch manifest that extract::finalize_job records on success.
+pub fn enqueue_extract(
+    app: &AppHandle,
+    class_id: i64,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue(app, "extract", Some(class_id), None, prompt, Some(payload))
 }
 
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
-    enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT)
+    enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None)
 }
 
 pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
@@ -259,6 +268,7 @@ fn enqueue(
     class_id: Option<i64>,
     scope: Option<&str>,
     prompt: &str,
+    payload: Option<String>,
 ) -> Result<i64> {
     let id = with_conn(app, |conn| {
         conn.execute(
@@ -275,6 +285,7 @@ fn enqueue(
             kind: kind.to_string(),
             class_id,
             prompt: prompt.to_string(),
+            payload,
         });
     }
     let _ = app.emit("jobs-changed", ());
@@ -337,6 +348,17 @@ fn run_job(
     };
     if status == "cancelled" {
         push_event(&app, job.id, "status", "cancelled — child process killed".into());
+    }
+
+    // Record keeping (SPEC §7 step 4) runs BEFORE the row leaves 'running':
+    // the extract pipeline treats "no active job + stale columns" as a signal
+    // to enqueue, so the columns must be updated first.
+    if status == "succeeded" && job.kind == "extract" {
+        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+            if let Err(e) = crate::extract::finalize_job(&app, class_id, payload) {
+                eprintln!("extract job {} record keeping failed: {e:#}", job.id);
+            }
+        }
     }
 
     let update = with_conn(&app, |conn| {
@@ -630,12 +652,43 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
                     continue;
                 }
                 let text = tool_result_text(block);
+                // PDF reads return rendered page images with little or no text;
+                // count both so the label reflects what the model received.
+                let images = block["content"]
+                    .as_array()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter(|p| p["type"].as_str() == Some("image"))
+                            .count()
+                    })
+                    .unwrap_or(0);
                 let condensed = if block["is_error"].as_bool().unwrap_or(false) {
                     format!("tool error · {}", truncate(&text, 300))
                 } else {
-                    format!("{} lines", text.lines().count())
+                    let lines = if text.trim().is_empty() {
+                        0
+                    } else {
+                        text.lines().count()
+                    };
+                    let mut parts = Vec::new();
+                    if lines > 0 {
+                        parts.push(count_label(lines, "line"));
+                    }
+                    if images > 0 {
+                        parts.push(count_label(images, "image"));
+                    }
+                    if parts.is_empty() {
+                        "empty result".to_string()
+                    } else {
+                        parts.join(" · ")
+                    }
                 };
-                push_event(app, job.id, "tool_result", condensed);
+                let detail = {
+                    let trimmed = text.trim();
+                    (!trimmed.is_empty()).then(|| truncate(trimmed, 4000))
+                };
+                push_event_detail(app, job.id, "tool_result", condensed, detail);
             }
         }
         "result" => {
@@ -664,6 +717,16 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
 }
 
 fn push_event(app: &AppHandle, job_id: i64, kind: &str, text: String) {
+    push_event_detail(app, job_id, kind, text, None);
+}
+
+fn push_event_detail(
+    app: &AppHandle,
+    job_id: i64,
+    kind: &str,
+    text: String,
+    detail: Option<String>,
+) {
     let event = {
         let mgr = app.state::<JobManager>();
         let mut inner = mgr.lock_inner();
@@ -672,6 +735,7 @@ fn push_event(app: &AppHandle, job_id: i64, kind: &str, text: String) {
             seq: out.next_seq,
             kind: kind.to_string(),
             text,
+            detail,
         };
         out.next_seq += 1;
         out.events.push(event.clone());
@@ -713,6 +777,14 @@ fn tool_result_text(block: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+fn count_label(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
