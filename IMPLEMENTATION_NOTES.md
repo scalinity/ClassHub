@@ -349,3 +349,81 @@ doesn't cover.
 - Owner instruction (2026-08-22): the learner is "Daniel" (not "Danny")
   everywhere in prose — SPEC.md prose was updated accordingly (sanctioned
   exception to the checkbox-only rule).
+
+## M6 — Semester master synthesis (2026-08-22)
+
+### What exists now
+
+- `prompts/master_guide.md`: seven-section anatomy — Key concepts (grouped by
+  module, yield rail), **Cross-module threads** (the master-only section; with a
+  single module it must open with one honest sentence and trace intra-module
+  through-lines instead — never invent modules), Diagrams (semester concept map
+  required), Formula & code reference, Worked examples, Self-test quiz (≥16),
+  Glossary. Same document register as module guides, capstone execution: serif
+  display, shared yield rail, thread-device module chips, semester map in the
+  header. Two owner-driven contract clauses: **dual register** (every key concept
+  stated technically first, then re-explained in plain English) and a **writing
+  strategy** section (below).
+- **Chunked writing contract**: first Write ends with a literal `<!-- CONTINUE -->`
+  before `</body></html>`; each Edit replaces the marker with ≤20–30 KB of markup
+  plus the marker; the final Edit removes it; Grep-verify no marker remains. Added
+  after run 1 lost two entire ~64K-token single-Write attempts to the CLI's
+  per-response output cap (nothing ever reached disk).
+- Migration `0002_job_payload.sql`: `jobs.payload TEXT` — the finalize payload now
+  survives an app restart, so a master stranded by a crash can still resume.
+- `jobs.rs`: **exclusive scheduling** in `pump` — a `master_guide` at the queue
+  front waits for running jobs to drain; while one runs (`RunningJob.exclusive`)
+  nothing else starts. Master spawns add `--include-partial-messages`;
+  `stream_event` content blocks for Write/Edit are tracked into sparse `phase`
+  progress events (one per 16 KB written). `--resume <session>` is passed when the
+  queued job carries `resume_session`. Guide finalization generalized to both
+  guide kinds.
+- `guides.rs`: `synthesize_master` (module list derived from the current
+  manifest) and `resume_master` (failed master + recorded `session_id` + persisted
+  payload required; re-enqueues with `RESUME_PROMPT`). `RESUME_PROMPT` carries the
+  chunked-write instruction itself, because a resumed session never re-reads the
+  template.
+- Frontend: `MasterGuideStrip` between workspace header and materials — states:
+  idle (`GENERATE SEMESTER MASTER`), queued (`WAITING FOR QUEUE TO DRAIN`),
+  running (phase rail ORIENT→READ→COMPOSE→VERIFY, elapsed clock, ~KB counter),
+  failed (`RESUME` + `START OVER` + error line), stale, fresh (regenerate +
+  `VIEW GUIDE`). Viewer header says `SEMESTER MASTER`; Job Center renders `phase`
+  events with a ◆ and drops the redundant `master` scope suffix.
+
+### Verified
+
+- Real Biostatistics master, end to end, with the most authentic failure drill
+  possible: the dev app was killed twice mid-job (see gotcha below), stranding
+  `running` rows. `startup_recovery` failed them on relaunch; session id and
+  payload survived via migration 0002; RESUME (once scripted, once clicked by the
+  owner) continued the **same** claude session `ff9e8270` from the 123 KB partial
+  file to `DONE` — session ids stay stable across resume chains.
+- Final document: 227 KB, all seven sections in order, threads section opens with
+  the honest single-module sentence, 22 `<details>` answers, 55 MathML blocks,
+  8+ SVGs, no `<!-- CONTINUE -->` remnant, ends `</html>`. `guides` upsert with
+  `scope='master'`; strip flipped to fresh (`GENERATED AUG 22 AT 3:43 PM`);
+  renders in the viewer.
+- Chunked writing: zero `max_tokens` truncations post-fix (run 1: two 64 K-token
+  write attempts lost); the file grew on disk in ~10–22 KB steps, which also makes
+  mid-write kills cheap to resume.
+- Offline: the only `http` strings are verbatim course `read.csv("https://tinyurl…")`
+  lines inside `<pre><code>` (same acceptable class as M5). `@media print` present
+  (force-light, break-inside avoidance).
+
+### Gotchas
+
+- **The CLI caps one response at ~64 K output tokens.** A single Write of a
+  guide-sized document hits the cap, is discarded, and the model retries the same
+  way — an expensive loop that never touches disk. Any prompt contracting a large
+  output file must mandate incremental writes. `module_guide.md` predates this
+  clause and should gain it when next touched.
+- A resumed session never re-reads the prompt template; mid-flight instruction
+  changes must ride `RESUME_PROMPT`.
+- **Cursor-managed background terminals are not a safe home for the dev app**: two
+  teardowns mid-job (no exit footer, no crash report, no panic — the harness just
+  stopped the shell), each killing app + claude child. The dev app now runs in the
+  owner's own terminal. Related: launching `tauri dev` inside the Cursor sandbox
+  produces a windowless zombie — the process lives but cannot reach the window
+  server or write the DB outside the workspace.
+- `pkill -f "tauri"` also matches macOS's *cenTAURI* system daemons
+  (`AppleCentauri*`, root-owned, so the signal fails — but keep patterns tight).

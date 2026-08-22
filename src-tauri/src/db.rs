@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_job_payload.sql"),
+];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

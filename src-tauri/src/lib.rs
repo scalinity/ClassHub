@@ -71,6 +71,22 @@ fn synthesize_module(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// SPEC §8.2: manual semester-master trigger (exclusive, long-running job).
+#[tauri::command]
+fn synthesize_master(
+    app: tauri::AppHandle,
+    class_id: i64,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    guides::synthesize_master(&app, class_id, &generated_at_label).map_err(|e| format!("{e:#}"))
+}
+
+/// SPEC §6: resume a failed master run with `--resume <session_id>`.
+#[tauri::command]
+fn resume_master_guide(app: tauri::AppHandle, job_id: i64) -> Result<i64, String> {
+    guides::resume_master(&app, job_id).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 fn list_guides(
     state: tauri::State<Db>,
@@ -168,6 +184,8 @@ pub fn run() {
             reveal_in_finder,
             open_in_default_app,
             synthesize_module,
+            synthesize_master,
+            resume_master_guide,
             list_guides,
             read_guide,
             list_jobs,

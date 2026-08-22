@@ -17,6 +17,19 @@ export function readGuide(classId: number, scope: string): Promise<string> {
   return invoke<string>("read_guide", { classId, scope });
 }
 
+/** Display-only footer stamp baked into the prompt at enqueue time. */
+function generatedAtLabel(): string {
+  return new Date()
+    .toLocaleString("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    })
+    .toUpperCase();
+}
+
 /**
  * Enqueues a module_guide job (manual trigger only — synthesis is never
  * automatic). The label becomes the guide footer's generated-at stamp; the
@@ -26,20 +39,24 @@ export function synthesizeModule(
   classId: number,
   moduleRelPath: string,
 ): Promise<number> {
-  const generatedAtLabel = new Date()
-    .toLocaleString("en-US", {
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-    .toUpperCase();
   return invoke<number>("synthesize_module", {
     classId,
     moduleRelPath,
-    generatedAtLabel,
+    generatedAtLabel: generatedAtLabel(),
   });
+}
+
+/** Enqueues the exclusive master_guide job (SPEC §8.2, manual trigger only). */
+export function synthesizeMaster(classId: number): Promise<number> {
+  return invoke<number>("synthesize_master", {
+    classId,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/** Re-invokes a failed master run with --resume <session_id> (SPEC §6). */
+export function resumeMasterGuide(jobId: number): Promise<number> {
+  return invoke<number>("resume_master_guide", { jobId });
 }
 
 export function formatGeneratedAt(unixSec: number): string {

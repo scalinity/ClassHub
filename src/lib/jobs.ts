@@ -28,7 +28,15 @@ export interface JobInfo {
 
 export interface ProgressEvent {
   seq: number;
-  kind: "status" | "text" | "tool" | "tool_result" | "retry" | "result" | "error";
+  kind:
+    | "status"
+    | "text"
+    | "tool"
+    | "tool_result"
+    | "retry"
+    | "result"
+    | "error"
+    | "phase";
   text: string;
   /** Full tool-result text (truncated backend-side); shown behind a disclosure. */
   detail?: string;

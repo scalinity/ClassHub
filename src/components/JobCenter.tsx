@@ -226,7 +226,10 @@ function JobRow({
             {jobKindLabel(job.kind)}
           </span>
           <span className="min-w-0 truncate text-[13px] text-muted-foreground">
-            {[job.className, job.scope].filter(Boolean).join(" · ")}
+            {/* scope 'master' is redundant with the MASTER GUIDE kind label */}
+            {[job.className, job.scope === "master" ? null : job.scope]
+              .filter(Boolean)
+              .join(" · ")}
           </span>
         </button>
         <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
@@ -277,6 +280,12 @@ function OutputLine({ event }: { event: ProgressEvent }) {
             {event.detail}
           </pre>
         </details>
+      );
+    case "phase":
+      return (
+        <div className="text-muted-foreground">
+          <span className="text-(--accent)">◆</span> {event.text}
+        </div>
       );
     case "retry":
       return <div className="italic text-muted-foreground">↻ {event.text}</div>;

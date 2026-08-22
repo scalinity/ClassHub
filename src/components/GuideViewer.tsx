@@ -46,11 +46,12 @@ export function GuideViewer({
         className="flex h-12 shrink-0 items-center gap-2.5 border-b bg-card pl-24 pr-3"
       >
         <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
-          STUDY GUIDE · {guide.scope.toUpperCase()}
+          STUDY GUIDE ·{" "}
+          {guide.scope === "master" ? "SEMESTER MASTER" : guide.scope.toUpperCase()}
         </p>
         {guide.stale && (
           <span
-            title="Sources changed since this guide was generated — resynthesize from the module row"
+            title="Sources changed since this guide was generated"
             className="shrink-0 rounded bg-class-amber/12 px-1.5 py-0.5 font-mono text-[10px] tracking-[0.14em] text-class-amber"
           >
             STALE

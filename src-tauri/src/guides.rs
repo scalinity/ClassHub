@@ -1,5 +1,5 @@
-//! SPEC §8.1 — module study-guide synthesis: prompt assembly, the guides-table
-//! upsert on job success, and on-demand staleness for the M5 badges.
+//! SPEC §8.1/§8.2 — study-guide synthesis (module and semester master): prompt
+//! assembly, the guides-table upsert on job success, and on-demand staleness.
 //!
 //! Synthesis flows through the job runner (SPEC §6, the single gateway to the
 //! subscription) and is only ever triggered manually (SPEC §7). The guides-row
@@ -7,6 +7,7 @@
 //! job row leaves `running` — the same ordering the extract pipeline uses — so
 //! the UI can never observe a succeeded job without its guide row.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -20,7 +21,25 @@ use tauri::{AppHandle, Manager};
 use crate::extract::{current_manifest, manifest_is_stale};
 
 const GUIDES_DIR: &str = "Study Guides";
+/// SPEC §5/§8.2: the guides/jobs scope value for the semester master.
+const MASTER_SCOPE: &str = "master";
+const MASTER_OUTPUT: &str = "Study Guides/Semester Master.html";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/module_guide.md");
+const MASTER_TEMPLATE: &str = include_str!("../prompts/master_guide.md");
+
+/// Continuation prompt for `--resume <session_id>` (SPEC §6): the session
+/// already holds the full original instructions and everything read so far.
+const RESUME_PROMPT: &str = "This session was interrupted before the task completed. \
+Resume exactly where you left off and finish the original task: check what has \
+already been written to the contracted output file, complete anything missing, and \
+honor every requirement of the original instructions (content anatomy, design \
+contract, hard constraints, output path). Write the file incrementally — NEVER in \
+one large Write call, which hits the per-response output limit and is discarded. \
+First Write the head plus the first section ending with the literal line \
+`<!-- CONTINUE -->` before `</body></html>`, then extend via Edit calls that each \
+replace `<!-- CONTINUE -->` with the next chunk (roughly 20-30 KB) plus the marker \
+again; the final Edit removes the marker. When finished, reply with exactly one \
+line: `DONE: <output path>` or `FAILED: <output path> — <reason>`.";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -86,7 +105,7 @@ pub fn synthesize_module(
         let db = app.state::<crate::Db>();
         let conn = lock(&db.0);
 
-        if has_active_guide_job(&conn, class_id, module_rel)? {
+        if has_active_job(&conn, class_id, "module_guide", module_rel)? {
             bail!("a synthesis for this module is already queued or running");
         }
         let module_dir = crate::scanner::resolve_rel(&conn, class_id, module_rel)?;
@@ -133,10 +152,122 @@ pub fn synthesize_module(
     crate::jobs::enqueue_module_guide(app, class_id, module_rel, &prompt, payload)
 }
 
-/// SPEC §8.1 inputs listing: extracts are primary; PDFs (and converted PPTX
-/// PDFs) are offered for figure re-inspection; Daniel's classwork is marked as
-/// learner work. The only layout signal for learner work is the `Edited Files`
-/// folder convention from SPEC §4's example tree.
+/// SPEC §8.2: semester master synthesis — full raw re-synthesis from every
+/// module's extracts, never from module guides. Runs exclusively (jobs.rs).
+pub fn synthesize_master(
+    app: &AppHandle,
+    class_id: i64,
+    generated_at_label: &str,
+) -> Result<i64> {
+    let (class_dir, prompt, payload) = {
+        let db = app.state::<crate::Db>();
+        let conn = lock(&db.0);
+
+        if has_active_job(&conn, class_id, "master_guide", MASTER_SCOPE)? {
+            bail!("a master synthesis for this class is already queued or running");
+        }
+        let (class_name, color): (String, String) = conn.query_row(
+            "SELECT display_name, color FROM classes WHERE id = ?1",
+            [class_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // Manifest captured at enqueue, extract-pattern semantics (see module).
+        // Scope 'master' = every indexed file in the class (SPEC §7 step 5).
+        let manifest = current_manifest(&conn, class_id, MASTER_SCOPE)?;
+        if manifest.is_empty() {
+            bail!("no indexed files in this class — rescan first");
+        }
+        // Module roster = distinct depth-0 folders holding indexed files.
+        let modules: BTreeSet<String> = manifest
+            .iter()
+            .filter_map(|e| {
+                let (first, rest) = e.rel_path.split_once('/')?;
+                (!rest.is_empty()).then(|| first.to_string())
+            })
+            .collect();
+        let modules_block = modules
+            .iter()
+            .map(|m| format!("- {m}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let manifest_block = manifest
+            .iter()
+            .map(|e| format!("- {}", e.rel_path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (accent_light, accent_dark) = accent_values(&color);
+
+        let prompt = MASTER_TEMPLATE
+            .replace("{class}", &class_name)
+            .replace("{output}", MASTER_OUTPUT)
+            .replace("{modules}", &modules_block)
+            .replace("{accent_light}", accent_light)
+            .replace("{accent_dark}", accent_dark)
+            .replace("{generated_at}", generated_at_label)
+            .replace("{files}", &files_block(&conn, class_id, MASTER_SCOPE)?)
+            .replace("{manifest}", &manifest_block);
+        let payload = serde_json::to_string(&GuidePayload {
+            scope: MASTER_SCOPE.to_string(),
+            rel_path: MASTER_OUTPUT.to_string(),
+            source_manifest: serde_json::to_string(&manifest)?,
+        })?;
+        (crate::scanner::class_dir(&conn, class_id)?, prompt, payload)
+    };
+
+    fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
+    crate::jobs::enqueue_master_guide(app, class_id, &prompt, payload, None)
+}
+
+/// SPEC §6 resumability: re-invoke a failed master run with
+/// `--resume <session_id>`. The new job reuses the failed row's persisted
+/// payload, so the enqueue-time manifest semantics survive the retry (and an
+/// app restart, since jobs.payload is a DB column).
+pub fn resume_master(app: &AppHandle, job_id: i64) -> Result<i64> {
+    let (class_id, session_id, payload) = {
+        let db = app.state::<crate::Db>();
+        let conn = lock(&db.0);
+        let row = conn
+            .query_row(
+                "SELECT kind, status, class_id, session_id, payload
+                 FROM jobs WHERE id = ?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("job not found")?;
+        let (kind, status, class_id, session_id, payload) = row;
+        if kind != "master_guide" {
+            bail!("only master guide jobs can be resumed");
+        }
+        if status != "failed" {
+            bail!("only failed jobs can be resumed");
+        }
+        let class_id = class_id.context("job has no class")?;
+        let session_id = session_id.context(
+            "no claude session was recorded — the run failed before it started; start over instead",
+        )?;
+        let payload = payload.context("job has no recorded payload — start over instead")?;
+        if has_active_job(&conn, class_id, "master_guide", MASTER_SCOPE)? {
+            bail!("a master synthesis for this class is already queued or running");
+        }
+        (class_id, session_id, payload)
+    };
+    crate::jobs::enqueue_master_guide(app, class_id, RESUME_PROMPT, payload, Some(session_id))
+}
+
+/// SPEC §8.1/§8.2 inputs listing: extracts are primary; PDFs (and converted
+/// PPTX PDFs) are offered for figure re-inspection; Daniel's classwork is
+/// marked as learner work. The only layout signal for learner work is the
+/// `Edited Files` folder convention from SPEC §4's example tree. Scope
+/// 'master' lists every indexed file in the class.
 fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT rel_path, kind, extract_rel_path FROM files
@@ -155,7 +286,7 @@ fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> 
     let prefix = format!("{scope}/");
     let mut lines = Vec::new();
     for (rel_path, kind, extract) in rows {
-        if rel_path != scope && !rel_path.starts_with(&prefix) {
+        if scope != MASTER_SCOPE && rel_path != scope && !rel_path.starts_with(&prefix) {
             continue;
         }
         let learner = Path::new(&rel_path)
@@ -186,12 +317,12 @@ fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> 
     Ok(lines.join("\n"))
 }
 
-fn has_active_guide_job(conn: &Connection, class_id: i64, scope: &str) -> Result<bool> {
+fn has_active_job(conn: &Connection, class_id: i64, kind: &str, scope: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs
-         WHERE kind = 'module_guide' AND class_id = ?1 AND scope = ?2
+         WHERE kind = ?1 AND class_id = ?2 AND scope = ?3
            AND status IN ('queued', 'running')",
-        params![class_id, scope],
+        params![kind, class_id, scope],
         |row| row.get(0),
     )?;
     Ok(count > 0)

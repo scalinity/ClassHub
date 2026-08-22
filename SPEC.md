@@ -424,7 +424,7 @@ Mark the checkbox when the acceptance criteria pass.
   sections and inline SVG, viewable in-app, offline, and print-clean; touching a source file
   flips the staleness badge.
 
-- [ ] **M6 — Semester master synthesis.**
+- [x] **M6 — Semester master synthesis.**
   `master_guide` exclusive job per §8.2 (full raw re-synthesis, cross-module threads section),
   long-job UX: phased progress display, resume-from-session on failure, time-elapsed indicator.
   *Accepted when:* a master file generates for Biostatistics (single module today — the

@@ -4,6 +4,7 @@ import { ChevronLeft, FolderOpen, RefreshCw } from "lucide-react";
 
 import { FileTree } from "@/components/FileTree";
 import { GuideViewer } from "@/components/GuideViewer";
+import { MasterGuideStrip } from "@/components/MasterGuide";
 import type { ClassInfo } from "@/lib/classes";
 import { listGuides, synthesizeModule } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
@@ -36,13 +37,15 @@ export function ClassWorkspace({
     queryFn: () => scanClass(info.id),
   });
 
-  // Guide state (M5). Staleness is computed on demand backend-side; the query
-  // re-runs when a scan lands (dataUpdatedAt) or a module_guide job settles
+  // Guide state (M5/M6). Staleness is computed on demand backend-side; the
+  // query re-runs when a scan lands (dataUpdatedAt) or a guide job settles
   // (settledGuideJobs) — the guides upsert commits before the status flips,
   // so a refetch triggered by the transition always sees the new row.
   const { jobs } = useJobs();
   const guideJobs = jobs.filter(
-    (j) => j.kind === "module_guide" && j.classId === info.id,
+    (j) =>
+      (j.kind === "module_guide" || j.kind === "master_guide") &&
+      j.classId === info.id,
   );
   const activeScopes = new Set(
     guideJobs
@@ -114,6 +117,14 @@ export function ClassWorkspace({
           {info.instructors}
         </p>
       </header>
+
+      {tree !== undefined && tree.length > 0 && (
+        <MasterGuideStrip
+          classId={info.id}
+          guide={guideMap.get("master")}
+          onView={() => setViewScope("master")}
+        />
+      )}
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between border-b pb-3">

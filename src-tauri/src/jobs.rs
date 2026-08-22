@@ -91,14 +91,21 @@ struct QueuedJob {
     kind: String,
     class_id: Option<i64>,
     prompt: String,
-    /// Kind-specific completion data (e.g. the extract batch manifest). Lost on
-    /// app restart, which is fine: startup_recovery fails interrupted jobs.
+    /// Kind-specific completion data (e.g. the extract batch manifest). Also
+    /// persisted to jobs.payload so a failed master_guide can be resumed after
+    /// an app restart (startup_recovery fails interrupted jobs but keeps rows).
     payload: Option<String>,
+    /// SPEC §6 resumability: when set, spawn with `--resume <session_id>` to
+    /// continue a failed run's claude session instead of starting fresh.
+    resume_session: Option<String>,
 }
 
 struct RunningJob {
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
+    /// SPEC §8.2: a master_guide runs exclusively — while it runs, pump starts
+    /// nothing else.
+    exclusive: bool,
 }
 
 #[derive(Default)]
@@ -193,7 +200,7 @@ pub fn enqueue_extract(
     prompt: &str,
     payload: String,
 ) -> Result<i64> {
-    enqueue(app, "extract", Some(class_id), None, prompt, Some(payload))
+    enqueue(app, "extract", Some(class_id), None, prompt, Some(payload), None)
 }
 
 /// SPEC §8.1: module guide synthesis (manual trigger only). `payload` carries
@@ -205,13 +212,33 @@ pub fn enqueue_module_guide(
     prompt: &str,
     payload: String,
 ) -> Result<i64> {
-    enqueue(app, "module_guide", Some(class_id), Some(scope), prompt, Some(payload))
+    enqueue(app, "module_guide", Some(class_id), Some(scope), prompt, Some(payload), None)
+}
+
+/// SPEC §8.2: semester master synthesis (manual trigger only, runs exclusively).
+/// With `resume_session` set this continues a failed run's claude session (§6).
+pub fn enqueue_master_guide(
+    app: &AppHandle,
+    class_id: i64,
+    prompt: &str,
+    payload: String,
+    resume_session: Option<String>,
+) -> Result<i64> {
+    enqueue(
+        app,
+        "master_guide",
+        Some(class_id),
+        Some("master"),
+        prompt,
+        Some(payload),
+        resume_session,
+    )
 }
 
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
-    enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None)
+    enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None, None)
 }
 
 pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
@@ -281,12 +308,13 @@ fn enqueue(
     scope: Option<&str>,
     prompt: &str,
     payload: Option<String>,
+    resume_session: Option<String>,
 ) -> Result<i64> {
     let id = with_conn(app, |conn| {
         conn.execute(
-            "INSERT INTO jobs (kind, class_id, scope, status, created_at)
-             VALUES (?1, ?2, ?3, 'queued', ?4)",
-            params![kind, class_id, scope, now()],
+            "INSERT INTO jobs (kind, class_id, scope, status, created_at, payload)
+             VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+            params![kind, class_id, scope, now(), payload],
         )?;
         Ok(conn.last_insert_rowid())
     })?;
@@ -298,6 +326,7 @@ fn enqueue(
             class_id,
             prompt: prompt.to_string(),
             payload,
+            resume_session,
         });
     }
     let _ = app.emit("jobs-changed", ());
@@ -305,12 +334,24 @@ fn enqueue(
     Ok(id)
 }
 
-/// Starts queued jobs while free slots remain.
+/// Starts queued jobs while free slots remain. SPEC §8.2 exclusivity: a
+/// master_guide at the front waits for every running job to finish, and while
+/// one runs (or waits, FIFO) nothing else starts.
 fn pump(app: &AppHandle) {
     loop {
         let (job, child_slot, cancelled) = {
             let mgr = app.state::<JobManager>();
             let mut inner = mgr.lock_inner();
+            if inner.running.values().any(|r| r.exclusive) {
+                return;
+            }
+            let Some(front) = inner.queue.front() else {
+                return;
+            };
+            let exclusive = front.kind == "master_guide";
+            if exclusive && !inner.running.is_empty() {
+                return; // queue drains first
+            }
             if inner.running.len() >= MAX_CONCURRENT {
                 return;
             }
@@ -324,6 +365,7 @@ fn pump(app: &AppHandle) {
                 RunningJob {
                     child: child_slot.clone(),
                     cancelled: cancelled.clone(),
+                    exclusive,
                 },
             );
             (job, child_slot, cancelled)
@@ -373,7 +415,7 @@ fn run_job(
             }
         }
     }
-    if status == "succeeded" && job.kind == "module_guide" {
+    if status == "succeeded" && (job.kind == "module_guide" || job.kind == "master_guide") {
         if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
             if let Err(e) = crate::guides::finalize_job(&app, class_id, payload) {
                 // A "succeeded" job with no recorded guide would be invisible
@@ -415,6 +457,13 @@ struct StreamState {
     /// Set when a self_check init reveals non-subscription auth: kill immediately
     /// so the child neither bills API credits nor grinds through 401 retries.
     auth_abort: Option<String>,
+    /// Index of the content block currently streaming a Write/Edit tool input
+    /// (master jobs run with --include-partial-messages).
+    write_block: Option<u64>,
+    /// Total streamed Write/Edit input bytes — the phased-progress "composing"
+    /// signal. Approximate (JSON-escaped), which is fine for a progress label.
+    write_bytes: usize,
+    write_bytes_reported: usize,
 }
 
 fn execute_job(
@@ -467,6 +516,16 @@ fn execute_job(
         .arg("--strict-mcp-config");
     if let Some(tools) = allowed_tools(&job.kind) {
         cmd.args(["--allowedTools", tools]);
+    }
+    // SPEC §6 resumability: continue a failed run's session where it left off.
+    if let Some(session) = &job.resume_session {
+        cmd.args(["--resume", session]);
+    }
+    // SPEC §8.2 long-job UX: partial message chunks expose the guide being
+    // written as it streams, powering the phased progress display. Master only —
+    // shorter kinds don't need the extra stream volume.
+    if job.kind == "master_guide" {
+        cmd.arg("--include-partial-messages");
     }
     match &class_dir {
         Some(dir) => {
@@ -655,6 +714,50 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
             stream.rate_limit_type = value["rate_limit_info"]["rateLimitType"]
                 .as_str()
                 .map(str::to_string);
+        }
+        // Partial message chunks (master_guide only): the long silent stretch of
+        // a 30-min job is the model streaming one huge Write input. Tracking its
+        // bytes turns that silence into live "composing" progress (SPEC §8.2).
+        "stream_event" => {
+            let event = &value["event"];
+            match event["type"].as_str().unwrap_or("") {
+                "content_block_start" => {
+                    let block = &event["content_block"];
+                    if block["type"].as_str() == Some("tool_use")
+                        && matches!(block["name"].as_str(), Some("Write") | Some("Edit"))
+                    {
+                        stream.write_block = event["index"].as_u64();
+                        if stream.write_bytes == 0 {
+                            push_event(app, job.id, "phase", "composing — writing the guide".into());
+                        }
+                    }
+                }
+                "content_block_delta" => {
+                    if stream.write_block.is_some()
+                        && stream.write_block == event["index"].as_u64()
+                    {
+                        if let Some(chunk) = event["delta"]["partial_json"].as_str() {
+                            stream.write_bytes += chunk.len();
+                            // Sparse updates: one event per ~16 KB, not per delta.
+                            if stream.write_bytes - stream.write_bytes_reported >= 16 * 1024 {
+                                stream.write_bytes_reported = stream.write_bytes;
+                                push_event(
+                                    app,
+                                    job.id,
+                                    "phase",
+                                    format!("composing · ~{} KB written", stream.write_bytes / 1024),
+                                );
+                            }
+                        }
+                    }
+                }
+                "content_block_stop" => {
+                    if stream.write_block == event["index"].as_u64() {
+                        stream.write_block = None;
+                    }
+                }
+                _ => {}
+            }
         }
         "assistant" => {
             for block in value["message"]["content"].as_array().unwrap_or(&Vec::new()) {
