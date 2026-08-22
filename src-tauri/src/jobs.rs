@@ -153,12 +153,11 @@ impl JobManager {
 // ---------------------------------------------------------------------------
 // Per-kind invocation scoping (SPEC §6)
 
-fn model_for(kind: &str) -> &'static str {
-    match kind {
-        "module_guide" | "master_guide" | "practice" => "opus",
-        _ => "sonnet",
-    }
-}
+/// Owner decision (2026-08-22): every job runs Opus 5 at xhigh effort by default,
+/// superseding SPEC §6's per-kind model split. Model and effort level become
+/// user-configurable in Settings when that lands (M11).
+const DEFAULT_MODEL: &str = "opus";
+const DEFAULT_EFFORT: &str = "xhigh";
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
@@ -414,7 +413,8 @@ fn execute_job(
     cmd.arg("-p")
         .arg(&job.prompt)
         .args(["--output-format", "stream-json", "--verbose"])
-        .args(["--model", model_for(&job.kind)])
+        .args(["--model", DEFAULT_MODEL])
+        .args(["--effort", DEFAULT_EFFORT])
         .args(["--disallowedTools", DISALLOWED_TOOLS]);
     if let Some(tools) = allowed_tools(&job.kind) {
         cmd.args(["--allowedTools", tools]);

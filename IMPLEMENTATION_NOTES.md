@@ -120,9 +120,14 @@ doesn't cover.
 
 - **Runner** (`src-tauri/src/jobs.rs`): `JobManager` in Tauri state — `VecDeque` queue +
   running map, max 2 concurrent, worker `std::thread`s. Spawns `~/.local/bin/claude -p`
-  per SPEC §6: cwd = class folder, `--add-dir`, per-kind `--model` (opus for guides/
-  practice, sonnet otherwise, passed explicitly) and `--allowedTools`. **Every spawn
+  per SPEC §6: cwd = class folder, `--add-dir`, per-kind `--allowedTools`. **Every spawn
   `env_remove`s `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`** (§1).
+- **Model policy (owner decision, 2026-08-22, supersedes SPEC §6's per-kind models):**
+  every job runs `--model opus --effort xhigh` (Opus 5, extra-high effort) by default.
+  The CLI's `--effort` accepts low|medium|high|xhigh|max. **Model selection and effort
+  level must become user-configurable in Settings when it is built (M11)** — wire the
+  Settings values into the spawn args in place of the `DEFAULT_MODEL`/`DEFAULT_EFFORT`
+  constants in `jobs.rs`.
 - **`--disallowedTools Bash,WebFetch,WebSearch` is passed on every spawn** in addition
   to `--allowedTools`. Verified on claude 2.1.237: allowedTools is additive and does
   NOT restrict tools the user's own permissive config allows (a probe scoped to
