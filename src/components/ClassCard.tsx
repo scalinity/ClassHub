@@ -18,7 +18,13 @@ const ACCENTS: Record<string, string> = {
 
 const WEEKDAY_LETTERS = ["M", "T", "W", "T", "F"];
 
-export function ClassCard({ info }: { info: ClassInfo }) {
+export function ClassCard({
+  info,
+  onOpen,
+}: {
+  info: ClassInfo;
+  onOpen: (cls: ClassInfo) => void;
+}) {
   const next = nextMeeting(info.meetings);
   const meetingDays = new Set(info.meetings.map((m) => m.weekday));
   const style = {
@@ -26,8 +32,20 @@ export function ClassCard({ info }: { info: ClassInfo }) {
   } as CSSProperties;
 
   return (
-    <Card style={style} className="relative gap-0 overflow-hidden p-6">
-      <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-(--accent)" />
+    <Card
+      style={style}
+      className="relative gap-0 overflow-hidden p-6 transition-shadow duration-200 hover:shadow-md"
+    >
+      <button
+        type="button"
+        aria-label={`Open ${info.displayName}`}
+        onClick={() => onOpen(info)}
+        className="absolute inset-0 z-[1] cursor-pointer rounded-[inherit] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
+      />
+      <span
+        aria-hidden
+        className="absolute inset-y-0 left-0 w-[3px] bg-(--accent) transition-[width] duration-200 group-hover/card:w-[6px]"
+      />
 
       <div className="flex items-start justify-between gap-4">
         <h2 className="text-[17px] font-semibold leading-snug tracking-tight">

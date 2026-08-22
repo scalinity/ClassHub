@@ -395,7 +395,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* app launches via `npm run tauri dev`, DB is created and seeded, all 4
   classes render as cards with correct names (no codes), colors, and next-meeting times.
 
-- [ ] **M2 — Class workspace.**
+- [x] **M2 — Class workspace.**
   File scanner/indexer (§7 step 1, hashes into `files`), class view with module/file tree
   (app-managed dirs hidden), file-kind icons, row actions: Show in Finder, Open in default app.
   *Accepted when:* Biostatistics shows Module 1's real tree; adding/removing a file in Finder

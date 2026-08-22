@@ -58,3 +58,55 @@ doesn't cover.
   background dev process tree. The DB persists regardless.
 - Vite dev does not type-check; TypeScript errors surface through IDE diagnostics only
   (`tsc` must not be run per workspace rules).
+
+## M2 — Class workspace (2026-08-22)
+
+### What exists now
+
+- **Scanner** (`src-tauri/src/scanner.rs`): recursive walk of a class folder producing
+  both the `files`-table sync (upsert added/changed, delete removed, in one transaction)
+  and the nested tree payload for the UI in a single pass. sha256 is skipped when
+  size+mtime match the indexed row (hash reused). Kind mapping per SPEC §5
+  (`pptx|pdf|rmd|r|html|md|other`, case-insensitive extensions; `htm` counts as html).
+- **Exclusions**: app-managed dirs (`Study Guides/`, `Notes/`, `_Inbox/`) are skipped at
+  class-folder top level only — deliberate, so a user's module can legitimately contain
+  e.g. a `Notes` subfolder. Hidden entries (`.classhub`, `.DS_Store`) and symlinks are
+  skipped at every depth.
+- **Scan triggers** (SPEC §7 step 1): launch (Rust `setup` scans all classes, missing
+  folders skipped with a stderr note), window focus (TanStack Query's default
+  `refetchOnWindowFocus` — no code), and the RESCAN button (`refetch()`).
+- **Commands**: `scan_class` (syncs + returns tree), `reveal_in_finder`,
+  `open_in_default_app`. Row actions run the opener plugin from Rust
+  (`tauri_plugin_opener::reveal_item_in_dir` / `open_path`), so no new capability
+  permissions were needed. `resolve_rel` rejects non-`Normal` path components
+  (traversal) and empty rel_path resolves to the class folder itself (used by the
+  empty state's "Open folder in Finder").
+- **UI**: dashboard cards are now clickable (stretched invisible button, accent
+  focus-visible outline, accent bar widens on hover); view switching is plain `useState`
+  in `App.tsx` (no router). `ClassWorkspace` header reuses the card's 3px accent bar +
+  mono meeting/room/credits eyebrow in the class accent. `FileTree` renders depth-0 dirs
+  as module sections (accent chevron, mono `N FILES` count), nested levels behind
+  hairline indent guides, file rows with kind icon + mono size, hover/focus-revealed
+  row actions. `SCANNED h:mm AM` stamp comes from the query's `dataUpdatedAt`.
+- A failed row action (file vanished since last scan) triggers a refetch instead of an
+  error UI — the tree self-corrects.
+
+### Verified
+
+- Launch scan indexed exactly Biostatistics Module 1's 11 real files; stored sha256
+  spot-checked against `shasum -a 256`. Adding a file in Finder → rescan picked it up
+  (row + tree) within seconds; removing it → row deleted, count back to 11. Decoy files
+  placed in all four app-managed dirs were excluded; `.DS_Store` never indexed.
+
+### Gotchas
+
+- **macOS Accessibility for Cursor got reset since M1**: `osascript` System Events
+  calls (focus app, toggle appearance) now fail with `-1719`. Re-grant in System
+  Settings → Privacy & Security → Accessibility before the next session that needs
+  scripted UI verification. `screencapture -x` (Screen Recording) still works.
+- sha2 is 0.11 (not 0.10): same `Digest` API, but hash via a manual chunked
+  `read`/`update` loop rather than `io::copy` (no reliance on the `std` Write impl).
+- `files` upsert deliberately leaves `extract_*` columns untouched on content change —
+  staleness in M4+ compares `extracted_sha256` vs current `sha256`.
+- Tauri v2 auto-camelCases command args (`class_id` ↔ `classId`) and serde payloads use
+  `rename_all = "camelCase"` as in M1 — keep both conventions.

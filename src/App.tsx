@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   QueryClient,
   QueryClientProvider,
@@ -5,11 +6,12 @@ import {
 } from "@tanstack/react-query";
 
 import { ClassCard } from "@/components/ClassCard";
-import { listClasses } from "@/lib/classes";
+import { ClassWorkspace } from "@/components/ClassWorkspace";
+import { listClasses, type ClassInfo } from "@/lib/classes";
 
 const queryClient = new QueryClient();
 
-function Dashboard() {
+function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
   const { data: classes, error } = useQuery({
     queryKey: ["classes"],
     queryFn: listClasses,
@@ -25,45 +27,53 @@ function Dashboard() {
     .replace(",", " ·");
 
   return (
-    <div className="min-h-screen">
-      {/* Drag strip clearing the macOS traffic lights (overlay title bar). */}
-      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-10 h-9" />
-
-      <main className="mx-auto max-w-4xl px-8 pt-16 pb-20">
-        <header>
-          <p className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-            FALL 2026 · AI IN BIOMEDICAL &amp; HEALTH SCIENCES
+    <main className="mx-auto max-w-4xl px-8 pt-16 pb-20">
+      <header>
+        <p className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+          FALL 2026 · AI IN BIOMEDICAL &amp; HEALTH SCIENCES
+        </p>
+        <div className="mt-2 flex items-baseline justify-between">
+          <h1 className="text-[28px] font-semibold tracking-tight">
+            ClassHub
+          </h1>
+          <p className="font-mono text-xs text-muted-foreground">
+            {dateLabel}
           </p>
-          <div className="mt-2 flex items-baseline justify-between">
-            <h1 className="text-[28px] font-semibold tracking-tight">
-              ClassHub
-            </h1>
-            <p className="font-mono text-xs text-muted-foreground">
-              {dateLabel}
-            </p>
-          </div>
-        </header>
+        </div>
+      </header>
 
-        {error ? (
-          <p className="mt-16 text-center font-mono text-xs text-destructive">
-            FAILED TO LOAD CLASSES — {String(error)}
-          </p>
-        ) : (
-          <div className="mt-10 grid gap-5 md:grid-cols-2">
-            {(classes ?? []).map((cls) => (
-              <ClassCard key={cls.id} info={cls} />
-            ))}
-          </div>
-        )}
-      </main>
-    </div>
+      {error ? (
+        <p className="mt-16 text-center font-mono text-xs text-destructive">
+          FAILED TO LOAD CLASSES — {String(error)}
+        </p>
+      ) : (
+        <div className="mt-10 grid gap-5 md:grid-cols-2">
+          {(classes ?? []).map((cls) => (
+            <ClassCard key={cls.id} info={cls} onOpen={onOpen} />
+          ))}
+        </div>
+      )}
+    </main>
   );
 }
 
 export default function App() {
+  const [openClass, setOpenClass] = useState<ClassInfo | null>(null);
+
   return (
     <QueryClientProvider client={queryClient}>
-      <Dashboard />
+      <div className="min-h-screen">
+        {/* Drag strip clearing the macOS traffic lights (overlay title bar). */}
+        <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-10 h-9" />
+        {openClass ? (
+          <ClassWorkspace
+            info={openClass}
+            onBack={() => setOpenClass(null)}
+          />
+        ) : (
+          <Dashboard onOpen={setOpenClass} />
+        )}
+      </div>
     </QueryClientProvider>
   );
 }
