@@ -100,10 +100,13 @@ doesn't cover.
 
 ### Gotchas
 
-- **macOS Accessibility for Cursor got reset since M1**: `osascript` System Events
-  calls (focus app, toggle appearance) now fail with `-1719`. Re-grant in System
-  Settings → Privacy & Security → Accessibility before the next session that needs
-  scripted UI verification. `screencapture -x` (Screen Recording) still works.
+- **macOS 27 renamed the Accessibility pane**: scripted-control permissions now live
+  under System Settings → Privacy & Security → Device Control and Data Access, and
+  Cursor is granted (owner-verified). A `-1719` assistive-access failure mid-M2 turned
+  out to be transient — if System Events errors, retest before assuming the grant is
+  gone. `screencapture -x` works regardless. Scripted clicks: `tell process "classhub"
+  to click at {x, y}` works only while the app is actually frontmost — verify focus
+  first or the click lands on whatever owns the screen there.
 - sha2 is 0.11 (not 0.10): same `Digest` API, but hash via a manual chunked
   `read`/`update` loop rather than `io::copy` (no reliance on the `std` Write impl).
 - `files` upsert deliberately leaves `extract_*` columns untouched on content change —
