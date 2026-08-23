@@ -234,7 +234,11 @@ export function DeadlinesSection({
       )}
 
       {editing !== null && (
+        // Keyed by target: the form seeds its fields in useState initializers,
+        // so switching edit targets must remount it — a reused instance would
+        // keep the previous row's values while saving under the new row's id.
         <DeadlineForm
+          key={editing === "new" ? "new" : editing.id}
           classId={classId}
           deadline={editing === "new" ? null : editing}
           onClose={() => setEditing(null)}
