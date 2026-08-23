@@ -193,6 +193,74 @@ fn walk_dir(
     Ok(dirs)
 }
 
+/// Cap on file lines in a prompt's tree listing — generous for a class
+/// folder, bounded if one ever grows huge (folders are always all listed).
+const MAX_TREE_FILES: usize = 200;
+
+/// Depth-first prompt listing (`dir/` lines, then files) applying this
+/// module's exclusions: app-managed dirs at the top level, hidden entries and
+/// symlinks everywhere. File lines stop at MAX_TREE_FILES; folders are always
+/// listed. Feeds the sort and syllabus-scan job prompts.
+pub(crate) fn walk_tree(
+    dir: &Path,
+    class_dir: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+    file_count: &mut usize,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if depth == 0 && APP_MANAGED_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            dirs.push(entry.path());
+        } else {
+            files.push(entry.path());
+        }
+    }
+    let by_name = |a: &PathBuf, b: &PathBuf| {
+        a.to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.to_string_lossy().to_lowercase())
+    };
+    dirs.sort_by(by_name);
+    files.sort_by(by_name);
+
+    for path in dirs {
+        if let Ok(rel) = path.strip_prefix(class_dir) {
+            out.push(format!("{}/", rel.to_string_lossy()));
+        }
+        walk_tree(&path, class_dir, depth + 1, out, file_count);
+    }
+    for path in files {
+        *file_count += 1;
+        if *file_count == MAX_TREE_FILES + 1 {
+            out.push("… (more files omitted)".to_string());
+        }
+        if *file_count > MAX_TREE_FILES {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(class_dir) {
+            out.push(rel.to_string_lossy().into_owned());
+        }
+    }
+}
+
 pub fn kind_for(path: &Path) -> &'static str {
     let ext = path
         .extension()

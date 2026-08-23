@@ -33,6 +33,16 @@ pub fn emit_hub_change(app: &AppHandle, area: &str) {
     let _ = app.emit("hub-changed", json!({ "area": area }));
 }
 
+/// One append-only history row. Destructive writes park their prior state
+/// here first — recoverability in place of confirmation prompts.
+pub fn audit(conn: &Connection, action: &str, payload: serde_json::Value) -> Result<()> {
+    conn.execute(
+        "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![action, payload.to_string(), now()],
+    )?;
+    Ok(())
+}
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_job_payload.sql"),

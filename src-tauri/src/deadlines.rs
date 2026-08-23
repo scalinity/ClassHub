@@ -16,12 +16,81 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{emit_hub_change, now, with_conn};
-use crate::tools::{
-    audit, truncate, valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS,
-};
+use crate::db::{audit, emit_hub_change, now, with_conn};
+use crate::tools::truncate;
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/syllabus.md");
+
+// ---------------------------------------------------------------------------
+// Domain rules — shared by every surface that writes a deadline (this
+// module's UI commands and syllabus scan, and the chat tool in tools.rs).
+
+pub(crate) const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "project", "other"];
+
+/// Caps applied wherever a deadline title or notes crosses a boundary (chat
+/// tool, UI form, syllabus scan). The scan is the one place model-supplied
+/// document text enters persistent storage — and stored titles feed back
+/// into the next scan's prompt, so unbounded growth would compound.
+pub(crate) const MAX_TITLE_CHARS: usize = 200;
+pub(crate) const MAX_NOTES_CHARS: usize = 1000;
+
+/// ISO date, optionally with a time: YYYY-MM-DD[THH:MM[:SS]]. Stored as given;
+/// lexicographic order is chronological order for this shape. Checks the
+/// calendar, not just the shape: a syllabus scan can propose model-invented
+/// dates like 2026-09-31, which would render as a rolled-over day while
+/// sorting and deduping as the stored text.
+pub(crate) fn valid_due_at(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if b.len() < 10 || !digits(0..4) || b[4] != b'-' || !digits(5..7) || b[7] != b'-' || !digits(8..10)
+    {
+        return false;
+    }
+    let shape_ok = match b.len() {
+        10 => true,
+        16 => b[10] == b'T' && digits(11..13) && b[13] == b':' && digits(14..16),
+        19 => {
+            b[10] == b'T'
+                && digits(11..13)
+                && b[13] == b':'
+                && digits(14..16)
+                && b[16] == b':'
+                && digits(17..19)
+        }
+        _ => false,
+    };
+    if !shape_ok {
+        return false;
+    }
+    // The shape check proved every sliced range is ASCII digits.
+    let num = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(0);
+    let (year, month, day) = (num(0..4), num(5..7), num(8..10));
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day < 1 || day > month_days {
+        return false;
+    }
+    if b.len() >= 16 && (num(11..13) > 23 || num(14..16) > 59) {
+        return false;
+    }
+    if b.len() == 19 && num(17..19) > 59 {
+        return false;
+    }
+    true
+}
 
 // ---------------------------------------------------------------------------
 // Deadline CRUD (UI side; the chat tools in tools.rs share the same rules)
@@ -309,7 +378,7 @@ fn build_prompt(
         None => {
             let mut tree_lines = Vec::new();
             let mut file_count = 0usize;
-            crate::sorter::walk_tree(&class_dir, &class_dir, 0, &mut tree_lines, &mut file_count);
+            crate::scanner::walk_tree(&class_dir, &class_dir, 0, &mut tree_lines, &mut file_count);
             let tree_block = if tree_lines.is_empty() {
                 "(no material yet)".to_string()
             } else {
@@ -394,7 +463,7 @@ struct RawDeadline {
 /// only unparseable output or an all-invalid batch is an error the caller
 /// demotes to job failure.
 pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
-    let entries = crate::sorter::parse_entries(result_text)?;
+    let entries = crate::jobs::parse_entries(result_text)?;
     let summary = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut duplicates = 0usize;

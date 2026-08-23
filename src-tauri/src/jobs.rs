@@ -1123,6 +1123,28 @@ fn count_label(n: usize, noun: &str) -> String {
     }
 }
 
+/// Parses the proposal-shaped jobs' output contract (sort_proposal,
+/// syllabus_scan): a bare JSON array as the final message, tolerating a
+/// fenced block or stray prose around it. A candidate `[` counts only when
+/// the next non-whitespace character is `{` (or `]`), so a bracket inside
+/// prose — e.g. a filename like `[draft] notes.pdf` — never wins the slice;
+/// the stream deserializer then stops at the array's end, so trailing prose
+/// is harmless too.
+pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
+    let bytes = text.as_bytes();
+    for (i, _) in text.match_indices('[') {
+        let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
+        if !matches!(next, Some(b'{') | Some(b']')) {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        if let Some(Ok(Value::Array(entries))) = stream.next() {
+            return Ok(entries);
+        }
+    }
+    bail!("no JSON array of proposals in the job output")
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

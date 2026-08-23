@@ -16,7 +16,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use tauri::AppHandle;
 
 use crate::db::{emit_hub_change, now, with_conn};
@@ -25,9 +25,6 @@ use crate::scanner::APP_MANAGED_DIRS;
 const INBOX_DIR: &str = "_Inbox";
 const EXTRACTS_PREFIX: &str = ".classhub/extracts";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
-/// Cap on file lines in the prompt's tree listing — generous for a class
-/// folder, bounded if one ever grows huge (folders are always all listed).
-const MAX_TREE_FILES: usize = 200;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -280,7 +277,7 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
 
     let mut tree_lines = Vec::new();
     let mut file_count = 0usize;
-    walk_tree(&class_dir, &class_dir, 0, &mut tree_lines, &mut file_count);
+    crate::scanner::walk_tree(&class_dir, &class_dir, 0, &mut tree_lines, &mut file_count);
     let tree_block = if tree_lines.is_empty() {
         "(no folders yet — this class has no material)".to_string()
     } else {
@@ -293,70 +290,6 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
             .replace("{inbox}", &inbox_block)
             .replace("{tree}", &tree_block),
     ))
-}
-
-/// Depth-first listing (`dir/` lines, then files) mirroring the scanner's
-/// exclusions: app-managed dirs at the top level, hidden entries and symlinks
-/// everywhere. File lines stop at MAX_TREE_FILES; folders are always listed.
-/// Shared with the syllabus scan's whole-folder prompt.
-pub(crate) fn walk_tree(
-    dir: &Path,
-    class_dir: &Path,
-    depth: usize,
-    out: &mut Vec<String>,
-    file_count: &mut usize,
-) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if depth == 0 && APP_MANAGED_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            dirs.push(entry.path());
-        } else {
-            files.push(entry.path());
-        }
-    }
-    let by_name = |a: &PathBuf, b: &PathBuf| {
-        a.to_string_lossy()
-            .to_lowercase()
-            .cmp(&b.to_string_lossy().to_lowercase())
-    };
-    dirs.sort_by(by_name);
-    files.sort_by(by_name);
-
-    for path in dirs {
-        if let Ok(rel) = path.strip_prefix(class_dir) {
-            out.push(format!("{}/", rel.to_string_lossy()));
-        }
-        walk_tree(&path, class_dir, depth + 1, out, file_count);
-    }
-    for path in files {
-        *file_count += 1;
-        if *file_count == MAX_TREE_FILES + 1 {
-            out.push("… (more files omitted)".to_string());
-        }
-        if *file_count > MAX_TREE_FILES {
-            continue;
-        }
-        if let Ok(rel) = path.strip_prefix(class_dir) {
-            out.push(rel.to_string_lossy().into_owned());
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +414,7 @@ struct RawProposal {
 /// Parses and records the job's proposals. Returns the job summary; zero
 /// recorded proposals is an error the caller demotes to job failure.
 pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
-    let entries = parse_entries(result_text)?;
+    let entries = crate::jobs::parse_entries(result_text)?;
     let summary = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let mut recorded = 0usize;
@@ -522,28 +455,6 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
     })?;
     emit_hub_change(app, "proposals");
     Ok(summary)
-}
-
-/// The prompt contracts a bare JSON array as the final message; tolerate a
-/// fenced block or stray prose around it. A candidate `[` counts only when
-/// the next non-whitespace character is `{` (or `]`), so a bracket inside
-/// prose — e.g. a filename like `[draft] notes.pdf` — never wins the slice;
-/// the stream deserializer then stops at the array's end, so trailing prose
-/// is harmless too. Shared with the syllabus scan, which contracts the same
-/// bare-array shape.
-pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
-    let bytes = text.as_bytes();
-    for (i, _) in text.match_indices('[') {
-        let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
-        if !matches!(next, Some(b'{') | Some(b']')) {
-            continue;
-        }
-        let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
-        if let Some(Ok(Value::Array(entries))) = stream.next() {
-            return Ok(entries);
-        }
-    }
-    bail!("no JSON array of proposals in the job output")
 }
 
 struct ValidEntry {
