@@ -446,7 +446,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* chat can create a deadline, write a note file, kick off a module synthesis,
   and generate a practice exam — each visibly reflected in the UI.
 
-- [ ] **M9 — Drop-to-sort.**
+- [x] **M9 — Drop-to-sort.**
   Drag-drop onto class workspace → `_Inbox/` copy, `sort_proposal` job with strict-JSON output,
   proposal cards (approve / change destination / leave), folder-creating moves, audit log,
   inbox badges.

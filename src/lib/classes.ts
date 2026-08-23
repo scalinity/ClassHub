@@ -17,6 +17,8 @@ export interface ClassInfo {
   folderPresent: boolean;
   /** Guides whose sources changed since generation (card badge). */
   staleGuides: number;
+  /** Items waiting in the drop-to-sort flow: pending proposals + unproposed inbox files. */
+  inboxPending: number;
   /** Nearest open deadline (card line), overdue included. */
   nextDeadline: { title: string; dueAt: string } | null;
   meetings: Meeting[];

@@ -110,16 +110,28 @@ export function ClassCard({
           <p className="text-muted-foreground">
             {info.room} · {info.credits} CR
           </p>
-          {info.staleGuides > 0 && (
-            <span
-              title="A study guide's sources changed since it was generated"
-              className="shrink-0 rounded bg-class-amber/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-class-amber"
-            >
-              {info.staleGuides === 1
-                ? "GUIDE STALE"
-                : `${info.staleGuides} GUIDES STALE`}
-            </span>
-          )}
+          <span className="flex shrink-0 items-center gap-1.5">
+            {info.inboxPending > 0 && (
+              <span
+                title="Files waiting in the drop-to-sort inbox"
+                className="rounded bg-(--accent)/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-(--accent)"
+              >
+                {info.inboxPending === 1
+                  ? "1 TO SORT"
+                  : `${info.inboxPending} TO SORT`}
+              </span>
+            )}
+            {info.staleGuides > 0 && (
+              <span
+                title="A study guide's sources changed since it was generated"
+                className="rounded bg-class-amber/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-class-amber"
+              >
+                {info.staleGuides === 1
+                  ? "GUIDE STALE"
+                  : `${info.staleGuides} GUIDES STALE`}
+              </span>
+            )}
+          </span>
         </div>
       </div>
 

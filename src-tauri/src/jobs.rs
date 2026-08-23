@@ -259,6 +259,12 @@ pub fn enqueue_practice(
     enqueue(app, "practice", Some(class_id), Some(scope), prompt, Some(payload), None)
 }
 
+/// SPEC §10 step 2: sort_proposal job over a class inbox (read-only tools).
+/// The strict JSON it returns on stdout is recorded by sorter::finalize_job.
+pub fn enqueue_sort(app: &AppHandle, class_id: i64, prompt: &str) -> Result<i64> {
+    enqueue(app, "sort_proposal", Some(class_id), None, prompt, None, None)
+}
+
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
@@ -403,8 +409,16 @@ fn pump(app: &AppHandle) {
 // Worker
 
 enum Outcome {
-    Succeeded { summary: String },
-    Failed { error: String },
+    Succeeded {
+        summary: String,
+        /// The untruncated result text, for kinds whose final message is a
+        /// machine-readable contract (sort_proposal's JSON) — the summary's
+        /// display cap would corrupt it.
+        result_text: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 fn run_job(
@@ -415,15 +429,19 @@ fn run_job(
 ) {
     let outcome = execute_job(&app, &job, &child_slot, &cancelled);
 
-    let (mut status, mut error, mut summary) = if cancelled.load(Ordering::SeqCst) {
-        ("cancelled", None, None)
-    } else {
-        match outcome {
-            Ok(Outcome::Succeeded { summary }) => ("succeeded", None, Some(summary)),
-            Ok(Outcome::Failed { error }) => ("failed", Some(error), None),
-            Err(e) => ("failed", Some(format!("{e:#}")), None),
-        }
-    };
+    let (mut status, mut error, mut summary, result_text) =
+        if cancelled.load(Ordering::SeqCst) {
+            ("cancelled", None, None, None)
+        } else {
+            match outcome {
+                Ok(Outcome::Succeeded {
+                    summary,
+                    result_text,
+                }) => ("succeeded", None, Some(summary), result_text),
+                Ok(Outcome::Failed { error }) => ("failed", Some(error), None, None),
+                Err(e) => ("failed", Some(format!("{e:#}")), None, None),
+            }
+        };
     if status == "cancelled" {
         push_event(&app, job.id, "status", "cancelled — child process killed".into());
     }
@@ -447,6 +465,21 @@ fn run_job(
                 status = "failed";
                 error = Some(format!("synthesis finished but no guide was recorded: {e:#}"));
                 summary = None;
+            }
+        }
+    }
+    if status == "succeeded" && job.kind == "sort_proposal" {
+        if let Some(class_id) = job.class_id {
+            // Same demotion as guides: a "succeeded" sort with nothing in the
+            // confirm queue would be invisible in the UI.
+            match crate::sorter::finalize_job(&app, class_id, result_text.as_deref().unwrap_or(""))
+            {
+                Ok(recorded) => summary = Some(recorded),
+                Err(e) => {
+                    status = "failed";
+                    error = Some(format!("sort job finished but recorded no proposals: {e:#}"));
+                    summary = None;
+                }
             }
         }
     }
@@ -704,6 +737,7 @@ fn execute_job(
     match (stream.result_is_error, stream.result_text) {
         (Some(false), text) => Ok(Outcome::Succeeded {
             summary: truncate(text.as_deref().unwrap_or("done"), 4000),
+            result_text: text,
         }),
         (Some(true), text) => Ok(Outcome::Failed {
             error: truncate(text.as_deref().unwrap_or("claude reported an error"), 2000),
@@ -733,7 +767,10 @@ fn resolve_self_check(app: &AppHandle, stream: &StreamState, stderr_tail: &str) 
                 "Subscription auth verified — apiKeySource none, rate window {window}."
             );
             set_auth(app, "ok", &detail);
-            Outcome::Succeeded { summary: detail }
+            Outcome::Succeeded {
+                summary: detail,
+                result_text: None,
+            }
         }
         (source, _) => {
             let reason = stream

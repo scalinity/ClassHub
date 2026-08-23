@@ -5,6 +5,7 @@ mod guides;
 mod jobs;
 mod notes;
 mod scanner;
+mod sorter;
 mod tools;
 
 use std::sync::Mutex;
@@ -148,6 +149,48 @@ fn list_practice(
 ) -> Result<Vec<notes::NoteFile>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+// --- Drop-to-sort (SPEC §10) --------------------------------------------------
+
+/// Step 1: files dropped onto a class workspace are COPIED into
+/// `<Class>/_Inbox/` (originals untouched); a sort job is auto-enqueued.
+#[tauri::command]
+fn stage_inbox_files(
+    app: tauri::AppHandle,
+    class_id: i64,
+    paths: Vec<String>,
+) -> Result<sorter::StageResult, String> {
+    sorter::stage_files(&app, class_id, &paths).map_err(|e| format!("{e:#}"))
+}
+
+/// The workspace queue: inbox files + pending proposals (chat and sort_job).
+#[tauri::command]
+fn sort_state(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<sorter::SortState, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    sorter::sort_state(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Manual sort trigger: retry after a failure, or files left in the inbox.
+#[tauri::command]
+fn run_sort_job(app: tauri::AppHandle, class_id: i64) -> Result<i64, String> {
+    sorter::run_sort_job(&app, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Steps 3–4: approve (move + index update + audit log, optionally to a
+/// picker-chosen destination) or leave the file where it is.
+#[tauri::command]
+fn resolve_move_proposal(
+    app: tauri::AppHandle,
+    proposal_id: i64,
+    approve: bool,
+    dest_override: Option<String>,
+) -> Result<String, String> {
+    sorter::resolve_proposal(&app, proposal_id, approve, dest_override)
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -313,6 +356,10 @@ pub fn run() {
             read_class_file,
             list_notes,
             list_practice,
+            stage_inbox_files,
+            sort_state,
+            run_sort_job,
+            resolve_move_proposal,
             list_jobs,
             cancel_job,
             get_job_events,

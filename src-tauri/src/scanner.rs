@@ -192,7 +192,7 @@ fn walk_dir(
     Ok(dirs)
 }
 
-fn kind_for(path: &Path) -> &'static str {
+pub fn kind_for(path: &Path) -> &'static str {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -208,7 +208,7 @@ fn kind_for(path: &Path) -> &'static str {
     }
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];

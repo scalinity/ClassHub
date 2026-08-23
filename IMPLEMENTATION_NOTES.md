@@ -599,6 +599,108 @@ doesn't cover.
   panel freshly mounts (autofocus); after AX presses elsewhere, toggle the
   panel closed and open again before pasting.
 
+## M9 — Drop-to-sort (2026-08-22)
+
+### What exists now
+
+- **`sorter.rs`** owns the whole SPEC §10 flow. Staging (`stage_files`): dropped
+  paths are COPIED into `<Class>/_Inbox/` (name collisions get ` (2)` suffixes,
+  dropped folders are skipped and reported, originals untouched), then a
+  `sort_proposal` job is auto-enqueued unless one is already queued/running for
+  the class. `run_sort_job` is the manual trigger (retry after a failure, files
+  left in the inbox). The prompt (`prompts/sort.md`) embeds the inbox listing +
+  a walked class tree (scanner exclusions mirrored; folders always listed, file
+  lines capped at 200) and contracts a bare JSON array per §10.
+- **Job plumbing**: `jobs::Outcome::Succeeded` now carries the untruncated
+  `result_text` beside the display summary — the 4000-char summary cap would
+  corrupt the JSON contract. `sorter::finalize_job` runs in the runner before
+  the row leaves `running` (guides pattern): slices the outermost `[...]`
+  (tolerates fences/prose), validates each entry (source must exist under
+  `_Inbox/`, dest not app-managed/dot/existing/self, confidence normalized to
+  high|medium|low or NULL), upserts with the one-pending-per-source rule chat
+  uses, and a zero-recorded result demotes the job to failure.
+- **Resolution** (`resolve_proposal`): approve = `create_dir_all` the dest
+  parents → same-volume `fs::rename` → index update → `audit_log` row
+  (`sort.move`, payload: proposalId/classId/from/to/proposedBy/confidence) →
+  row `approved` (+ `dest_rel_path` rewritten when the picker overrode it).
+  Dismiss just parks the row `dismissed`; the file stays put. Nothing else in
+  the app touches files.
+- **Index update semantics**: an indexed source (chat proposals) keeps its
+  `files` row — `rel_path` rewritten and the extract artifacts (`.md`, and
+  `.pdf`/`.pdf.sha256` conversion sidecars) renamed along the SPEC §4 mirror
+  rule, so a move costs zero re-extraction. An inbox file was never indexed
+  (`_Inbox` is scan-excluded), so approve inserts a fresh hashed row and the
+  next scan auto-extracts it as new material.
+- **Frontend**: `lib/sorter.ts` — module-level `onDragDropEvent` listener
+  (note: the API is `onDragDropEvent`, not `onDragDrop`); the open workspace is
+  the drop target via a module variable App sets during render; an external
+  store drives the drag-over overlay (pointer-events-none, dashed accent
+  frame). `InboxQueue.tsx` renders between the master strip and MATERIALS and
+  self-hides when empty: one card per pending proposal (chat rows in the same
+  queue) + rows for unproposed inbox files (`AWAITING PROPOSAL` while a job
+  runs, `SORT INBOX` header action otherwise, failure line with RETRY).
+- **Card anatomy**: filename · chip (`HIGH` accent / `MEDIUM` amber / `LOW`
+  outlined / `VIA CHAT` muted — NULL confidence renders no chip) · the route
+  line (mono `source dir → dest path` where destination folders that don't
+  exist yet are dash-underlined in the accent + a `NEW FOLDER` tag — new-ness
+  computed client-side against the tree's dirs) · reasoning · APPROVE /
+  MOVE TO… / LEAVE IN INBOX (or DISMISS for non-inbox sources). The picker
+  lists existing tree dirs and approves directly with `dest_override`; busy
+  state holds until the refetch removes the card.
+- **Wiring**: `hub-changed` gained a `files` area. `proposals` invalidates
+  `sortState` + `classes` (card badge `N TO SORT` = pending proposals +
+  unproposed inbox files, computed by `sorter::pending_count` in
+  `list_classes`); `files` (emitted on approve) invalidates `classTree`, which
+  rescans and refreshes guide staleness through the tree-keyed guides query.
+- Chat surface updated: `propose_file_moves` result text and
+  `chat_system.md` now point at the workspace inbox queue instead of "arrives
+  in an upcoming milestone".
+
+### Verified (real native drag-drop, end to end)
+
+- Dropped a mixed pair (a `week3_lecture_slides.pptx` copy of the real deck +
+  an unrelated 1-page parking-permit PDF) onto the Biostatistics workspace via
+  a synthesized native drag: both copied into `_Inbox/`, originals untouched,
+  job 105 auto-enqueued, overlay + `PROPOSING DESTINATIONS…` + `AWAITING
+  PROPOSAL` states all live. Proposals were genuinely grounded: the pptx →
+  `Module 1/Slides/` at medium ("no evidence of a Module 2 yet" — judged by
+  name, pptx unreadable), the PDF skimmed and recognized as non-course
+  material → class root at low confidence.
+- All three resolutions exercised: the pending M8 chat proposal (NULL
+  confidence, `VIA CHAT`) approved — `Week 1/` created, PDF moved, `files`
+  rel_path + extract_rel_path rewritten, extract .md physically moved, **no
+  extract job spawned** (zero tokens); the parking PDF approved through the
+  MOVE TO… picker into `Module 1/Reading Material/` (override recorded on the
+  row, fresh index row, auto-extracted by job 106 covering only that file);
+  the pptx left in inbox (row `dismissed`, file stayed). Two `sort.move`
+  audit rows carry full payloads. Badge walked 1 → 3 → 1 → 0 live; the queue
+  section self-hid once empty. Test files were then removed from the tree
+  (fixture cleanup); the Week 1 move is real and stays.
+- Moving a file flips module + master guides stale by design — manifests
+  compare `{rel_path, sha256}` sets, and the badges did exactly that.
+  Light-mode screenshots skipped again (no new tokens; all chips reuse
+  existing accent/amber/muted pairs).
+
+### Gotchas
+
+- **cliclick cannot drag**: each invocation is a fresh process, so a
+  `dd:`/`m:`/`du:` split across invocations posts `mouseMoved` instead of
+  `leftMouseDragged`, and even single-invocation `-w` drags never started a
+  native drag session here. What works: JXA with the ObjC bridge posting
+  CGEvents directly — mouseDown, a few 1-px threshold-crossing drags, ~40
+  interpolated dragged events (30 ms apart), a hover pause, mouseUp
+  (`scratchpad drag.js` pattern). Clicks and AXPress remain fine for buttons.
+- Desktop icons don't render on this Mac (hidden desktop items), so a drag
+  must be sourced from a Finder window — list view, row coordinates read via
+  AX (`text field` values inside `entire contents of window 1`). The screen is
+  1168×755 logical and the app fills it; shrink the app window first to expose
+  a drag source, and note `Finder select` re-opens a browser window every
+  time it runs.
+- A staged file can miss an already-running sort job (the prompt embeds the
+  inbox at enqueue time). Deliberate: the file shows as `AWAITING PROPOSAL`
+  until the job settles, then `SORT INBOX` covers it; finalize skips entries
+  whose source vanished meanwhile, so approve-during-job races are safe.
+
 ## M7 — Chat sidebar, read-only (2026-08-22)
 
 ### Shape

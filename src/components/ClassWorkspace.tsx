@@ -12,6 +12,7 @@ import {
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GuideViewer } from "@/components/GuideViewer";
+import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import type { ClassInfo } from "@/lib/classes";
 import {
@@ -29,6 +30,7 @@ import {
   type ManagedFile,
 } from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
+import { useDragState } from "@/lib/sorter";
 
 const ACCENTS: Record<string, string> = {
   blue: "var(--class-blue)",
@@ -99,6 +101,7 @@ export function ClassWorkspace({
     queryFn: () => listNotes(info.id),
   });
 
+  const drag = useDragState();
   const [viewScope, setViewScope] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [synthError, setSynthError] = useState<string | null>(null);
@@ -174,6 +177,8 @@ export function ClassWorkspace({
           }
         />
       )}
+
+      <InboxQueue classId={info.id} tree={tree ?? []} />
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between border-b pb-3">
@@ -318,6 +323,23 @@ export function ClassWorkspace({
         </section>
       )}
 
+      {drag.active && (
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 z-40 bg-background/70 p-4 backdrop-blur-[2px] animate-in fade-in duration-150"
+        >
+          <div className="flex h-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-(--accent)">
+            <p className="font-mono text-[13px] font-bold tracking-[0.22em] text-(--accent)">
+              DROP TO SORT
+            </p>
+            <p className="text-[13px] text-muted-foreground">
+              Copies land in the inbox — originals stay put, and nothing moves
+              without your approval.
+            </p>
+          </div>
+        </div>
+      )}
+
       {viewedGuide && (
         <GuideViewer
           classId={info.id}
@@ -381,7 +403,8 @@ function EmptyMaterials({ classId }: { classId: number }) {
       />
       <p className="mt-4 text-[13px] font-medium">No material yet</p>
       <p className="mx-auto mt-1 max-w-sm text-[13px] text-muted-foreground">
-        Files added to this class folder in Finder appear here after a rescan.
+        Drop files anywhere in this window to sort them in — or add them to the
+        class folder in Finder and rescan.
       </p>
       <button
         type="button"

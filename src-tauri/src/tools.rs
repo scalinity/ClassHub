@@ -1581,7 +1581,8 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
             text.push_str(&format!("- {} → {}\n", mv.from_display, mv.to_display));
         }
         text.push_str(
-            "The approval queue UI arrives in an upcoming milestone; until then the proposals wait.",
+            "Each waits in the class workspace's inbox queue, where Daniel can approve, \
+             redirect, or decline it.",
         );
         Ok(Outcome::ok(text))
     })?;

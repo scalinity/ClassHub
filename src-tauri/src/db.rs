@@ -39,6 +39,9 @@ pub struct ClassCard {
     pub folder_present: bool,
     /// Card-level staleness badge (SPEC §12), computed on demand.
     pub stale_guides: i64,
+    /// Drop-to-sort badge (SPEC §10 step 5): pending proposals plus inbox
+    /// files nothing has proposed for yet.
+    pub inbox_pending: i64,
     /// Nearest open deadline (SPEC §12 card contents), overdue included —
     /// an open deadline in the past is the most urgent line on the card.
     pub next_deadline: Option<DeadlineChip>,
@@ -125,6 +128,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
 
         let folder_present = root.join(&folder_name).is_dir();
         let stale_guides = crate::guides::stale_guide_count(conn, id)?;
+        let inbox_pending = crate::sorter::pending_count(conn, id)?;
         // ISO text sorts chronologically, so MIN(due_at) is the nearest.
         let next_deadline = conn
             .query_row(
@@ -150,6 +154,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             folder_name,
             folder_present,
             stale_guides,
+            inbox_pending,
             next_deadline,
             meetings,
         });

@@ -7,6 +7,7 @@ import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { listClasses, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
+import { setDropTarget } from "@/lib/sorter";
 import { dragWindow } from "@/lib/window";
 
 function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
@@ -57,6 +58,9 @@ function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
 
 export default function App() {
   const [openClass, setOpenClass] = useState<ClassInfo | null>(null);
+  // Native file drops land in the open class's inbox (SPEC §10). A module
+  // variable read only by the drag-drop listener — idempotent to set here.
+  setDropTarget(openClass?.id ?? null);
 
   return (
     <QueryClientProvider client={queryClient}>
