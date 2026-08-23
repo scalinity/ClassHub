@@ -809,6 +809,46 @@ doesn't cover.
 - The rebuild Keychain prompt (post-M9 gotcha) appeared once and was denied —
   harmless here; chat was not part of this milestone's verification.
 
+## Post-M10 — Review fixes (2026-08-22)
+
+A two-agent review of the M10 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 8 warnings,
+and 12 suggestions; all were addressed as individual commits. What future
+sessions should know:
+
+- **A keyed form is load-bearing.** `DeadlineForm` seeds its fields in
+  useState initializers; rendered without a `key`, switching edit targets
+  reused the instance — old values, new id, wrong row overwritten on save.
+  It is now keyed by target (`"new"` or the row id). Any future form that
+  seeds state from props the same way needs the same key.
+- **Every write+audit pair commits as one transaction** (save, status
+  toggle, delete, proposal approval) — the audit row is the undo, so the
+  destructive statement must never outlive it. `unchecked_transaction` on
+  the shared connection is the established shape (sorter::record_move).
+- **A dismissed syllabus proposal stays dismissed**: finalize skips keys
+  with a `dismissed` row, and the prompt lists skipped items beside
+  recorded deadlines. Adding the deadline by hand is the way back.
+- **`valid_due_at` now checks the calendar** (month/day-in-month with leap
+  years, hour/minute/second ranges), not just the shape — model-supplied
+  scan dates made 2026-09-31 reachable, which rendered as a rolled-over
+  day while sorting/deduping as the stored text.
+- **ADD ALL is one backend call** (`approve_syllabus_proposals`): each
+  card approves independently, skipped ones stay in the queue with their
+  reasons surfaced, hub-changed fires once. The scan picker holds a busy
+  state while the scan command is in flight (double-click guard).
+- **Module homes**: `with_conn`/`emit_hub_change`/`now`/`audit` live in
+  db.rs; `parse_entries` in jobs.rs; `walk_tree` in scanner.rs;
+  `valid_due_at`/`DEADLINE_KINDS`/title+notes caps in deadlines.rs (the
+  domain module — tools.rs imports them). `Task` joined the read-only
+  deny list in jobs.rs, which is documented as THE security boundary for
+  proposal jobs. `CLASS_ACCENTS` in lib/classes.ts is the only accent map.
+- The M10 section above describes the pre-fix dedupe and resolution flow;
+  this section supersedes it where they differ.
+- Verified after the pass: clean rebuild (zero warnings), dashboard and
+  workspace render unchanged, and the critical was re-tested live — edit
+  Quiz 1, switch to edit Homework 1, form now shows Homework 1's values.
+- The repo has no git remote; review fixes are local commits only.
+
 ## Post-M9 — Review fixes (2026-08-22)
 
 A two-agent review of the M9 changeset (one bug-hunting pass, one
