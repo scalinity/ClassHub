@@ -679,20 +679,35 @@ fn update_index(
                 if let Some(parent) = new.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let _ = fs::rename(&old, &new);
+                if let Err(e) = fs::rename(&old, &new) {
+                    eprintln!("extract artifact move failed ({}): {e}", old.display());
+                }
             }
         }
-        let new_extract: Option<String> = conn
-            .query_row(
-                "SELECT extract_rel_path FROM files WHERE id = ?1",
-                [file_id],
-                |row| row.get::<_, Option<String>>(0),
-            )?
-            .map(|_| format!("{EXTRACTS_PREFIX}/{dest_rel}.md"));
-        conn.execute(
-            "UPDATE files SET rel_path = ?1, extract_rel_path = ?2 WHERE id = ?3",
-            params![dest_rel, new_extract, file_id],
+        let recorded: Option<String> = conn.query_row(
+            "SELECT extract_rel_path FROM files WHERE id = ?1",
+            [file_id],
+            |row| row.get::<_, Option<String>>(0),
         )?;
+        // Point the row at the relocated extract only if it actually landed.
+        // A row must never claim an extract that is not on disk — the source
+        // hash didn't change, so the pipeline would trust the dangling path
+        // forever; clearing the extract columns makes the next scan re-extract.
+        let md_ok = extracts.join(format!("{dest_rel}.md")).is_file();
+        if recorded.is_some() && !md_ok {
+            conn.execute(
+                "UPDATE files SET rel_path = ?1, extract_rel_path = NULL,
+                        extracted_at = NULL, extracted_sha256 = NULL
+                 WHERE id = ?2",
+                params![dest_rel, file_id],
+            )?;
+        } else {
+            let new_extract = recorded.map(|_| format!("{EXTRACTS_PREFIX}/{dest_rel}.md"));
+            conn.execute(
+                "UPDATE files SET rel_path = ?1, extract_rel_path = ?2 WHERE id = ?3",
+                params![dest_rel, new_extract, file_id],
+            )?;
+        }
     } else {
         let abs = class_dir.join(dest_rel);
         let meta = fs::metadata(&abs)?;
