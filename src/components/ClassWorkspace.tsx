@@ -15,7 +15,7 @@ import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GuideViewer } from "@/components/GuideViewer";
 import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
-import type { ClassInfo } from "@/lib/classes";
+import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
 import {
   formatGeneratedAt,
   listGuides,
@@ -32,13 +32,6 @@ import {
 } from "@/lib/materials";
 import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
 import { useDragState } from "@/lib/sorter";
-
-const ACCENTS: Record<string, string> = {
-  blue: "var(--class-blue)",
-  orange: "var(--class-orange)",
-  green: "var(--class-green)",
-  amber: "var(--class-amber)",
-};
 
 export function ClassWorkspace({
   info,
@@ -113,7 +106,7 @@ export function ClassWorkspace({
   const viewedGuide = viewScope ? (guideMap.get(viewScope) ?? null) : null;
 
   const style = {
-    "--accent": ACCENTS[info.color] ?? "var(--class-blue)",
+    "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
   const meetingLine = [

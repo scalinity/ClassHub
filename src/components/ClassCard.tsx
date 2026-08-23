@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 import { Card } from "@/components/ui/card";
-import type { ClassInfo } from "@/lib/classes";
+import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
 import {
   formatDueDate,
   formatTimeRange,
@@ -9,13 +9,6 @@ import {
   relativeLabel,
   weekdayLabel,
 } from "@/lib/schedule";
-
-const ACCENTS: Record<string, string> = {
-  blue: "var(--class-blue)",
-  orange: "var(--class-orange)",
-  green: "var(--class-green)",
-  amber: "var(--class-amber)",
-};
 
 const WEEKDAY_LETTERS = ["M", "T", "W", "T", "F"];
 
@@ -29,7 +22,7 @@ export function ClassCard({
   const next = nextMeeting(info.meetings);
   const meetingDays = new Set(info.meetings.map((m) => m.weekday));
   const style = {
-    "--accent": ACCENTS[info.color] ?? "var(--class-blue)",
+    "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
   return (
