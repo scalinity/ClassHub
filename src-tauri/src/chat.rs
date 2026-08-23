@@ -176,32 +176,74 @@ fn keychain() -> Result<keyring::v1::Entry> {
     })
 }
 
-/// One re-own pass per app run (see stored_key).
-static KEY_REOWNED: AtomicBool = AtomicBool::new(false);
+/// One-time migration marker: set once the Keychain item is known to have
+/// been created by this signed app (see stored_key's re-own).
+const KEY_REOWNED_SETTING: &str = "keychain_reowned";
 
-pub fn stored_key() -> Result<Option<String>> {
+/// Serializes the re-own's delete→re-add window against concurrent readers,
+/// so no overlapping `stored_key` call can observe the item mid-migration
+/// and report "no key saved".
+static REOWN_GUARD: Mutex<()> = Mutex::new(());
+
+/// Reads the key, self-healing item ownership on the way: an item created by
+/// anything else (older builds wrote it through the `security` CLI, whose
+/// items land in the Apple-tools protection partition) prompts on every read
+/// no matter its ACL; an item this signed app created reads silently, and
+/// stays readable across rebuilds because dev-sign.sh keeps the signing
+/// identity stable.
+///
+/// The re-own's delete→re-add is the one moment the Keychain holds no copy
+/// of a key the console only ever displays once — so it runs once ever
+/// (persistent settings flag, not once per run), retries the write-back, and
+/// surfaces a final failure as an error instead of a stderr note.
+pub fn stored_key(app: &AppHandle) -> Result<Option<String>> {
     let entry = keychain()?;
+    let _guard = lock(&REOWN_GUARD);
     match entry.get_password() {
         Ok(key) => {
-            // Self-healing ownership: once per run, delete and re-create the
-            // item so this app is its creator. An item created by anything
-            // else (older builds wrote it through the `security` CLI, whose
-            // items land in the Apple-tools protection partition) prompts on
-            // every read no matter its ACL; an item this signed app created
-            // reads silently, and stays readable across rebuilds because
-            // dev-sign.sh keeps the signing identity stable. A no-op cost on
-            // an already-owned item.
-            if !KEY_REOWNED.swap(true, Ordering::SeqCst) {
-                let _ = entry.delete_credential();
-                if let Err(e) = entry.set_password(&key) {
-                    eprintln!("keychain re-own failed (key still usable this run): {e}");
-                }
+            let reowned = with_conn(app, |conn| {
+                Ok(setting(conn, KEY_REOWNED_SETTING)?.is_some())
+            })
+            // An unreadable flag must not open the destructive window.
+            .unwrap_or(true);
+            if !reowned {
+                reown(app, &entry, &key)?;
             }
             Ok(Some(key))
         }
         Err(keyring::v1::Error::NoEntry) => Ok(None),
         Err(e) => Err(anyhow!("reading the API key from the Keychain: {e}")),
     }
+}
+
+/// Delete-then-add under REOWN_GUARD. Between the two calls this process's
+/// memory holds the only copy, so the add is retried and a final failure
+/// returns Err — the current turn fails loudly while the key is still in
+/// hand, rather than the next launch discovering an empty Keychain.
+fn reown(app: &AppHandle, entry: &keyring::v1::Entry, key: &str) -> Result<()> {
+    let _ = entry.delete_credential();
+    let mut wrote = entry.set_password(key);
+    for _ in 0..2 {
+        if wrote.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        wrote = entry.set_password(key);
+    }
+    wrote.map_err(|e| {
+        anyhow!(
+            "the Keychain item was removed for re-owning and could not be \
+             written back ({e}) — re-save the API key in chat settings"
+        )
+    })?;
+    mark_reowned(app);
+    Ok(())
+}
+
+/// Best-effort: a failed flag write only means the (now no-op) re-own runs
+/// again on a later read.
+fn mark_reowned(app: &AppHandle) {
+    let _ = with_conn(app, |conn| set_setting(conn, KEY_REOWNED_SETTING, "1"));
 }
 
 /// The app creates its own item, so the ACL pins to the app's code signature
@@ -211,22 +253,36 @@ pub fn stored_key() -> Result<Option<String>> {
 /// compile and would invalidate the grant. Delete-then-add, never update:
 /// updating an existing item keeps the old creator's ACL, which is exactly
 /// what a re-save must replace.
-pub fn save_key(key: &str) -> Result<()> {
+pub fn save_key(app: &AppHandle, key: &str) -> Result<()> {
     let key = key.trim();
     if key.is_empty() {
         bail!("paste an API key first");
     }
     let entry = keychain()?;
+    let _guard = lock(&REOWN_GUARD);
     let _ = entry.delete_credential();
     entry
         .set_password(key)
-        .map_err(|e| anyhow!("saving the API key to the Keychain: {e}"))
+        .map_err(|e| anyhow!("saving the API key to the Keychain: {e}"))?;
+    // A UI save IS an app-created item — no re-own migration needed for it.
+    mark_reowned(app);
+    Ok(())
 }
 
-pub fn delete_key() -> Result<()> {
+pub fn delete_key(app: &AppHandle) -> Result<()> {
     match keychain()?.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::v1::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(keyring::v1::Error::NoEntry) => {
+            // A future item may come from anywhere (e.g. the old CLI path);
+            // clearing the flag keeps the self-heal available for it.
+            let _ = with_conn(app, |conn| {
+                conn.execute(
+                    "DELETE FROM settings WHERE key = ?1",
+                    [KEY_REOWNED_SETTING],
+                )?;
+                Ok(())
+            });
+            Ok(())
+        }
         Err(e) => Err(anyhow!("removing the API key from the Keychain: {e}")),
     }
 }
@@ -239,7 +295,7 @@ pub fn settings(app: &AppHandle) -> Result<ChatSettings> {
         Ok((setting(conn, MODEL_SETTING)?, stored_effort(conn)?))
     })?;
     Ok(ChatSettings {
-        has_key: stored_key()?.is_some(),
+        has_key: stored_key(app)?.is_some(),
         model,
         effort,
     })
@@ -331,7 +387,7 @@ fn default_model(models: &[ModelOption]) -> String {
 
 /// The Settings picker's data: the live list plus the model chat will use.
 pub fn list_models(app: &AppHandle) -> Result<ModelList> {
-    let key = stored_key()?.context("save your Anthropic API key first")?;
+    let key = stored_key(app)?.context("save your Anthropic API key first")?;
     let models = on_worker(move || fetch_models(&key))?;
     let stored = with_conn(app, |conn| setting(conn, MODEL_SETTING))?;
     let selected = match stored {
@@ -556,7 +612,7 @@ pub fn send(
     if text.is_empty() {
         bail!("type a question first");
     }
-    let key = stored_key()?
+    let key = stored_key(app)?
         .context("no API key yet — add your Anthropic key in the chat settings")?;
 
     let (session_id, system, effort) = with_conn(app, |conn| {

@@ -400,13 +400,13 @@ fn chat_settings(app: tauri::AppHandle) -> Result<chat::ChatSettings, String> {
 
 /// The key goes to the macOS Keychain only — never the DB, never a file.
 #[tauri::command]
-fn save_chat_key(key: String) -> Result<(), String> {
-    chat::save_key(&key).map_err(|e| format!("{e:#}"))
+fn save_chat_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    chat::save_key(&app, &key).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-fn delete_chat_key() -> Result<(), String> {
-    chat::delete_key().map_err(|e| format!("{e:#}"))
+fn delete_chat_key(app: tauri::AppHandle) -> Result<(), String> {
+    chat::delete_key(&app).map_err(|e| format!("{e:#}"))
 }
 
 /// Live `GET /v1/models` plus the model chat will use (SPEC §9). Async so the
