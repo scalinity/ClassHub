@@ -43,7 +43,7 @@ fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Re
 
 /// Same push the chat write tools use (src/lib/query.ts maps areas to query
 /// invalidations): `proposals` for queue/badge changes, `files` after a move.
-fn emit_change(app: &AppHandle, area: &str) {
+fn emit_hub_change(app: &AppHandle, area: &str) {
     let _ = app.emit("hub-changed", json!({ "area": area }));
 }
 
@@ -160,7 +160,7 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     } else {
         enqueue_sort_job(app, class_id)?
     };
-    emit_change(app, "proposals"); // unproposed inbox files count on the card badge
+    emit_hub_change(app, "proposals"); // unproposed inbox files count on the card badge
     Ok(StageResult {
         staged,
         skipped_folders,
@@ -520,7 +520,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         }
         Ok(summary)
     })?;
-    emit_change(app, "proposals");
+    emit_hub_change(app, "proposals");
     Ok(summary)
 }
 
@@ -765,9 +765,9 @@ pub fn resolve_proposal(
             }
         }
     })?;
-    emit_change(app, "proposals");
+    emit_hub_change(app, "proposals");
     if approve {
-        emit_change(app, "files"); // the tree on disk changed
+        emit_hub_change(app, "files"); // the tree on disk changed
     }
     Ok(summary)
 }

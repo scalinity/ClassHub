@@ -166,7 +166,7 @@ fn stage_inbox_files(
 
 /// The workspace queue: inbox files + pending proposals (chat and sort_job).
 #[tauri::command]
-fn sort_state(
+fn get_sort_state(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<sorter::SortState, String> {
@@ -357,7 +357,7 @@ pub fn run() {
             list_notes,
             list_practice,
             stage_inbox_files,
-            sort_state,
+            get_sort_state,
             run_sort_job,
             resolve_move_proposal,
             list_jobs,

@@ -38,7 +38,7 @@ export interface StageResult {
 }
 
 export function getSortState(classId: number): Promise<SortState> {
-  return invoke<SortState>("sort_state", { classId });
+  return invoke<SortState>("get_sort_state", { classId });
 }
 
 /** Manual sort trigger: retry after a failure, or files left in the inbox. */
