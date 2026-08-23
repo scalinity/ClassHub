@@ -113,55 +113,62 @@ pub fn save_deadline(
     let title = title.trim();
     validate_fields(title, kind, due_at)?;
     let notes = notes.map(str::trim).filter(|n| !n.is_empty());
-    with_conn(app, |conn| match id {
-        None => {
-            conn.execute(
-                "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'manual')",
-                params![class_id, title, kind, due_at, notes],
-            )?;
-            audit(
-                conn,
-                "ui.upsert_deadline",
-                json!({ "id": conn.last_insert_rowid(), "classId": class_id, "title": title,
-                        "kind": kind, "dueAt": due_at, "notes": notes, "created": true }),
-            )
-        }
-        Some(id) => {
-            let before = conn
-                .query_row(
-                    "SELECT class_id, title, kind, due_at, notes FROM deadlines WHERE id = ?1",
-                    [id],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                            r.get::<_, Option<String>>(4)?,
-                        ))
-                    },
-                )
-                .optional()?
-                .with_context(|| format!("no deadline #{id}"))?;
-            if before.0 != class_id {
-                bail!("deadline #{id} belongs to a different class");
+    // Write + audit land as one unit — a history entry must not be lost to a
+    // failure between the two statements.
+    with_conn(app, |conn| {
+        let tx = conn.unchecked_transaction()?;
+        match id {
+            None => {
+                tx.execute(
+                    "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'manual')",
+                    params![class_id, title, kind, due_at, notes],
+                )?;
+                audit(
+                    &tx,
+                    "ui.upsert_deadline",
+                    json!({ "id": tx.last_insert_rowid(), "classId": class_id, "title": title,
+                            "kind": kind, "dueAt": due_at, "notes": notes, "created": true }),
+                )?;
             }
-            conn.execute(
-                "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4
-                 WHERE id = ?5",
-                params![title, kind, due_at, notes, id],
-            )?;
-            audit(
-                conn,
-                "ui.upsert_deadline",
-                json!({ "id": id, "classId": class_id,
-                        "before": { "title": before.1, "kind": before.2,
-                                    "dueAt": before.3, "notes": before.4 },
-                        "after": { "title": title, "kind": kind,
-                                   "dueAt": due_at, "notes": notes } }),
-            )
+            Some(id) => {
+                let before = tx
+                    .query_row(
+                        "SELECT class_id, title, kind, due_at, notes FROM deadlines WHERE id = ?1",
+                        [id],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                                r.get::<_, Option<String>>(4)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .with_context(|| format!("no deadline #{id}"))?;
+                if before.0 != class_id {
+                    bail!("deadline #{id} belongs to a different class");
+                }
+                tx.execute(
+                    "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4
+                     WHERE id = ?5",
+                    params![title, kind, due_at, notes, id],
+                )?;
+                audit(
+                    &tx,
+                    "ui.upsert_deadline",
+                    json!({ "id": id, "classId": class_id,
+                            "before": { "title": before.1, "kind": before.2,
+                                        "dueAt": before.3, "notes": before.4 },
+                            "after": { "title": title, "kind": kind,
+                                       "dueAt": due_at, "notes": notes } }),
+                )?;
+            }
         }
+        tx.commit()?;
+        Ok(())
     })?;
     emit_hub_change(app, "deadlines");
     Ok(())
@@ -171,24 +178,29 @@ pub fn save_deadline(
 pub fn set_deadline_status(app: &AppHandle, id: i64, done: bool) -> Result<()> {
     let status = if done { "done" } else { "open" };
     with_conn(app, |conn| {
-        let changed = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE deadlines SET status = ?1 WHERE id = ?2",
             params![status, id],
         )?;
         if changed == 0 {
             bail!("no deadline #{id}");
         }
-        audit(conn, "ui.set_deadline_status", json!({ "id": id, "status": status }))
+        audit(&tx, "ui.set_deadline_status", json!({ "id": id, "status": status }))?;
+        tx.commit()?;
+        Ok(())
     })?;
     emit_hub_change(app, "deadlines");
     Ok(())
 }
 
 /// The full row rides the audit entry, so a deletion is recoverable — that
-/// stands in for a confirmation prompt.
+/// stands in for a confirmation prompt. Delete and audit commit together:
+/// the audit row IS the undo, so the delete must never outlive it.
 pub fn delete_deadline(app: &AppHandle, id: i64) -> Result<()> {
     with_conn(app, |conn| {
-        let row = conn
+        let tx = conn.unchecked_transaction()?;
+        let row = tx
             .query_row(
                 "SELECT class_id, title, kind, due_at, notes, status, source
                  FROM deadlines WHERE id = ?1",
@@ -208,8 +220,10 @@ pub fn delete_deadline(app: &AppHandle, id: i64) -> Result<()> {
             )
             .optional()?
             .with_context(|| format!("no deadline #{id}"))?;
-        conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
-        audit(conn, "ui.delete_deadline", row)
+        tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        audit(&tx, "ui.delete_deadline", row)?;
+        tx.commit()?;
+        Ok(())
     })?;
     emit_hub_change(app, "deadlines");
     Ok(())
