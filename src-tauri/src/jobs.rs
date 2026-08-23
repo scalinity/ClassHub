@@ -24,6 +24,18 @@ const MAX_CONCURRENT: usize = 2;
 /// `--allowedTools` list alone does not restrict tools the user's own config
 /// permits (verified against claude 2.1.237), so deny rules are passed too.
 const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch";
+/// Kinds that only propose (sort/syllabus) must not be able to touch the tree
+/// at all — the additive-allowedTools behavior above applies to the write
+/// tools just the same, so read-only is only real if they are denied.
+const READ_ONLY_DISALLOWED: &str =
+    "Bash,WebFetch,WebSearch,Write,Edit,MultiEdit,NotebookEdit";
+
+fn disallowed_tools(kind: &str) -> &'static str {
+    match kind {
+        "sort_proposal" | "syllabus_scan" => READ_ONLY_DISALLOWED,
+        _ => DISALLOWED_TOOLS,
+    }
+}
 
 const SELF_CHECK_PROMPT: &str = "Reply with exactly: OK";
 
@@ -635,7 +647,7 @@ fn execute_job(
         .args(["--output-format", "stream-json", "--verbose"])
         .args(["--model", DEFAULT_MODEL])
         .args(["--effort", DEFAULT_EFFORT])
-        .args(["--disallowedTools", DISALLOWED_TOOLS])
+        .args(["--disallowedTools", disallowed_tools(&job.kind)])
         // The user-level claude config leaks MCP servers (e.g. web search)
         // into spawns; with no --mcp-config this loads zero MCP servers.
         .arg("--strict-mcp-config");
