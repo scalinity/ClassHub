@@ -7,41 +7,48 @@ export interface AppSettings {
   jobModel: string;
   jobEffort: string;
   jobConcurrency: number;
+  /** The values the backend's setters accept — the UI renders these. */
+  jobModels: string[];
+  jobEfforts: string[];
+  maxConcurrency: number;
 }
 
-/** CLI model aliases — each resolves to its current release at spawn time. */
-export const JOB_MODELS = [
-  {
-    id: "opus",
+/**
+ * Display copy for the backend-served option ids. The backend owns which ids
+ * exist; an id without copy here still renders (bare, uppercased).
+ */
+export const JOB_MODEL_COPY: Record<string, { label: string; note: string }> = {
+  opus: {
     label: "OPUS",
     note: "The deepest model — the shipped default for guides and extraction.",
   },
-  {
-    id: "sonnet",
+  sonnet: {
     label: "SONNET",
     note: "Mid-tier. Faster and lighter on the subscription window.",
   },
-  {
-    id: "haiku",
+  haiku: {
     label: "HAIKU",
     note: "Fastest and cheapest. Fine for throwaway probes, thin for synthesis.",
   },
-] as const;
+};
 
-/** The CLI's --effort ladder, cheapest first. */
-export const JOB_EFFORTS = [
-  { id: "low", label: "LOW", note: "Fewest tokens, fastest turnaround." },
-  { id: "medium", label: "MEDIUM", note: "Balanced reading and reasoning." },
-  { id: "high", label: "HIGH", note: "The CLI's own default." },
-  {
-    id: "xhigh",
+export const JOB_EFFORT_COPY: Record<string, { label: string; note: string }> = {
+  low: { label: "LOW", note: "Fewest tokens, fastest turnaround." },
+  medium: { label: "MEDIUM", note: "Balanced reading and reasoning." },
+  high: { label: "HIGH", note: "The CLI's own default." },
+  xhigh: {
     label: "XHIGH",
     note: "Extra-high — the shipped default for study-guide quality.",
   },
-  { id: "max", label: "MAX", note: "No ceiling on reasoning. Slowest." },
-] as const;
+  max: { label: "MAX", note: "No ceiling on reasoning. Slowest." },
+};
 
-export const MAX_JOB_CONCURRENCY = 4;
+export function optionCopy(
+  copy: Record<string, { label: string; note: string }>,
+  id: string,
+): { label: string; note: string } {
+  return copy[id] ?? { label: id.toUpperCase(), note: "" };
+}
 
 export function getAppSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("get_app_settings");

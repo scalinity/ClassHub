@@ -6,9 +6,9 @@ import { openChatSettings, useChat, EFFORT_LEVELS } from "@/lib/chat";
 import { queryClient } from "@/lib/query";
 import {
   getAppSettings,
-  JOB_EFFORTS,
-  JOB_MODELS,
-  MAX_JOB_CONCURRENCY,
+  JOB_EFFORT_COPY,
+  JOB_MODEL_COPY,
+  optionCopy,
   setAibhsRoot,
   setJobConcurrency,
   setJobEffort,
@@ -114,16 +114,19 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               MODEL
             </p>
             <div className="mt-2 space-y-1">
-              {JOB_MODELS.map((model) => (
-                <OptionRow
-                  key={model.id}
-                  label={model.label}
-                  note={model.note}
-                  selected={settings.jobModel === model.id}
-                  disabled={pending}
-                  onSelect={() => apply(setJobModel(model.id))}
-                />
-              ))}
+              {settings.jobModels.map((id) => {
+                const copy = optionCopy(JOB_MODEL_COPY, id);
+                return (
+                  <OptionRow
+                    key={id}
+                    label={copy.label}
+                    note={copy.note}
+                    selected={settings.jobModel === id}
+                    disabled={pending}
+                    onSelect={() => apply(setJobModel(id))}
+                  />
+                );
+              })}
             </div>
 
             <p className="mt-6 font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
@@ -133,16 +136,19 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               How long a job may read and reason before it writes.
             </p>
             <div className="mt-2 space-y-1">
-              {JOB_EFFORTS.map((effort) => (
-                <OptionRow
-                  key={effort.id}
-                  label={effort.label}
-                  note={effort.note}
-                  selected={settings.jobEffort === effort.id}
-                  disabled={pending}
-                  onSelect={() => apply(setJobEffort(effort.id))}
-                />
-              ))}
+              {settings.jobEfforts.map((id) => {
+                const copy = optionCopy(JOB_EFFORT_COPY, id);
+                return (
+                  <OptionRow
+                    key={id}
+                    label={copy.label}
+                    note={copy.note}
+                    selected={settings.jobEffort === id}
+                    disabled={pending}
+                    onSelect={() => apply(setJobEffort(id))}
+                  />
+                );
+              })}
             </div>
 
             <p className="mt-6 font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
@@ -153,7 +159,7 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               whatever this says.
             </p>
             <div className="mt-2.5 flex items-center gap-1.5">
-              {Array.from({ length: MAX_JOB_CONCURRENCY }, (_, i) => i + 1).map(
+              {Array.from({ length: settings.maxConcurrency }, (_, i) => i + 1).map(
                 (count) => (
                   <button
                     key={count}

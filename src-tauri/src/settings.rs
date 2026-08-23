@@ -36,6 +36,11 @@ pub struct AppSettings {
     pub job_model: String,
     pub job_effort: String,
     pub job_concurrency: usize,
+    /// What the setters accept — served so the UI renders exactly the values
+    /// the backend will take, instead of keeping a second copy of the lists.
+    pub job_models: Vec<String>,
+    pub job_efforts: Vec<String>,
+    pub max_concurrency: usize,
 }
 
 pub fn get(app: &AppHandle) -> Result<AppSettings> {
@@ -47,6 +52,9 @@ pub fn get(app: &AppHandle) -> Result<AppSettings> {
             job_model: job_model(conn),
             job_effort: job_effort(conn),
             job_concurrency: concurrency(conn),
+            job_models: JOB_MODELS.iter().map(|m| m.to_string()).collect(),
+            job_efforts: JOB_EFFORTS.iter().map(|e| e.to_string()).collect(),
+            max_concurrency: MAX_JOB_CONCURRENCY,
         })
     })
 }
