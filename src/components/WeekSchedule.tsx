@@ -130,6 +130,18 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
       </div>
 
       <div className="relative" style={{ height: `${canvasHeight}px` }}>
+        {/* Frame and hour rules live beside the columns in the SAME box, so
+            their percentages and the blocks' resolve against one basis — a
+            border on the columns container would shrink the blocks' basis by
+            its own width and let the two drift. */}
+        <div
+          aria-hidden
+          className="absolute top-0 right-0 left-10 border-t border-border/60"
+        />
+        <div
+          aria-hidden
+          className="absolute right-0 bottom-0 left-10 border-b border-border/60"
+        />
         {hourMarks.map((h) => (
           <div key={h} aria-hidden>
             <div
@@ -145,7 +157,7 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
           </div>
         ))}
 
-        <div className="relative ml-10 grid h-full grid-cols-5 border-y border-border/60">
+        <div className="relative ml-10 grid h-full grid-cols-5">
           {DAY_LABELS.map((label, i) => (
             <div
               key={label}
