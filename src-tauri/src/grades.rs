@@ -63,6 +63,8 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
 
     let mut categories = Vec::with_capacity(heads.len());
     let mut weight_total = 0.0;
+    let mut grade_weight_sum = 0.0;
+    let mut grade_acc = 0.0;
     for (id, name, weight) in heads {
         let items = item_stmt
             .query_map([id], |row| {
@@ -76,8 +78,15 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
             })?
             .collect::<rusqlite::Result<Vec<GradeItem>>>()?;
         let max_sum: f64 = items.iter().map(|i| i.max_score).sum();
-        let percent = (max_sum > 0.0)
-            .then(|| items.iter().map(|i| i.score).sum::<f64>() / max_sum * 100.0);
+        let score_sum: f64 = items.iter().map(|i| i.score).sum();
+        let percent = (max_sum > 0.0).then(|| score_sum / max_sum * 100.0);
+        // Same gate as weighted_grade (the card and chat path): categories
+        // with graded items and a positive weight, renormalized. Derived from
+        // the rows already in hand so the two numbers cannot drift.
+        if max_sum > 0.0 && weight > 0.0 {
+            grade_weight_sum += weight;
+            grade_acc += weight * (score_sum / max_sum);
+        }
         weight_total += weight;
         categories.push(GradeCategory {
             id,
@@ -88,7 +97,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
         });
     }
     Ok(GradesInfo {
-        current_grade: weighted_grade(conn, class_id)?,
+        current_grade: (grade_weight_sum > 0.0).then(|| grade_acc / grade_weight_sum * 100.0),
         categories,
         weight_total,
     })
