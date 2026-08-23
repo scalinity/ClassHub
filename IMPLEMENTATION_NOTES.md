@@ -701,6 +701,58 @@ doesn't cover.
   until the job settles, then `SORT INBOX` covers it; finalize skips entries
   whose source vanished meanwhile, so approve-during-job races are safe.
 
+## Post-M9 — Review fixes (2026-08-22)
+
+A two-agent review of the M9 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 15 warnings,
+and 7 suggestions; all were addressed as individual commits (9daea3f..a0d87f8).
+The highlights future sessions should know about:
+
+- **Read-only job kinds now deny the write tools.** `--allowedTools` is
+  additive against the user-level claude config (the M3 finding), so
+  `sort_proposal`/`syllabus_scan` could still have used Write/Edit despite
+  their Read,Glob,Grep allowlist. `jobs::disallowed_tools(kind)` gives those
+  kinds a deny list including Write, Edit, MultiEdit, NotebookEdit. Any
+  future read-only kind must be added to that match arm.
+- **The approve path is atomic.** `record_move` wraps index update + audit +
+  proposal resolution in one transaction (`unchecked_transaction` — the
+  shared connection is behind `&`), clears a stale index row occupying the
+  destination first, and on failure the rename and any moved extract
+  artifacts are reversed. A relocated extract that didn't land clears the
+  extract columns so the pipeline re-extracts instead of trusting a dangling
+  path.
+- **Dismissal is terminal, per path.** Dismissed inbox files stop counting
+  toward the badge and are excluded from automatic sort runs (manual SORT
+  INBOX includes them again); staging deletes stale dismissed rows for paths
+  it just filled, so a re-dropped file is a fresh decision. The sort job's
+  automatic runs also skip files with pending proposals — cards under review
+  never get silently rewritten; after a sort job succeeds, a follow-up run
+  covers files dropped while it was busy.
+- Proposal JSON now parses per entry (one malformed entry costs itself, not
+  the batch) and the array is located by a bracket followed by `{`/`]`, so
+  bracketed filenames in surrounding prose can't break the slice. Staging is
+  batch-tolerant the same way, and StageResult (folder skips, per-file
+  failures) surfaces as a dismissable, class-scoped notice.
+- Frontend: drop notices are scoped to their class; `setDropTarget` is a
+  pure assignment (no store notification during App's render); the queue
+  renders a neutral state while the tree query is in flight instead of
+  claiming every folder is new; the picker preserves a proposed rename.
+- The app-managed denylist lives once (`scanner::APP_MANAGED_DIRS`), both
+  move validators reject dotted segments at every depth (the scanner hides
+  those everywhere), and the queue command is `get_sort_state`.
+
+### Gotchas
+
+- **The Keychain prompt is back on every rebuild.** Despite the M7 `-A`
+  ACL note, the rebuilt dev binary triggered the login-keychain password
+  prompt on launch twice this session (macOS 27 appears to have tightened
+  any-application ACLs for ad-hoc-signed binaries). Denying is safe — chat
+  simply sees no key for that run — but the M7 remove-and-re-save advice
+  needs revisiting whenever chat is next used from a fresh build.
+- The AX tree needs a beat after the webview (re)loads: the first
+  entire-contents button search after a rebuild reliably returned nothing;
+  the retry a second later found everything.
+
 ## M7 — Chat sidebar, read-only (2026-08-22)
 
 ### Shape
