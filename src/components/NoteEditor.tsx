@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
@@ -90,6 +90,9 @@ function EditorBody({
 
   const dirty = content !== savedContent;
   const savable = title.trim() !== "" && content.trim() !== "";
+  // Parse only when the content changes — every other render (title
+  // keystrokes, busy flips) reuses the built document.
+  const previewHtml = useMemo(() => docShell(renderMarkdown(content)), [content]);
 
   const save = (thenClose: boolean) => {
     if (busy || !dirty || !savable) return;
@@ -221,7 +224,7 @@ function EditorBody({
         <iframe
           sandbox="allow-same-origin"
           title="Note preview"
-          ref={(el) => syncPreview(el, docShell(renderMarkdown(content)))}
+          ref={(el) => syncPreview(el, previewHtml)}
           className="block h-full w-full border-0"
         />
       </div>
