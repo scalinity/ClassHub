@@ -65,7 +65,12 @@ export function InboxQueue({
   const proposals = data?.proposals ?? [];
   const proposedSources = new Set(proposals.map((p) => p.sourceRelPath));
   const unproposed = inbox.filter(
-    (f) => !proposedSources.has(`_Inbox/${f.name}`),
+    (f) => !proposedSources.has(`_Inbox/${f.name}`) && !f.dismissed,
+  );
+  // Dismissed files are decisions already made: shown quietly when the
+  // section is open for other reasons, never counted, never nagging.
+  const dismissed = inbox.filter(
+    (f) => f.dismissed && !proposedSources.has(`_Inbox/${f.name}`),
   );
   const count = proposals.length + unproposed.length;
 
@@ -97,7 +102,7 @@ export function InboxQueue({
                 : "SORT QUEUED"}
             </span>
           ) : (
-            unproposed.length > 0 && (
+            (unproposed.length > 0 || dismissed.length > 0) && (
               <button
                 type="button"
                 onClick={sortNow}
@@ -152,6 +157,30 @@ export function InboxQueue({
                 AWAITING PROPOSAL
               </span>
             )}
+            <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
+              {formatSize(f.size)}
+            </span>
+          </div>
+        ))}
+        {dismissed.map((f) => (
+          <div
+            key={f.name}
+            className="flex h-8 items-center gap-2 rounded-md px-2 opacity-60"
+          >
+            <File
+              size={14}
+              aria-hidden
+              className="shrink-0 text-muted-foreground/60"
+            />
+            <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
+              {f.name}
+            </span>
+            <span
+              title="You chose to leave this file in the inbox — SORT INBOX proposes it again"
+              className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70"
+            >
+              LEFT IN INBOX
+            </span>
             <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
               {formatSize(f.size)}
             </span>

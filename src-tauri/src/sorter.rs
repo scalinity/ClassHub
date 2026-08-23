@@ -55,6 +55,10 @@ fn emit_change(app: &AppHandle, area: &str) {
 pub struct InboxFile {
     pub name: String,
     pub size: i64,
+    /// The user dismissed this file's proposal ("leave in inbox") and no new
+    /// pending proposal exists: it stops counting and stops being re-proposed
+    /// automatically; only a manual SORT INBOX includes it again.
+    pub dismissed: bool,
 }
 
 #[derive(Serialize)]
@@ -195,7 +199,7 @@ fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
         if has_active_sort(conn, class_id)? {
             return Ok(None);
         }
-        build_prompt(conn, class_id).map(Some)
+        build_prompt(conn, class_id, false)
     })?;
     // Enqueued outside the DB lock — the job runner takes the lock itself.
     match prompt {
@@ -204,14 +208,17 @@ fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     }
 }
 
-/// Manual trigger: retry after a failed job, or files left sitting in the inbox.
+/// Manual trigger: retry after a failed job, files left sitting in the inbox,
+/// or an explicit re-sort — manual runs cover every inbox file, dismissed
+/// ones included (the escape hatch out of a dismissal).
 pub fn run_sort_job(app: &AppHandle, class_id: i64) -> Result<i64> {
     let prompt = with_conn(app, |conn| {
         if has_active_sort(conn, class_id)? {
             bail!("a sort job for this class is already queued or running");
         }
-        build_prompt(conn, class_id)
-    })?;
+        build_prompt(conn, class_id, true)
+    })?
+    .context("the inbox is empty — drop files onto the workspace first")?;
     crate::jobs::enqueue_sort(app, class_id, &prompt)
 }
 
@@ -226,19 +233,33 @@ fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {
     Ok(count > 0)
 }
 
-/// SPEC §10 step 2: the job receives the inbox listing + the class folder tree.
-fn build_prompt(conn: &Connection, class_id: i64) -> Result<String> {
+/// SPEC §10 step 2: the job receives the inbox listing + the class folder
+/// tree. Automatic runs (post-drop, follow-up) cover only fresh files —
+/// nothing already pending (the user may be reviewing those cards) and
+/// nothing dismissed; a manual SORT INBOX re-proposes everything. Ok(None)
+/// means there is nothing in scope to sort.
+fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option<String>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let (pending, dismissed) = proposal_sources(conn, class_id)?;
+    let inbox: Vec<InboxFile> = list_inbox(&class_dir)
+        .into_iter()
+        .filter(|f| {
+            if manual {
+                return true;
+            }
+            let key = format!("{INBOX_DIR}/{}", f.name);
+            !pending.contains(&key) && !dismissed.contains(&key)
+        })
+        .collect();
+    if inbox.is_empty() {
+        return Ok(None);
+    }
     let class_name: String = conn.query_row(
         "SELECT display_name FROM classes WHERE id = ?1",
         [class_id],
         |row| row.get(0),
     )?;
 
-    let inbox = list_inbox(&class_dir);
-    if inbox.is_empty() {
-        bail!("the inbox is empty — drop files onto the workspace first");
-    }
     let inbox_block = inbox
         .iter()
         .map(|f| format!("- {INBOX_DIR}/{} ({})", f.name, format_size(f.size)))
@@ -254,10 +275,12 @@ fn build_prompt(conn: &Connection, class_id: i64) -> Result<String> {
         tree_lines.join("\n")
     };
 
-    Ok(PROMPT_TEMPLATE
-        .replace("{class}", &class_name)
-        .replace("{inbox}", &inbox_block)
-        .replace("{tree}", &tree_block))
+    Ok(Some(
+        PROMPT_TEMPLATE
+            .replace("{class}", &class_name)
+            .replace("{inbox}", &inbox_block)
+            .replace("{tree}", &tree_block),
+    ))
 }
 
 /// Depth-first listing (`dir/` lines, then files) mirroring the scanner's
@@ -340,15 +363,56 @@ fn list_inbox(class_dir: &Path) -> Vec<InboxFile> {
                 return None;
             }
             let size = e.metadata().map(|m| m.len() as i64).unwrap_or(0);
-            Some(InboxFile { name, size })
+            Some(InboxFile {
+                name,
+                size,
+                dismissed: false, // filled in from move_proposals by the callers
+            })
         })
         .collect();
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     files
 }
 
+/// Pending and dismissed source paths for a class, in cheap form (no
+/// reasoning strings — this also feeds the per-card badge on every
+/// dashboard refetch). A source counts as dismissed only while no newer
+/// pending proposal exists for it.
+fn proposal_sources(
+    conn: &Connection,
+    class_id: i64,
+) -> Result<(HashSet<String>, HashSet<String>)> {
+    let mut stmt = conn.prepare(
+        "SELECT source_rel_path, status FROM move_proposals
+         WHERE class_id = ?1 AND status IN ('pending', 'dismissed')",
+    )?;
+    let rows = stmt.query_map([class_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut pending = HashSet::new();
+    let mut dismissed = HashSet::new();
+    for row in rows {
+        let (source, status) = row?;
+        if status == "pending" {
+            pending.insert(source);
+        } else {
+            dismissed.insert(source);
+        }
+    }
+    dismissed.retain(|s| !pending.contains(s));
+    Ok((pending, dismissed))
+}
+
 pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let (_, dismissed) = proposal_sources(conn, class_id)?;
+    let inbox = list_inbox(&class_dir)
+        .into_iter()
+        .map(|mut file| {
+            file.dismissed = dismissed.contains(&format!("{INBOX_DIR}/{}", file.name));
+            file
+        })
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT id, source_rel_path, dest_rel_path, reasoning, confidence, source, created_at
          FROM move_proposals WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
@@ -366,27 +430,23 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(SortState {
-        inbox: list_inbox(&class_dir),
-        proposals,
-    })
+    Ok(SortState { inbox, proposals })
 }
 
-/// Card badge (SPEC §10 step 5): everything waiting in the sorting flow —
-/// pending proposals plus inbox files nothing has proposed for yet.
+/// Card badge (SPEC §10 step 5): everything actually waiting on a decision —
+/// pending proposals plus inbox files that are neither proposed nor
+/// dismissed. A dismissed file is a decision already made; it stops counting.
 pub fn pending_count(conn: &Connection, class_id: i64) -> Result<i64> {
-    let state = sort_state(conn, class_id)?;
-    let proposed: HashSet<&str> = state
-        .proposals
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let (pending, dismissed) = proposal_sources(conn, class_id)?;
+    let fresh = list_inbox(&class_dir)
         .iter()
-        .map(|p| p.source_rel_path.as_str())
-        .collect();
-    let unproposed = state
-        .inbox
-        .iter()
-        .filter(|f| !proposed.contains(format!("{INBOX_DIR}/{}", f.name).as_str()))
+        .filter(|f| {
+            let key = format!("{INBOX_DIR}/{}", f.name);
+            !pending.contains(&key) && !dismissed.contains(&key)
+        })
         .count();
-    Ok(state.proposals.len() as i64 + unproposed as i64)
+    Ok(pending.len() as i64 + fresh as i64)
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,10 @@ import { useSyncExternalStore } from "react";
 export interface InboxFile {
   name: string;
   size: number;
+  /** Its proposal was dismissed ("leave in inbox") — a decision already made:
+   * it stops counting toward the badge and only a manual SORT INBOX
+   * re-proposes it. */
+  dismissed: boolean;
 }
 
 export type Confidence = "high" | "medium" | "low";
