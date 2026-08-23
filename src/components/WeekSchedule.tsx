@@ -95,7 +95,9 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
   const axisEnd =
     Math.ceil(Math.max(...blocks.map((b) => toMinutes(b.meeting.endTime))) / 60) *
     60;
-  const span = axisEnd - axisStart;
+  // Never zero: meetings whose start equals their end (possible only via
+  // hand-edited rows) would otherwise make pct() emit NaN geometry.
+  const span = Math.max(axisEnd - axisStart, 60);
   const canvasHeight = (span / 60) * PX_PER_HOUR;
   const pct = (minutes: number) => ((minutes - axisStart) / span) * 100;
 
