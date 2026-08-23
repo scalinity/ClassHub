@@ -85,6 +85,8 @@ pub struct SortState {
 pub struct StageResult {
     pub staged: Vec<String>,
     pub skipped_folders: usize,
+    /// Per-file staging failures ("name: reason") — the batch survives them.
+    pub failed: Vec<String>,
     /// The auto-enqueued sort job; None when one was already queued/running.
     pub job_id: Option<i64>,
 }
@@ -102,36 +104,50 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     let inbox = class_dir.join(INBOX_DIR);
     fs::create_dir_all(&inbox)?;
 
+    // A drop is a batch: one bad member costs itself, never the rest, and
+    // whatever staged is always announced and sorted.
     let mut staged = Vec::new();
     let mut skipped_folders = 0usize;
+    let mut failed = Vec::new();
     for raw in paths {
         let path = PathBuf::from(raw);
-        let meta =
-            fs::symlink_metadata(&path).with_context(|| format!("no such file: {raw}"))?;
-        if meta.is_dir() {
-            // Staging stays predictable: files only, and the skip is reported.
-            skipped_folders += 1;
-            continue;
-        }
-        let name = path
-            .file_name()
-            .with_context(|| format!("dropped path has no file name: {raw}"))?
-            .to_string_lossy()
-            .into_owned();
+        let name = match path.file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => {
+                failed.push(format!("{raw}: no file name"));
+                continue;
+            }
+        };
         if name.starts_with('.') {
             continue;
         }
+        // fs::metadata resolves symlinks, so a link to a folder counts as a
+        // folder skip instead of failing the copy below.
+        let meta = match fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                failed.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        if meta.is_dir() {
+            // Staging stays predictable: files only, and the skip is surfaced.
+            skipped_folders += 1;
+            continue;
+        }
         let target = free_slot(&inbox, &name);
-        fs::copy(&path, &target).with_context(|| format!("copying {name} into the inbox"))?;
-        staged.push(
-            target
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-        );
+        match fs::copy(&path, &target) {
+            Ok(_) => staged.push(
+                target
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
     }
-    if staged.is_empty() && skipped_folders == 0 {
+    if staged.is_empty() && skipped_folders == 0 && failed.is_empty() {
         bail!("nothing was staged");
     }
 
@@ -144,6 +160,7 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     Ok(StageResult {
         staged,
         skipped_folders,
+        failed,
         job_id,
     })
 }
