@@ -1130,6 +1130,10 @@ commits. What future sessions should know:
   display copy. `list_grades` derives its current grade from the rows it
   already read (same gate as `weighted_grade`); the note preview parse is
   memoized on content.
+- **The shared document shell carries a CSP** (`default-src 'none'` plus
+  inline styles and data: images): the frame sandbox blocks scripts but not
+  fetches, so without it a note embedding a remote image still hit the
+  network. Guides and class HTML notebooks have their own shells.
 - **Known growth term, accepted:** every note save embeds the full replaced
   content in `audit_log` — that IS the undo mechanism, but a 1 MB note
   edited fifty times is 50 MB of database with no pruning path. Revisit only
