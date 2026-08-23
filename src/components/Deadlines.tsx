@@ -13,6 +13,7 @@ import {
   saveDeadline,
   setDeadlineStatus,
   type Deadline,
+  type DeadlineKind,
   type SyllabusProposal,
 } from "@/lib/deadlines";
 import { useJobs } from "@/lib/jobs";
@@ -452,7 +453,7 @@ function DeadlineForm({
   const [time, setTime] = useState(
     deadline?.dueAt.includes("T") ? deadline.dueAt.split("T")[1].slice(0, 5) : "",
   );
-  const [kind, setKind] = useState(deadline?.kind ?? "assignment");
+  const [kind, setKind] = useState<DeadlineKind>(deadline?.kind ?? "assignment");
   const [notes, setNotes] = useState(deadline?.notes ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -493,7 +494,7 @@ function DeadlineForm({
         />
         <select
           value={kind}
-          onChange={(e) => setKind(e.target.value)}
+          onChange={(e) => setKind(e.target.value as DeadlineKind)}
           aria-label="Deadline kind"
           className={`${inputBase} cursor-pointer`}
         >

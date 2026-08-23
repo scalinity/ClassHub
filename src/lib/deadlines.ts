@@ -17,7 +17,8 @@ export interface Deadline {
   className: string;
   classColor: string;
   title: string;
-  kind: string;
+  /** Every write path validates against DEADLINE_KINDS, so rows are in-domain. */
+  kind: DeadlineKind;
   /** ISO as stored: YYYY-MM-DD, optionally with THH:MM[:SS]. */
   dueAt: string;
   notes: string | null;
@@ -36,7 +37,7 @@ export function saveDeadline(args: {
   classId: number;
   id?: number;
   title: string;
-  kind: string;
+  kind: DeadlineKind;
   dueAt: string;
   notes?: string;
 }): Promise<void> {
@@ -65,7 +66,8 @@ export interface SyllabusProposal {
   id: number;
   classId: number;
   title: string;
-  kind: string;
+  /** Normalized into DEADLINE_KINDS by the scan's finalize. */
+  kind: DeadlineKind;
   dueAt: string;
   notes: string | null;
   createdAt: number;
