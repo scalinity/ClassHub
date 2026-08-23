@@ -88,27 +88,44 @@ pub fn job_concurrency(app: &AppHandle) -> usize {
     with_conn(app, |conn| Ok(concurrency(conn))).unwrap_or(DEFAULT_JOB_CONCURRENCY)
 }
 
+/// One shape for every setting write: the value and its before/after audit
+/// row commit together. These decide what a subscription-billed spawn runs
+/// with, so "when did this change" is exactly what the history is for. The
+/// action name derives from the key (`ui.set_job_model`, `ui.set_aibhs_root`).
+fn set_audited(app: &AppHandle, key: &str, value: &str) -> Result<()> {
+    with_conn(app, |conn| {
+        let before = setting(conn, key)?;
+        let tx = conn.unchecked_transaction()?;
+        set_setting(&tx, key, value)?;
+        audit(
+            &tx,
+            &format!("ui.set_{key}"),
+            json!({ "before": before, "after": value }),
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub fn set_job_model(app: &AppHandle, model: &str) -> Result<()> {
     if !JOB_MODELS.contains(&model) {
         bail!("model must be one of: {}", JOB_MODELS.join(", "));
     }
-    with_conn(app, |conn| set_setting(conn, MODEL_SETTING, model))
+    set_audited(app, MODEL_SETTING, model)
 }
 
 pub fn set_job_effort(app: &AppHandle, effort: &str) -> Result<()> {
     if !JOB_EFFORTS.contains(&effort) {
         bail!("effort must be one of: {}", JOB_EFFORTS.join(", "));
     }
-    with_conn(app, |conn| set_setting(conn, EFFORT_SETTING, effort))
+    set_audited(app, EFFORT_SETTING, effort)
 }
 
 pub fn set_job_concurrency(app: &AppHandle, count: usize) -> Result<()> {
     if !(1..=MAX_JOB_CONCURRENCY).contains(&count) {
         bail!("concurrency is between 1 and {MAX_JOB_CONCURRENCY}");
     }
-    with_conn(app, |conn| {
-        set_setting(conn, CONCURRENCY_SETTING, &count.to_string())
-    })
+    set_audited(app, CONCURRENCY_SETTING, &count.to_string())
 }
 
 /// Points the app at a different AIBHS tree. `~/` expands; the folder must
@@ -132,15 +149,5 @@ pub fn set_aibhs_root(app: &AppHandle, path: &str) -> Result<()> {
     if !expanded.is_dir() {
         bail!("no folder at {}", expanded.display());
     }
-    with_conn(app, |conn| {
-        let before = crate::db::aibhs_root(conn)?;
-        set_setting(conn, "aibhs_root", &expanded.to_string_lossy())?;
-        audit(
-            conn,
-            "ui.set_aibhs_root",
-            json!({ "before": before.to_string_lossy(),
-                    "after": expanded.to_string_lossy() }),
-        )?;
-        Ok(())
-    })
+    set_audited(app, "aibhs_root", &expanded.to_string_lossy())
 }
