@@ -78,6 +78,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_job_payload.sql"),
     include_str!("../migrations/0003_move_proposals.sql"),
     include_str!("../migrations/0004_deadline_proposals.sql"),
+    include_str!("../migrations/0005_grade_checks.sql"),
 ];
 
 #[derive(Serialize)]
