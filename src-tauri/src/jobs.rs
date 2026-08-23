@@ -27,8 +27,14 @@ const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch";
 /// Kinds that only propose (sort/syllabus) must not be able to touch the tree
 /// at all — the additive-allowedTools behavior above applies to the write
 /// tools just the same, so read-only is only real if they are denied.
+///
+/// This deny list IS the security boundary for read-only kinds (the allow
+/// list does not restrict, see above), and a deny list only stops names it
+/// enumerates — when the CLI grows a new write-capable or delegating tool,
+/// its name must be added here. `Task` is denied because a spawned sub-agent
+/// is a path around the parent's tool scoping.
 const READ_ONLY_DISALLOWED: &str =
-    "Bash,WebFetch,WebSearch,Write,Edit,MultiEdit,NotebookEdit";
+    "Bash,WebFetch,WebSearch,Write,Edit,MultiEdit,NotebookEdit,Task";
 
 fn disallowed_tools(kind: &str) -> &'static str {
     match kind {
