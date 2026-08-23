@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::tools::{audit, valid_due_at, DEADLINE_KINDS};
+use crate::tools::{
+    audit, truncate, valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS,
+};
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/syllabus.md");
 
@@ -110,9 +112,12 @@ pub fn save_deadline(
     due_at: &str,
     notes: Option<&str>,
 ) -> Result<()> {
-    let title = title.trim();
-    validate_fields(title, kind, due_at)?;
-    let notes = notes.map(str::trim).filter(|n| !n.is_empty());
+    let title = truncate(title.trim(), MAX_TITLE_CHARS);
+    validate_fields(&title, kind, due_at)?;
+    let notes = notes
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|n| truncate(n, MAX_NOTES_CHARS));
     // Write + audit land as one unit — a history entry must not be lost to a
     // failure between the two statements.
     with_conn(app, |conn| {
@@ -422,7 +427,9 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                     continue;
                 }
             };
-            let title = entry.title.trim();
+            // The untrusted boundary: model-supplied text gets capped here,
+            // before it can enter storage (and the next scan's prompt).
+            let title = truncate(entry.title.trim(), MAX_TITLE_CHARS);
             if title.is_empty() {
                 skipped.push(format!("entry {} (empty title)", index + 1));
                 continue;
@@ -438,7 +445,12 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                 .map(str::to_lowercase)
                 .filter(|k| DEADLINE_KINDS.contains(&k.as_str()))
                 .unwrap_or_else(|| "other".to_string());
-            let notes = entry.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let notes = entry
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(|n| truncate(n, MAX_NOTES_CHARS));
 
             // Dedupe on (title, due date): within the batch, against existing
             // deadlines of any status, and one pending proposal per key.

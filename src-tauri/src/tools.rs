@@ -965,6 +965,13 @@ fn safe_join(root: &Path, rel_path: &str) -> Result<PathBuf> {
 
 pub(crate) const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "project", "other"];
 
+/// Caps applied wherever a deadline title or notes crosses a boundary (chat
+/// tool, UI form, syllabus scan). The scan is the one place model-supplied
+/// document text enters persistent storage — and stored titles feed back
+/// into the next scan's prompt, so unbounded growth would compound.
+pub(crate) const MAX_TITLE_CHARS: usize = 200;
+pub(crate) const MAX_NOTES_CHARS: usize = 1000;
+
 /// ISO date, optionally with a time: YYYY-MM-DD[THH:MM[:SS]]. Stored as given;
 /// lexicographic order is chronological order for this shape. Shared with the
 /// UI's deadline writes and the syllabus scan (deadlines.rs) — one validation
@@ -1045,7 +1052,7 @@ fn upsert_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
 }
 
 fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result<Outcome> {
-    let title = str_arg(input, "title")?;
+    let title = truncate(&str_arg(input, "title")?, MAX_TITLE_CHARS);
     let kind = opt_str_arg(input, "kind").unwrap_or_else(|| "other".to_string());
     if !DEADLINE_KINDS.contains(&kind.as_str()) {
         bail!("kind must be one of: {}", DEADLINE_KINDS.join(", "));
@@ -1054,7 +1061,7 @@ fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result
     if !valid_due_at(&due_at) {
         bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
     }
-    let notes = opt_str_arg(input, "notes");
+    let notes = opt_str_arg(input, "notes").map(|n| truncate(&n, MAX_NOTES_CHARS));
     conn.execute(
         "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
          VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'agent')",
@@ -1097,7 +1104,10 @@ fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -
         bail!("deadline #{id} belongs to a different class");
     }
 
-    let title = opt_str_arg(input, "title").unwrap_or_else(|| old_title.clone());
+    let title = truncate(
+        &opt_str_arg(input, "title").unwrap_or_else(|| old_title.clone()),
+        MAX_TITLE_CHARS,
+    );
     let kind = opt_str_arg(input, "kind").unwrap_or_else(|| old_kind.clone());
     if !DEADLINE_KINDS.contains(&kind.as_str()) {
         bail!("kind must be one of: {}", DEADLINE_KINDS.join(", "));
@@ -1106,7 +1116,9 @@ fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -
     if !valid_due_at(&due_at) {
         bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
     }
-    let notes = opt_str_arg(input, "notes").or_else(|| old_notes.clone());
+    let notes = opt_str_arg(input, "notes")
+        .or_else(|| old_notes.clone())
+        .map(|n| truncate(&n, MAX_NOTES_CHARS));
     conn.execute(
         "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
         params![title, kind, due_at, notes, id],
@@ -1781,7 +1793,7 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
