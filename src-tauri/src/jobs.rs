@@ -277,6 +277,18 @@ pub fn enqueue_sort(app: &AppHandle, class_id: i64, prompt: &str) -> Result<i64>
     enqueue(app, "sort_proposal", Some(class_id), None, prompt, None, None)
 }
 
+/// SPEC §11: syllabus_scan over a chosen file (scope = its rel path) or the
+/// whole class folder (scope None). Read-only tools; the strict JSON it
+/// returns on stdout is recorded by deadlines::finalize_job.
+pub fn enqueue_syllabus(
+    app: &AppHandle,
+    class_id: i64,
+    scope: Option<&str>,
+    prompt: &str,
+) -> Result<i64> {
+    enqueue(app, "syllabus_scan", Some(class_id), scope, prompt, None, None)
+}
+
 /// SPEC §6: startup self-check asserting the active auth is the subscription.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
@@ -490,6 +502,24 @@ fn run_job(
                 Err(e) => {
                     status = "failed";
                     error = Some(format!("sort job finished but recorded no proposals: {e:#}"));
+                    summary = None;
+                }
+            }
+        }
+    }
+    if status == "succeeded" && job.kind == "syllabus_scan" {
+        if let Some(class_id) = job.class_id {
+            // An empty array is a legitimate outcome (finalize reports it
+            // honestly); only unparseable/all-invalid output demotes to failure.
+            match crate::deadlines::finalize_job(
+                &app,
+                class_id,
+                result_text.as_deref().unwrap_or(""),
+            ) {
+                Ok(recorded) => summary = Some(recorded),
+                Err(e) => {
+                    status = "failed";
+                    error = Some(format!("syllabus scan finished but recorded no proposals: {e:#}"));
                     summary = None;
                 }
             }

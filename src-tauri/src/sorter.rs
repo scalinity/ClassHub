@@ -316,7 +316,8 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
 /// Depth-first listing (`dir/` lines, then files) mirroring the scanner's
 /// exclusions: app-managed dirs at the top level, hidden entries and symlinks
 /// everywhere. File lines stop at MAX_TREE_FILES; folders are always listed.
-fn walk_tree(
+/// Shared with the syllabus scan's whole-folder prompt.
+pub(crate) fn walk_tree(
     dir: &Path,
     class_dir: &Path,
     depth: usize,
@@ -546,8 +547,9 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
 /// the next non-whitespace character is `{` (or `]`), so a bracket inside
 /// prose — e.g. a filename like `[draft] notes.pdf` — never wins the slice;
 /// the stream deserializer then stops at the array's end, so trailing prose
-/// is harmless too.
-fn parse_entries(text: &str) -> Result<Vec<Value>> {
+/// is harmless too. Shared with the syllabus scan, which contracts the same
+/// bare-array shape.
+pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
     let bytes = text.as_bytes();
     for (i, _) in text.match_indices('[') {
         let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());

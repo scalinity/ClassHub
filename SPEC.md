@@ -455,7 +455,7 @@ Mark the checkbox when the acceptance criteria pass.
   created as proposed), and every move is audit-logged. Chat-proposed moves (M8) surface in
   the same queue.
 
-- [ ] **M10 — Schedule + deadlines.**
+- [x] **M10 — Schedule + deadlines.**
   Weekly schedule grid + today highlight + next-class and exam-countdown chips, deadline CRUD
   (per-class tab + dashboard 7-day strip), `syllabus_scan` job with confirm cards.
   *Accepted when:* the grid matches §5 seed data, a manually added deadline appears on the

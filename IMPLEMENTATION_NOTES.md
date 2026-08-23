@@ -701,6 +701,114 @@ doesn't cover.
   until the job settles, then `SORT INBOX` covers it; finalize skips entries
   whose source vanished meanwhile, so approve-during-job races are safe.
 
+## M10 — Schedule + deadlines (2026-08-22)
+
+### What exists now
+
+- **`deadlines.rs`** — UI-side deadline CRUD mirroring the chat tools exactly:
+  the same `valid_due_at`/kind rules (now `pub(crate)` in tools.rs, one
+  validation for every surface), audit rows under `ui.*` actions (amend
+  carries before/after, delete carries the full row — recoverable, so the UI
+  has no confirm prompt), and `hub-changed {area:"deadlines"}` on every
+  write. `list_deadlines` returns every class's deadlines joined with
+  name/color, due-soonest first; the dashboard strip, the workspace list and
+  the card line all filter the one `["deadlines"]` query client-side.
+- **Syllabus scan** (SPEC §11). Migration `0004_deadline_proposals.sql` is
+  the pending-proposal store: job `result_text` is not persisted, so
+  proposals live in a table between job finalize and confirmation (the
+  `move_proposals` answer), surviving restarts. `finalize_job` runs in the
+  job runner before the row leaves `running` and consumes the **untruncated**
+  `result_text` (the sort_proposal pattern; the 4000-char summary cap would
+  corrupt the JSON). Parsing reuses `sorter::parse_entries` (now
+  `pub(crate)`); entries validate per-entry (malformed costs itself), dedupe
+  on (lower(title), due date) within the batch, against existing deadlines of
+  any status, and one-pending-per-key. Unlike sort, an empty array and
+  all-already-recorded are honest successes with honest summaries — only
+  unparseable or all-invalid output demotes the job to failure.
+  `resolve_proposal` re-checks for a duplicate at approve time (one may have
+  been added since the scan), inserts with `source='syllabus'`, audits
+  `syllabus.insert_deadline`. `run_scan` covers a chosen file
+  (`scanner::resolve_rel`; the prompt notes the `.classhub/extracts` fallback
+  for `.pptx`) or the whole folder (`sorter::walk_tree`, now `pub(crate)`);
+  the class's existing deadlines ride the prompt so the model skips them, and
+  a duplicate-active guard matches the sort job's. `prompts/syllabus.md`
+  contracts the bare JSON array (title/kind/due_at/notes), date-bearing items
+  only, dates resolved against the semester, `[]` legitimate.
+- `jobs.rs`: `enqueue_syllabus` (scope = the file's rel path, NULL for whole
+  folder) and the `syllabus_scan` finalize branch. `db.rs`: `ClassCard`
+  gained `final_exam_start` for the countdown chips.
+- **`WeekSchedule.tsx`** — the dashboard grid (SPEC §11): the card tick row
+  grown into a time-true instrument. Axis = the meetings' span widened to
+  whole hours at 26px/hour; even-hour hairline rules with mono gutter labels;
+  Mon–Fri columns with meetings as accent slabs (3px bar, name, time when the
+  block is tall enough) placed by real start/duration; today's column washed
+  with a dotted header; an in-session slab inverts to solid accent (the card
+  chip inversion). Header carries the next-class chip (min (daysUntil,
+  startTime) across classes; solid inversion while in session); below, exam
+  chips (`FINAL IN N DAYS` + start + class) skip already-past exams.
+- `DeadlineStrip.tsx` — open deadlines with `daysUntil < 7` (overdue
+  included, first, in destructive) as bordered chips with the class accent
+  dot; honest empty line otherwise. `Deadlines.tsx` — the workspace section
+  between the inbox queue and MATERIALS: rows (done-toggle circle, weekday
+  due label, kind chip, `VIA SYLLABUS`/`VIA CHAT` source tags,
+  hover-revealed edit/delete), done rows behind an `N DONE` disclosure,
+  inline create/edit form (native date/time inputs, mono register), the scan
+  picker (WHOLE CLASS FOLDER + tree files), and the proposal confirm cards —
+  a card leaves the queue the moment the backend confirms its resolution
+  (`resolvedIds`), with `ADD ALL` looping sequentially. `query.ts`:
+  `deadlines` invalidates `["deadlines"]` + `["classes"]`; new `syllabus`
+  area invalidates `["syllabusProposals"]`. `schedule.ts` gained
+  `daysUntil`/`dueDayLabel`/`todayIso` (all parse date parts — never
+  `new Date("YYYY-MM-DD")`); `classes.ts` exports `CLASS_ACCENTS`.
+
+### Verified
+
+- Grid vs §5 seed data: exact — Tue carries both slabs (Applied 11:45–2:45
+  amber, Fundamentals 4:05–7:05 blue), Wed the 50-min Studio slab (name
+  only — too short for a time line), Thu Biostats green, Mon/Fri empty; hour
+  labels 12 PM–6 PM; exam chip `FINAL IN 107 DAYS · DEC 7 8:00 PM`
+  (2026-08-22 → 2026-12-07 = 107). Saturday session: no today column and the
+  NEXT chip correctly points at TUE 11:45 AM Applied Gen AI.
+- Full CRUD through the real UI (AX-driven): created `Problem Set 1`
+  (2026-08-26T23:59) — the dashboard strip chip and the card's `DUE AUG 26
+  11:59 PM` line both appeared with no manual refresh; edit added notes
+  (audit has before/after); done → reopen round-trip; delete (audit keeps the
+  full row). DB checked at every step.
+- **Real syllabus, end to end**: the owner added the actual CAI 5731
+  syllabus PDF mid-session (`Syllabus/`). A chosen-file scan (job 114)
+  proposed 11 items — all five homeworks (`Due 09/13`…`11/15` resolved to
+  2026 dates), all four quizzes with week dates, the project report
+  (2026-12-03T23:59, Reading Days) and the oral presentation
+  (2026-12-07T16:00) — grounded in the document, nothing invented, nothing
+  inserted before confirmation. `ADD ALL 11` inserted every row with
+  `source='syllabus'` plus 11 audit rows; the queue emptied live. The
+  fabricated Problem Set 1 fixture was then deleted through the UI, leaving
+  exactly the 11 real deadlines.
+- The new PDF's auto-extract (job 113) ran concurrently with the scan —
+  max-2 concurrency exercised; both succeeded.
+
+### Gotchas
+
+- **WebKit `<input type="date">` under AX automation**: it surfaces as
+  `AXDateTimeArea` with no readable/settable value. Segments accept typed
+  digits with arrow-key navigation between them, but clicking the field opens
+  the calendar popover, which swallows Escape and hides the form's buttons
+  from the AX search — click another field to dismiss it before pressing
+  SAVE. First-click keystrokes landed unpredictably; per-segment typing after
+  explicit segment selection is the reliable recipe.
+- AppleScript string comparison is **case-insensitive by default**: an
+  `ends with "DONE"` matcher pressed "Mark Quiz 1 done" and completed a real
+  deadline (reopened through the UI toggle). Wrap matchers in
+  `considering case`. Also `expanded` is a reserved AX property — as a
+  variable name it throws "Access not allowed".
+- The today-column highlight is code-only verified (Saturday session; the
+  grid correctly shows no highlight on weekends) — the first weekday launch
+  shows the wash + header dot. Light mode skipped again (owner active on the
+  machine; M10 adds no new color tokens — accent/muted/destructive pairs all
+  date from M1).
+- The rebuild Keychain prompt (post-M9 gotcha) appeared once and was denied —
+  harmless here; chat was not part of this milestone's verification.
+
 ## Post-M9 — Review fixes (2026-08-22)
 
 A two-agent review of the M9 changeset (one bug-hunting pass, one

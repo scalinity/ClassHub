@@ -5,19 +5,28 @@ import { listen } from "@tauri-apps/api/event";
 export const queryClient = new QueryClient();
 
 interface HubChange {
-  /** What changed backend-side (tools.rs and sorter.rs emit_hub_change). */
-  area: "deadlines" | "grades" | "notes" | "proposals" | "files";
+  /** What changed backend-side (tools.rs, sorter.rs, deadlines.rs). */
+  area: "deadlines" | "grades" | "notes" | "proposals" | "files" | "syllabus";
 }
 
-// Backend writes (chat tools, drop-to-sort) change hub data; this push turns
-// each one into a targeted refetch, so the UI reflects it without a manual
-// refresh. Module-level listener — no useEffect per workspace rules.
+// Backend writes (chat tools, drop-to-sort, deadline CRUD) change hub data;
+// this push turns each one into a targeted refetch, so the UI reflects it
+// without a manual refresh. Module-level listener — no useEffect per
+// workspace rules.
 void listen<HubChange>("hub-changed", ({ payload }) => {
   switch (payload.area) {
     case "deadlines":
-    case "grades":
-      // Both surface on the class cards (nearest deadline now; grade in M11).
+      // The dashboard strip and class lists, plus the card's deadline line.
+      void queryClient.invalidateQueries({ queryKey: ["deadlines"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      break;
+    case "grades":
+      // Surfaces on the class cards (computed grade lands in M11).
+      void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      break;
+    case "syllabus":
+      // The workspace's syllabus confirm cards.
+      void queryClient.invalidateQueries({ queryKey: ["syllabusProposals"] });
       break;
     case "notes":
       void queryClient.invalidateQueries({ queryKey: ["notes"] });

@@ -90,3 +90,38 @@ export function formatDueDate(dueAt: string): string {
     .toUpperCase();
   return timePart ? `${label} ${formatTime(timePart.slice(0, 5))}` : label;
 }
+
+/** Local midnight of an ISO date(-time)'s date part, parsed by parts (see above). */
+function localMidnight(iso: string): Date {
+  const [y, m, d] = iso.split("T")[0].split("-").map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+}
+
+/** Whole days from today to the ISO date's day: 0 today, negative overdue. */
+export function daysUntil(iso: string, now: Date = new Date()): number {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((localMidnight(iso).getTime() - today.getTime()) / 86_400_000);
+}
+
+/**
+ * Deadline label with the day named: "OVERDUE · AUG 20", "TODAY", "TOMORROW",
+ * "WED AUG 26" — plus the time when the deadline carries one.
+ */
+export function dueDayLabel(dueAt: string): string {
+  const days = daysUntil(dueAt);
+  const timePart = dueAt.split("T")[1];
+  const time = timePart ? ` ${formatTime(timePart.slice(0, 5))}` : "";
+  if (days < 0) return `OVERDUE · ${formatDueDate(dueAt)}`;
+  if (days === 0) return `TODAY${time}`;
+  if (days === 1) return `TOMORROW${time}`;
+  const weekday = localMidnight(dueAt)
+    .toLocaleDateString("en-US", { weekday: "short" })
+    .toUpperCase();
+  return `${weekday} ${formatDueDate(dueAt)}`;
+}
+
+/** Today as YYYY-MM-DD in local time (backend stamps and date-input defaults). */
+export function todayIso(now: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}

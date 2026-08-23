@@ -1,5 +1,6 @@
 mod chat;
 mod db;
+mod deadlines;
 mod extract;
 mod guides;
 mod jobs;
@@ -149,6 +150,75 @@ fn list_practice(
 ) -> Result<Vec<notes::NoteFile>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+// --- Deadlines + syllabus scan (SPEC §11) -------------------------------------
+
+/// Every deadline across every class, due-soonest first; the dashboard strip
+/// and the per-class list both filter this client-side.
+#[tauri::command]
+fn list_deadlines(state: tauri::State<Db>) -> Result<Vec<deadlines::DeadlineInfo>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    deadlines::list_deadlines(&conn).map_err(|e| format!("{e:#}"))
+}
+
+/// Create (id None) or amend a deadline — same validation as the chat tool.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_deadline(
+    app: tauri::AppHandle,
+    class_id: i64,
+    id: Option<i64>,
+    title: String,
+    kind: String,
+    due_at: String,
+    notes: Option<String>,
+) -> Result<(), String> {
+    deadlines::save_deadline(&app, class_id, id, &title, &kind, &due_at, notes.as_deref())
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_deadline_status(app: tauri::AppHandle, id: i64, done: bool) -> Result<(), String> {
+    deadlines::set_deadline_status(&app, id, done).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_deadline(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    deadlines::delete_deadline(&app, id).map_err(|e| format!("{e:#}"))
+}
+
+/// Pending syllabus-scan proposals for the class's confirm cards.
+#[tauri::command]
+fn get_syllabus_proposals(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<deadlines::DeadlineProposal>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    deadlines::syllabus_proposals(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Scan a chosen file (rel_path) or the whole class folder (None) for dated
+/// items. `today` is client-formatted (std Rust cannot format a local date).
+#[tauri::command]
+fn run_syllabus_scan(
+    app: tauri::AppHandle,
+    class_id: i64,
+    rel_path: Option<String>,
+    today: String,
+) -> Result<i64, String> {
+    deadlines::run_scan(&app, class_id, rel_path.as_deref(), &today)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Approve (insert with source='syllabus') or skip a proposed deadline.
+#[tauri::command]
+fn resolve_syllabus_proposal(
+    app: tauri::AppHandle,
+    proposal_id: i64,
+    approve: bool,
+) -> Result<String, String> {
+    deadlines::resolve_proposal(&app, proposal_id, approve).map_err(|e| format!("{e:#}"))
 }
 
 // --- Drop-to-sort (SPEC §10) --------------------------------------------------
@@ -356,6 +426,13 @@ pub fn run() {
             read_class_file,
             list_notes,
             list_practice,
+            list_deadlines,
+            save_deadline,
+            set_deadline_status,
+            delete_deadline,
+            get_syllabus_proposals,
+            run_syllabus_scan,
+            resolve_syllabus_proposal,
             stage_inbox_files,
             get_sort_state,
             run_sort_job,

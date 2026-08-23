@@ -9,6 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { DeadlinesSection } from "@/components/Deadlines";
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GuideViewer } from "@/components/GuideViewer";
@@ -179,6 +180,8 @@ export function ClassWorkspace({
       )}
 
       <InboxQueue classId={info.id} tree={tree} />
+
+      <DeadlinesSection classId={info.id} tree={tree} />
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between border-b pb-3">

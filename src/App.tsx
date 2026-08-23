@@ -4,7 +4,9 @@ import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
+import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
+import { WeekSchedule } from "@/components/WeekSchedule";
 import { listClasses, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
 import { setDropTarget } from "@/lib/sorter";
@@ -46,11 +48,22 @@ function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
           FAILED TO LOAD CLASSES — {String(error)}
         </p>
       ) : (
-        <div className="mt-10 grid gap-5 md:grid-cols-2">
-          {(classes ?? []).map((cls) => (
-            <ClassCard key={cls.id} info={cls} onOpen={onOpen} />
-          ))}
-        </div>
+        <>
+          {classes !== undefined && <WeekSchedule classes={classes} />}
+          <DeadlineStrip />
+          <section className="mt-10" aria-label="Classes">
+            <div className="border-b pb-3">
+              <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+                CLASSES
+              </h2>
+            </div>
+            <div className="mt-5 grid gap-5 md:grid-cols-2">
+              {(classes ?? []).map((cls) => (
+                <ClassCard key={cls.id} info={cls} onOpen={onOpen} />
+              ))}
+            </div>
+          </section>
+        </>
       )}
     </main>
   );

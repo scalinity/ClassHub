@@ -8,6 +8,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_job_payload.sql"),
     include_str!("../migrations/0003_move_proposals.sql"),
+    include_str!("../migrations/0004_deadline_proposals.sql"),
 ];
 
 #[derive(Serialize)]
@@ -45,6 +46,9 @@ pub struct ClassCard {
     /// Nearest open deadline (SPEC §12 card contents), overdue included —
     /// an open deadline in the past is the most urgent line on the card.
     pub next_deadline: Option<DeadlineChip>,
+    /// ISO start of the final exam, when scheduled — the dashboard's
+    /// countdown chips (SPEC §11).
+    pub final_exam_start: Option<String>,
     pub meetings: Vec<Meeting>,
 }
 
@@ -92,7 +96,8 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
     let root = aibhs_root(conn)?;
 
     let mut class_stmt = conn.prepare(
-        "SELECT id, display_name, color, room, instructors, credits, folder_name
+        "SELECT id, display_name, color, room, instructors, credits, folder_name,
+                final_exam_start
          FROM classes ORDER BY id",
     )?;
     let mut meeting_stmt = conn.prepare(
@@ -110,12 +115,15 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
                 row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut cards = Vec::with_capacity(classes.len());
-    for (id, display_name, color, room, instructors, credits, folder_name) in classes {
+    for (id, display_name, color, room, instructors, credits, folder_name, final_exam_start) in
+        classes
+    {
         let meetings = meeting_stmt
             .query_map([id], |row| {
                 Ok(Meeting {
@@ -156,6 +164,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             stale_guides,
             inbox_pending,
             next_deadline,
+            final_exam_start,
             meetings,
         });
     }

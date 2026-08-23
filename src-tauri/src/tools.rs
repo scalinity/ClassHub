@@ -963,11 +963,12 @@ fn safe_join(root: &Path, rel_path: &str) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 // Write tools — deadlines (SPEC §9/§11; rows carry source='agent')
 
-const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "project", "other"];
+pub(crate) const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "project", "other"];
 
 /// ISO date, optionally with a time: YYYY-MM-DD[THH:MM[:SS]]. Stored as given;
-/// lexicographic order is chronological order for this shape.
-fn valid_due_at(s: &str) -> bool {
+/// lexicographic order is chronological order for this shape. Shared with the
+/// UI's deadline writes (deadlines.rs) — one validation for every surface.
+pub(crate) fn valid_due_at(s: &str) -> bool {
     let b = s.as_bytes();
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
     if b.len() < 10 || !digits(0..4) || b[4] != b'-' || !digits(5..7) || b[7] != b'-' || !digits(8..10)
@@ -989,7 +990,7 @@ fn valid_due_at(s: &str) -> bool {
     }
 }
 
-fn audit(conn: &Connection, action: &str, payload: Value) -> Result<()> {
+pub(crate) fn audit(conn: &Connection, action: &str, payload: Value) -> Result<()> {
     conn.execute(
         "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
         params![action, payload.to_string(), now_secs()],
