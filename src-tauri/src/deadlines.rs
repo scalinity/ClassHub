@@ -510,9 +510,12 @@ pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Res
             return Ok(format!("skipped — {title}"));
         }
 
+        // Insert + audit + status flip land as one unit — interrupted midway
+        // they would leave a deadline behind a still-pending card.
+        let tx = conn.unchecked_transaction()?;
         // A matching deadline may have appeared since the scan (added by hand
         // or through chat) — approving would silently duplicate it.
-        let existing: i64 = conn.query_row(
+        let existing: i64 = tx.query_row(
             "SELECT COUNT(*) FROM deadlines
              WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
                AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
@@ -522,23 +525,24 @@ pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Res
         if existing > 0 {
             bail!("'{title}' is already recorded for that date — skip this card instead");
         }
-        conn.execute(
+        tx.execute(
             "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
              VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'syllabus')",
             params![class_id, title, kind, due_at, notes],
         )?;
         audit(
-            conn,
+            &tx,
             "syllabus.insert_deadline",
-            json!({ "proposalId": proposal_id, "deadlineId": conn.last_insert_rowid(),
+            json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
                     "classId": class_id, "title": title, "kind": kind,
                     "dueAt": due_at, "notes": notes }),
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
              WHERE id = ?2",
             params![now(), proposal_id],
         )?;
+        tx.commit()?;
         Ok(format!("added — {title} due {due_at}"))
     })?;
     emit_hub_change(app, "syllabus");
