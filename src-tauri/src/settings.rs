@@ -59,41 +59,76 @@ pub fn get(app: &AppHandle) -> Result<AppSettings> {
     })
 }
 
+/// Reads a whitelisted setting. Anything unreadable or unknown falls back to
+/// the default — a job must never fail on an odd settings row — but never
+/// silently: the substitution lands on stderr, since a configured
+/// sonnet/low quietly spawning as opus/xhigh would differ on the
+/// subscription window with nothing to notice it by.
+fn validated(conn: &Connection, key: &str, allowed: &[&str], default: &'static str) -> String {
+    match setting(conn, key) {
+        Ok(None) => default.to_string(),
+        Ok(Some(v)) if allowed.contains(&v.as_str()) => v,
+        Ok(Some(v)) => {
+            eprintln!("settings: {key} '{v}' is not an accepted value — using {default}");
+            default.to_string()
+        }
+        Err(e) => {
+            eprintln!("settings: {key} unreadable ({e:#}) — using {default}");
+            default.to_string()
+        }
+    }
+}
+
 fn job_model(conn: &Connection) -> String {
-    setting(conn, MODEL_SETTING)
-        .ok()
-        .flatten()
-        .filter(|m| JOB_MODELS.contains(&m.as_str()))
-        .unwrap_or_else(|| DEFAULT_JOB_MODEL.to_string())
+    validated(conn, MODEL_SETTING, &JOB_MODELS, DEFAULT_JOB_MODEL)
 }
 
 fn job_effort(conn: &Connection) -> String {
-    setting(conn, EFFORT_SETTING)
-        .ok()
-        .flatten()
-        .filter(|e| JOB_EFFORTS.contains(&e.as_str()))
-        .unwrap_or_else(|| DEFAULT_JOB_EFFORT.to_string())
+    validated(conn, EFFORT_SETTING, &JOB_EFFORTS, DEFAULT_JOB_EFFORT)
 }
 
 fn concurrency(conn: &Connection) -> usize {
-    setting(conn, CONCURRENCY_SETTING)
-        .ok()
-        .flatten()
-        .and_then(|n| n.parse::<usize>().ok())
-        .filter(|n| (1..=MAX_JOB_CONCURRENCY).contains(n))
-        .unwrap_or(DEFAULT_JOB_CONCURRENCY)
+    match setting(conn, CONCURRENCY_SETTING) {
+        Ok(None) => DEFAULT_JOB_CONCURRENCY,
+        Ok(Some(v)) => match v
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=MAX_JOB_CONCURRENCY).contains(n))
+        {
+            Some(n) => n,
+            None => {
+                eprintln!(
+                    "settings: job_concurrency '{v}' is not 1–{MAX_JOB_CONCURRENCY} — \
+                     using {DEFAULT_JOB_CONCURRENCY}"
+                );
+                DEFAULT_JOB_CONCURRENCY
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "settings: job_concurrency unreadable ({e:#}) — using {DEFAULT_JOB_CONCURRENCY}"
+            );
+            DEFAULT_JOB_CONCURRENCY
+        }
+    }
 }
 
-/// What the job runner spawns with. Unreadable settings fall back to the
-/// defaults — a job must never fail because a setting row is odd.
+/// What the job runner spawns with; falls back (loudly) rather than failing.
 pub fn job_spawn_options(app: &AppHandle) -> (String, String) {
-    with_conn(app, |conn| Ok((job_model(conn), job_effort(conn))))
-        .unwrap_or_else(|_| (DEFAULT_JOB_MODEL.into(), DEFAULT_JOB_EFFORT.into()))
+    with_conn(app, |conn| Ok((job_model(conn), job_effort(conn)))).unwrap_or_else(|e| {
+        eprintln!("settings: job spawn options unreadable ({e:#}) — using the defaults");
+        (DEFAULT_JOB_MODEL.into(), DEFAULT_JOB_EFFORT.into())
+    })
 }
 
 /// How many jobs the queue runs at once (master exclusivity is unaffected).
 pub fn job_concurrency(app: &AppHandle) -> usize {
-    with_conn(app, |conn| Ok(concurrency(conn))).unwrap_or(DEFAULT_JOB_CONCURRENCY)
+    with_conn(app, |conn| Ok(concurrency(conn))).unwrap_or_else(|e| {
+        eprintln!(
+            "settings: job_concurrency unreadable ({e:#}) — using {DEFAULT_JOB_CONCURRENCY}"
+        );
+        DEFAULT_JOB_CONCURRENCY
+    })
 }
 
 /// One shape for every setting write: the value and its before/after audit
