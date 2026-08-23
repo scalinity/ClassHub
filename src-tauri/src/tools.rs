@@ -1724,7 +1724,9 @@ fn days_ago(now: i64, then: i64) -> String {
     }
 }
 
-fn format_size(bytes: i64) -> String {
+/// Shared with the drop-to-sort prompt builder — both surfaces feed the model
+/// and should describe sizes identically.
+pub fn format_size(bytes: i64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
     }
