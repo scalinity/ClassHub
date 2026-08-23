@@ -35,9 +35,18 @@ export interface ManagedFile {
   modifiedAt: number; // unix seconds
 }
 
-/** Markdown notes in the class's Notes folder, newest first (M8; editor in M11). */
+/** Markdown notes in the class's Notes folder, newest first. */
 export function listNotes(classId: number): Promise<ManagedFile[]> {
   return invoke<ManagedFile[]>("list_notes", { classId });
+}
+
+/** The notes editor's save; a replaced version is kept in the audit log. */
+export function saveNote(
+  classId: number,
+  title: string,
+  content: string,
+): Promise<{ relPath: string; created: boolean }> {
+  return invoke("save_note", { classId, title, content });
 }
 
 /** Generated practice exams in Study Guides/Practice, newest first. */

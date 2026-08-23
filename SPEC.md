@@ -462,7 +462,7 @@ Mark the checkbox when the acceptance criteria pass.
   dashboard, and a syllabus scan proposes at least date-bearing items from a real syllabus
   file with confirm-before-insert.
 
-- [ ] **M11 — Notes + grades + polish.**
+- [x] **M11 — Notes + grades + polish.**
   Markdown notes editor with preview (files in `Notes/`), weighted grade tracker with computed
   current grade on card + tab, Settings screen (AIBHS root, API key management, model,
   concurrency), empty/error states everywhere (3 empty classes today must look intentional),

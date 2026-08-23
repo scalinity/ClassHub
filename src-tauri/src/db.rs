@@ -33,12 +33,42 @@ pub fn emit_hub_change(app: &AppHandle, area: &str) {
     let _ = app.emit("hub-changed", json!({ "area": area }));
 }
 
+/// Char-safe display truncation with an ellipsis — job summaries, tool-chip
+/// labels, and the deadline field caps all share it.
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{cut}…")
+    }
+}
+
 /// One append-only history row. Destructive writes park their prior state
 /// here first — recoverability in place of confirmation prompts.
 pub fn audit(conn: &Connection, action: &str, payload: serde_json::Value) -> Result<()> {
     conn.execute(
         "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![action, payload.to_string(), now()],
+    )?;
+    Ok(())
+}
+
+/// One value from the SPEC §5 settings table (chat.rs and settings.rs share
+/// this — the API key itself never lives here, only in the Keychain).
+pub fn setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()?)
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
     )?;
     Ok(())
 }
@@ -85,6 +115,8 @@ pub struct ClassCard {
     /// Nearest open deadline (SPEC §12 card contents), overdue included —
     /// an open deadline in the past is the most urgent line on the card.
     pub next_deadline: Option<DeadlineChip>,
+    /// SPEC §11: current weighted grade over graded items (grades.rs math).
+    pub current_grade: Option<f64>,
     /// ISO start of the final exam, when scheduled — the dashboard's
     /// countdown chips (SPEC §11).
     pub final_exam_start: Option<String>,
@@ -191,6 +223,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
                 },
             )
             .optional()?;
+        let current_grade = crate::grades::weighted_grade(conn, id)?;
         cards.push(ClassCard {
             id,
             display_name,
@@ -203,6 +236,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             stale_guides,
             inbox_pending,
             next_deadline,
+            current_grade,
             final_exam_start,
             meetings,
         });

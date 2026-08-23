@@ -12,9 +12,11 @@ import {
 import { DeadlinesSection } from "@/components/Deadlines";
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
+import { GradesSection } from "@/components/Grades";
 import { GuideViewer } from "@/components/GuideViewer";
 import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
+import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
 import {
   formatGeneratedAt,
@@ -98,6 +100,7 @@ export function ClassWorkspace({
   const drag = useDragState();
   const [viewScope, setViewScope] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
+  const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
   const [synthError, setSynthError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
     setSynthError(null);
@@ -175,6 +178,8 @@ export function ClassWorkspace({
       <InboxQueue classId={info.id} tree={tree} />
 
       <DeadlinesSection classId={info.id} tree={tree} />
+
+      <GradesSection classId={info.id} />
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between border-b pb-3">
@@ -288,36 +293,47 @@ export function ClassWorkspace({
         </section>
       )}
 
-      {(notes?.length ?? 0) > 0 && (
-        <section className="mt-12">
-          <div className="flex items-baseline justify-between border-b pb-3">
-            <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-              NOTES
-            </h2>
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-              {(notes?.length ?? 0) === 1 ? "1 NOTE" : `${notes?.length} NOTES`}
-            </span>
+      <section className="mt-12" aria-label="Notes">
+        <div className="flex items-baseline justify-between border-b pb-3">
+          <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+            NOTES
+          </h2>
+          <div className="flex items-baseline gap-4">
+            <button
+              type="button"
+              onClick={() => setEditingNote({ title: null, relPath: null })}
+              className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent)"
+            >
+              NEW NOTE
+            </button>
+            {(notes?.length ?? 0) > 0 && (
+              <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+                {notes?.length === 1 ? "1 NOTE" : `${notes?.length} NOTES`}
+              </span>
+            )}
           </div>
-          <div className="mt-3 space-y-1">
-            {(notes ?? []).map((note) => (
-              <ManagedRow
-                key={note.relPath}
-                icon={NotepadText}
-                file={note}
-                strippedExt=".md"
-                stamp={formatGeneratedAt(note.modifiedAt)}
-                onView={(name) =>
-                  setViewFile({
-                    relPath: note.relPath,
-                    name,
-                    kind: note.name.toLowerCase().endsWith(".md") ? "md" : "other",
-                  })
-                }
-              />
-            ))}
-          </div>
-        </section>
-      )}
+        </div>
+        <div className="mt-3 space-y-1">
+          {notes !== undefined && notes.length === 0 && (
+            <p className="py-2 text-[13px] text-muted-foreground">
+              No notes yet — start one, or ask the chat to draft one from the
+              material. They live as Markdown in the class's Notes folder.
+            </p>
+          )}
+          {(notes ?? []).map((note) => (
+            <ManagedRow
+              key={note.relPath}
+              icon={NotepadText}
+              file={note}
+              strippedExt=".md"
+              stamp={formatGeneratedAt(note.modifiedAt)}
+              onView={(name) =>
+                setEditingNote({ title: name, relPath: note.relPath })
+              }
+            />
+          ))}
+        </div>
+      </section>
 
       {drag.active && (
         <div
@@ -348,6 +364,13 @@ export function ClassWorkspace({
           classId={info.id}
           file={viewFile}
           onClose={() => setViewFile(null)}
+        />
+      )}
+      {editingNote && (
+        <NoteEditor
+          classId={info.id}
+          note={editingNote}
+          onClose={() => setEditingNote(null)}
         />
       )}
     </main>

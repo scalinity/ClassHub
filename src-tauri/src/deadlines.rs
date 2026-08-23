@@ -16,8 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{audit, emit_hub_change, now, with_conn};
-use crate::tools::truncate;
+use crate::db::{audit, emit_hub_change, now, truncate, with_conn};
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/syllabus.md");
 

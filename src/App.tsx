@@ -1,18 +1,26 @@
 import { useState } from "react";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { Settings2 } from "lucide-react";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
+import { SettingsScreen } from "@/components/Settings";
 import { WeekSchedule } from "@/components/WeekSchedule";
 import { listClasses, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
 import { setDropTarget } from "@/lib/sorter";
 import { dragWindow } from "@/lib/window";
 
-function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
+function Dashboard({
+  onOpen,
+  onSettings,
+}: {
+  onOpen: (cls: ClassInfo) => void;
+  onSettings: () => void;
+}) {
   const { data: classes, error } = useQuery({
     queryKey: ["classes"],
     queryFn: listClasses,
@@ -37,9 +45,20 @@ function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
           <h1 className="text-[28px] font-semibold tracking-tight">
             ClassHub
           </h1>
-          <p className="font-mono text-xs text-muted-foreground">
-            {dateLabel}
-          </p>
+          <div className="flex items-center gap-2.5">
+            <p className="font-mono text-xs text-muted-foreground">
+              {dateLabel}
+            </p>
+            <button
+              type="button"
+              aria-label="Open settings"
+              title="Settings"
+              onClick={onSettings}
+              className="cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            >
+              <Settings2 size={14} aria-hidden />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -69,24 +88,34 @@ function Dashboard({ onOpen }: { onOpen: (cls: ClassInfo) => void }) {
   );
 }
 
+type View = "dashboard" | "settings" | ClassInfo;
+
 export default function App() {
-  const [openClass, setOpenClass] = useState<ClassInfo | null>(null);
+  const [view, setViewState] = useState<View>("dashboard");
+  // Each view is its own page; carrying scroll depth between them opens the
+  // next one mid-scroll.
+  const setView = (next: View) => {
+    window.scrollTo(0, 0);
+    setViewState(next);
+  };
   // Native file drops land in the open class's inbox (SPEC §10). A module
   // variable read only by the drag-drop listener — idempotent to set here.
-  setDropTarget(openClass?.id ?? null);
+  setDropTarget(typeof view === "object" ? view.id : null);
 
   return (
     <QueryClientProvider client={queryClient}>
       <div className="min-h-screen">
         {/* Drag strip clearing the macOS traffic lights (overlay title bar). */}
         <div onMouseDown={dragWindow} className="fixed inset-x-0 top-0 z-10 h-9" />
-        {openClass ? (
-          <ClassWorkspace
-            info={openClass}
-            onBack={() => setOpenClass(null)}
+        {view === "dashboard" ? (
+          <Dashboard
+            onOpen={setView}
+            onSettings={() => setView("settings")}
           />
+        ) : view === "settings" ? (
+          <SettingsScreen onBack={() => setView("dashboard")} />
         ) : (
-          <Dashboard onOpen={setOpenClass} />
+          <ClassWorkspace info={view} onBack={() => setView("dashboard")} />
         )}
         <JobCenter />
         <ChatSidebar />

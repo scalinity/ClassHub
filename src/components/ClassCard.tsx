@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 
 import { Card } from "@/components/ui/card";
 import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
+import { formatPercent } from "@/lib/grades";
 import {
   formatDueDate,
   formatTimeRange,
@@ -104,6 +105,14 @@ export function ClassCard({
             {info.room} · {info.credits} CR
           </p>
           <span className="flex shrink-0 items-center gap-1.5">
+            {info.currentGrade != null && (
+              <span
+                title="Current weighted grade over graded items"
+                className="rounded bg-(--accent)/12 px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-[0.08em] text-(--accent)"
+              >
+                {formatPercent(info.currentGrade)}
+              </span>
+            )}
             {info.inboxPending > 0 && (
               <span
                 title="Files waiting in the drop-to-sort inbox"

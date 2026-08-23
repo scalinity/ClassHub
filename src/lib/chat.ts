@@ -414,6 +414,14 @@ export function toggleSettings() {
   }
 }
 
+/** The Settings screen's link into the chat pane (key, model, effort live there). */
+export function openChatSettings() {
+  emitChange({ open: true, settingsOpen: true, pickerOpen: false });
+  if (snapshot.settings?.hasKey && snapshot.models === null) {
+    void loadModels();
+  }
+}
+
 export function newChat() {
   emitChange({ sessionId: null, items: [], streaming: false, pickerOpen: false, error: null });
 }

@@ -21,7 +21,8 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
     case "grades":
-      // Surfaces on the class cards (computed grade lands in M11).
+      // The workspace Grades section and the card's computed grade.
+      void queryClient.invalidateQueries({ queryKey: ["grades"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
     case "syllabus":
@@ -30,6 +31,8 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       break;
     case "notes":
       void queryClient.invalidateQueries({ queryKey: ["notes"] });
+      // A chat rewrite of a note the viewer or editor has cached.
+      void queryClient.invalidateQueries({ queryKey: ["classFile"] });
       break;
     case "proposals":
       // The workspace inbox queue and the card badges.

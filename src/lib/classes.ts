@@ -21,6 +21,8 @@ export interface ClassInfo {
   inboxPending: number;
   /** Nearest open deadline (card line), overdue included. */
   nextDeadline: { title: string; dueAt: string } | null;
+  /** Current weighted grade over graded items (null until something is graded). */
+  currentGrade: number | null;
   /** ISO start of the final exam, when scheduled (dashboard countdown chip). */
   finalExamStart: string | null;
   meetings: Meeting[];

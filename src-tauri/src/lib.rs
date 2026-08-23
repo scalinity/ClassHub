@@ -2,10 +2,12 @@ mod chat;
 mod db;
 mod deadlines;
 mod extract;
+mod grades;
 mod guides;
 mod jobs;
 mod notes;
 mod scanner;
+mod settings;
 mod sorter;
 mod tools;
 
@@ -150,6 +152,90 @@ fn list_practice(
 ) -> Result<Vec<notes::NoteFile>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// The notes editor's save (SPEC §11) — content lands in `<Class>/Notes/`.
+#[tauri::command]
+fn save_note(
+    app: tauri::AppHandle,
+    class_id: i64,
+    title: String,
+    content: String,
+) -> Result<notes::SavedNote, String> {
+    notes::save_from_ui(&app, class_id, &title, &content).map_err(|e| format!("{e:#}"))
+}
+
+// --- Grades (SPEC §11) --------------------------------------------------------
+
+#[tauri::command]
+fn list_grades(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<grades::GradesInfo, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    grades::list_grades(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Create (id None) or amend a weighted category — same rules as the chat tool.
+#[tauri::command]
+fn save_grade_category(
+    app: tauri::AppHandle,
+    class_id: i64,
+    id: Option<i64>,
+    name: String,
+    weight: f64,
+) -> Result<(), String> {
+    grades::save_category(&app, class_id, id, &name, weight).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_grade_category(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    grades::delete_category(&app, id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn save_grade_item(
+    app: tauri::AppHandle,
+    category_id: i64,
+    id: Option<i64>,
+    name: String,
+    score: f64,
+    max_score: f64,
+) -> Result<(), String> {
+    grades::save_item(&app, category_id, id, &name, score, max_score)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_grade_item(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    grades::delete_item(&app, id).map_err(|e| format!("{e:#}"))
+}
+
+// --- App settings (SPEC §11 M11) ----------------------------------------------
+
+#[tauri::command]
+fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, String> {
+    settings::get(&app).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_aibhs_root(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    settings::set_aibhs_root(&app, &path).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_job_model(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    settings::set_job_model(&app, &model).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_job_effort(app: tauri::AppHandle, effort: String) -> Result<(), String> {
+    settings::set_job_effort(&app, &effort).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_job_concurrency(app: tauri::AppHandle, count: usize) -> Result<(), String> {
+    settings::set_job_concurrency(&app, count).map_err(|e| format!("{e:#}"))
 }
 
 // --- Deadlines + syllabus scan (SPEC §11) -------------------------------------
@@ -435,6 +521,17 @@ pub fn run() {
             read_class_file,
             list_notes,
             list_practice,
+            save_note,
+            list_grades,
+            save_grade_category,
+            delete_grade_category,
+            save_grade_item,
+            delete_grade_item,
+            get_app_settings,
+            set_aibhs_root,
+            set_job_model,
+            set_job_effort,
+            set_job_concurrency,
             list_deadlines,
             save_deadline,
             set_deadline_status,

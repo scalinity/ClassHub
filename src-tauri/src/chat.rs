@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::db::{now, with_conn};
+use crate::db::{now, set_setting, setting, truncate, with_conn};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
@@ -176,54 +176,51 @@ fn keychain() -> Result<keyring::v1::Entry> {
     })
 }
 
+/// One re-own pass per app run (see stored_key).
+static KEY_REOWNED: AtomicBool = AtomicBool::new(false);
+
 pub fn stored_key() -> Result<Option<String>> {
-    match keychain()?.get_password() {
-        Ok(key) => Ok(Some(key)),
+    let entry = keychain()?;
+    match entry.get_password() {
+        Ok(key) => {
+            // Self-healing ownership: once per run, delete and re-create the
+            // item so this app is its creator. An item created by anything
+            // else (older builds wrote it through the `security` CLI, whose
+            // items land in the Apple-tools protection partition) prompts on
+            // every read no matter its ACL; an item this signed app created
+            // reads silently, and stays readable across rebuilds because
+            // dev-sign.sh keeps the signing identity stable. A no-op cost on
+            // an already-owned item.
+            if !KEY_REOWNED.swap(true, Ordering::SeqCst) {
+                let _ = entry.delete_credential();
+                if let Err(e) = entry.set_password(&key) {
+                    eprintln!("keychain re-own failed (key still usable this run): {e}");
+                }
+            }
+            Ok(Some(key))
+        }
         Err(keyring::v1::Error::NoEntry) => Ok(None),
         Err(e) => Err(anyhow!("reading the API key from the Keychain: {e}")),
     }
 }
 
-/// Written through `security -A` rather than the keyring crate, deliberately.
-///
-/// A Keychain item's ACL is pinned to the exact binary that created it, and the
-/// dev binary is ad-hoc *linker-signed*: every `cargo build` produces a new code
-/// hash, so the item stops recognising the app and macOS asks for the login
-/// password again — "Always Allow" only ever pins the build about to be
-/// replaced. `-A` trusts any application instead, which holds across rebuilds.
-///
-/// The trade: any process running as this user can then read the key without a
-/// prompt, i.e. the protection of a `0600` file in the home directory. On a
-/// single-user personal machine that beats training oneself to approve Keychain
-/// prompts on sight. The ACL is fixed at creation, so an existing item has to be
-/// removed and re-saved for this to take effect.
+/// The app creates its own item, so the ACL pins to the app's code signature
+/// — and only holds across rebuilds because dev builds carry a stable Apple
+/// Development signature (dev-sign.sh, wired as the cargo runner in
+/// `.cargo/config.toml`); an ad-hoc dev build is a new identity every
+/// compile and would invalidate the grant. Delete-then-add, never update:
+/// updating an existing item keeps the old creator's ACL, which is exactly
+/// what a re-save must replace.
 pub fn save_key(key: &str) -> Result<()> {
     let key = key.trim();
     if key.is_empty() {
         bail!("paste an API key first");
     }
-    let _ = keychain()?.delete_credential();
-    let output = std::process::Command::new("/usr/bin/security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-A",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_USER,
-            "-w",
-            key,
-        ])
-        .output()
-        .context("running /usr/bin/security to save the API key")?;
-    if !output.status.success() {
-        bail!(
-            "saving the API key to the Keychain: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    let entry = keychain()?;
+    let _ = entry.delete_credential();
+    entry
+        .set_password(key)
+        .map_err(|e| anyhow!("saving the API key to the Keychain: {e}"))
 }
 
 pub fn delete_key() -> Result<()> {
@@ -236,23 +233,6 @@ pub fn delete_key() -> Result<()> {
 
 // ---------------------------------------------------------------------------
 // Settings and models
-
-fn setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-            row.get(0)
-        })
-        .optional()?)
-}
-
-fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
-}
 
 pub fn settings(app: &AppHandle) -> Result<ChatSettings> {
     let (model, effort) = with_conn(app, |conn| {
@@ -1044,11 +1024,3 @@ fn stream_turn(
     Ok(turn)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
-}

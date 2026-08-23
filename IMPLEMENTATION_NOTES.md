@@ -980,3 +980,112 @@ The highlights future sessions should know about:
   its own element, so React appends rather than re-mounts and settled text never
   re-fades. Re-parsing markdown per delta would restart every animation in the
   answer — that is the whole reason for the split.
+
+## M11 — Notes + grades + settings + polish (2026-08-22)
+
+### What exists now
+
+- **`grades.rs`** is the grades domain module. The math moved out of tools.rs
+  (`weighted_grade` / `weights_line` / `grades_line` / `trim_num`, now
+  `pub(crate)`; tools.rs imports them), so chat, the UI commands, and the
+  class card all compute the same number. `list_grades` returns categories
+  with items, per-category percent (points-weighted), the weights sum, and
+  the SPEC §11 current grade. UI CRUD (`save_category` / `delete_category` /
+  `save_item` / `delete_item`) follows the deadlines shape exactly: one
+  transaction per write+audit pair (`ui.*` actions, deletes carry the full
+  rows — a category delete parks every item in its payload), category names
+  unique per class case-insensitively because the chat tool addresses
+  categories by name. Every write emits `hub-changed {area:"grades"}`, which
+  now invalidates `["grades"]` and `["classes"]`; `ClassCard` gained
+  `current_grade` (same `weighted_grade` call) rendered as an accent chip in
+  the card's badge cluster.
+- **`Grades.tsx`** renders the workspace GRADES section between Deadlines and
+  Materials (SPEC §12's "tabs" have been stacked sections since the workspace
+  took shape — the pattern holds). Ledger layout: mono weight column, name,
+  per-category percent (or NO SCORES YET), items nested behind a hairline
+  indent, hover-revealed add/edit/delete. The ≠100% warning is the amber mono
+  line under the header; the computed grade sits in the header as
+  `CURRENT N%`. Both forms are keyed by target (the M10 lesson).
+- **Notes editor** (`NoteEditor.tsx`): full-screen overlay in the reading-room
+  chrome — mono textarea beside a live preview rendered through FileViewer's
+  now-exported `docShell` + `renderMarkdown`, so a note previews exactly as
+  it reads. `notes::save_from_ui` shares the write path and audit shape with
+  the chat tool (`ui.write_note`, replaced content parked in the payload).
+  Closing saves anything unsaved — recoverability in place of a confirmation
+  prompt — with one guarded case: untitled non-empty text holds the close
+  (title it to keep it, clear it to discard) since that is the only close
+  that could silently lose work. ⌘S saves in place; a first save fixes the
+  title (the file name comes from it). On save the editor writes the note
+  back into the `["classFile", classId, relPath]` query cache — reopening
+  seeds from that cache, and a background refetch would land after the
+  keyed editor already seeded its state. The `notes` hub area also
+  invalidates `["classFile"]` for chat rewrites of a cached note. The NOTES
+  section is now always visible (NEW NOTE action, honest empty line) and
+  note rows open the editor instead of the read-only viewer.
+- **`settings.rs`** owns app-level settings in the settings table:
+  `job_model` (opus|sonnet|haiku aliases — the CLI resolves each to its
+  current release), `job_effort` (the CLI ladder), `job_concurrency` (1–4),
+  and the AIBHS root setter (`~/` expands, the folder must exist — it picks a
+  library, never creates one; before/after audited). Defaults stay
+  opus/xhigh/2. jobs.rs reads model+effort per spawn (a change applies to the
+  next job to start, queued included) and concurrency at the top of `pump` —
+  read **before** the manager lock, because `with_conn` must never nest
+  inside it. `setting`/`set_setting` moved to db.rs; chat.rs imports them.
+- **`Settings.tsx`**: the Settings view (gear beside the dashboard date;
+  App.tsx now switches dashboard | settings | workspace and resets scroll per
+  swap). Sections: LIBRARY (root path + change form, missing-folder error
+  line), SYNTHESIS JOBS (model rows, effort ladder, concurrency chips —
+  master exclusivity called out), CHAT. Chat's key/model/effort deliberately
+  stay in the chat sidebar's own pane — that is where a mid-conversation
+  change happens — so Settings shows their live status and links over via
+  `openChatSettings()` instead of duplicating the controls. The Job Center
+  header's concurrency label reads the configured value.
+- Empty states pass: deadlines/grades/notes sections carry honest one-line
+  invitations, materials keeps the M2 drop-target hero — an empty class
+  (three of four today) reads as intentional top to bottom.
+
+### Verified
+
+- **Notes round-trip** through real UI typing (AX): the saved file on disk
+  matches the typed markdown byte-for-byte (heading, bold, list, code span),
+  reopening loads it into the keyed editor, the live preview tracks each
+  keystroke, ⌘S stamps `SAVED h:mm PM`, close-saves append edits. Chat
+  search: "search my notes for fundamentals-kickoff-checklist" ran
+  search_material (1 hit) → read_material → answered with the note's items
+  and a clickable citation of `…/Notes/Before the first class.md`.
+- **Grade math** on the real CAI 5731 weighting (Assignments 50 / Quizzes 20
+  / Project 30, from the syllabus extract's evaluation table): Quiz 1 9/10
+  alone → CURRENT 90% (renormalized over the one graded category); adding
+  Homework 1 8/10 → 82.9% ((50·0.8 + 20·0.9)/70). The card chip appeared
+  live via the grades push. The amber warning read `WEIGHTS SUM 50% — 50%
+  UNASSIGNED` mid-entry and cleared at 100. The two fixture scores were
+  deleted through the UI (audit rows keep them); the three real categories
+  stay, showing NO SCORES YET until the semester produces real ones.
+- **Settings**: sonnet/low/1 chosen in the UI → rows in the settings table →
+  intact after a watcher-triggered app restart → syllabus_scan job 125's
+  init event reported `model claude-sonnet-5` (and finished honestly: all 11
+  recorded deadlines rode the prompt, so it proposed nothing). Restored to
+  opus/xhigh/2 afterwards. Concurrency reaches `pump` the same way (read per
+  call); the Job Center label follows it.
+- **Light mode, finally**: system appearance flipped briefly and restored —
+  dashboard, cards, Biostatistics workspace, notes listing, the editor split
+  (paper-white preview beside the source pane), and Settings all render
+  correctly on the light tokens.
+
+### Gotchas
+
+- **`aria-pressed` turns a button into an AX checkbox.** The settings option
+  rows and concurrency chips surface as `checkbox`, not `button` — AX
+  automation matching only buttons finds nothing on the Settings screen.
+- **A `sandbox=""` iframe hides `contentDocument` from its parent.** The live
+  preview writes via `sandbox="allow-same-origin"` (still no scripts) — the
+  FileViewer live-mode pattern. Changing `sandbox` on a mounted iframe does
+  not re-apply to the loaded document; only a remount picks it up.
+- react-refresh preserves hook state through an HMR edit of a mounted
+  overlay, so a fix like the sandbox change needs a close/reopen to observe.
+- This session ran concurrently with the dev-signing session (f47447b) —
+  interleaved edits to the same files merged cleanly, and that commit's
+  chat.rs companions (keyring-owned `save_key`, once-per-run re-own in
+  `stored_key`) ride this milestone commit as its message says. The stable
+  signing identity held up in practice: chat read the key across rebuilds
+  with zero Keychain prompts all session.

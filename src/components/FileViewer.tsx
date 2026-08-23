@@ -201,7 +201,7 @@ function escapeHtml(s: string): string {
 }
 
 /** Front matter renders as a quiet mono block, the body through marked. */
-function renderMarkdown(src: string): string {
+export function renderMarkdown(src: string): string {
   let front = "";
   let body = src;
   if (src.startsWith("---\n")) {
@@ -217,9 +217,10 @@ function renderMarkdown(src: string): string {
 /**
  * ClassHub's document register for raw materials: same paper/ink/type system
  * as the generated guides, but neutral apparatus — raw sources are unbranded;
- * only synthesized documents carry the class accent.
+ * only synthesized documents carry the class accent. The note editor's live
+ * preview uses it too, so a note previews exactly as it will read.
  */
-function docShell(body: string): string {
+export function docShell(body: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>

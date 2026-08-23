@@ -34,8 +34,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::db::{audit, emit_hub_change, now, with_conn};
+use crate::db::{audit, emit_hub_change, now, truncate, with_conn};
 use crate::deadlines::{valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS};
+use crate::grades::{grades_line, trim_num, weighted_grade, weights_line};
 
 /// Per-turn context for the write tools: today as display text (job prompt
 /// stamps) and as YYYY-MM-DD (practice file names). Both are formatted
@@ -1242,119 +1243,6 @@ fn add_grade_item(app: &AppHandle, input: &Value) -> Result<Outcome> {
     Ok(outcome)
 }
 
-/// "Weights now: Homework 30% + Exams 40% = 70% — 30% unassigned."
-fn weights_line(conn: &Connection, class_id: i64) -> Result<String> {
-    let mut stmt = conn.prepare(
-        "SELECT name, weight FROM grade_categories WHERE class_id = ?1 ORDER BY id",
-    )?;
-    let rows = stmt
-        .query_map([class_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let total: f64 = rows.iter().map(|(_, w)| w).sum();
-    let listed = rows
-        .iter()
-        .map(|(name, weight)| format!("{name} {}%", trim_num(*weight)))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    Ok(format!(
-        "Weights now: {listed} = {}%{}",
-        trim_num(total),
-        if (total - 100.0).abs() < 0.01 {
-            String::new()
-        } else if total < 100.0 {
-            format!(" — {}% unassigned", trim_num(100.0 - total))
-        } else {
-            format!(" — {}% over 100", trim_num(total - 100.0))
-        }
-    ))
-}
-
-/// SPEC §11: current weighted grade over graded items. Categories with no
-/// items are excluded and the remaining weights renormalized.
-fn weighted_grade(conn: &Connection, class_id: i64) -> Result<Option<f64>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.weight, SUM(i.score), SUM(i.max_score)
-         FROM grade_categories c JOIN grade_items i ON i.category_id = c.id
-         WHERE c.class_id = ?1 GROUP BY c.id",
-    )?;
-    let rows = stmt
-        .query_map([class_id], |row| {
-            Ok((
-                row.get::<_, f64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut weight_sum = 0.0;
-    let mut acc = 0.0;
-    for (weight, score, max) in rows {
-        if max > 0.0 && weight > 0.0 {
-            weight_sum += weight;
-            acc += weight * (score / max);
-        }
-    }
-    Ok((weight_sum > 0.0).then(|| acc / weight_sum * 100.0))
-}
-
-/// Grades summary for the detailed overview (the agent needs category names
-/// and current state to record into the right place).
-fn grades_line(conn: &Connection, class_id: i64) -> Result<String> {
-    let mut stmt = conn.prepare(
-        "SELECT c.name, c.weight, COUNT(i.id), SUM(i.score), SUM(i.max_score)
-         FROM grade_categories c LEFT JOIN grade_items i ON i.category_id = c.id
-         WHERE c.class_id = ?1 GROUP BY c.id ORDER BY c.id",
-    )?;
-    let rows = stmt
-        .query_map([class_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<f64>>(3)?,
-                row.get::<_, Option<f64>>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows.is_empty() {
-        return Ok("Grades: no categories yet\n".to_string());
-    }
-    let mut weight_total = 0.0;
-    let parts = rows
-        .iter()
-        .map(|(name, weight, count, score, max)| {
-            weight_total += weight;
-            let detail = match (score, max) {
-                (Some(s), Some(m)) if *m > 0.0 => {
-                    format!("{count} item(s), {:.1}%", s / m * 100.0)
-                }
-                _ => "no items yet".to_string(),
-            };
-            format!("{name} {}% ({detail})", trim_num(*weight))
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    let grade = match weighted_grade(conn, class_id)? {
-        Some(pct) => format!("current weighted grade {pct:.1}%"),
-        None => "nothing graded yet".to_string(),
-    };
-    Ok(format!(
-        "Grades: {parts} · weights sum {}%{} · {grade}\n",
-        trim_num(weight_total),
-        if (weight_total - 100.0).abs() < 0.01 { "" } else { " (≠100!)" }
-    ))
-}
-
-fn trim_num(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-9 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{v:.1}")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Write tools — notes, synthesis triggers, practice, move proposals
 
@@ -1702,11 +1590,3 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
-}

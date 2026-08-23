@@ -18,9 +18,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::db::{now, with_conn};
+use crate::db::{now, truncate, with_conn};
 
-const MAX_CONCURRENT: usize = 2;
 /// SPEC §6: never allow these, regardless of user-level claude settings. The
 /// `--allowedTools` list alone does not restrict tools the user's own config
 /// permits (verified against claude 2.1.237), so deny rules are passed too.
@@ -181,11 +180,9 @@ impl JobManager {
 // ---------------------------------------------------------------------------
 // Per-kind invocation scoping (SPEC §6)
 
-/// Owner decision (2026-08-22): every job runs Opus 5 at xhigh effort by default,
-/// superseding SPEC §6's per-kind model split. Model and effort level become
-/// user-configurable in Settings when that lands (M11).
-const DEFAULT_MODEL: &str = "opus";
-const DEFAULT_EFFORT: &str = "xhigh";
+// Model and effort come from Settings at spawn time (settings.rs; defaults
+// Opus at xhigh per the M3 owner decision superseding SPEC §6's per-kind
+// split). One global pair covers every job kind.
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
@@ -386,6 +383,9 @@ fn enqueue(
 /// master_guide at the front waits for every running job to finish, and while
 /// one runs (or waits, FIFO) nothing else starts.
 fn pump(app: &AppHandle) {
+    // Read before taking the manager lock — with_conn must never nest inside
+    // it (a thread holding the Db lock may be about to take this one).
+    let max_concurrent = crate::settings::job_concurrency(app);
     loop {
         let (job, child_slot, cancelled) = {
             let mgr = app.state::<JobManager>();
@@ -400,7 +400,7 @@ fn pump(app: &AppHandle) {
             if exclusive && !inner.running.is_empty() {
                 return; // queue drains first
             }
-            if inner.running.len() >= MAX_CONCURRENT {
+            if inner.running.len() >= max_concurrent {
                 return;
             }
             let Some(job) = inner.queue.pop_front() else {
@@ -672,12 +672,15 @@ fn execute_job(
 
     let home = dirs::home_dir().context("resolving home directory")?;
     let claude = home.join(".local").join("bin").join("claude");
+    // The Settings screen's job model/effort, read at spawn time so a change
+    // applies to the very next job — queued jobs included.
+    let (model, effort) = crate::settings::job_spawn_options(app);
     let mut cmd = Command::new(&claude);
     cmd.arg("-p")
         .arg(&job.prompt)
         .args(["--output-format", "stream-json", "--verbose"])
-        .args(["--model", DEFAULT_MODEL])
-        .args(["--effort", DEFAULT_EFFORT])
+        .args(["--model", &model])
+        .args(["--effort", &effort])
         .args(["--disallowedTools", disallowed_tools(&job.kind)])
         // The user-level claude config leaks MCP servers (e.g. web search)
         // into spawns; with no --mcp-config this loads zero MCP servers.
@@ -1145,11 +1148,3 @@ pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
     bail!("no JSON array of proposals in the job output")
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
-}

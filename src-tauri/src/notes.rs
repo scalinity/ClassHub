@@ -1,5 +1,5 @@
-//! SPEC §11 — per-class markdown notes in `<Class>/Notes/`. M8 gives chat
-//! `write_note` and the workspace a read-only listing; the editor lands in M11.
+//! SPEC §11 — per-class markdown notes in `<Class>/Notes/`. Chat's
+//! `write_note` tool (M8) and the workspace editor (M11) share one write path.
 
 use std::fs;
 use std::path::Path;
@@ -7,6 +7,10 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
+use serde_json::json;
+use tauri::AppHandle;
+
+use crate::db::{audit, emit_hub_change, with_conn};
 
 pub const NOTES_DIR: &str = "Notes";
 /// Notes are prose; anything bigger than this is not a note.
@@ -76,6 +80,38 @@ pub fn write_note(
         created: previous.is_none(),
         previous,
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedNote {
+    pub rel_path: String,
+    pub created: bool,
+}
+
+/// The editor's save — same write path and audit shape as the chat tool, so
+/// an overwrite can never silently destroy a note from either surface.
+pub fn save_from_ui(
+    app: &AppHandle,
+    class_id: i64,
+    title: &str,
+    content: &str,
+) -> Result<SavedNote> {
+    let saved = with_conn(app, |conn| {
+        let written = write_note(conn, class_id, title, content)?;
+        audit(
+            conn,
+            "ui.write_note",
+            json!({ "classId": class_id, "relPath": written.rel_path,
+                    "created": written.created, "previousContent": written.previous }),
+        )?;
+        Ok(SavedNote {
+            rel_path: written.rel_path,
+            created: written.created,
+        })
+    })?;
+    emit_hub_change(app, "notes");
+    Ok(saved)
 }
 
 pub fn list_notes(conn: &Connection, class_id: i64) -> Result<Vec<NoteFile>> {

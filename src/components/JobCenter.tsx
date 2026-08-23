@@ -1,4 +1,5 @@
 import { useRef, useState, type CSSProperties } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Check,
   ChevronRight,
@@ -20,6 +21,7 @@ import {
   type JobInfo,
   type ProgressEvent,
 } from "@/lib/jobs";
+import { getAppSettings } from "@/lib/settings";
 
 const ACCENTS: Record<string, string> = {
   blue: "var(--class-blue)",
@@ -39,6 +41,10 @@ const isActive = (j: JobInfo) => j.status === "running" || j.status === "queued"
 export function JobCenter() {
   const { jobs, output, panelOpen, nowSec } = useJobs();
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const { data: appSettings } = useQuery({
+    queryKey: ["appSettings"],
+    queryFn: getAppSettings,
+  });
 
   const running = jobs.filter((j) => j.status === "running");
   const active = jobs.filter(isActive);
@@ -58,7 +64,7 @@ export function JobCenter() {
             </h2>
             <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
               {active.length > 0
-                ? `${active.length} ACTIVE · MAX 2 CONCURRENT`
+                ? `${active.length} ACTIVE · MAX ${appSettings?.jobConcurrency ?? 2} CONCURRENT`
                 : "NO ACTIVE JOBS"}
             </span>
           </header>
