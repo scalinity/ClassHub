@@ -65,14 +65,20 @@ export function resolveProposal(
 // state — only these native handlers read it); the store below drives the
 // drop-zone highlight. Module-level wiring, no useEffect (workspace rules).
 
+export interface DropNotice {
+  /** The class whose workspace the drop targeted — only that workspace renders it. */
+  classId: number;
+  message: string;
+}
+
 export interface DragSnapshot {
   /** A drag is hovering the window while a class workspace is open. */
   active: boolean;
-  /** Last staging failure, surfaced in the inbox section. */
-  error: string | null;
+  /** Last staging failure or partial-drop notice, scoped to its class. */
+  notice: DropNotice | null;
 }
 
-let snapshot: DragSnapshot = { active: false, error: null };
+let snapshot: DragSnapshot = { active: false, notice: null };
 const listeners = new Set<() => void>();
 
 function emitDrag(patch: Partial<DragSnapshot>) {
@@ -82,31 +88,39 @@ function emitDrag(patch: Partial<DragSnapshot>) {
 
 let dropClassId: number | null = null;
 
-/** Called by App during render: the open workspace's class, or null. */
+/**
+ * Called by App during render: the open workspace's class, or null. A pure
+ * assignment — notifying store subscribers here would be a state update
+ * during App's render pass, so a drag that outlives its workspace is reset
+ * by the next drag event (below) instead.
+ */
 export function setDropTarget(classId: number | null) {
   dropClassId = classId;
-  if (classId === null && snapshot.active) emitDrag({ active: false });
 }
 
-export function clearDropError() {
-  if (snapshot.error !== null) emitDrag({ error: null });
+export function clearDropNotice() {
+  if (snapshot.notice !== null) emitDrag({ notice: null });
 }
 
 void getCurrentWebview().onDragDropEvent((event) => {
-  if (dropClassId === null) return;
+  if (dropClassId === null) {
+    if (snapshot.active) emitDrag({ active: false });
+    return;
+  }
+  const classId = dropClassId;
   const type = event.payload.type;
   if (type === "enter" || type === "over") {
     if (!snapshot.active) emitDrag({ active: true });
   } else if (type === "leave") {
     emitDrag({ active: false });
   } else if (type === "drop") {
-    emitDrag({ active: false, error: null });
+    emitDrag({ active: false, notice: null });
     // Success needs no handling here: the backend emits hub-changed, which
     // refetches the queue and the card badges (lib/query.ts).
     void invoke<StageResult>("stage_inbox_files", {
-      classId: dropClassId,
+      classId,
       paths: event.payload.paths,
-    }).catch((e) => emitDrag({ error: String(e) }));
+    }).catch((e) => emitDrag({ notice: { classId, message: String(e) } }));
   }
 });
 

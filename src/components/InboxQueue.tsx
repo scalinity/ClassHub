@@ -5,6 +5,7 @@ import { File } from "lucide-react";
 import { useJobs } from "@/lib/jobs";
 import { formatSize, type TreeNode } from "@/lib/materials";
 import {
+  clearDropNotice,
   getSortState,
   resolveProposal,
   runSortJob,
@@ -73,8 +74,9 @@ export function InboxQueue({
     (f) => f.dismissed && !proposedSources.has(`_Inbox/${f.name}`),
   );
   const count = proposals.length + unproposed.length;
+  const notice = drag.notice?.classId === classId ? drag.notice.message : null;
 
-  if (count === 0 && !active && !drag.error) return null;
+  if (count === 0 && !active && !notice) return null;
 
   const dirs = collectDirs(tree);
   const dirSet: ReadonlySet<string> = new Set(dirs);
@@ -120,9 +122,19 @@ export function InboxQueue({
         </div>
       </div>
 
-      {(drag.error ?? actionError) && (
-        <p className="mt-3 font-mono text-[11px] text-destructive">
-          ✕ {drag.error ?? actionError}
+      {(notice ?? actionError) && (
+        <p className="mt-3 flex items-start gap-2 font-mono text-[11px] text-destructive">
+          <span className="min-w-0 flex-1">✕ {notice ?? actionError}</span>
+          {notice && (
+            <button
+              type="button"
+              aria-label="Dismiss this notice"
+              onClick={clearDropNotice}
+              className="shrink-0 cursor-pointer rounded px-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            >
+              ✕
+            </button>
+          )}
         </p>
       )}
       {lastFailed && unproposed.length > 0 && (
