@@ -350,7 +350,7 @@ fn build_prompt(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let existing = if existing_rows.is_empty() {
+    let mut existing = if existing_rows.is_empty() {
         "No deadlines are recorded for this class yet.".to_string()
     } else {
         format!(
@@ -358,6 +358,27 @@ fn build_prompt(
             existing_rows.join("\n")
         )
     };
+    // A dismissal is a decision already made (the sorter's convention): tell
+    // the model, and finalize enforces it either way.
+    let mut stmt = conn.prepare(
+        "SELECT due_at, title FROM deadline_proposals
+         WHERE class_id = ?1 AND status = 'dismissed' ORDER BY due_at",
+    )?;
+    let dismissed_rows = stmt
+        .query_map([class_id], |row| {
+            Ok(format!(
+                "- {} · {}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !dismissed_rows.is_empty() {
+        existing.push_str(&format!(
+            "\n\nSkipped earlier in the app (do not re-propose these either):\n\n{}",
+            dismissed_rows.join("\n")
+        ));
+    }
 
     Ok(PROMPT_TEMPLATE
         .replace("{class}", &class_name)
@@ -389,6 +410,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
     let summary = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut duplicates = 0usize;
+        let mut dismissed_skips = 0usize;
         let mut skipped = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         // Per-entry tolerance: one malformed entry costs itself, not the batch.
@@ -435,6 +457,21 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                 duplicates += 1;
                 continue;
             }
+            // A dismissed proposal for the same item is a decision already
+            // made — a rescan must not resurface the card. Adding the
+            // deadline by hand remains the way back.
+            let dismissed_before: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM deadline_proposals
+                 WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+                   AND substr(due_at, 1, 10) = substr(?3, 1, 10)
+                   AND status = 'dismissed'",
+                params![class_id, title, due_at],
+                |row| row.get(0),
+            )?;
+            if dismissed_before > 0 {
+                dismissed_skips += 1;
+                continue;
+            }
             let updated = conn.execute(
                 "UPDATE deadline_proposals
                  SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4
@@ -453,14 +490,28 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
             recorded += 1;
         }
 
-        if recorded == 0 && duplicates == 0 && !skipped.is_empty() {
+        if recorded == 0 && duplicates == 0 && dismissed_skips == 0 && !skipped.is_empty() {
             bail!("no valid proposals in the scan output — skipped: {}", skipped.join("; "));
         }
-        let mut summary = match (recorded, duplicates) {
-            (0, 0) => "no date-bearing items found".to_string(),
-            (0, d) => format!("nothing new — {d} dated item(s) already recorded"),
-            (n, 0) => format!("{n} deadline proposal(s) awaiting review"),
-            (n, d) => format!("{n} deadline proposal(s) awaiting review · {d} already recorded"),
+        let mut known = Vec::new();
+        if duplicates > 0 {
+            known.push(format!("{duplicates} already recorded"));
+        }
+        if dismissed_skips > 0 {
+            known.push(format!("{dismissed_skips} skipped earlier"));
+        }
+        let mut summary = if recorded == 0 {
+            if known.is_empty() {
+                "no date-bearing items found".to_string()
+            } else {
+                format!("nothing new — {}", known.join(" · "))
+            }
+        } else {
+            let mut s = format!("{recorded} deadline proposal(s) awaiting review");
+            for part in &known {
+                s.push_str(&format!(" · {part}"));
+            }
+            s
         };
         if !skipped.is_empty() {
             summary.push_str(&format!(" · skipped {}", skipped.join("; ")));

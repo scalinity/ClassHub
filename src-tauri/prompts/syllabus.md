@@ -22,7 +22,8 @@ How to decide:
 - `title` is short and recognizable ("Problem Set 2", "Midterm Exam") — not a
   sentence. Put anything else worth keeping (the syllabus wording, what it covers,
   submission details) in `notes`, one line, or omit `notes` entirely.
-- Skip items already recorded (listed above) and duplicates within the material.
+- Skip items already recorded and items skipped earlier (both listed above), and
+  duplicates within the material.
 - A date that has already passed still counts if the material clearly commits to it —
   the app decides what to do with it.
 
