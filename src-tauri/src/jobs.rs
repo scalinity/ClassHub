@@ -523,6 +523,13 @@ fn run_job(
         mgr.lock_inner().running.remove(&job.id);
     }
     let _ = app.emit("jobs-changed", ());
+    // Files dropped while a sort ran were invisible to its prompt; with the
+    // row settled, a follow-up run covers whatever is still fresh.
+    if job.kind == "sort_proposal" && status == "succeeded" {
+        if let Some(class_id) = job.class_id {
+            crate::sorter::enqueue_followup(&app, class_id);
+        }
+    }
     pump(&app);
 }
 

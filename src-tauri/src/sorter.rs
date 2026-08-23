@@ -192,8 +192,9 @@ fn free_slot(dir: &Path, name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 // The sort job (SPEC §10 step 2)
 
-/// Enqueues unless a sort job for the class is already queued/running (its
-/// output covers the inbox as it reads it; later drops enqueue again).
+/// Enqueues unless a sort job for the class is already queued/running —
+/// files dropped while one runs are invisible to its prompt, and the
+/// follow-up run after it settles (enqueue_followup) covers them.
 fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     let prompt = with_conn(app, |conn| {
         if has_active_sort(conn, class_id)? {
@@ -205,6 +206,18 @@ fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     match prompt {
         Some(prompt) => Ok(Some(crate::jobs::enqueue_sort(app, class_id, &prompt)?)),
         None => Ok(None),
+    }
+}
+
+/// Called by the job runner after a sort job succeeds and its row settles:
+/// if fresh files arrived while it ran, another run picks them up — the
+/// queue's "AWAITING PROPOSAL" is a promise the system keeps. Best-effort;
+/// a failure here only costs the automatic follow-up (SORT INBOX remains).
+pub fn enqueue_followup(app: &AppHandle, class_id: i64) {
+    match enqueue_sort_job(app, class_id) {
+        Ok(Some(job_id)) => eprintln!("sort follow-up enqueued as job {job_id}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("sort follow-up failed to enqueue: {e:#}"),
     }
 }
 
