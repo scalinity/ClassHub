@@ -223,6 +223,11 @@ function ProposalCard({
 
   const source = proposal.sourceRelPath;
   const fileName = source.slice(source.lastIndexOf("/") + 1);
+  // MOVE TO… changes only the folder: a rename the proposal carries survives
+  // the redirect, so the picker override keeps the destination's file name.
+  const destName = proposal.destRelPath.slice(
+    proposal.destRelPath.lastIndexOf("/") + 1,
+  );
   const fromInbox = source.startsWith("_Inbox/");
   const fromDir = source.includes("/")
     ? source.slice(0, source.lastIndexOf("/"))
@@ -300,7 +305,7 @@ function ProposalCard({
                 type="button"
                 onClick={() => {
                   setPickerOpen(false);
-                  resolve(true, `${dir}/${fileName}`);
+                  resolve(true, `${dir}/${destName}`);
                 }}
                 className="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
               >
