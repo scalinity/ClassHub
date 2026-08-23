@@ -1557,8 +1557,11 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
         for mv in &validated {
             // One pending proposal per source file — a re-proposal replaces it
             // instead of stacking duplicates in the queue.
+            // source/confidence reset too: replacing a sort job's pending row
+            // must not leave its HIGH chip attributed to a chat destination.
             let updated = conn.execute(
-                "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, created_at = ?3
+                "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, created_at = ?3,
+                        source = 'chat', confidence = NULL
                  WHERE class_id = ?4 AND source_rel_path = ?5 AND status = 'pending'",
                 params![mv.dest_rel, mv.reason, now_secs(), mv.class_id, mv.source_rel],
             )?;
