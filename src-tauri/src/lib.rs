@@ -238,7 +238,12 @@ fn set_job_effort(app: tauri::AppHandle, effort: String) -> Result<(), String> {
 
 #[tauri::command]
 fn set_job_concurrency(app: tauri::AppHandle, count: usize) -> Result<(), String> {
-    settings::set_job_concurrency(&app, count).map_err(|e| format!("{e:#}"))
+    settings::set_job_concurrency(&app, count).map_err(|e| format!("{e:#}"))?;
+    // A raised limit should start queued jobs now, not at the next enqueue.
+    // The setter's Db guard is released by here, so pump's Db-before-manager
+    // lock ordering holds.
+    jobs::poke(&app);
+    Ok(())
 }
 
 // --- Deadlines + syllabus scan (SPEC §11) -------------------------------------

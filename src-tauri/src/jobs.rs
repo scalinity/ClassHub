@@ -286,6 +286,13 @@ pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None, None)
 }
 
+/// Re-runs the scheduler outside any queue transition — the concurrency
+/// setter calls this so a raised limit starts already-queued jobs at once
+/// instead of waiting for the next enqueue or job exit to pump.
+pub fn poke(app: &AppHandle) {
+    pump(app);
+}
+
 pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
     let mgr = app.state::<JobManager>();
     let mut inner = mgr.lock_inner();
