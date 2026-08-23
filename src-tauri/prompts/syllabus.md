@@ -4,7 +4,7 @@ date attached — and propose it. You only propose — each item becomes a deadl
 one by one, after explicit approval in the app.
 
 The working directory is the class folder. All paths below are relative to it.
-Today is {today}; the semester is Fall 2026.
+Today is {today}; the semester is {semester}.
 
 {target}
 
@@ -13,9 +13,9 @@ Today is {today}; the semester is Fall 2026.
 How to decide:
 
 - Propose only date-bearing items: something is due, happens, or closes on a calendar
-  date you can resolve. "Sept 3" in a Fall 2026 syllabus resolves to 2026-09-03.
-  A weekly rhythm with no dates ("quizzes every Friday") is not resolvable — skip it
-  rather than inventing dates.
+  date you can resolve against the semester named above (e.g. "Sept 3" in a Fall 2026
+  syllabus resolves to 2026-09-03). A weekly rhythm with no dates ("quizzes every
+  Friday") is not resolvable — skip it rather than inventing dates.
 - Include a time only when the material states one ("11:59 PM" → T23:59). Never
   invent a time.
 - `kind` is your judgment call: assignment | exam | quiz | project | other.

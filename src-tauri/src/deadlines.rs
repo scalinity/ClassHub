@@ -440,8 +440,26 @@ fn build_prompt(
     Ok(PROMPT_TEMPLATE
         .replace("{class}", &class_name)
         .replace("{today}", today)
+        .replace("{semester}", &semester_label(today))
         .replace("{target}", &target)
         .replace("{existing}", &existing))
+}
+
+/// "Fall 2026" from a YYYY-MM-DD. Month-level precision is all the prompt
+/// needs — it anchors how the model resolves partial dates like "Sept 3",
+/// which is stored data, not a display label.
+fn semester_label(today_iso: &str) -> String {
+    let year = today_iso.get(0..4).unwrap_or("");
+    let month: u32 = today_iso
+        .get(5..7)
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(1);
+    let term = match month {
+        1..=4 => "Spring",
+        5..=7 => "Summer",
+        _ => "Fall",
+    };
+    format!("{term} {year}")
 }
 
 // ---------------------------------------------------------------------------
