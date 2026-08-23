@@ -967,7 +967,10 @@ pub(crate) const DEADLINE_KINDS: &[&str] = &["assignment", "exam", "quiz", "proj
 
 /// ISO date, optionally with a time: YYYY-MM-DD[THH:MM[:SS]]. Stored as given;
 /// lexicographic order is chronological order for this shape. Shared with the
-/// UI's deadline writes (deadlines.rs) — one validation for every surface.
+/// UI's deadline writes and the syllabus scan (deadlines.rs) — one validation
+/// for every surface. Checks the calendar, not just the shape: a syllabus
+/// scan can propose model-invented dates like 2026-09-31, which would render
+/// as a rolled-over day while sorting and deduping as the stored text.
 pub(crate) fn valid_due_at(s: &str) -> bool {
     let b = s.as_bytes();
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
@@ -975,7 +978,7 @@ pub(crate) fn valid_due_at(s: &str) -> bool {
     {
         return false;
     }
-    match b.len() {
+    let shape_ok = match b.len() {
         10 => true,
         16 => b[10] == b'T' && digits(11..13) && b[13] == b':' && digits(14..16),
         19 => {
@@ -987,7 +990,38 @@ pub(crate) fn valid_due_at(s: &str) -> bool {
                 && digits(17..19)
         }
         _ => false,
+    };
+    if !shape_ok {
+        return false;
     }
+    // The shape check proved every sliced range is ASCII digits.
+    let num = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(0);
+    let (year, month, day) = (num(0..4), num(5..7), num(8..10));
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day < 1 || day > month_days {
+        return false;
+    }
+    if b.len() >= 16 && (num(11..13) > 23 || num(14..16) > 59) {
+        return false;
+    }
+    if b.len() == 19 && num(17..19) > 59 {
+        return false;
+    }
+    true
 }
 
 pub(crate) fn audit(conn: &Connection, action: &str, payload: Value) -> Result<()> {
