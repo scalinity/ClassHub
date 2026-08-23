@@ -34,6 +34,8 @@ fences, one entry per inbox file listed above:
 
 - `file` must echo an inbox path exactly as listed above; propose nothing for files
   not listed.
+- `create_folders` documents intent for whoever reads the proposal — the app itself
+  derives folder creation from `destination_rel_path` at approval time.
 - `destination_rel_path` must not target `_Inbox`, `Study Guides`, `Notes`, or any
   dot-folder, and must not collide with an existing file.
 - Keep the original file name unless the name itself is broken (collides or is
