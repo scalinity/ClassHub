@@ -35,7 +35,7 @@ type Editing =
  * renormalized over categories that have items).
  */
 export function GradesSection({ classId }: { classId: number }) {
-  const { data } = useQuery({
+  const { data, error } = useQuery({
     queryKey: ["grades", classId],
     queryFn: () => listGrades(classId),
   });
@@ -70,6 +70,11 @@ export function GradesSection({ classId }: { classId: number }) {
         </div>
       </div>
 
+      {error != null && (
+        <p className="mt-3 font-mono text-[11px] text-destructive">
+          ✕ GRADES DIDN&apos;T LOAD — {String(error)}
+        </p>
+      )}
       {actionError && (
         <p className="mt-3 font-mono text-[11px] text-destructive">
           ✕ {actionError}
