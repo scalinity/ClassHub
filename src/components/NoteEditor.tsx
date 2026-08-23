@@ -55,6 +55,7 @@ export function NoteEditor({
       key={note.relPath ?? "new"}
       classId={classId}
       initialTitle={note.title}
+      initialRelPath={note.relPath}
       initialContent={data ?? ""}
       onClose={onClose}
     />
@@ -64,17 +65,23 @@ export function NoteEditor({
 function EditorBody({
   classId,
   initialTitle,
+  initialRelPath,
   initialContent,
   onClose,
 }: {
   classId: number;
   initialTitle: string | null;
+  initialRelPath: string | null;
   initialContent: string;
   onClose: () => void;
 }) {
   const [title, setTitle] = useState(initialTitle ?? "");
   // A first save fixes the title — the file name comes from it.
   const [titleFixed, setTitleFixed] = useState(initialTitle !== null);
+  // The canonical file this editor writes: the backend's sanitizer names the
+  // file, so the raw title must never be used to address it (a `Week 3:
+  // recap` title lives at `Notes/Week 3- recap.md`).
+  const [relPath, setRelPath] = useState(initialRelPath);
   const [content, setContent] = useState(initialContent);
   const [savedContent, setSavedContent] = useState(initialContent);
   const [savedLabel, setSavedLabel] = useState<string | null>(null);
@@ -88,14 +95,15 @@ function EditorBody({
     if (busy || !dirty || !savable) return;
     setBusy(true);
     setSaveError(null);
-    saveNote(classId, title.trim(), content)
-      .then(({ relPath }) => {
+    saveNote(classId, title.trim(), content, relPath ?? undefined)
+      .then(({ relPath: savedPath }) => {
         // The read cache must match the disk immediately: reopening seeds the
         // editor from this key, and a background refetch would land too late.
         queryClient.setQueryData(
-          ["classFile", classId, relPath],
+          ["classFile", classId, savedPath],
           content.endsWith("\n") ? content : `${content}\n`,
         );
+        setRelPath(savedPath);
         setSavedContent(content);
         setTitleFixed(true);
         setSavedLabel(
@@ -176,11 +184,13 @@ function EditorBody({
           >
             SAVE
           </button>
-          {titleFixed && (
+          {relPath !== null && (
             <button
               type="button"
               onClick={() =>
-                void revealInFinder(classId, `Notes/${title}.md`).catch(() => {})
+                void revealInFinder(classId, relPath).catch((e) =>
+                  setSaveError(String(e)),
+                )
               }
               className={headerAction}
             >

@@ -40,13 +40,17 @@ export function listNotes(classId: number): Promise<ManagedFile[]> {
   return invoke<ManagedFile[]>("list_notes", { classId });
 }
 
-/** The notes editor's save; a replaced version is kept in the audit log. */
+/**
+ * The notes editor's save; a replaced version is kept in the audit log.
+ * `relPath` targets an exact existing file; without it the title names one.
+ */
 export function saveNote(
   classId: number,
   title: string,
   content: string,
+  relPath?: string,
 ): Promise<{ relPath: string; created: boolean }> {
-  return invoke("save_note", { classId, title, content });
+  return invoke("save_note", { classId, title, content, relPath });
 }
 
 /** Generated practice exams in Study Guides/Practice, newest first. */

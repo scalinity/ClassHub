@@ -68,6 +68,30 @@ pub fn write_note(
     write_audited(conn, class_id, &abs, &rel_path, content, audit_action)
 }
 
+/// Saves over an exact existing file in `Notes/` — the editor's path for a
+/// note opened from the listing, where re-deriving the name from the title
+/// could route the save to a different file (sanitization flattens `/` and
+/// `:`, and the listing also surfaces non-`.md` files). The title plays no
+/// part here; `rel_path` must be a plain `Notes/<file>` path.
+pub fn overwrite_note(
+    conn: &Connection,
+    class_id: i64,
+    rel_path: &str,
+    content: &str,
+    audit_action: &str,
+) -> Result<WrittenNote> {
+    let file_name = rel_path
+        .strip_prefix(&format!("{NOTES_DIR}/"))
+        .with_context(|| format!("notes live under {NOTES_DIR}/ — got '{rel_path}'"))?;
+    if file_name.is_empty() || file_name.contains('/') || file_name.starts_with('.') {
+        bail!("not a note file name: '{file_name}'");
+    }
+    let abs = crate::scanner::class_dir(conn, class_id)?
+        .join(NOTES_DIR)
+        .join(file_name);
+    write_audited(conn, class_id, &abs, rel_path, content, audit_action)
+}
+
 /// The shared tail of every note save: read the previous version (an
 /// unreadable file aborts — overwriting content the audit log cannot recover
 /// would defeat the undo), commit the audit row, then write the file. The
@@ -121,15 +145,21 @@ pub struct SavedNote {
 }
 
 /// The editor's save — same write path and audit shape as the chat tool, so
-/// an overwrite can never silently destroy a note from either surface.
+/// an overwrite can never silently destroy a note from either surface. With
+/// `rel_path` set, the save targets that exact file; otherwise the title
+/// names a (new) file.
 pub fn save_from_ui(
     app: &AppHandle,
     class_id: i64,
     title: &str,
     content: &str,
+    rel_path: Option<&str>,
 ) -> Result<SavedNote> {
     let saved = with_conn(app, |conn| {
-        let written = write_note(conn, class_id, title, content, "ui.write_note")?;
+        let written = match rel_path {
+            Some(rel) => overwrite_note(conn, class_id, rel, content, "ui.write_note")?,
+            None => write_note(conn, class_id, title, content, "ui.write_note")?,
+        };
         Ok(SavedNote {
             rel_path: written.rel_path,
             created: written.created,

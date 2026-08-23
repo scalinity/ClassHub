@@ -155,14 +155,17 @@ fn list_practice(
 }
 
 /// The notes editor's save (SPEC §11) — content lands in `<Class>/Notes/`.
+/// `rel_path` targets an exact existing file; without it the title names one.
 #[tauri::command]
 fn save_note(
     app: tauri::AppHandle,
     class_id: i64,
     title: String,
     content: String,
+    rel_path: Option<String>,
 ) -> Result<notes::SavedNote, String> {
-    notes::save_from_ui(&app, class_id, &title, &content).map_err(|e| format!("{e:#}"))
+    notes::save_from_ui(&app, class_id, &title, &content, rel_path.as_deref())
+        .map_err(|e| format!("{e:#}"))
 }
 
 // --- Grades (SPEC §11) --------------------------------------------------------
