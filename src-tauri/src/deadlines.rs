@@ -442,7 +442,10 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
 
             // Dedupe on (title, due date): within the batch, against existing
             // deadlines of any status, and one pending proposal per key.
-            let key = format!("{}\u{0}{}", title.to_lowercase(), &due_at[..10]);
+            // ASCII folding to match SQLite's LOWER() in the queries below —
+            // Unicode folding here would let the two layers disagree on
+            // non-ASCII titles and slip a duplicate pending row through.
+            let key = format!("{}\u{0}{}", title.to_ascii_lowercase(), &due_at[..10]);
             if !seen.insert(key) {
                 continue;
             }
