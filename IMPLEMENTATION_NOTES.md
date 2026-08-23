@@ -848,6 +848,24 @@ sessions should know:
   workspace render unchanged, and the critical was re-tested live — edit
   Quiz 1, switch to edit Homework 1, form now shows Homework 1's values.
 - The repo has no git remote; review fixes are local commits only.
+- **The launch Keychain prompt is fixed at the root** (supersedes the M7
+  and Post-M9 keychain gotchas). Cause, in two layers: (1) the dev binary
+  was ad-hoc linker-signed — a new code identity every build, so no grant
+  could ever persist; (2) the key item was created by the `security` CLI,
+  whose items land in the Apple-tools protection partition, which macOS 27
+  gates for non-Apple apps regardless of the `-A` ACL. Fixes: dev builds
+  are re-signed with the stable Apple Development identity by
+  `src-tauri/dev-sign.sh` (wired as the cargo runner in
+  `src-tauri/.cargo/config.toml`; identifier com.danny.classhub); `save_key`
+  writes through the keyring crate again — delete-then-add, because
+  updating an item keeps the old creator's ACL — so the app owns its item;
+  and `stored_key` re-owns a foreign-created item once per run, so a single
+  password entry on the old item's next read completes the migration and
+  every read after that is silent across rebuilds. Caveats: the runner
+  signs without entitlements, so lldb cannot attach to the dev binary
+  (get-task-allow is absent), and if the Apple Development cert ever
+  expires, dev-sign.sh falls back to the ad-hoc build and the prompts
+  return until the identity is renewed.
 
 ## Post-M9 — Review fixes (2026-08-22)
 

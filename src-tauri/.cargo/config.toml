@@ -1,0 +1,7 @@
+# Dev binaries run through dev-sign.sh, which swaps the linker's ad-hoc
+# signature (a new code identity every build) for the stable Apple
+# Development identity. The Keychain grant for the chat key persists across
+# rebuilds only because the signing identity does. Absolute path: cargo
+# runner paths are not config-relative, and this repo lives on one machine.
+[target.aarch64-apple-darwin]
+runner = "/Users/danny/Documents/Apps/ClassHub/src-tauri/dev-sign.sh"
