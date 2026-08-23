@@ -166,15 +166,17 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
                 (today === i + 1 ? "bg-muted/50" : "")
               }
             >
-              {blocks
-                .filter((b) => b.meeting.weekday === i + 1)
-                .map((block) => (
-                  <MeetingBlock
-                    key={`${block.cls.id}-${block.meeting.startTime}`}
-                    block={block}
-                    pct={pct}
-                  />
-                ))}
+              {layoutLanes(
+                blocks.filter((b) => b.meeting.weekday === i + 1),
+              ).map(({ block, lane, lanes }) => (
+                <MeetingBlock
+                  key={`${block.cls.id}-${block.meeting.startTime}`}
+                  block={block}
+                  lane={lane}
+                  lanes={lanes}
+                  pct={pct}
+                />
+              ))}
             </div>
           ))}
         </div>
@@ -183,11 +185,40 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
   );
 }
 
+/**
+ * Lane layout for one day: meetings that overlap in time split the column
+ * width instead of painting over each other. Greedy first-free-lane by start
+ * time; the day's lane count divides every block equally.
+ */
+function layoutLanes(
+  dayBlocks: Block[],
+): { block: Block; lane: number; lanes: number }[] {
+  const sorted = [...dayBlocks].sort(
+    (a, b) => toMinutes(a.meeting.startTime) - toMinutes(b.meeting.startTime),
+  );
+  const laneEnds: number[] = [];
+  const placed = sorted.map((block) => {
+    const start = toMinutes(block.meeting.startTime);
+    let lane = laneEnds.findIndex((end) => end <= start);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(0);
+    }
+    laneEnds[lane] = toMinutes(block.meeting.endTime);
+    return { block, lane };
+  });
+  return placed.map((p) => ({ ...p, lanes: laneEnds.length }));
+}
+
 function MeetingBlock({
   block,
+  lane,
+  lanes,
   pct,
 }: {
   block: Block;
+  lane: number;
+  lanes: number;
   pct: (minutes: number) => number;
 }) {
   const { cls, meeting, inSession } = block;
@@ -197,6 +228,8 @@ function MeetingBlock({
   const style = {
     top: `${pct(start)}%`,
     height: `${pct(end) - pct(start)}%`,
+    left: `calc(${(lane / lanes) * 100}% + 4px)`,
+    width: `calc(${100 / lanes}% - 8px)`,
     "--accent": CLASS_ACCENTS[cls.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
@@ -205,7 +238,7 @@ function MeetingBlock({
       title={`${cls.displayName} · ${formatTimeRange(meeting.startTime, meeting.endTime)}`}
       style={style}
       className={
-        "absolute inset-x-1 overflow-hidden rounded-[5px] py-1 pr-1.5 pl-2.5 " +
+        "absolute overflow-hidden rounded-[5px] py-1 pr-1.5 pl-2.5 " +
         (inSession ? "bg-(--accent)" : "bg-(--accent)/12")
       }
     >
