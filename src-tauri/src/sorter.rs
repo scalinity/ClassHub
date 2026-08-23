@@ -155,6 +155,23 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
         bail!("nothing was staged");
     }
 
+    // A fresh copy at a path supersedes a dismissal recorded for a file that
+    // has since left the inbox (free_slot suffixes the name while the old
+    // file is still there, so a match means the old file is gone) — a new
+    // drop is a new decision, and the sort job must see it.
+    if !staged.is_empty() {
+        with_conn(app, |conn| {
+            for name in &staged {
+                conn.execute(
+                    "DELETE FROM move_proposals
+                     WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'dismissed'",
+                    params![class_id, format!("{INBOX_DIR}/{name}")],
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+
     let job_id = if staged.is_empty() {
         None
     } else {
