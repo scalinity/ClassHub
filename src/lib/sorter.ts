@@ -34,6 +34,8 @@ export interface SortState {
 export interface StageResult {
   staged: string[];
   skippedFolders: number;
+  /** Per-file staging failures ("name: reason") — the batch survives them. */
+  failed: string[];
   jobId: number | null;
 }
 
@@ -115,12 +117,27 @@ void getCurrentWebview().onDragDropEvent((event) => {
     emitDrag({ active: false });
   } else if (type === "drop") {
     emitDrag({ active: false, notice: null });
-    // Success needs no handling here: the backend emits hub-changed, which
-    // refetches the queue and the card badges (lib/query.ts).
+    // Staged files announce themselves through the backend's hub-changed
+    // push; what needs surfacing here is everything that did NOT stage.
     void invoke<StageResult>("stage_inbox_files", {
       classId,
       paths: event.payload.paths,
-    }).catch((e) => emitDrag({ notice: { classId, message: String(e) } }));
+    })
+      .then((result) => {
+        const parts: string[] = [];
+        if (result.skippedFolders > 0) {
+          parts.push(
+            result.skippedFolders === 1
+              ? "1 folder skipped — drop files, not folders"
+              : `${result.skippedFolders} folders skipped — drop files, not folders`,
+          );
+        }
+        parts.push(...result.failed);
+        if (parts.length > 0) {
+          emitDrag({ notice: { classId, message: parts.join(" · ") } });
+        }
+      })
+      .catch((e) => emitDrag({ notice: { classId, message: String(e) } }));
   }
 });
 
