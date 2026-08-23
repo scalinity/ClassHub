@@ -1619,8 +1619,15 @@ fn validate_move(conn: &Connection, root: &Path, entry: &Value) -> Result<Valida
     if Path::new(&dest_rel).file_name().is_none() {
         bail!("'{to}' must include the destination file name");
     }
+    // Same policy as the drop-to-sort validator: dot-entries are scanner-hidden
+    // at every depth; app-managed dirs are excluded at top level only.
+    for segment in dest_rel.split('/') {
+        if segment.starts_with('.') {
+            bail!("'{to}' contains a hidden folder — the app would never show the file there");
+        }
+    }
     let first = dest_rel.split('/').next().unwrap_or("");
-    if first.starts_with('.') || ["Study Guides", "Notes", "_Inbox"].contains(&first) {
+    if crate::scanner::APP_MANAGED_DIRS.contains(&first) {
         bail!("'{to}' targets an app-managed folder — material belongs in module folders");
     }
     if root.join(&to).exists() {

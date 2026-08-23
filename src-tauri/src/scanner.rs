@@ -10,8 +10,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 /// App-managed directories excluded from scanning (SPEC §4), at class-folder top level.
-/// Hidden entries (incl. `.classhub`) are excluded at every depth.
-const APP_MANAGED_DIRS: &[&str] = &["Study Guides", "Notes", "_Inbox"];
+/// Hidden entries (incl. `.classhub`) are excluded at every depth. Shared with the
+/// drop-to-sort and chat move validators so all three enforce one policy.
+pub const APP_MANAGED_DIRS: &[&str] = &["Study Guides", "Notes", "_Inbox"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

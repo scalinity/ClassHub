@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::scanner::APP_MANAGED_DIRS;
+
 const INBOX_DIR: &str = "_Inbox";
 const EXTRACTS_PREFIX: &str = ".classhub/extracts";
-/// Destinations may never target app-managed folders (SPEC §4).
-const APP_MANAGED_DIRS: &[&str] = &["Study Guides", "Notes", "_Inbox"];
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
 /// Cap on file lines in the prompt's tree listing — generous for a class
 /// folder, bounded if one ever grows huge (folders are always all listed).
@@ -490,8 +490,17 @@ fn validate_dest(class_dir: &Path, source_rel: &str, dest_rel: &str) -> Result<(
     if Path::new(dest_rel).file_name().is_none() {
         bail!("destination must include the file name");
     }
+    // The scanner hides dot-entries at every depth, so a dotted segment
+    // anywhere would make the moved file vanish from the app.
+    for segment in dest_rel.split('/') {
+        if segment.starts_with('.') {
+            bail!("destination contains a hidden folder ('{segment}') — the app would never show it");
+        }
+    }
+    // App-managed dirs are excluded at class-folder top level only (same
+    // depth the scanner applies), so only the first segment is checked.
     let first = dest_rel.split('/').next().unwrap_or("");
-    if first.starts_with('.') || APP_MANAGED_DIRS.contains(&first) {
+    if APP_MANAGED_DIRS.contains(&first) {
         bail!("destination targets an app-managed folder");
     }
     if dest_rel == source_rel {
