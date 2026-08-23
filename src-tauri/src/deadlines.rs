@@ -9,36 +9,19 @@
 //! proposes becomes a deadline without explicit approval.
 
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
+use crate::db::{emit_hub_change, now, with_conn};
 use crate::tools::{
     audit, truncate, valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS,
 };
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/syllabus.md");
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    let db = app.state::<crate::Db>();
-    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&guard)
-}
-
-fn emit_hub_change(app: &AppHandle, area: &str) {
-    let _ = app.emit("hub-changed", json!({ "area": area }));
-}
 
 // ---------------------------------------------------------------------------
 // Deadline CRUD (UI side; the chat tools in tools.rs share the same rules)

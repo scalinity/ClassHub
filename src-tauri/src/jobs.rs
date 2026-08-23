@@ -11,13 +11,14 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
+
+use crate::db::{now, with_conn};
 
 const MAX_CONCURRENT: usize = 2;
 /// SPEC §6: never allow these, regardless of user-level claude settings. The
@@ -45,21 +46,8 @@ fn disallowed_tools(kind: &str) -> &'static str {
 
 const SELF_CHECK_PROMPT: &str = "Reply with exactly: OK";
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    let db = app.state::<crate::Db>();
-    let guard = lock(&db.0);
-    f(&guard)
 }
 
 // ---------------------------------------------------------------------------

@@ -11,14 +11,15 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
+use crate::db::{emit_hub_change, now, with_conn};
 use crate::scanner::APP_MANAGED_DIRS;
 
 const INBOX_DIR: &str = "_Inbox";
@@ -27,25 +28,6 @@ const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
 /// Cap on file lines in the prompt's tree listing — generous for a class
 /// folder, bounded if one ever grows huge (folders are always all listed).
 const MAX_TREE_FILES: usize = 200;
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    let db = app.state::<crate::Db>();
-    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&guard)
-}
-
-/// Same push the chat write tools use (src/lib/query.ts maps areas to query
-/// invalidations): `proposals` for queue/badge changes, `files` after a move.
-fn emit_hub_change(app: &AppHandle, area: &str) {
-    let _ = app.emit("hub-changed", json!({ "area": area }));
-}
 
 // ---------------------------------------------------------------------------
 // Types

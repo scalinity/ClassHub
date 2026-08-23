@@ -1,8 +1,37 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
+use serde_json::json;
+use tauri::{AppHandle, Emitter, Manager};
+
+// ---------------------------------------------------------------------------
+// Shared infrastructure — the single definitions every module imports.
+
+/// Unix seconds.
+pub fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Runs `f` with the shared connection guard held for exactly that window.
+/// The mutex is NOT reentrant: never reach anything that takes it again
+/// (e.g. `jobs::enqueue`) from inside `f`.
+pub fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let db = app.state::<crate::Db>();
+    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&guard)
+}
+
+/// Tells the frontend that hub data changed (src/lib/query.ts maps areas to
+/// query invalidations — the whole "no manual refresh" mechanism).
+pub fn emit_hub_change(app: &AppHandle, area: &str) {
+    let _ = app.emit("hub-changed", json!({ "area": area }));
+}
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),

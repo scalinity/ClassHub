@@ -11,13 +11,13 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use crate::db::now;
 use crate::extract::{current_manifest, manifest_is_stale};
 
 const GUIDES_DIR: &str = "Study Guides";
@@ -47,13 +47,6 @@ line: `DONE: <output path>` or `FAILED: <output path> — <reason>`.";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// The class accent as concrete values for the guide's design contract,

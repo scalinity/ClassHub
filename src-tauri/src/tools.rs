@@ -28,12 +28,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
+
+use crate::db::{emit_hub_change, now, with_conn};
 
 /// Per-turn context for the write tools: today as display text (job prompt
 /// stamps) and as YYYY-MM-DD (practice file names). Both are formatted
@@ -41,18 +42,6 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct ToolCtx<'a> {
     pub today: &'a str,
     pub today_iso: &'a str,
-}
-
-fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    let db = app.state::<crate::Db>();
-    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&guard)
-}
-
-/// Tells the frontend that hub data changed (src/lib/query.ts maps areas to
-/// query invalidations — the "no manual refresh" half of the write contract).
-fn emit_hub_change(app: &AppHandle, area: &str) {
-    let _ = app.emit("hub-changed", json!({ "area": area }));
 }
 
 const EXTRACTS_DIR: &str = ".classhub/extracts";
@@ -544,7 +533,7 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
         if guides.is_empty() {
             out.push_str("Guides: none generated yet\n");
         } else {
-            let now = now_secs();
+            let now_ts = now();
             let described = guides
                 .iter()
                 .map(|g| {
@@ -558,7 +547,7 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
                             "{scope} — {} ({}, {})",
                             if g.stale { "STALE" } else { "fresh" },
                             g.rel_path,
-                            days_ago(now, g.generated_at)
+                            days_ago(now_ts, g.generated_at)
                         )
                     } else {
                         format!("{scope} ({})", if g.stale { "STALE" } else { "fresh" })
@@ -1034,7 +1023,7 @@ pub(crate) fn valid_due_at(s: &str) -> bool {
 pub(crate) fn audit(conn: &Connection, action: &str, payload: Value) -> Result<()> {
     conn.execute(
         "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
-        params![action, payload.to_string(), now_secs()],
+        params![action, payload.to_string(), now()],
     )?;
     Ok(())
 }
@@ -1610,7 +1599,7 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
                 "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, created_at = ?3,
                         source = 'chat', confidence = NULL
                  WHERE class_id = ?4 AND source_rel_path = ?5 AND status = 'pending'",
-                params![mv.dest_rel, mv.reason, now_secs(), mv.class_id, mv.source_rel],
+                params![mv.dest_rel, mv.reason, now(), mv.class_id, mv.source_rel],
             )?;
             if updated == 0 {
                 conn.execute(
@@ -1618,7 +1607,7 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
                      (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
                       source, status, created_at)
                      VALUES (?1, ?2, ?3, ?4, NULL, 'chat', 'pending', ?5)",
-                    params![mv.class_id, mv.source_rel, mv.dest_rel, mv.reason, now_secs()],
+                    params![mv.class_id, mv.source_rel, mv.dest_rel, mv.reason, now()],
                 )?;
             }
         }
@@ -1751,13 +1740,6 @@ fn float_arg(input: &Value, key: &str) -> Result<f64> {
         .get(key)
         .and_then(Value::as_f64)
         .with_context(|| format!("missing required numeric argument '{key}'"))
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Relative age in whole days — std alone cannot format a local date, and the
