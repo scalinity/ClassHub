@@ -178,7 +178,7 @@ export function ClassWorkspace({
         />
       )}
 
-      <InboxQueue classId={info.id} tree={tree ?? []} />
+      <InboxQueue classId={info.id} tree={tree} />
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between border-b pb-3">

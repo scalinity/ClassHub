@@ -41,7 +41,9 @@ export function InboxQueue({
   tree,
 }: {
   classId: number;
-  tree: readonly TreeNode[];
+  /** undefined while the classTree query is in flight — the queue renders a
+   * neutral state rather than treating every folder as not-yet-existing. */
+  tree: readonly TreeNode[] | undefined;
 }) {
   const { data } = useQuery({
     queryKey: ["sortState", classId],
@@ -78,8 +80,8 @@ export function InboxQueue({
 
   if (count === 0 && !active && !notice) return null;
 
-  const dirs = collectDirs(tree);
-  const dirSet: ReadonlySet<string> = new Set(dirs);
+  const dirs = tree ? collectDirs(tree) : null;
+  const dirSet: ReadonlySet<string> | null = dirs ? new Set(dirs) : null;
 
   const sortNow = () => {
     setActionError(null);
@@ -209,8 +211,9 @@ function ProposalCard({
   dirSet,
 }: {
   proposal: MoveProposal;
-  dirs: readonly string[];
-  dirSet: ReadonlySet<string>;
+  /** null while the tree is loading. */
+  dirs: readonly string[] | null;
+  dirSet: ReadonlySet<string> | null;
 }) {
   // Busy holds until the hub-changed refetch removes the card (or an error
   // re-enables the actions) — a resolved proposal must not be re-clickable.
@@ -224,7 +227,7 @@ function ProposalCard({
   const fromDir = source.includes("/")
     ? source.slice(0, source.lastIndexOf("/"))
     : "";
-  const pickerDirs = dirs.filter((d) => d !== fromDir);
+  const pickerDirs = dirs?.filter((d) => d !== fromDir) ?? null;
 
   const resolve = (approve: boolean, destOverride?: string) => {
     setBusy(true);
@@ -282,7 +285,11 @@ function ProposalCard({
 
       {pickerOpen && !busy && (
         <div className="mt-2 max-h-44 overflow-y-auto rounded-md border p-1">
-          {pickerDirs.length === 0 ? (
+          {pickerDirs === null ? (
+            <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
+              Folders are still loading…
+            </p>
+          ) : pickerDirs.length === 0 ? (
             <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
               No other folders yet — approving creates the proposed one.
             </p>
@@ -314,14 +321,16 @@ function ProposalCard({
 /**
  * The route this approval takes: source folder → destination path in mono,
  * with destination folders that don't exist yet dash-underlined in the accent
- * — the "will be created" state is visible before anything happens.
+ * — the "will be created" state is visible before anything happens. While the
+ * tree is loading (dirSet null) segments render plain: no folder gets called
+ * new until the tree can actually say so.
  */
 function RouteLine({
   proposal,
   dirSet,
 }: {
   proposal: MoveProposal;
-  dirSet: ReadonlySet<string>;
+  dirSet: ReadonlySet<string> | null;
 }) {
   const source = proposal.sourceRelPath;
   const fromDir = source.includes("/")
@@ -337,7 +346,7 @@ function RouteLine({
   let path = "";
   const parts = (destDir === "" ? [] : destDir.split("/")).map((seg) => {
     path = path === "" ? seg : `${path}/${seg}`;
-    return { seg, isNew: !dirSet.has(path) };
+    return { seg, isNew: dirSet !== null && !dirSet.has(path) };
   });
   const hasNew = parts.some((p) => p.isNew);
 
