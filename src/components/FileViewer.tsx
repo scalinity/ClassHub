@@ -226,6 +226,11 @@ export function docShell(body: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<!-- The sandbox already blocks scripts; the CSP closes the residual it
+     doesn't cover — network loads (remote images, meta refresh) from note
+     or material content rendered through this shell. -->
+
 <style>
 :root {
   --paper: #fcfcfd; --ink: #1c1f24; --muted: #697079;
