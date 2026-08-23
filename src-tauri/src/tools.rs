@@ -1251,15 +1251,10 @@ fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
         let class = resolve_class(conn, &str_arg(input, "class")?)?;
         let title = str_arg(input, "title")?;
         let content = str_arg(input, "content_md")?;
-        let written = crate::notes::write_note(conn, class.id, &title, &content)?;
-        // The replaced content rides the audit entry — an overwrite can never
-        // silently destroy a note.
-        audit(
-            conn,
-            "chat.write_note",
-            json!({ "classId": class.id, "relPath": written.rel_path,
-                    "created": written.created, "previousContent": written.previous }),
-        )?;
+        // notes::write_note commits the audit row (with the replaced content)
+        // before the file write — an overwrite can never silently destroy a note.
+        let written =
+            crate::notes::write_note(conn, class.id, &title, &content, "chat.write_note")?;
         let lines = content.lines().count();
         Ok(Outcome::ok(format!(
             "Note {} — {}/{} ({lines} line{})\n{}",

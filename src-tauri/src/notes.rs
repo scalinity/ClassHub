@@ -28,9 +28,6 @@ pub struct NoteFile {
 pub struct WrittenNote {
     pub rel_path: String,
     pub created: bool,
-    /// The content replaced by an overwrite — kept in the audit log so a
-    /// chat write can never silently destroy a note.
-    pub previous: Option<String>,
 }
 
 /// A note title becomes its file name; slashes and colons would change the
@@ -52,11 +49,38 @@ fn note_file_name(title: &str) -> Result<String> {
     Ok(format!("{cleaned}.md"))
 }
 
+/// One write path for every surface (chat tool and editor): `audit_action`
+/// names the caller (`chat.write_note` / `ui.write_note`) on the audit row
+/// that parks the replaced content.
 pub fn write_note(
     conn: &Connection,
     class_id: i64,
     title: &str,
     content: &str,
+    audit_action: &str,
+) -> Result<WrittenNote> {
+    let file_name = note_file_name(title)?;
+    let dir = crate::scanner::class_dir(conn, class_id)?.join(NOTES_DIR);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let abs = dir.join(&file_name);
+    let rel_path = format!("{NOTES_DIR}/{file_name}");
+    write_audited(conn, class_id, &abs, &rel_path, content, audit_action)
+}
+
+/// The shared tail of every note save: read the previous version (an
+/// unreadable file aborts — overwriting content the audit log cannot recover
+/// would defeat the undo), commit the audit row, then write the file. The
+/// ordering is deliberate: a committed audit row for a write that then fails
+/// is a harmless stray, while the reverse — an overwrite whose previous
+/// version was never parked — is unrecoverable.
+fn write_audited(
+    conn: &Connection,
+    class_id: i64,
+    abs: &Path,
+    rel_path: &str,
+    content: &str,
+    audit_action: &str,
 ) -> Result<WrittenNote> {
     if content.trim().is_empty() {
         bail!("the note has no content");
@@ -64,21 +88,28 @@ pub fn write_note(
     if content.len() > MAX_NOTE_BYTES {
         bail!("note content is too large (1 MB max)");
     }
-    let file_name = note_file_name(title)?;
-    let dir = crate::scanner::class_dir(conn, class_id)?.join(NOTES_DIR);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    let abs = dir.join(&file_name);
-    let previous = fs::read_to_string(&abs).ok();
+    let previous = match fs::read_to_string(abs) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => bail!("cannot read the existing {rel_path} ({e}) — not overwriting it"),
+    };
+    let created = previous.is_none();
+    let tx = conn.unchecked_transaction()?;
+    audit(
+        &tx,
+        audit_action,
+        json!({ "classId": class_id, "relPath": rel_path,
+                "created": created, "previousContent": previous }),
+    )?;
+    tx.commit()?;
     let mut text = content.to_string();
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    fs::write(&abs, text).with_context(|| format!("writing {}", abs.display()))?;
+    fs::write(abs, text).with_context(|| format!("writing {}", abs.display()))?;
     Ok(WrittenNote {
-        rel_path: format!("{NOTES_DIR}/{file_name}"),
-        created: previous.is_none(),
-        previous,
+        rel_path: rel_path.to_string(),
+        created,
     })
 }
 
@@ -98,13 +129,7 @@ pub fn save_from_ui(
     content: &str,
 ) -> Result<SavedNote> {
     let saved = with_conn(app, |conn| {
-        let written = write_note(conn, class_id, title, content)?;
-        audit(
-            conn,
-            "ui.write_note",
-            json!({ "classId": class_id, "relPath": written.rel_path,
-                    "created": written.created, "previousContent": written.previous }),
-        )?;
+        let written = write_note(conn, class_id, title, content, "ui.write_note")?;
         Ok(SavedNote {
             rel_path: written.rel_path,
             created: written.created,
