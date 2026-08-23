@@ -616,36 +616,99 @@ pub fn resolve_proposal(
         fs::rename(&src_abs, &dest_abs)
             .with_context(|| format!("moving {source_rel} to {dest_rel}"))?;
 
-        update_index(conn, class_id, &class_dir, &source_rel, &dest_rel)?;
-
-        conn.execute(
-            "INSERT INTO audit_log (action, payload, created_at)
-             VALUES ('sort.move', ?1, ?2)",
-            params![
-                json!({
-                    "proposalId": proposal_id,
-                    "classId": class_id,
-                    "from": source_rel,
-                    "to": dest_rel,
-                    "proposedBy": source,
-                    "confidence": confidence,
-                })
-                .to_string(),
-                now()
-            ],
-        )?;
-        conn.execute(
-            "UPDATE move_proposals
-             SET status = 'approved', dest_rel_path = ?1, resolved_at = ?2 WHERE id = ?3",
-            params![dest_rel, now(), proposal_id],
-        )?;
-        Ok(format!("moved — {source_rel} → {dest_rel}"))
+        // Everything after the rename lands as one unit; on failure the DB
+        // rolls back and the file (plus any moved extract artifacts) goes
+        // back where it was, so the observable states are exactly "nothing
+        // happened" or "everything happened".
+        match record_move(
+            conn,
+            class_id,
+            &class_dir,
+            &source_rel,
+            &dest_rel,
+            proposal_id,
+            &source,
+            confidence.as_deref(),
+        ) {
+            Ok(()) => Ok(format!("moved — {source_rel} → {dest_rel}")),
+            Err(e) => {
+                undo_artifact_moves(&class_dir, &source_rel, &dest_rel);
+                if let Err(undo) = fs::rename(&dest_abs, &src_abs) {
+                    return Err(e.context(format!(
+                        "recording the move failed AND the file could not be moved \
+                         back ({undo}) — it is on disk at {dest_rel}; rescan the class"
+                    )));
+                }
+                Err(e.context("recording the move failed — the file was moved back"))
+            }
+        }
     })?;
     emit_change(app, "proposals");
     if approve {
         emit_change(app, "files"); // the tree on disk changed
     }
     Ok(summary)
+}
+
+/// The whole DB side of an approved move in one transaction — stale-row
+/// cleanup, index update, audit entry, proposal resolution — so a failure
+/// anywhere leaves no partial commit and the caller can undo the rename.
+#[allow(clippy::too_many_arguments)]
+fn record_move(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    dest_rel: &str,
+    proposal_id: i64,
+    proposed_by: &str,
+    confidence: Option<&str>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    // A stale index row can still occupy the destination (file deleted in
+    // Finder, no rescan since) — validate_dest only checks the disk. Clear
+    // it so the rel_path rewrite cannot hit UNIQUE(class_id, rel_path).
+    tx.execute(
+        "DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2",
+        params![class_id, dest_rel],
+    )?;
+    update_index(&tx, class_id, class_dir, source_rel, dest_rel)?;
+    tx.execute(
+        "INSERT INTO audit_log (action, payload, created_at)
+         VALUES ('sort.move', ?1, ?2)",
+        params![
+            json!({
+                "proposalId": proposal_id,
+                "classId": class_id,
+                "from": source_rel,
+                "to": dest_rel,
+                "proposedBy": proposed_by,
+                "confidence": confidence,
+            })
+            .to_string(),
+            now()
+        ],
+    )?;
+    tx.execute(
+        "UPDATE move_proposals
+         SET status = 'approved', dest_rel_path = ?1, resolved_at = ?2 WHERE id = ?3",
+        params![dest_rel, now(), proposal_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Best-effort reversal of `update_index`'s artifact renames, for the
+/// failure path: each relocated extract file goes back to its source mirror.
+fn undo_artifact_moves(class_dir: &Path, source_rel: &str, dest_rel: &str) {
+    let extracts = class_dir.join(EXTRACTS_PREFIX);
+    for suffix in [".md", ".pdf", ".pdf.sha256"] {
+        let new = extracts.join(format!("{dest_rel}{suffix}"));
+        let old = extracts.join(format!("{source_rel}{suffix}"));
+        if new.is_file() && !old.exists() {
+            let _ = fs::rename(&new, &old);
+        }
+    }
 }
 
 /// SPEC §10 step 4, "updates the file index": an indexed source keeps its row
