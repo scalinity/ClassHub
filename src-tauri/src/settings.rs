@@ -19,6 +19,8 @@ pub const DEFAULT_JOB_CONCURRENCY: usize = 2;
 const MODEL_SETTING: &str = "job_model";
 const EFFORT_SETTING: &str = "job_effort";
 const CONCURRENCY_SETTING: &str = "job_concurrency";
+/// Seeded by db.rs on first launch; this module only repoints it.
+const ROOT_SETTING: &str = "aibhs_root";
 
 /// CLI aliases — the claude CLI resolves each to its current release, so a
 /// model bump never needs a setting change.
@@ -192,5 +194,5 @@ pub fn set_aibhs_root(app: &AppHandle, path: &str) -> Result<()> {
     if !expanded.is_dir() {
         bail!("no folder at {}", expanded.display());
     }
-    set_audited(app, "aibhs_root", &expanded.to_string_lossy())
+    set_audited(app, ROOT_SETTING, &expanded.to_string_lossy())
 }
