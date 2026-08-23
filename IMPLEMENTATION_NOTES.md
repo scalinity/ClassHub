@@ -1089,3 +1089,49 @@ The highlights future sessions should know about:
   `stored_key`) ride this milestone commit as its message says. The stable
   signing identity held up in practice: chat read the key across rebuilds
   with zero Keychain prompts all session.
+
+## Post-M11 — Review fixes (2026-08-23)
+
+A two-agent review of the M11 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 6 warnings
+(plus 1 pre-existing), and 8 suggestions; all were addressed as individual
+commits. What future sessions should know:
+
+- **The Keychain re-own is once-ever and loud.** The delete→re-add window is
+  the one moment the key exists only in process memory, so it is gated on a
+  persistent `keychain_reowned` settings flag (not once per run), serialized
+  behind a mutex so a concurrent `stored_key` can't observe the item
+  mid-delete, retried, and a final failure returns an error instead of a
+  stderr note. A UI save marks the item app-owned; deleting the key clears
+  the flag. `stored_key`/`save_key`/`delete_key` all take the AppHandle now.
+- **Note saves commit the audit row before the file write** (the reverse of
+  the M8 shape): a stray audit row for a failed write is harmless, an
+  overwrite whose previous version was never parked is not. The shared path
+  (`notes::write_note`, action-name parameter) also refuses to overwrite an
+  existing file it cannot read — non-UTF-8 or unreadable content must not be
+  clobbered with `previousContent: null`.
+- **The editor addresses files by the backend's canonical `rel_path`, never
+  by title.** The sanitizer names the file (`Week 3: recap` lives at
+  `Week 3- recap.md`), so `save_note` takes an optional `rel_path` targeting
+  the exact file (single-component `Notes/` paths); the title names only new
+  notes. Reveals use the same path.
+- **Every settings write commits atomically with a before/after audit row**
+  (`set_audited`, action name derived from the key), and every spawn-option
+  fallback to defaults logs the substitution — a configured sonnet/low
+  silently spawning opus/xhigh would land on the subscription window.
+- **Raising job concurrency pokes the scheduler** (`jobs::poke` from the
+  command, after the Db guard releases) so queued jobs start immediately.
+- **Migration 0005** rebuilds both grade tables with CHECK constraints
+  (weight 0–100, score ≥ 0, max_score > 0); SQLite can't add a CHECK in
+  place, so the recipe is rename-originals → create+copy parent → create+copy
+  child → drop child → drop parent, with the child's FK following the rename.
+- The backend serves the allowed job model/effort ids
+  (`AppSettings.jobModels/jobEfforts/maxConcurrency`); the UI keeps only
+  display copy. `list_grades` derives its current grade from the rows it
+  already read (same gate as `weighted_grade`); the note preview parse is
+  memoized on content.
+- **Known growth term, accepted:** every note save embeds the full replaced
+  content in `audit_log` — that IS the undo mechanism, but a 1 MB note
+  edited fifty times is 50 MB of database with no pruning path. Revisit only
+  if the file ever gets noticeably large.
+- The repo still has no git remote; review fixes are local commits only.
