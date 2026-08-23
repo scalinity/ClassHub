@@ -489,9 +489,15 @@ fn validate_entry(class_dir: &Path, entry: &RawProposal) -> Result<ValidEntry> {
     })
 }
 
-/// Class-relative path hygiene: no traversal, no absolutes.
+/// Class-relative path hygiene: no traversal, no absolutes. An absolute path
+/// is rejected rather than silently reinterpreted as class-relative — the
+/// input meant something quite different from what would happen.
 fn clean_rel(path: &str) -> Result<String> {
-    let trimmed = path.trim().trim_matches('/');
+    let trimmed = path.trim();
+    if trimmed.starts_with('/') {
+        bail!("'{path}' is absolute — paths are class-relative");
+    }
+    let trimmed = trimmed.trim_end_matches('/');
     if trimmed.is_empty() {
         bail!("empty path");
     }
@@ -504,11 +510,9 @@ fn clean_rel(path: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-/// Shared destination rules for job proposals and approval overrides.
+/// Shared destination rules for job proposals and approval overrides (re-run
+/// at approval time, where the fs operations actually happen).
 fn validate_dest(class_dir: &Path, source_rel: &str, dest_rel: &str) -> Result<()> {
-    if Path::new(dest_rel).file_name().is_none() {
-        bail!("destination must include the file name");
-    }
     // The scanner hides dot-entries at every depth, so a dotted segment
     // anywhere would make the moved file vanish from the app.
     for segment in dest_rel.split('/') {
@@ -525,8 +529,33 @@ fn validate_dest(class_dir: &Path, source_rel: &str, dest_rel: &str) -> Result<(
     if dest_rel == source_rel {
         bail!("destination equals the current path");
     }
-    if class_dir.join(dest_rel).exists() {
+    let dest_abs = class_dir.join(dest_rel);
+    if dest_abs.is_dir() {
+        bail!("destination is a folder — include the file name");
+    }
+    if dest_abs.exists() {
         bail!("destination already exists");
+    }
+    ensure_no_symlink_ancestors(class_dir, dest_rel)?;
+    Ok(())
+}
+
+/// No destination may route through a symlinked directory — create_dir_all
+/// and rename would physically write outside the class folder while the
+/// index records the file as inside it.
+fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
+    let mut current = class_dir.to_path_buf();
+    let parent = Path::new(dest_rel).parent().unwrap_or(Path::new(""));
+    for component in parent.components() {
+        current.push(component);
+        if let Ok(meta) = fs::symlink_metadata(&current) {
+            if meta.file_type().is_symlink() {
+                bail!(
+                    "destination goes through a symlink ('{}')",
+                    current.display()
+                );
+            }
+        } // missing components will be created as real directories
     }
     Ok(())
 }
@@ -597,9 +626,12 @@ pub fn resolve_proposal(
             return Ok(format!("left in place — {source_rel}"));
         }
 
+        // Both branches go through clean_rel — the stored destination was
+        // validated when recorded, but the approve path is the last gate
+        // before an fs operation and re-checks everything it relies on.
         let dest_rel = match dest_override {
             Some(over) => clean_rel(&over)?,
-            None => proposed_dest,
+            None => clean_rel(&proposed_dest)?,
         };
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let src_abs = class_dir.join(&source_rel);
