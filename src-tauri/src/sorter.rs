@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::scanner::APP_MANAGED_DIRS;
@@ -391,13 +391,22 @@ struct RawProposal {
 /// Parses and records the job's proposals. Returns the job summary; zero
 /// recorded proposals is an error the caller demotes to job failure.
 pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
-    let entries = parse_proposals(result_text)?;
+    let entries = parse_entries(result_text)?;
     let summary = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let mut recorded = 0usize;
         let mut skipped = Vec::new();
-        for entry in &entries {
-            match validate_entry(&class_dir, entry) {
+        // Per-entry tolerance throughout: one malformed or invalid entry
+        // costs that entry, never the rest of the batch.
+        for (index, raw) in entries.iter().enumerate() {
+            let entry: RawProposal = match serde_json::from_value(raw.clone()) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    skipped.push(format!("entry {} (malformed: {e})", index + 1));
+                    continue;
+                }
+            };
+            match validate_entry(&class_dir, &entry) {
                 Ok(valid) => {
                     upsert_proposal(conn, class_id, &valid)?;
                     recorded += 1;
@@ -426,14 +435,24 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
 }
 
 /// The prompt contracts a bare JSON array as the final message; tolerate a
-/// fenced block or stray prose around it by slicing the outermost array.
-fn parse_proposals(text: &str) -> Result<Vec<RawProposal>> {
-    let start = text.find('[').context("no JSON array in the job output")?;
-    let end = text.rfind(']').context("unterminated JSON array in the job output")?;
-    if end <= start {
-        bail!("malformed JSON array in the job output");
+/// fenced block or stray prose around it. A candidate `[` counts only when
+/// the next non-whitespace character is `{` (or `]`), so a bracket inside
+/// prose — e.g. a filename like `[draft] notes.pdf` — never wins the slice;
+/// the stream deserializer then stops at the array's end, so trailing prose
+/// is harmless too.
+fn parse_entries(text: &str) -> Result<Vec<Value>> {
+    let bytes = text.as_bytes();
+    for (i, _) in text.match_indices('[') {
+        let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
+        if !matches!(next, Some(b'{') | Some(b']')) {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        if let Some(Ok(Value::Array(entries))) = stream.next() {
+            return Ok(entries);
+        }
     }
-    serde_json::from_str(&text[start..=end]).context("parsing the job's JSON proposals")
+    bail!("no JSON array of proposals in the job output")
 }
 
 struct ValidEntry {
