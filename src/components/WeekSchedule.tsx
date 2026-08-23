@@ -6,7 +6,9 @@ import {
   formatDueDate,
   formatTime,
   formatTimeRange,
+  isoWeekday,
   nextMeeting,
+  toMinutes,
   weekdayLabel,
   type NextMeeting,
 } from "@/lib/schedule";
@@ -14,15 +16,6 @@ import {
 const DAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI"];
 /** Vertical scale of the time canvas. */
 const PX_PER_HOUR = 26;
-
-function toMinutes(time: string): number {
-  const [h, m] = time.split(":").map(Number);
-  return h * 60 + m;
-}
-
-function isoWeekday(date: Date): number {
-  return ((date.getDay() + 6) % 7) + 1;
-}
 
 interface Block {
   cls: ClassInfo;
