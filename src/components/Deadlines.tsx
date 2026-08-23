@@ -72,6 +72,10 @@ export function DeadlinesSection({
     new Set(),
   );
   const [addingAll, setAddingAll] = useState(false);
+  // Held while the scan command is in flight: a double-click in the picker
+  // would otherwise race the backend's already-queued guard and enqueue two
+  // identical scans.
+  const [scanStarting, setScanStarting] = useState(false);
 
   const deadlines = (all ?? []).filter((d) => d.classId === classId);
   const open = deadlines.filter((d) => d.status === "open");
@@ -89,9 +93,19 @@ export function DeadlinesSection({
     !activeScan && scanJobs[0]?.status === "failed" ? scanJobs[0] : null;
 
   const startScan = (relPath: string | null) => {
+    if (scanStarting) return;
+    setScanStarting(true);
     setActionError(null);
-    setPickerOpen(false);
-    runSyllabusScan(classId, relPath).catch((e) => setActionError(String(e)));
+    runSyllabusScan(classId, relPath)
+      .then(() => {
+        setScanStarting(false);
+        setPickerOpen(false);
+      })
+      .catch((e) => {
+        setActionError(String(e));
+        setScanStarting(false);
+        setPickerOpen(false);
+      });
   };
 
   const markResolved = (id: number) =>
@@ -197,7 +211,8 @@ export function DeadlinesSection({
           <button
             type="button"
             onClick={() => startScan(null)}
-            className="block w-full cursor-pointer rounded px-2 py-1 text-left font-mono text-[11px] font-medium text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent)"
+            disabled={scanStarting}
+            className="block w-full cursor-pointer rounded px-2 py-1 text-left font-mono text-[11px] font-medium text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
           >
             WHOLE CLASS FOLDER
           </button>
@@ -211,7 +226,8 @@ export function DeadlinesSection({
                 key={file.relPath}
                 type="button"
                 onClick={() => startScan(file.relPath)}
-                className="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                disabled={scanStarting}
+                className="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
               >
                 {file.relPath}
               </button>
