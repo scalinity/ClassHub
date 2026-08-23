@@ -528,77 +528,114 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
 /// Approve inserts the deadline (source='syllabus') and audits it; dismiss
 /// parks the row — either way the card leaves the queue.
 pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Result<String> {
-    let summary = with_conn(app, |conn| {
-        let row = conn
-            .query_row(
-                "SELECT class_id, title, kind, due_at, notes, status
-                 FROM deadline_proposals WHERE id = ?1",
-                [proposal_id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("proposal not found")?;
-        let (class_id, title, kind, due_at, notes, status) = row;
-        if status != "pending" {
-            bail!("this proposal was already resolved");
-        }
-
-        if !approve {
-            conn.execute(
-                "UPDATE deadline_proposals SET status = 'dismissed', resolved_at = ?1
-                 WHERE id = ?2",
-                params![now(), proposal_id],
-            )?;
-            return Ok(format!("skipped — {title}"));
-        }
-
-        // Insert + audit + status flip land as one unit — interrupted midway
-        // they would leave a deadline behind a still-pending card.
-        let tx = conn.unchecked_transaction()?;
-        // A matching deadline may have appeared since the scan (added by hand
-        // or through chat) — approving would silently duplicate it.
-        let existing: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM deadlines
-             WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-               AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
-            params![class_id, title, due_at],
-            |row| row.get(0),
-        )?;
-        if existing > 0 {
-            bail!("'{title}' is already recorded for that date — skip this card instead");
-        }
-        tx.execute(
-            "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'syllabus')",
-            params![class_id, title, kind, due_at, notes],
-        )?;
-        audit(
-            &tx,
-            "syllabus.insert_deadline",
-            json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
-                    "classId": class_id, "title": title, "kind": kind,
-                    "dueAt": due_at, "notes": notes }),
-        )?;
-        tx.execute(
-            "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
-             WHERE id = ?2",
-            params![now(), proposal_id],
-        )?;
-        tx.commit()?;
-        Ok(format!("added — {title} due {due_at}"))
-    })?;
+    let summary = with_conn(app, |conn| resolve_in_conn(conn, proposal_id, approve))?;
     emit_hub_change(app, "syllabus");
     if approve {
         emit_hub_change(app, "deadlines");
     }
     Ok(summary)
+}
+
+/// What a batch approval did: which cards can leave the queue, and one line
+/// per card that could not be added (its proposal row stays pending).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOutcome {
+    pub approved: Vec<i64>,
+    pub skipped: Vec<String>,
+}
+
+/// The ADD ALL button: approves each proposal independently — one rejection
+/// (e.g. an identical deadline added by hand since the scan) costs that card,
+/// never the rest — and pushes hub-changed once at the end instead of per
+/// card. Each approval keeps its own transaction inside resolve_in_conn.
+pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchOutcome> {
+    if proposal_ids.is_empty() {
+        bail!("no proposals to approve");
+    }
+    let outcome = with_conn(app, |conn| {
+        let mut approved = Vec::new();
+        let mut skipped = Vec::new();
+        for &id in proposal_ids {
+            match resolve_in_conn(conn, id, true) {
+                Ok(_) => approved.push(id),
+                Err(e) => skipped.push(format!("{e:#}")),
+            }
+        }
+        Ok(BatchOutcome { approved, skipped })
+    })?;
+    emit_hub_change(app, "syllabus");
+    if !outcome.approved.is_empty() {
+        emit_hub_change(app, "deadlines");
+    }
+    Ok(outcome)
+}
+
+fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result<String> {
+    let row = conn
+        .query_row(
+            "SELECT class_id, title, kind, due_at, notes, status
+             FROM deadline_proposals WHERE id = ?1",
+            [proposal_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .context("proposal not found")?;
+    let (class_id, title, kind, due_at, notes, status) = row;
+    if status != "pending" {
+        bail!("this proposal was already resolved");
+    }
+
+    if !approve {
+        conn.execute(
+            "UPDATE deadline_proposals SET status = 'dismissed', resolved_at = ?1
+             WHERE id = ?2",
+            params![now(), proposal_id],
+        )?;
+        return Ok(format!("skipped — {title}"));
+    }
+
+    // Insert + audit + status flip land as one unit — interrupted midway
+    // they would leave a deadline behind a still-pending card.
+    let tx = conn.unchecked_transaction()?;
+    // A matching deadline may have appeared since the scan (added by hand
+    // or through chat) — approving would silently duplicate it.
+    let existing: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM deadlines
+         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+           AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
+        params![class_id, title, due_at],
+        |row| row.get(0),
+    )?;
+    if existing > 0 {
+        bail!("'{title}' is already recorded for that date — skip this card instead");
+    }
+    tx.execute(
+        "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'syllabus')",
+        params![class_id, title, kind, due_at, notes],
+    )?;
+    audit(
+        &tx,
+        "syllabus.insert_deadline",
+        json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
+                "classId": class_id, "title": title, "kind": kind,
+                "dueAt": due_at, "notes": notes }),
+    )?;
+    tx.execute(
+        "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
+         WHERE id = ?2",
+        params![now(), proposal_id],
+    )?;
+    tx.commit()?;
+    Ok(format!("added — {title} due {due_at}"))
 }

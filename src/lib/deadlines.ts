@@ -96,3 +96,18 @@ export function resolveSyllabusProposal(
 ): Promise<string> {
   return invoke<string>("resolve_syllabus_proposal", { proposalId, approve });
 }
+
+/** What ADD ALL did: ids now safe to hide, and one line per card it couldn't
+ * add (those stay in the queue). */
+export interface BatchOutcome {
+  approved: number[];
+  skipped: string[];
+}
+
+/** Approves a batch server-side: one rejection costs its card, never the
+ * rest, and the backend pushes hub-changed once for the whole batch. */
+export function approveAllProposals(
+  proposalIds: number[],
+): Promise<BatchOutcome> {
+  return invoke<BatchOutcome>("approve_syllabus_proposals", { proposalIds });
+}

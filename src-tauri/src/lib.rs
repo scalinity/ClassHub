@@ -221,6 +221,15 @@ fn resolve_syllabus_proposal(
     deadlines::resolve_proposal(&app, proposal_id, approve).map_err(|e| format!("{e:#}"))
 }
 
+/// ADD ALL: approve a batch — each card independently, one hub push at the end.
+#[tauri::command]
+fn approve_syllabus_proposals(
+    app: tauri::AppHandle,
+    proposal_ids: Vec<i64>,
+) -> Result<deadlines::BatchOutcome, String> {
+    deadlines::approve_proposals(&app, &proposal_ids).map_err(|e| format!("{e:#}"))
+}
+
 // --- Drop-to-sort (SPEC §10) --------------------------------------------------
 
 /// Step 1: files dropped onto a class workspace are COPIED into
@@ -433,6 +442,7 @@ pub fn run() {
             get_syllabus_proposals,
             run_syllabus_scan,
             resolve_syllabus_proposal,
+            approve_syllabus_proposals,
             stage_inbox_files,
             get_sort_state,
             run_sort_job,

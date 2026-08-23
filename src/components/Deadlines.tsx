@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 
 import {
+  approveAllProposals,
   DEADLINE_KINDS,
   deleteDeadline,
   getSyllabusProposals,
@@ -96,18 +97,30 @@ export function DeadlinesSection({
   const markResolved = (id: number) =>
     setResolvedIds((prev) => new Set(prev).add(id));
 
-  const addAll = async () => {
+  // One backend call for the batch: a rejected card (e.g. its deadline was
+  // added by hand after the scan) costs itself, never the rest, and its
+  // reason is surfaced while the card stays in the queue.
+  const addAll = () => {
     setAddingAll(true);
     setActionError(null);
-    try {
-      for (const proposal of cards) {
-        await resolveSyllabusProposal(proposal.id, true);
-        markResolved(proposal.id);
-      }
-    } catch (e) {
-      setActionError(String(e));
-    }
-    setAddingAll(false);
+    approveAllProposals(cards.map((card) => card.id))
+      .then((outcome) => {
+        setResolvedIds((prev) => {
+          const next = new Set(prev);
+          for (const id of outcome.approved) next.add(id);
+          return next;
+        });
+        if (outcome.skipped.length > 0) {
+          setActionError(
+            `Not added — ${outcome.skipped.join(" · ")}`,
+          );
+        }
+        setAddingAll(false);
+      })
+      .catch((e) => {
+        setActionError(String(e));
+        setAddingAll(false);
+      });
   };
 
   return (
@@ -215,7 +228,7 @@ export function DeadlinesSection({
             </p>
             <button
               type="button"
-              onClick={() => void addAll()}
+              onClick={addAll}
               disabled={addingAll}
               className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
             >
