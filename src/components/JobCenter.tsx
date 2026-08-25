@@ -19,7 +19,7 @@ import {
   toggleJobPanel,
   useJobs,
   type JobInfo,
-  type ProgressEvent,
+  type JobProgressEvent,
 } from "@/lib/jobs";
 import { CLASS_ACCENTS } from "@/lib/classes";
 import { getAppSettings } from "@/lib/settings";
@@ -269,7 +269,7 @@ function JobRow({
 }
 
 /** Glyph prefixes encode event kinds: · status, » tool call, ← result, ✓/✕ outcome. */
-function OutputLine({ event }: { event: ProgressEvent }) {
+function OutputLine({ event }: { event: JobProgressEvent }) {
   switch (event.kind) {
     case "status":
       return <div className="text-muted-foreground/70">· {event.text}</div>;
@@ -322,7 +322,7 @@ function OutputPane({
   events,
 }: {
   job: JobInfo;
-  events: readonly ProgressEvent[];
+  events: readonly JobProgressEvent[];
 }) {
   // Stick to the bottom unless the user scrolls up; the ref callback runs on
   // every render, so new lines keep the pane pinned without effects.

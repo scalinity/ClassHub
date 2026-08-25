@@ -28,7 +28,13 @@ export interface JobInfo {
   sessionId: string | null;
 }
 
-export interface ProgressEvent {
+/**
+ * Named `Job`-prefixed on purpose: `ProgressEvent` is a DOM global, so a file
+ * that uses the bare name without importing it silently resolves to lib.dom
+ * instead of failing — the mismatch then surfaces as a baffling structural
+ * error rather than "cannot find name".
+ */
+export interface JobProgressEvent {
   seq: number;
   kind:
     | "status"
@@ -52,7 +58,7 @@ export interface AuthCheck {
 export interface JobsSnapshot {
   jobs: JobInfo[];
   auth: AuthCheck;
-  output: ReadonlyMap<number, readonly ProgressEvent[]>;
+  output: ReadonlyMap<number, readonly JobProgressEvent[]>;
   /** Rolling decoded source text a synthesis job is writing (live tail). */
   tails: ReadonlyMap<number, string>;
   panelOpen: boolean;
@@ -77,7 +83,7 @@ let snapshot: JobsSnapshot = {
 
 const storeListeners = new Set<() => void>();
 /** Per job: seq -> event. Merges the live stream with the backfill snapshot. */
-const buffers = new Map<number, Map<number, ProgressEvent>>();
+const buffers = new Map<number, Map<number, JobProgressEvent>>();
 const subscribedJobs = new Set<number>();
 /** Live event registrations, so a settled job can drop its own. */
 const unlisteners = new Map<number, () => void>();
@@ -99,7 +105,7 @@ function commitOutput(jobId: number) {
   emitChange({ output });
 }
 
-function addEvents(jobId: number, events: ProgressEvent[]) {
+function addEvents(jobId: number, events: JobProgressEvent[]) {
   let buffer = buffers.get(jobId);
   if (!buffer) {
     buffer = new Map();
@@ -119,14 +125,14 @@ function addEvents(jobId: number, events: ProgressEvent[]) {
 export function ensureOutput(jobId: number) {
   if (subscribedJobs.has(jobId)) return;
   subscribedJobs.add(jobId);
-  void listen<ProgressEvent>(`job://${jobId}/progress`, (e) =>
+  void listen<JobProgressEvent>(`job://${jobId}/progress`, (e) =>
     addEvents(jobId, [e.payload]),
   )
     .then((unlisten) => {
       // Kept so the registration can be dropped when the job settles —
       // otherwise every job the app has run this session stays subscribed.
       unlisteners.set(jobId, unlisten);
-      return invoke<ProgressEvent[]>("get_job_events", { jobId }).then((events) =>
+      return invoke<JobProgressEvent[]>("get_job_events", { jobId }).then((events) =>
         addEvents(jobId, events),
       );
     })
@@ -296,7 +302,7 @@ export function jobKindLabel(kind: string): string {
  */
 export const PHASES = ["ORIENT", "READ", "COMPOSE", "VERIFY"] as const;
 
-export function derivePhase(events: readonly ProgressEvent[]): {
+export function derivePhase(events: readonly JobProgressEvent[]): {
   index: number;
   detail: string;
 } {

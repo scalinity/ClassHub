@@ -10,6 +10,16 @@ import { escapeHtml } from "@/lib/answer";
  * XHR, WebSocket and beacon by fallback, so a prompt-injected guide cannot
  * phone home with what it read. SPEC §8.1 states the same rule as prose in the
  * prompt; this is the half that holds when the prose is ignored.
+ *
+ * Note on how this composes with the app window's own CSP: a `srcdoc` frame
+ * INHERITS the embedder's policy, and multiple policies intersect rather than
+ * override. Two consequences, both verified in a browser:
+ *   - `script-src` in tauri.conf.json must keep `'unsafe-inline'`, or the
+ *     intersection forbids these documents' inline scripts and every guide
+ *     renders inert.
+ *   - This policy's `default-src 'none'` still applies on top of the parent's,
+ *     so the egress block holds regardless of what the parent allows. That is
+ *     the property this function exists for.
  */
 const DOC_CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:";

@@ -13,7 +13,7 @@ import {
   formatElapsed,
   PHASES,
   useJobs,
-  type ProgressEvent,
+  type JobProgressEvent,
 } from "@/lib/jobs";
 import { monoAction } from "@/lib/styles";
 
@@ -257,7 +257,7 @@ function ActiveDetail({
   events,
 }: {
   running: boolean;
-  events: readonly ProgressEvent[];
+  events: readonly JobProgressEvent[];
 }) {
   const detail = running
     ? derivePhase(events).detail

@@ -413,8 +413,11 @@ and apply it. Non-negotiable per project owner.
   becomes markup: raw HTML is escaped and link/image URLs outside `http(s)`/`mailto`/
   relative are dropped (marked only runs `encodeURI`, which leaves `javascript:` intact).
   Generated guides and class HTML notebooks keep `allow-scripts` to work, so a
-  document-level CSP is what stops them reaching the network; the app window carries a real
-  CSP of its own.
+  document-level CSP is what stops them reaching the network. The app window carries a CSP
+  of its own, but a `srcdoc` frame inherits it and policies intersect — so the window
+  policy must keep `script-src 'unsafe-inline'` or those frames go inert. The window CSP
+  is therefore an anti-exfiltration control (no external script origin, no external
+  connect-src, no object/base/form), not the thing that blocks `javascript:` URLs.
 - Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
   the streamed-escape decoder, the job-output array parser, the HTML stripper, and the
   source fingerprint diff. UI and job plumbing are exercised by running the app.

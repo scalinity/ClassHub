@@ -1203,6 +1203,38 @@ successful run.
   `reqwest::blocking` wants, which is how `list_chat_models` ended up parking a
   runtime worker on a network round trip.
 
+### The CSP was verified, and it was wrong
+
+The first version set `script-src 'self'` on the app window. A `srcdoc` iframe
+**inherits the embedder's CSP**, and multiple policies intersect rather than
+override — so that would have blocked the study guides' and class notebooks'
+own inline scripts and rendered every guide inert, killing the §8.1
+interactivity contract. Confirmed in a browser before it shipped: *"Executing
+inline script violates the following Content Security Policy directive
+'script-src 'self''"* at `about:srcdoc`.
+
+`'unsafe-inline'` is therefore required in the window policy, which means the
+CSP is **not** what closes the `javascript:` vector — `src/lib/answer.ts` is,
+and that is the control to protect. What the policy still buys is exfiltration:
+no external script origin, no external `connect-src`, no `object`, no base-tag
+hijack, no form posting. The same probe confirmed the other half holds: with the
+parent permissive, a guide's own `default-src 'none'` still blocked its
+`fetch` (`script=RAN fetch=BLOCKED`), so `withDocumentCsp` does the job it
+exists for.
+
+Loading the real frontend under the production policy showed no violations —
+Tailwind's injected stylesheet applied (249 rules) under
+`style-src 'unsafe-inline'`, and KaTeX's fonts are all relative URLs, covered
+by `font-src 'self'`. One deliberate consequence: a remote `https:` image in an
+answer passes the renderer filter but is blocked by `img-src`, so the tag
+exists and nothing is fetched. That is the desired outcome for a beacon.
+
+Two smaller findings from the same pass. `tauri.conf.json` rejects unknown keys,
+so the rationale above cannot live in the config as a comment — it sits in
+`lib/document.ts` next to the policy it constrains. And the jobs
+`ProgressEvent` type is now `JobProgressEvent`: the bare name is a DOM global,
+so a file using it without an import resolved to `lib.dom` instead of failing.
+
 ### Deliberately not changed
 
 - `useMutation` is still unused; writes hand-roll busy/error state across seven
