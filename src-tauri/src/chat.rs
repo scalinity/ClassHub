@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -325,12 +325,24 @@ fn on_worker<T: Send + 'static>(
         .map_err(|_| anyhow!("the network thread panicked"))?
 }
 
-fn http_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        // An answer takes as long as it takes; only connecting is bounded.
-        .timeout(None::<Duration>)
-        .connect_timeout(Duration::from_secs(20))
-        .build()
+/// One client for every call, so connections are pooled across the rounds of a
+/// turn and across turns — `answer`, `followups` and `fetch_models` share it.
+fn http_client() -> Result<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                // An answer takes as long as it takes, so there is no total
+                // deadline — but a half-open socket must not park the worker
+                // forever inside a read it can never finish, which is what
+                // keepalive turns into an ordinary I/O error instead.
+                .timeout(None::<Duration>)
+                .connect_timeout(Duration::from_secs(20))
+                .tcp_keepalive(Duration::from_secs(30))
+                .build()
+                .ok()
+        })
+        .as_ref()
         .context("building the HTTP client")
 }
 
@@ -616,6 +628,12 @@ pub fn send(
             Some(id) => id,
             None => create_session(conn, &title_from(text))?,
         };
+        // Before the new question goes in, not after: the repair inspects the
+        // last row, and once this user message lands the dangling assistant
+        // row is no longer last. A crash between persisting a tool_use and its
+        // result would otherwise wedge the session permanently — every later
+        // send rejected by the API, with no way back from the UI.
+        close_dangling_tool_uses(conn, session_id)?;
         // SPEC §9: identity, today's date, and the injected hub context.
         let system = SYSTEM_TEMPLATE
             .replace("{today}", today)
@@ -672,7 +690,12 @@ pub fn send(
         }
         {
             let state = app.state::<ChatState>();
-            lock(&state.running).remove(&session_id);
+            let mut running = lock(&state.running);
+            // Only clear our own entry: `stop` removes it too, and a fresh run
+            // may already hold the slot by the time this thread unwinds.
+            if running.get(&session_id).is_some_and(|f| Arc::ptr_eq(f, &cancel)) {
+                running.remove(&session_id);
+            }
         }
         if let Err(e) = outcome {
             let mut event = ChatEvent::new(session_id, "error");
@@ -688,8 +711,14 @@ pub fn send(
 pub fn stop(app: &AppHandle, session_id: i64) {
     let state = app.state::<ChatState>();
     // Bind the guard so it drops before `state` does.
-    let running = lock(&state.running);
-    if let Some(flag) = running.get(&session_id) {
+    let mut running = lock(&state.running);
+    // Removed, not just flagged. The flag is only read between decoded lines,
+    // so a stream that stops delivering bytes parks the worker inside the read
+    // and it never reaches its own cleanup — leaving the session permanently
+    // "still answering" and unsendable. Dropping the entry here frees the
+    // session immediately; the flag still tells the orphaned thread to exit if
+    // its stream ever resumes, and it holds the last Arc either way.
+    if let Some(flag) = running.remove(&session_id) {
         flag.store(true, Ordering::SeqCst);
     }
 }
@@ -739,10 +768,15 @@ fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
         if thinking {
             body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         }
-        // Out of tool budget: offering no tools at all forces an answer from
-        // what has already been read instead of retrieving forever.
-        if round < MAX_TOOL_ROUNDS {
-            body["tools"] = crate::tools::definitions();
+        body["tools"] = crate::tools::definitions();
+        // Out of tool budget: answer from what has already been read instead
+        // of retrieving forever. `tool_choice: none` is how that is said —
+        // dropping `tools` outright is rejected, because by this round the
+        // replayed history necessarily carries tool_use/tool_result blocks,
+        // and the API requires tools to be defined whenever it does. Doing it
+        // that way threw away the answer this guard exists to obtain.
+        if round == MAX_TOOL_ROUNDS {
+            body["tool_choice"] = json!({ "type": "none" });
         }
 
         let turn = match stream_turn(app, &client, session_id, run.key, &body, cancel) {
