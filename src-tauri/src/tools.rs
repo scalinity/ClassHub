@@ -375,6 +375,35 @@ fn class_rows(conn: &Connection) -> Result<Vec<ClassRow>> {
     Ok(rows)
 }
 
+/// Exact, then substring, then subsequence: the first tier with any match
+/// decides, and a tier matching more than one is an error rather than a guess.
+/// `keys` returns every string an item may be named by (a class answers to its
+/// display name and its folder name; a module only to itself).
+///
+/// The needle is squashed by the caller, which is also where the empty-needle
+/// guard belongs: an empty needle is `contains`-true against everything, so it
+/// would match the whole first tier it reached.
+fn best_match<'a, T>(
+    items: &'a [T],
+    needle: &str,
+    keys: impl Fn(&T) -> Vec<String>,
+) -> Option<Vec<&'a T>> {
+    let mut exact = Vec::new();
+    let mut partial = Vec::new();
+    let mut loose = Vec::new();
+    for item in items {
+        let candidates = keys(item);
+        if candidates.iter().any(|c| c == needle) {
+            exact.push(item);
+        } else if candidates.iter().any(|c| c.contains(needle)) {
+            partial.push(item);
+        } else if candidates.iter().any(|c| is_subsequence(needle, c)) {
+            loose.push(item);
+        }
+    }
+    [exact, partial, loose].into_iter().find(|t| !t.is_empty())
+}
+
 /// Tolerant class lookup: exact name, then substring, then subsequence — so
 /// "Biostats" finds "Biostatistics for AI" without the model having to echo the
 /// full name. Ambiguity is an error listing the candidates.
@@ -391,33 +420,22 @@ fn resolve_class(conn: &Connection, query: &str) -> Result<ClassRow> {
         bail!("which class? one of: {}", names());
     }
 
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    let mut loose = Vec::new();
-    for row in &rows {
-        let candidates = [squash(&row.display_name), squash(&row.folder_name)];
-        if candidates.iter().any(|c| *c == needle) {
-            exact.push(row);
-        } else if candidates.iter().any(|c| c.contains(&needle)) {
-            partial.push(row);
-        } else if candidates.iter().any(|c| is_subsequence(&needle, c)) {
-            loose.push(row);
-        }
+    let Some(tier) = best_match(&rows, &needle, |r| {
+        vec![squash(&r.display_name), squash(&r.folder_name)]
+    }) else {
+        bail!("no class matches '{query}'. Classes: {}", names());
+    };
+    match tier.as_slice() {
+        [only] => Ok((*only).clone()),
+        many => bail!(
+            "'{query}' matches {} classes ({}) — use the full name",
+            many.len(),
+            many.iter()
+                .map(|r| r.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
-    for tier in [exact, partial, loose] {
-        match tier.len() {
-            1 => return Ok(tier[0].clone()),
-            0 => {}
-            n => bail!(
-                "'{query}' matches {n} classes ({}) — use the full name",
-                tier.iter()
-                    .map(|r| r.display_name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
-    }
-    bail!("no class matches '{query}'. Classes: {}", names())
 }
 
 /// Lowercased alphanumerics only, so punctuation and spacing never decide a match.
@@ -1332,34 +1350,21 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Opt
             modules.join(", ")
         );
     }
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    let mut loose = Vec::new();
-    for module in &modules {
-        let candidate = squash(module);
-        if candidate == needle {
-            exact.push(module);
-        } else if candidate.contains(&needle) {
-            partial.push(module);
-        } else if is_subsequence(&needle, &candidate) {
-            loose.push(module);
-        }
+    let Some(tier) = best_match(&modules, &needle, |m| vec![squash(m)]) else {
+        bail!(
+            "no module matches '{scope}' in {}. Modules: {} — or 'master' for the semester master",
+            class.display_name,
+            modules.join(", ")
+        );
+    };
+    match tier.as_slice() {
+        [only] => Ok(Some((*only).clone())),
+        many => bail!(
+            "'{scope}' matches {} modules ({}) — be specific",
+            many.len(),
+            many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        ),
     }
-    for tier in [exact, partial, loose] {
-        match tier.len() {
-            1 => return Ok(Some(tier[0].clone())),
-            0 => {}
-            n => bail!(
-                "'{scope}' matches {n} modules ({}) — be specific",
-                tier.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        }
-    }
-    bail!(
-        "no module matches '{scope}' in {}. Modules: {} — or 'master' for the semester master",
-        class.display_name,
-        modules.join(", ")
-    )
 }
 
 fn trigger_synthesis(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
@@ -1607,7 +1612,9 @@ fn days_ago(now: i64, then: i64) -> String {
 }
 
 /// Shared with the drop-to-sort prompt builder — both surfaces feed the model
-/// and should describe sizes identically.
+/// and should describe sizes identically. Mirrored by `formatSize` in
+/// src/lib/materials.ts, which renders the same sizes in the inbox; change one,
+/// change the other.
 pub fn format_size(bytes: i64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");

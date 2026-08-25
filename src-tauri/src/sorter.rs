@@ -698,6 +698,11 @@ fn record_move(
     proposed_by: &str,
     confidence: Option<&str>,
 ) -> Result<()> {
+    // The rename has already happened; an Err below rolls it back explicitly.
+    // A hard crash in the window between them is not covered: the file is at
+    // the destination while the index and the pending proposal still name the
+    // source. The next scan repairs the index, so the cost is one
+    // re-extraction rather than lost data.
     let tx = conn.unchecked_transaction()?;
     // A stale index row can still occupy the destination (file deleted in
     // Finder, no rescan since) — validate_dest only checks the disk. Clear

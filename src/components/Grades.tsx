@@ -176,10 +176,13 @@ function CategoryRow({
 
   const remove = () => {
     setBusy(true);
-    deleteGradeCategory(category.id).catch((e) => {
-      onError(String(e));
-      setBusy(false);
-    });
+    // Cleared on both paths. On success the row usually unmounts when the
+    // hub-changed refetch lands, but "usually" is not a lifecycle: if the
+    // refetch is slow or the row survives, a stuck flag leaves the control
+    // disabled with nothing to release it.
+    deleteGradeCategory(category.id)
+      .catch((e) => onError(String(e)))
+      .finally(() => setBusy(false));
   };
 
   return (

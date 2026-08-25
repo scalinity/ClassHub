@@ -74,6 +74,9 @@ export function countFiles(nodes: TreeNode[]): number {
 }
 
 /** 1234 -> "1.2 KB"; whole numbers at >= 10 of a unit. */
+/** Mirrors `format_size` in src-tauri/src/tools.rs — same thresholds, same
+ *  "whole numbers at >= 10 of a unit" rule. Both sides genuinely need it (Rust
+ *  builds prompt text, this renders the inbox); change one, change the other. */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB"];

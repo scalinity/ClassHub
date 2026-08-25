@@ -21,7 +21,11 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
     case "grades":
-      // The workspace Grades section and the card's computed grade.
+      // The workspace Grades section and the card's computed grade. The
+      // ["classes"] refetch is deliberate — the card shows the grade — but it
+      // is the expensive one: db::list_classes re-reads every inbox folder
+      // from disk per class. Worth remembering if a chat turn recording
+      // several grade items ever feels sluggish.
       void queryClient.invalidateQueries({ queryKey: ["grades"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
