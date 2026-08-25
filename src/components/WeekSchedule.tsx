@@ -227,7 +227,7 @@ function MeetingBlock({
   const heightPx = ((end - start) / 60) * PX_PER_HOUR;
   const style = {
     top: `${pct(start)}%`,
-    height: `${pct(end) - pct(start)}%`,
+    height: `${Math.max(pct(end) - pct(start), 0)}%`,
     left: `calc(${(lane / lanes) * 100}% + 4px)`,
     width: `calc(${100 / lanes}% - 8px)`,
     "--accent": CLASS_ACCENTS[cls.color] ?? "var(--class-blue)",

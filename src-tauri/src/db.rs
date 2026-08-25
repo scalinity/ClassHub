@@ -66,6 +66,26 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Writes through a sibling temp file and renames over the target. `fs::write`
+/// truncates in place, so a crash mid-write leaves a half-written note or a
+/// truncated extract; rename is atomic on the same volume, which this always
+/// is since the temp file sits next to the target.
+pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let tmp = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, contents)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replacing {}", path.display())
+    })?;
+    Ok(())
+}
+
 /// One append-only history row. Destructive writes park their prior state
 /// here first — recoverability in place of confirmation prompts.
 pub fn audit(conn: &Connection, action: &str, payload: serde_json::Value) -> Result<()> {

@@ -546,12 +546,38 @@ enum Outcome {
     },
 }
 
+struct RunSlot {
+    app: AppHandle,
+    job_id: i64,
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        let mgr = self.app.state::<JobManager>();
+        let mut inner = mgr.lock_inner();
+        // Normally already gone; this only bites on an unwind.
+        if inner.running.remove(&self.job_id).is_some() {
+            eprintln!("job {} released by unwind", self.job_id);
+            drop(inner);
+            let _ = self.app.emit("jobs-changed", ());
+            pump(&self.app);
+        }
+    }
+}
+
 fn run_job(
     app: AppHandle,
     job: QueuedJob,
     child_slot: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
 ) {
+    // Releases the concurrency slot on unwind too: a panic anywhere below
+    // would otherwise leave the entry in `running` forever, consuming a slot
+    // (the exclusive one, for a master_guide) with no way to reclaim it.
+    let _slot = RunSlot {
+        app: app.clone(),
+        job_id: job.id,
+    };
     // Fingerprinted before the spawn and compared after, so a run that wandered
     // outside its contracted output path is caught rather than trusted.
     let guarded_dir = writes_to_disk(&job.kind)
@@ -1210,7 +1236,12 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
                     }
                 }
                 "content_block_stop" => {
-                    if stream.write_block == event["index"].as_u64() {
+                    // is_some, as in the delta arm above: with no open write
+                    // block and a stop event carrying no index, None == None
+                    // would flush a stray newline into the live source tail.
+                    if stream.write_block.is_some()
+                        && stream.write_block == event["index"].as_u64()
+                    {
                         stream.write_block = None;
                         stream.tail_carry.clear();
                         stream.tail_pending.push('\n');

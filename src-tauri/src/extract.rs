@@ -245,7 +245,7 @@ fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, html: bool
     let abs = class_dir.join(extract_rel);
     let parent = abs.parent().context("extract path has no parent")?;
     fs::create_dir_all(parent)?;
-    fs::write(&abs, content).with_context(|| format!("writing {extract_rel}"))?;
+    crate::db::write_atomic(&abs, &content)?;
     Ok(())
 }
 

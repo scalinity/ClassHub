@@ -95,7 +95,14 @@ function pickStarters(classes: readonly ClassInfo[]): string[] {
   const pool = name
     ? STARTERS.map((s) => s.replace("{class}", name))
     : STARTERS.filter((s) => !s.includes("{class}"));
-  return [...pool].sort(() => Math.random() - 0.5).slice(0, 3);
+  // Fisher-Yates: a random comparator is not a uniform shuffle, and gives
+  // sort an inconsistent ordering besides.
+  const shuffled = [...pool];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled.slice(0, 3);
 }
 
 /**

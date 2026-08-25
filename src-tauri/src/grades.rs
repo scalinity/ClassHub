@@ -8,6 +8,11 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::AppHandle;
 
+/// Weights are compared to 100 within this much. The UI applies the same
+/// value, so a set summing to 100.03 cannot read clean in one place and
+/// flagged in the other.
+pub const WEIGHT_EPSILON: f64 = 0.01;
+
 use crate::db::{audit, emit_hub_change, with_conn};
 
 const MAX_NAME_CHARS: usize = 80;
@@ -379,7 +384,7 @@ pub(crate) fn weights_line(conn: &Connection, class_id: i64) -> Result<String> {
     Ok(format!(
         "Weights now: {listed} = {}%{}",
         trim_num(total),
-        if (total - 100.0).abs() < 0.01 {
+        if (total - 100.0).abs() < WEIGHT_EPSILON {
             String::new()
         } else if total < 100.0 {
             format!(" — {}% unassigned", trim_num(100.0 - total))

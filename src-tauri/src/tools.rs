@@ -653,6 +653,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
     let mut lines = Vec::new();
     let mut shown = 0usize;
     let mut skipped = 0usize;
+    let mut matched = 0usize;
     for (rel_path, kind, size, extracted) in &rows {
         if let Some(sub) = &subpath {
             let inside = rel_path == sub || rel_path.starts_with(&format!("{sub}/"));
@@ -660,6 +661,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
                 continue;
             }
         }
+        matched += 1;
         if shown >= MAX_LIST_LINES {
             skipped += 1;
             continue;
@@ -675,9 +677,11 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
 
     let mut text = match subpath.as_deref() {
         Some(sub) => format!(
-            "{} — {shown} of {} indexed file(s) under '{sub}'\n",
+            // matched, not rows.len(): the denominator has to be the count
+            // under the subpath, or "5 of 100 … under 'Module 1'" reports the
+            // whole class to both the model and the sidebar chip.
+            "{} — {shown} of {matched} indexed file(s) under '{sub}'\n",
             class.display_name,
-            rows.len()
         ),
         None => format!(
             "{} — {} indexed file(s)\n",
@@ -932,6 +936,11 @@ fn read_material(conn: &Connection, input: &Value) -> Result<Outcome> {
         .map_err(|_| anyhow::anyhow!("{rel_path} is not UTF-8 text"))?;
     let all: Vec<&str> = content.lines().collect();
     let total = all.len();
+    // Stated as a fact rather than as the contradictory "lines 1–0 of 0" the
+    // window arithmetic would otherwise produce.
+    if total == 0 {
+        return Ok(Outcome::ok(format!("{rel_path} is empty (0 lines).")));
+    }
     if offset > total.max(1) {
         bail!("offset {offset} is past the end of {rel_path} ({total} lines)");
     }
@@ -1574,10 +1583,15 @@ fn opt_str_arg(input: &Value, key: &str) -> Option<String> {
 }
 
 fn int_arg(input: &Value, key: &str) -> Result<i64> {
-    input
-        .get(key)
-        .and_then(Value::as_i64)
-        .with_context(|| format!("missing required integer argument '{key}'"))
+    let Some(value) = input.get(key) else {
+        bail!("missing required integer argument '{key}'");
+    };
+    // A model answering an "integer" field with 3.0 meant 3; telling it the
+    // argument was missing invites it to retry the call unchanged.
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
+        .with_context(|| format!("'{key}' must be an integer, got {value}"))
 }
 
 fn float_arg(input: &Value, key: &str) -> Result<f64> {

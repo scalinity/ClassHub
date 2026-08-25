@@ -37,8 +37,11 @@ export function GradesSection({ classId }: { classId: number }) {
 
   const categories = data?.categories ?? [];
   const weightTotal = data?.weightTotal ?? 0;
-  const offBy = Math.round((weightTotal - 100) * 10) / 10;
-  const showWeightWarning = data !== undefined && categories.length > 0 && offBy !== 0;
+  // Same tolerance the backend applies (grades.rs WEIGHT_EPSILON), so a set
+  // summing to 100.03 cannot read clean here and flagged in chat.
+  const offBy = weightTotal - 100;
+  const showWeightWarning =
+    data !== undefined && categories.length > 0 && Math.abs(offBy) >= 0.01;
 
   return (
     <section className="mt-12" aria-label="Grades">

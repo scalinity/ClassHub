@@ -8,7 +8,7 @@
 //! frontend refetches without a manual refresh. Nothing a syllabus scan
 //! proposes becomes a deadline without explicit approval.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -486,7 +486,9 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         let mut duplicates = 0usize;
         let mut dismissed_skips = 0usize;
         let mut skipped = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        // key -> whether the winning entry carried a time of day.
+        let mut seen: HashMap<String, bool> = HashMap::new();
+        let mut superseded: Vec<String> = Vec::new();
         // Per-entry tolerance: one malformed entry costs itself, not the batch.
         for (index, raw) in entries.iter().enumerate() {
             let entry: RawDeadline = match serde_json::from_value(raw.clone()) {
@@ -527,8 +529,25 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
             // Unicode folding here would let the two layers disagree on
             // non-ASCII titles and slip a duplicate pending row through.
             let key = format!("{}\u{0}{}", title.to_ascii_lowercase(), &due_at[..10]);
-            if !seen.insert(key) {
-                continue;
+            // The key is date-granular, so "Quiz 1 on 2026-09-03" and "Quiz 1
+            // at 2026-09-03T23:59" collide. Keeping whichever the model
+            // emitted first would silently discard a stated time, so the entry
+            // carrying one wins and the loser is reported rather than dropped
+            // in silence.
+            let has_time = due_at.len() > 10;
+            match seen.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if has_time && !*slot.get() {
+                        slot.insert(true);
+                        superseded.push(title.clone());
+                    } else {
+                        skipped.push(format!("{title} (duplicate of another entry)"));
+                        continue;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(has_time);
+                }
             }
             let existing: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM deadlines
@@ -583,6 +602,12 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         }
         if dismissed_skips > 0 {
             known.push(format!("{dismissed_skips} skipped earlier"));
+        }
+        if !superseded.is_empty() {
+            known.push(format!(
+                "{} kept with the stated time",
+                superseded.len()
+            ));
         }
         let mut summary = if recorded == 0 {
             if known.is_empty() {

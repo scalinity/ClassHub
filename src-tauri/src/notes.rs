@@ -129,7 +129,7 @@ fn write_audited(
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    fs::write(abs, text).with_context(|| format!("writing {}", abs.display()))?;
+    crate::db::write_atomic(abs, &text)?;
     Ok(WrittenNote {
         rel_path: rel_path.to_string(),
         created,
