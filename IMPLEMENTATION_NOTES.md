@@ -1139,3 +1139,77 @@ commits. What future sessions should know:
   edited fifty times is 50 MB of database with no pruning path. Revisit only
   if the file ever gets noticeably large.
 - The repo still has no git remote; review fixes are local commits only.
+
+## Post-M11 — app-wide review pass (2026-08-25)
+
+A five-agent read-only review over the whole codebase (~8.6k Rust, ~7.4k TS),
+followed by fixes for every finding. What is worth carrying forward:
+
+### The two real security holes were both "the guard exists elsewhere"
+
+- **Answers rendered into the app document with no URL policy.** `marked` only
+  runs `encodeURI` on an href, so `[x](javascript:…)` survived intact into a
+  `dangerouslySetInnerHTML` in the window that holds the IPC bridge —
+  confirmed against the installed marked 18.0.10 with the repo's own renderer
+  config. Every *other* HTML surface was already sandboxed; this one was the
+  exception. URL policy now lives in `src/lib/answer.ts`, the app window has a
+  real CSP (`devCsp` carries the extra dev-server origins), and generated
+  guides and class notebooks get a document-level CSP because they must keep
+  `allow-scripts` to work.
+- **`Task` was denied for read-only job kinds and allowed for write-capable
+  ones**, with the reason ("a sub-agent is a path around the parent's tool
+  scoping") written next to the list that omitted it.
+
+### `--add-dir` grants read and write together
+
+A synthesis job must read the whole class folder, so `Write`/`Edit` reach every
+source file in it; the only thing aiming them at the contracted output path was
+prose in the prompt, which is what a poisoned source document overrides. Sources
+are now fingerprinted by (size, mtime) before the spawn and compared after — a
+run that changed anything outside `Study Guides/` and `.classhub/extracts/` is
+demoted to failed, records nothing, and its path list goes to `audit_log`.
+`scanner::fingerprint_sources` deliberately skips exactly those two paths; the
+test asserts both directions, since a false positive would demote every
+successful run.
+
+### Three ways a chat session could become permanently unusable
+
+1. Out of tool budget, the loop dropped `tools` from the final request. The
+   replayed history necessarily carries tool_use/tool_result blocks by then, and
+   the API rejects that combination — so the guard meant to force an answer
+   turned twelve rounds of paid retrieval into a 400. `tool_choice: none` is the
+   supported way to say it.
+2. `close_dangling_tool_uses` ran only after a run finished, and `send` inserted
+   the new question *before* calling it — so the repair, which inspects the last
+   row, saw a user row and did nothing. Order matters here.
+3. STOP only set a flag, read between decoded lines; a stream that stopped
+   delivering bytes parked the worker inside a read it could never finish, and
+   the session stayed "still answering" for the life of the process.
+
+### Gotchas found while fixing
+
+- `ProgressEvent` is a DOM global. Dropping the type import from a component
+  resolves to `lib.dom`'s version instead of erroring as undefined — the failure
+  surfaces as a baffling structural type mismatch, not "cannot find name".
+- Adding a `summary` key to a persisted `tool_result` block would ride back into
+  the API on every replay, so rebuilt tool chips instead mirror `Outcome`'s
+  derivation exactly (chars not UTF-16 units, trimmed, ellipsis on cut).
+- The incremental fence-parity in `settle()` must return the item *unchanged*
+  when the fence is still open: `text` has not advanced, so its parity has not
+  either, and the slice gets recounted next time. Verified equivalent to the
+  old full-rescan across chunk sizes and fence layouts before landing.
+- Commands are dispatched inline on the IPC thread unless marked
+  `#[tauri::command(async)]`; `async fn` is the opposite of what
+  `reqwest::blocking` wants, which is how `list_chat_models` ended up parking a
+  runtime worker on a network round trip.
+
+### Deliberately not changed
+
+- `useMutation` is still unused; writes hand-roll busy/error state across seven
+  components. The concrete defect inside that finding (a busy flag never cleared
+  on success) is fixed. A blanket migration is ~17 call sites of behavioural
+  change in UI that cannot be verified without running every flow, and the
+  existing pattern is consistent.
+- The CSP values are reasoned but unverified — nothing here launched the app.
+  First run after this pass should watch the devtools console for a CSP
+  violation, especially around KaTeX styles and the iframe shells.

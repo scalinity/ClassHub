@@ -332,6 +332,21 @@ function handleEvent(event: ChatEventPayload) {
   }
 }
 
+/** Mirrors `MAX_DETAIL_CHARS` in chat.rs, so a reopened disclosure shows what
+ *  the live one did rather than the larger persisted body. */
+const DETAIL_CHARS = 4_000;
+
+/** Mirrors `truncate` in db.rs: counts characters, appends the ellipsis. */
+function truncateChars(s: string, max: number): string {
+  const chars = [...s];
+  return chars.length <= max ? s : `${chars.slice(0, max).join("")}…`;
+}
+
+/** Mirrors `Outcome::ok`: every tool's first output line works as its summary. */
+function summaryLine(text: string): string {
+  return truncateChars((text.split("\n", 1)[0] ?? "").trim(), 140);
+}
+
 /** Persisted blocks → transcript items, folding tool results onto their call. */
 function itemsFromHistory(messages: StoredMessage[]): ChatItem[] {
   const items: ChatItem[] = [];
@@ -374,14 +389,17 @@ function itemsFromHistory(messages: StoredMessage[]): ChatItem[] {
         const position = toolPositions.get(String(block.tool_use_id));
         const call = position === undefined ? undefined : items[position];
         if (position === undefined || call?.kind !== "tool") continue;
-        const detail = String(block.content ?? "");
+        const isError = block.is_error === true;
+        const full = String(block.content ?? "");
         items[position] = {
           ...call,
-          // Every tool's first output line is written to work as its summary,
-          // which is exactly what the live chip showed (tools.rs).
-          summary: detail.split("\n", 1)[0]?.slice(0, 140),
-          detail,
-          isError: block.is_error === true,
+          // Derived exactly as tools.rs Outcome does, so a chip rebuilt from
+          // history reads identically to the live one: chars not UTF-16 units,
+          // trimmed, ellipsis when cut — and for an error the whole message is
+          // the summary rather than its first line.
+          summary: isError ? truncateChars(full, 140) : summaryLine(full),
+          detail: truncateChars(full, DETAIL_CHARS),
+          isError,
         };
       }
     }

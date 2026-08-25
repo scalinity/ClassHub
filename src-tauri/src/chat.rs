@@ -121,7 +121,10 @@ pub struct StoredMessage {
 #[serde(rename_all = "camelCase")]
 struct ChatEvent {
     session_id: i64,
-    /// started | text | tool | tool_result | done | error
+    /// The full set, mirrored by `ChatEventPayload` in src/lib/chat.ts:
+    /// started | text | thinking | thinking_end | tool | tool_result |
+    /// suggestions | done | error. A kind added here without a matching case
+    /// there is a silent no-op — the frontend switch has no default arm.
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
