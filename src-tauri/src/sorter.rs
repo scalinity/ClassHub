@@ -512,7 +512,9 @@ fn clean_rel(path: &str) -> Result<String> {
 
 /// Shared destination rules for job proposals and approval overrides (re-run
 /// at approval time, where the fs operations actually happen).
-fn validate_dest(class_dir: &Path, source_rel: &str, dest_rel: &str) -> Result<()> {
+/// The one destination policy, shared with chat's `propose_file_moves` so the
+/// two proposal paths cannot enforce different rules.
+pub(crate) fn validate_dest(class_dir: &Path, source_rel: &str, dest_rel: &str) -> Result<()> {
     // The scanner hides dot-entries at every depth, so a dotted segment
     // anywhere would make the moved file vanish from the app.
     for segment in dest_rel.split('/') {

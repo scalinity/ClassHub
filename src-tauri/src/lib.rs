@@ -18,20 +18,20 @@ use tauri::Manager;
 
 pub(crate) struct Db(pub(crate) Mutex<Connection>);
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_classes(state: tauri::State<Db>) -> Result<Vec<db::ClassCard>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     db::list_classes(&conn).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn scan_class(
     app: tauri::AppHandle,
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<scanner::TreeNode>, String> {
     let tree = {
-        let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+        let mut conn = db::lock(&state.0);
         scanner::scan_class(&mut conn, class_id).map_err(|e| format!("{e:#}"))?
     };
     // SPEC §7: auto-extract after every scan; a no-change scan is a no-op there.
@@ -39,27 +39,27 @@ fn scan_class(
     Ok(tree)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reveal_in_finder(
     state: tauri::State<Db>,
     class_id: i64,
     rel_path: String,
 ) -> Result<(), String> {
     let path = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db::lock(&state.0);
         scanner::resolve_rel(&conn, class_id, &rel_path).map_err(|e| format!("{e:#}"))?
     };
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_in_default_app(
     state: tauri::State<Db>,
     class_id: i64,
     rel_path: String,
 ) -> Result<(), String> {
     let path = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db::lock(&state.0);
         scanner::resolve_rel(&conn, class_id, &rel_path).map_err(|e| format!("{e:#}"))?
     };
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
@@ -68,7 +68,7 @@ fn open_in_default_app(
 /// In-app file viewer: raw text of a class file, rendered by the frontend
 /// (markdown, HTML, code). resolve_rel guards traversal; the cap keeps huge
 /// artifacts in their default apps.
-#[tauri::command]
+#[tauri::command(async)]
 fn read_class_file(
     state: tauri::State<Db>,
     class_id: i64,
@@ -76,7 +76,7 @@ fn read_class_file(
 ) -> Result<String, String> {
     const MAX_VIEW_BYTES: u64 = 8 * 1024 * 1024;
     let path = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db::lock(&state.0);
         scanner::resolve_rel(&conn, class_id, &rel_path).map_err(|e| format!("{e:#}"))?
     };
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
@@ -115,48 +115,48 @@ fn resume_master_guide(app: tauri::AppHandle, job_id: i64) -> Result<i64, String
     guides::resume_master(&app, job_id).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_guides(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<guides::GuideInfo>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     guides::list_guides(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_guide(
     state: tauri::State<Db>,
     class_id: i64,
     scope: String,
 ) -> Result<String, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     guides::read_guide(&conn, class_id, &scope).map_err(|e| format!("{e:#}"))
 }
 
 /// Read-only note listing for the workspace (M8; the editor lands in M11).
-#[tauri::command]
+#[tauri::command(async)]
 fn list_notes(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<notes::NoteFile>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     notes::list_notes(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
 /// Practice exams on disk (SPEC §8.3) for the workspace listing.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_practice(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<notes::NoteFile>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
 /// The notes editor's save (SPEC §11) — content lands in `<Class>/Notes/`.
 /// `rel_path` targets an exact existing file; without it the title names one.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_note(
     app: tauri::AppHandle,
     class_id: i64,
@@ -170,12 +170,12 @@ fn save_note(
 
 // --- Grades (SPEC §11) --------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_grades(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<grades::GradesInfo, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     grades::list_grades(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
@@ -216,12 +216,12 @@ fn delete_grade_item(app: tauri::AppHandle, id: i64) -> Result<(), String> {
 
 // --- App settings (SPEC §11 M11) ----------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, String> {
     settings::get(&app).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_aibhs_root(app: tauri::AppHandle, path: String) -> Result<(), String> {
     settings::set_aibhs_root(&app, &path).map_err(|e| format!("{e:#}"))
 }
@@ -250,9 +250,9 @@ fn set_job_concurrency(app: tauri::AppHandle, count: usize) -> Result<(), String
 
 /// Every deadline across every class, due-soonest first; the dashboard strip
 /// and the per-class list both filter this client-side.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_deadlines(state: tauri::State<Db>) -> Result<Vec<deadlines::DeadlineInfo>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     deadlines::list_deadlines(&conn).map_err(|e| format!("{e:#}"))
 }
 
@@ -283,12 +283,12 @@ fn delete_deadline(app: tauri::AppHandle, id: i64) -> Result<(), String> {
 }
 
 /// Pending syllabus-scan proposals for the class's confirm cards.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_syllabus_proposals(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<deadlines::DeadlineProposal>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     deadlines::syllabus_proposals(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
@@ -328,7 +328,7 @@ fn approve_syllabus_proposals(
 
 /// Step 1: files dropped onto a class workspace are COPIED into
 /// `<Class>/_Inbox/` (originals untouched); a sort job is auto-enqueued.
-#[tauri::command]
+#[tauri::command(async)]
 fn stage_inbox_files(
     app: tauri::AppHandle,
     class_id: i64,
@@ -338,12 +338,12 @@ fn stage_inbox_files(
 }
 
 /// The workspace queue: inbox files + pending proposals (chat and sort_job).
-#[tauri::command]
+#[tauri::command(async)]
 fn get_sort_state(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<sorter::SortState, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     sorter::sort_state(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
@@ -366,9 +366,9 @@ fn resolve_move_proposal(
         .map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_jobs(state: tauri::State<Db>) -> Result<Vec<jobs::JobInfo>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     jobs::list_jobs(&conn).map_err(|e| format!("{e:#}"))
 }
 
@@ -401,26 +401,29 @@ fn run_auth_check(app: tauri::AppHandle) -> Result<i64, String> {
 
 // --- Agent chat (SPEC §9) ---------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn chat_settings(app: tauri::AppHandle) -> Result<chat::ChatSettings, String> {
     chat::settings(&app).map_err(|e| format!("{e:#}"))
 }
 
 /// The key goes to the macOS Keychain only — never the DB, never a file.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_chat_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
     chat::save_key(&app, &key).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_chat_key(app: tauri::AppHandle) -> Result<(), String> {
     chat::delete_key(&app).map_err(|e| format!("{e:#}"))
 }
 
-/// Live `GET /v1/models` plus the model chat will use (SPEC §9). Async so the
-/// network round-trip runs off the UI thread, where sync commands land.
-#[tauri::command]
-async fn list_chat_models(app: tauri::AppHandle) -> Result<chat::ModelList, String> {
+/// Live `GET /v1/models` plus the model chat will use (SPEC §9).
+///
+/// `command(async)` rather than `async fn`: the body is blocking HTTP, and the
+/// async runtime is the one place `reqwest::blocking` must never run. This
+/// form puts it on the blocking pool, which is where it belongs.
+#[tauri::command(async)]
+fn list_chat_models(app: tauri::AppHandle) -> Result<chat::ModelList, String> {
     chat::list_models(&app).map_err(|e| format!("{e:#}"))
 }
 
@@ -435,18 +438,18 @@ fn set_chat_effort(app: tauri::AppHandle, effort: String) -> Result<(), String> 
     chat::set_effort(&app, &effort).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_chat_sessions(state: tauri::State<Db>) -> Result<Vec<chat::SessionInfo>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     chat::list_sessions(&conn).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn chat_history(
     state: tauri::State<Db>,
     session_id: i64,
 ) -> Result<Vec<chat::StoredMessage>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db::lock(&state.0);
     chat::history(&conn, session_id).map_err(|e| format!("{e:#}"))
 }
 

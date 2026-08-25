@@ -93,9 +93,28 @@ pub fn resolve_rel(conn: &Connection, class_id: i64, rel_path: &str) -> Result<P
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
         bail!("invalid path: {rel_path}");
     }
-    let abs = class_dir(conn, class_id)?.join(rel);
-    if fs::symlink_metadata(&abs).is_err() {
+    let root = class_dir(conn, class_id)?;
+    let abs = root.join(rel);
+    let Ok(meta) = fs::symlink_metadata(&abs) else {
         bail!("no longer on disk (rescan the class): {rel_path}");
+    };
+    // The component check above stops `..`, but a symlink reaches outside the
+    // class folder without one — and callers here read the file, or hand the
+    // path to the OS to open. The walk already skips symlinks, so one that
+    // resolves is not something the index put there. Ancestors count too: the
+    // leaf can be an ordinary file inside a linked directory.
+    if meta.file_type().is_symlink() {
+        bail!("not a regular file: {rel_path}");
+    }
+    let mut walked = root;
+    for component in rel.components() {
+        walked.push(component);
+        if fs::symlink_metadata(&walked)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            bail!("path crosses a symlink: {rel_path}");
+        }
     }
     Ok(abs)
 }

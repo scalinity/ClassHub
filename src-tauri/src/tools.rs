@@ -1060,8 +1060,10 @@ fn complete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
                 "Deadline was already done — {title} · {class_name} [#{id}]"
             )));
         }
-        conn.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
-        audit(conn, "chat.complete_deadline", json!({ "id": id }))?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
+        audit(&tx, "chat.complete_deadline", json!({ "id": id }))?;
+        tx.commit()?;
         Ok(Outcome::ok(format!(
             "Deadline done — {title} · {class_name} [#{id}]"
         )))
@@ -1093,14 +1095,18 @@ fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
             .optional()?
             .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))?;
         let (class_id, title, kind, due_at, notes, status, source) = row;
-        conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        // One transaction, because the promise below — that the row survives
+        // in the audit log — is only true if both statements land together.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
         // The full row rides the audit entry, so a deletion is recoverable.
         audit(
-            conn,
+            &tx,
             "chat.delete_deadline",
             json!({ "id": id, "classId": class_id, "title": title, "kind": kind,
                     "dueAt": due_at, "notes": notes, "status": status, "source": source }),
         )?;
+        tx.commit()?;
         Ok(Outcome::ok(format!(
             "Deadline deleted — {title} (was due {due_at}) [#{id}]\nThe full row is kept in the audit log."
         )))
@@ -1287,6 +1293,17 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Opt
     if modules.is_empty() {
         bail!("{} has no module folders yet", class.display_name);
     }
+    // Same guard as `resolve_class`, and for a sharper reason: an empty needle
+    // is `contains`-true against every candidate, so a scope of "?" or "—"
+    // squashes to nothing, matches every module, and — in a class with exactly
+    // one — resolves silently. That would enqueue a full synthesis run against
+    // a scope the model never actually named.
+    if needle.is_empty() {
+        bail!(
+            "which module? one of: {}",
+            modules.join(", ")
+        );
+    }
     let mut exact = Vec::new();
     let mut partial = Vec::new();
     let mut loose = Vec::new();
@@ -1397,19 +1414,23 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // The batch was validated as a unit, so it lands as one: a failure
+        // partway through would otherwise leave the queue holding half of a
+        // proposal set whose result text describes all of it.
+        let tx = conn.unchecked_transaction()?;
         for mv in &validated {
             // One pending proposal per source file — a re-proposal replaces it
             // instead of stacking duplicates in the queue.
             // source/confidence reset too: replacing a sort job's pending row
             // must not leave its HIGH chip attributed to a chat destination.
-            let updated = conn.execute(
+            let updated = tx.execute(
                 "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, created_at = ?3,
                         source = 'chat', confidence = NULL
                  WHERE class_id = ?4 AND source_rel_path = ?5 AND status = 'pending'",
                 params![mv.dest_rel, mv.reason, now(), mv.class_id, mv.source_rel],
             )?;
             if updated == 0 {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO move_proposals
                      (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
                       source, status, created_at)
@@ -1418,6 +1439,7 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
                 )?;
             }
         }
+        tx.commit()?;
 
         let mut text = format!(
             "{} file move(s) proposed — nothing has moved; each waits for Daniel's approval\n",
@@ -1459,26 +1481,17 @@ fn validate_move(conn: &Connection, root: &Path, entry: &Value) -> Result<Valida
     if !root.join(&from).is_file() {
         bail!("'{from}' is not a file on disk — use paths exactly as list_material returns them");
     }
-    if source_rel == dest_rel {
-        bail!("'{from}' already has that path");
-    }
     if Path::new(&dest_rel).file_name().is_none() {
         bail!("'{to}' must include the destination file name");
     }
-    // Same policy as the drop-to-sort validator: dot-entries are scanner-hidden
-    // at every depth; app-managed dirs are excluded at top level only.
-    for segment in dest_rel.split('/') {
-        if segment.starts_with('.') {
-            bail!("'{to}' contains a hidden folder — the app would never show the file there");
-        }
-    }
-    let first = dest_rel.split('/').next().unwrap_or("");
-    if crate::scanner::APP_MANAGED_DIRS.contains(&first) {
-        bail!("'{to}' targets an app-managed folder — material belongs in module folders");
-    }
-    if root.join(&to).exists() {
-        bail!("'{to}' already exists — pick a different destination");
-    }
+    // The destination policy itself belongs to the drop-to-sort validator, and
+    // is called rather than restated: the copy that used to live here had
+    // already drifted, missing the symlinked-ancestor check that stops a move
+    // physically landing outside the class folder while the index records it
+    // as inside. Approval re-runs the same function, so the two agree by
+    // construction now instead of by comment.
+    crate::sorter::validate_dest(&root.join(&from_class.folder_name), &source_rel, &dest_rel)
+        .with_context(|| format!("'{to}' is not a valid destination"))?;
     Ok(ValidatedMove {
         class_id: from_class.id,
         source_rel,

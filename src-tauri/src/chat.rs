@@ -315,16 +315,6 @@ fn stored_effort(conn: &Connection) -> Result<Option<String>> {
         .filter(|level| EFFORT_LEVELS.contains(&level.as_str())))
 }
 
-/// Runs blocking HTTP on a plain thread. Tauri commands are dispatched from the
-/// async runtime, and `reqwest::blocking` must never run inside one.
-fn on_worker<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T> {
-    std::thread::spawn(work)
-        .join()
-        .map_err(|_| anyhow!("the network thread panicked"))?
-}
-
 /// One client for every call, so connections are pooled across the rounds of a
 /// turn and across turns — `answer`, `followups` and `fetch_models` share it.
 fn http_client() -> Result<&'static reqwest::blocking::Client> {
@@ -396,7 +386,7 @@ fn default_model(models: &[ModelOption]) -> String {
 /// The Settings picker's data: the live list plus the model chat will use.
 pub fn list_models(app: &AppHandle) -> Result<ModelList> {
     let key = stored_key(app)?.context("save your Anthropic API key first")?;
-    let models = on_worker(move || fetch_models(&key))?;
+    let models = fetch_models(&key)?;
     let stored = with_conn(app, |conn| setting(conn, MODEL_SETTING))?;
     let selected = match stored {
         Some(model) if models.iter().any(|m| m.id == model) => model,
@@ -955,6 +945,10 @@ enum OpenBlock {
         text: String,
         signature: String,
     },
+    /// Encrypted reasoning. Nothing here can read it, but the API expects it
+    /// back verbatim alongside the tool results of the same turn — dropping it
+    /// truncated the assistant message that the very next round replays.
+    Redacted(String),
     Tool {
         id: String,
         name: String,
@@ -1011,6 +1005,9 @@ fn stream_turn(
                         text: String::new(),
                         signature: String::new(),
                     }),
+                    Some("redacted_thinking") => Some(OpenBlock::Redacted(
+                        block["data"].as_str().unwrap_or_default().to_string(),
+                    )),
                     Some("tool_use") => Some(OpenBlock::Tool {
                         id: block["id"].as_str().unwrap_or_default().to_string(),
                         name: block["name"].as_str().unwrap_or_default().to_string(),
@@ -1069,6 +1066,12 @@ fn stream_turn(
                         }));
                     }
                     emit(app, ChatEvent::new(session_id, "thinking_end"));
+                }
+                Some(OpenBlock::Redacted(data)) => {
+                    if !data.is_empty() {
+                        turn.blocks
+                            .push(json!({ "type": "redacted_thinking", "data": data }));
+                    }
                 }
                 Some(OpenBlock::Tool {
                     id,
