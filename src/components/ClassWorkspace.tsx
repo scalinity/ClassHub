@@ -54,10 +54,10 @@ export function ClassWorkspace({
     queryFn: () => scanClass(info.id),
   });
 
-  // Guide state (M5/M6). Staleness is computed on demand backend-side; the
-  // query re-runs when a scan lands (dataUpdatedAt) or a guide job settles
-  // (settledGuideJobs) — the guides upsert commits before the status flips,
-  // so a refetch triggered by the transition always sees the new row.
+  // Guide state (M5/M6). Staleness is computed on demand backend-side. The
+  // key stays stable: the jobs store invalidates ["guides"] when a synthesis
+  // job settles, and the upsert commits before the status flips, so the
+  // refetch always sees the new row.
   const { jobs } = useJobs();
   const guideJobs = jobs.filter(
     (j) =>
@@ -69,9 +69,8 @@ export function ClassWorkspace({
       .filter((j) => j.status === "running" || j.status === "queued")
       .map((j) => j.scope ?? ""),
   );
-  const settledGuideJobs = guideJobs.length - activeScopes.size;
   const { data: guides } = useQuery({
-    queryKey: ["guides", info.id, settledGuideJobs, dataUpdatedAt],
+    queryKey: ["guides", info.id],
     queryFn: () => listGuides(info.id),
     placeholderData: (prev) => prev,
   });
@@ -88,7 +87,7 @@ export function ClassWorkspace({
     (j) => j.status === "running" || j.status === "queued",
   );
   const { data: practice } = useQuery({
-    queryKey: ["practice", info.id, practiceJobs.length - activePractice.length],
+    queryKey: ["practice", info.id],
     queryFn: () => listPractice(info.id),
     placeholderData: (prev) => prev,
   });

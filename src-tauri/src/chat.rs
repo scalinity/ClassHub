@@ -137,6 +137,9 @@ struct ChatEvent {
     detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_error: Option<bool>,
+    /// Whether this tool changes something — served rather than mirrored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_write: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     suggestions: Option<Vec<String>>,
 }
@@ -153,6 +156,7 @@ impl ChatEvent {
             summary: None,
             detail: None,
             is_error: None,
+            is_write: None,
             suggestions: None,
         }
     }
@@ -1090,6 +1094,7 @@ fn stream_turn(
                     event.tool_id = Some(id.clone());
                     event.name = Some(name.clone());
                     event.input = Some(input.to_string());
+                    event.is_write = Some(crate::tools::is_write(&name));
                     emit(app, event);
                     turn.tool_calls.push(ToolCall { id, name, input });
                 }

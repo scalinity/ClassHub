@@ -2,6 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useSyncExternalStore } from "react";
 
+/** SPEC §4: the drop folder, mirrored from sorter.rs INBOX_DIR — the one path
+ *  string both sides must agree on. */
+export const INBOX_DIR = "_Inbox";
+
 export interface InboxFile {
   name: string;
   size: number;

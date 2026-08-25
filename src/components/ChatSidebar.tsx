@@ -616,7 +616,7 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
           }
         >
           {/* ✎ marks a chip that changed something; » only ever read. */}
-          {isWriteTool(item.name) ? "✎" : "»"}
+          {isWriteTool(item) ? "✎" : "»"}
         </span>
         <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em]">
           {toolLabel(item.name)}

@@ -94,13 +94,16 @@ export default function App() {
   const [view, setViewState] = useState<View>("dashboard");
   // Each view is its own page; carrying scroll depth between them opens the
   // next one mid-scroll.
+  // Every view change goes through here, so the drop target rides along with
+  // it rather than being written during render (SPEC §13: event handlers and
+  // derived state). Native file drops land in the open class's inbox
+  // (SPEC §10); sorter.ts already carries the dashboard default for the
+  // initial mount.
   const setView = (next: View) => {
     window.scrollTo(0, 0);
+    setDropTarget(typeof next === "object" ? next.id : null);
     setViewState(next);
   };
-  // Native file drops land in the open class's inbox (SPEC §10). A module
-  // variable read only by the drag-drop listener — idempotent to set here.
-  setDropTarget(typeof view === "object" ? view.id : null);
 
   return (
     <QueryClientProvider client={queryClient}>

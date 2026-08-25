@@ -7,6 +7,7 @@ import { formatSize, type TreeNode } from "@/lib/materials";
 import {
   clearDropNotice,
   getSortState,
+  INBOX_DIR,
   resolveProposal,
   runSortJob,
   useDragState,
@@ -66,17 +67,22 @@ export function InboxQueue({
   const proposals = data?.proposals ?? [];
   const proposedSources = new Set(proposals.map((p) => p.sourceRelPath));
   const unproposed = inbox.filter(
-    (f) => !proposedSources.has(`_Inbox/${f.name}`) && !f.dismissed,
+    (f) => !proposedSources.has(`${INBOX_DIR}/${f.name}`) && !f.dismissed,
   );
   // Dismissed files are decisions already made: shown quietly when the
   // section is open for other reasons, never counted, never nagging.
   const dismissed = inbox.filter(
-    (f) => f.dismissed && !proposedSources.has(`_Inbox/${f.name}`),
+    (f) => f.dismissed && !proposedSources.has(`${INBOX_DIR}/${f.name}`),
   );
   const count = proposals.length + unproposed.length;
   const notice = drag.notice?.classId === classId ? drag.notice.message : null;
 
-  if (count === 0 && !active && !notice) return null;
+  // Dismissed files are not counted, but they still keep the section on
+  // screen: SORT INBOX is the documented way back out of a dismissal
+  // (sorter.rs runs manual sorts over every inbox file, dismissed included),
+  // and gating on `count` alone made it unreachable once everything was
+  // dismissed — the button's own branch below already contemplates this case.
+  if (count === 0 && dismissed.length === 0 && !active && !notice) return null;
 
   const dirs = tree ? collectDirs(tree) : null;
   const dirSet: ReadonlySet<string> | null = dirs ? new Set(dirs) : null;
@@ -226,7 +232,7 @@ function ProposalCard({
   const destName = proposal.destRelPath.slice(
     proposal.destRelPath.lastIndexOf("/") + 1,
   );
-  const fromInbox = source.startsWith("_Inbox/");
+  const fromInbox = source.startsWith(`${INBOX_DIR}/`);
   const fromDir = source.includes("/")
     ? source.slice(0, source.lastIndexOf("/"))
     : "";

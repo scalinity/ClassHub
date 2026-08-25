@@ -92,6 +92,24 @@ impl Outcome {
     }
 }
 
+/// Tools that change something. The sidebar marks their chips differently, and
+/// deriving that here rather than from a hand-kept copy in the frontend means a
+/// new write tool cannot quietly render as a read.
+pub fn is_write(name: &str) -> bool {
+    matches!(
+        name,
+        "upsert_deadline"
+            | "complete_deadline"
+            | "delete_deadline"
+            | "upsert_grade_category"
+            | "add_grade_item"
+            | "write_note"
+            | "trigger_synthesis"
+            | "generate_practice"
+            | "propose_file_moves"
+    )
+}
+
 /// Tool schemas sent with every request (SPEC §9: four read tools, nine write
 /// tools). Thirteen schemas ride every round of the loop — roughly two
 /// thousand tokens, a fine price for the model always seeing its full reach.

@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
+import { queryClient } from "@/lib/query";
+
 export type JobStatus =
   | "queued"
   | "running"
@@ -56,6 +58,9 @@ export interface JobsSnapshot {
   panelOpen: boolean;
   /** Unix seconds, ticked every second while a job is active (for elapsed labels). */
   nowSec: number;
+  /** Set when the job list could not be refreshed, so the panel says so
+   *  instead of quietly showing stale rows forever. */
+  error: string | null;
 }
 
 // --- External store (push-based Tauri events; no useEffect per workspace rules) ---
@@ -67,12 +72,16 @@ let snapshot: JobsSnapshot = {
   tails: new Map(),
   panelOpen: false,
   nowSec: Math.floor(Date.now() / 1000),
+  error: null,
 };
 
 const storeListeners = new Set<() => void>();
 /** Per job: seq -> event. Merges the live stream with the backfill snapshot. */
 const buffers = new Map<number, Map<number, ProgressEvent>>();
 const subscribedJobs = new Set<number>();
+/** Live event registrations, so a settled job can drop its own. */
+const unlisteners = new Map<number, () => void>();
+const tailUnlisteners = new Map<number, () => void>();
 let ticker: ReturnType<typeof setInterval> | null = null;
 
 function emitChange(patch: Partial<JobsSnapshot>) {
@@ -112,11 +121,16 @@ export function ensureOutput(jobId: number) {
   subscribedJobs.add(jobId);
   void listen<ProgressEvent>(`job://${jobId}/progress`, (e) =>
     addEvents(jobId, [e.payload]),
-  ).then(() =>
-    invoke<ProgressEvent[]>("get_job_events", { jobId }).then((events) =>
-      addEvents(jobId, events),
-    ),
-  );
+  )
+    .then((unlisten) => {
+      // Kept so the registration can be dropped when the job settles —
+      // otherwise every job the app has run this session stays subscribed.
+      unlisteners.set(jobId, unlisten);
+      return invoke<ProgressEvent[]>("get_job_events", { jobId }).then((events) =>
+        addEvents(jobId, events),
+      );
+    })
+    .catch((e) => emitChange({ error: String(e) }));
 }
 
 const TAIL_CAP = 8 * 1024;
@@ -140,12 +154,15 @@ export function ensureTail(jobId: number) {
   void listen<string>(`job://${jobId}/tail`, (e) => {
     if (!backfilled) return; // covered by the pending backfill snapshot
     setTail(jobId, (snapshot.tails.get(jobId) ?? "") + e.payload);
-  }).then(() =>
-    invoke<string>("get_job_tail", { jobId }).then((tail) => {
-      backfilled = true;
-      setTail(jobId, tail);
-    }),
-  );
+  })
+    .then((unlisten) => {
+      tailUnlisteners.set(jobId, unlisten);
+      return invoke<string>("get_job_tail", { jobId }).then((tail) => {
+        backfilled = true;
+        setTail(jobId, tail);
+      });
+    })
+    .catch((e) => emitChange({ error: String(e) }));
 }
 
 function updateTicker(jobs: JobInfo[]) {
@@ -164,14 +181,63 @@ function updateTicker(jobs: JobInfo[]) {
 }
 
 async function refreshJobs() {
-  const jobs = await invoke<JobInfo[]>("list_jobs");
-  emitChange({ jobs, nowSec: Math.floor(Date.now() / 1000) });
+  let jobs: JobInfo[];
+  try {
+    jobs = await invoke<JobInfo[]>("list_jobs");
+  } catch (e) {
+    // Without this the panel silently freezes on stale rows: this runs from an
+    // event listener, so a rejection would only ever reach the console.
+    emitChange({ error: String(e) });
+    return;
+  }
+  // Detected before the state is updated: the active → settled edge is what
+  // says an artifact just landed.
+  const settled = jobs.filter((j) => !isActive(j) && wasActive.delete(j.id));
+  emitChange({ jobs, nowSec: Math.floor(Date.now() / 1000), error: null });
   for (const job of jobs) {
-    if (job.status === "running" || job.status === "queued") {
+    if (isActive(job)) {
+      wasActive.add(job.id);
       ensureOutput(job.id);
+    } else {
+      releaseJob(job.id);
+    }
+  }
+  // A job that produces an artifact reconciles it backend-side before its row
+  // leaves running, so this transition is the moment to refetch. Invalidating
+  // here rather than encoding a job counter into the query key keeps the keys
+  // stable, and matches how hub-changed already drives every other refetch.
+  for (const job of settled) {
+    if (job.kind === "module_guide" || job.kind === "master_guide") {
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
+    } else if (job.kind === "practice") {
+      void queryClient.invalidateQueries({ queryKey: ["practice"] });
     }
   }
   updateTicker(jobs);
+}
+
+const isActive = (j: JobInfo) => j.status === "running" || j.status === "queued";
+/** Ids seen active, so the active → settled edge can be detected. */
+const wasActive = new Set<number>();
+
+/**
+ * Drops a settled job's live registrations. The condensed event list stays —
+ * the Job Center still renders it for a finished run — but the listener and
+ * the growing source tail have nothing left to feed.
+ */
+function releaseJob(jobId: number) {
+  const unlisten = unlisteners.get(jobId);
+  if (unlisten) {
+    unlisten();
+    unlisteners.delete(jobId);
+    subscribedJobs.delete(jobId);
+  }
+  const tailUnlisten = tailUnlisteners.get(jobId);
+  if (tailUnlisten) {
+    tailUnlisten();
+    tailUnlisteners.delete(jobId);
+    subscribedTails.delete(jobId);
+  }
 }
 
 let initialized = false;

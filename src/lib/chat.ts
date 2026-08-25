@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
+import { todayIso } from "@/lib/schedule";
+
 export interface ChatSettings {
   hasKey: boolean;
   model: string | null;
@@ -22,6 +24,8 @@ export const EFFORT_LEVELS = [
 export interface ModelOption {
   id: string;
   displayName: string;
+  /** The largest max_tokens the model accepts, when it publishes one. */
+  maxTokens: number | null;
 }
 
 export interface ModelList {
@@ -55,7 +59,14 @@ export type ChatItem =
    * `tail` is the unparsed remainder, split into the chunks it arrived in so
    * each can fade in on its own.
    */
-  | { kind: "answer"; text: string; tail: readonly string[] }
+  | {
+      kind: "answer";
+      text: string;
+      tail: readonly string[];
+      /** Whether `text` ends inside an unclosed code fence — carried so each
+       *  settle counts only the newly settled slice. */
+      openFence?: boolean;
+    }
   | { kind: "thinking"; text: string; done: boolean }
   | {
       kind: "tool";
@@ -66,6 +77,8 @@ export type ChatItem =
       summary?: string;
       detail?: string;
       isError?: boolean;
+      /** Served by the backend rather than mirrored here. */
+      isWrite?: boolean;
     }
   | { kind: "notice"; text: string };
 
@@ -115,6 +128,7 @@ interface ChatEventPayload {
   summary?: string;
   detail?: string;
   isError?: boolean;
+  isWrite?: boolean;
   suggestions?: string[];
 }
 
@@ -192,10 +206,29 @@ function settle(
   const tail = item.tail.join("");
   const cut = tail.lastIndexOf("\n\n");
   if (cut < 0) return item;
-  const text = item.text + tail.slice(0, cut + 2);
-  if ((text.match(/```/g)?.length ?? 0) % 2 !== 0) return item;
+  const settling = tail.slice(0, cut + 2);
+  // Fences are counted over the newly settled slice and the parity carried on
+  // the item, rather than rescanning the whole answer each time — that was
+  // O(n) per settle and O(n²) across a long answer.
+  // Returned unchanged when the fence is still open: `text` has not advanced,
+  // so its parity has not either, and this slice gets counted again next time
+  // along with whatever arrived after it.
+  const stillOpen =
+    (item.openFence ?? false) !== (countFences(settling) % 2 !== 0);
+  if (stillOpen) return item;
   const rest = tail.slice(cut + 2);
-  return { kind: "answer", text, tail: rest === "" ? [] : [rest] };
+  return {
+    kind: "answer",
+    text: item.text + settling,
+    tail: rest === "" ? [] : [rest],
+    openFence: false,
+  };
+}
+
+function countFences(s: string): number {
+  let count = 0;
+  for (let i = s.indexOf("```"); i !== -1; i = s.indexOf("```", i + 3)) count++;
+  return count;
 }
 
 /** Nothing is still arriving, so the whole answer can be parsed as markdown. */
@@ -280,6 +313,7 @@ function handleEvent(event: ChatEventPayload) {
         toolId: event.toolId ?? "",
         name: event.name ?? "tool",
         input: event.input ?? "{}",
+        isWrite: event.isWrite,
       });
       break;
     case "tool_result":
@@ -304,12 +338,18 @@ function itemsFromHistory(messages: StoredMessage[]): ChatItem[] {
   const toolPositions = new Map<string, number>();
 
   for (const message of messages) {
-    let blocks: Array<Record<string, unknown>>;
+    // `JSON.parse` returns `any`, so the declared type was an assertion, not a
+    // check — and the catch only covered malformed JSON. A row that is valid
+    // JSON but not an array would throw on iteration and take out the whole
+    // transcript render rather than skipping one message.
+    let parsed: unknown;
     try {
-      blocks = JSON.parse(message.content);
+      parsed = JSON.parse(message.content);
     } catch {
       continue;
     }
+    if (!Array.isArray(parsed)) continue;
+    const blocks = parsed as Array<Record<string, unknown>>;
     for (const block of blocks) {
       if (block.type === "text") {
         const text = String(block.text ?? "");
@@ -455,7 +495,7 @@ export async function sendChat(text: string) {
       text: question,
       today: todayLabel(),
       // YYYY-MM-DD in local time — stamps practice file names backend-side.
-      todayIso: new Date().toLocaleDateString("en-CA"),
+      todayIso: todayIso(),
     });
     if (snapshot.sessionId !== sessionId) {
       emitChange({
@@ -582,6 +622,10 @@ export function toolLabel(name: string): string {
 }
 
 /** M8 write tools — their chips carry a pen glyph instead of the read arrows. */
+/**
+ * Live turns carry the flag from the backend, which owns the list. Rebuilt
+ * history has no event to carry it, so it falls back to the persisted name.
+ */
 const WRITE_TOOLS = new Set([
   "upsert_deadline",
   "complete_deadline",
@@ -594,6 +638,6 @@ const WRITE_TOOLS = new Set([
   "propose_file_moves",
 ]);
 
-export function isWriteTool(name: string): boolean {
-  return WRITE_TOOLS.has(name);
+export function isWriteTool(item: { name: string; isWrite?: boolean }): boolean {
+  return item.isWrite ?? WRITE_TOOLS.has(item.name);
 }

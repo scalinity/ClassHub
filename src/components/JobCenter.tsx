@@ -21,26 +21,22 @@ import {
   type JobInfo,
   type ProgressEvent,
 } from "@/lib/jobs";
+import { CLASS_ACCENTS } from "@/lib/classes";
 import { getAppSettings } from "@/lib/settings";
-
-const ACCENTS: Record<string, string> = {
-  blue: "var(--class-blue)",
-  orange: "var(--class-orange)",
-  green: "var(--class-green)",
-  amber: "var(--class-amber)",
-};
 
 function accentStyle(color: string | null): CSSProperties {
   return {
-    "--accent": (color && ACCENTS[color]) || "var(--muted-foreground)",
+    "--accent": (color && CLASS_ACCENTS[color]) || "var(--muted-foreground)",
   } as CSSProperties;
 }
 
 const isActive = (j: JobInfo) => j.status === "running" || j.status === "queued";
 
 export function JobCenter() {
-  const { jobs, output, panelOpen, nowSec } = useJobs();
+  const { jobs, output, panelOpen, nowSec, error } = useJobs();
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const notice = actionError ?? error;
   const { data: appSettings } = useQuery({
     queryKey: ["appSettings"],
     queryFn: getAppSettings,
@@ -69,6 +65,15 @@ export function JobCenter() {
             </span>
           </header>
 
+          {notice !== null && (
+            <p
+              role="alert"
+              className="border-b bg-destructive/5 px-4 py-2 font-mono text-[10.5px] leading-relaxed text-destructive"
+            >
+              {notice}
+            </p>
+          )}
+
           {jobs.length === 0 ? (
             <p className="px-4 py-8 text-center text-[13px] text-muted-foreground">
               No jobs yet. Extraction and synthesis work will appear here.
@@ -86,6 +91,7 @@ export function JobCenter() {
                       setSelectedId(job.id);
                       ensureOutput(job.id);
                     }}
+                    onError={setActionError}
                   />
                 ))}
               </ul>
@@ -194,11 +200,13 @@ function JobRow({
   nowSec,
   selected,
   onSelect,
+  onError,
 }: {
   job: JobInfo;
   nowSec: number;
   selected: boolean;
   onSelect: () => void;
+  onError: (message: string | null) => void;
 }) {
   const timeLabel =
     job.status === "running"
@@ -246,7 +254,10 @@ function JobRow({
             type="button"
             title="Cancel job"
             aria-label={`Cancel job ${job.id}`}
-            onClick={() => void cancelJob(job.id)}
+            onClick={() => {
+              onError(null);
+              cancelJob(job.id).catch((e) => onError(String(e)));
+            }}
             className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive focus-visible:outline-2 focus-visible:outline-(--accent)"
           >
             <X size={13} aria-hidden />
@@ -352,6 +363,7 @@ function OutputPane({
  */
 export function AuthWarning() {
   const { auth } = useJobs();
+  const [recheckError, setRecheckError] = useState<string | null>(null);
   if (auth.status !== "failed") return null;
 
   return (
@@ -378,11 +390,19 @@ export function AuthWarning() {
         </p>
         <button
           type="button"
-          onClick={() => void rerunAuthCheck()}
+          onClick={() => {
+            setRecheckError(null);
+            rerunAuthCheck().catch((e) => setRecheckError(String(e)));
+          }}
           className="mt-5 cursor-pointer rounded-md border px-3.5 py-1.5 text-[12px] font-medium transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
         >
           Re-run check
         </button>
+        {recheckError !== null && (
+          <p className="mt-3 font-mono text-[10.5px] leading-relaxed text-destructive">
+            {recheckError}
+          </p>
+        )}
       </div>
     </div>
   );
