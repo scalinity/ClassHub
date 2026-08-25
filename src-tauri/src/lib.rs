@@ -505,15 +505,23 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let conn = db::open(&data_dir.join("classhub.db"))?;
+            let conn = match db::open(&data_dir.join("classhub.db")) {
+                Ok(conn) => conn,
+                Err(e) => report_startup_failure(&data_dir, &e),
+            };
             jobs::startup_recovery(&conn)?;
+            jobs::prune_logs(&data_dir);
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
             app.manage(chat::ChatState::default());
             if let Err(e) = jobs::enqueue_self_check(app.handle()) {
                 eprintln!("startup self-check failed to enqueue: {e:#}");
             }
-            scan_and_extract_all(app.handle());
+            // Off the main thread: this walks every class folder and hashes
+            // whatever changed, and the window should not wait behind it. The
+            // `hub-changed` pushes each class emits bring the UI up to date.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || scan_and_extract_all(&handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -569,6 +577,33 @@ pub fn run() {
             send_chat,
             stop_chat
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Children spawned by the job runner are not reaped by dropping
+            // their handles, so quitting mid-job would otherwise hand a live
+            // `claude` to launchd. ExitRequested covers the ordinary quit;
+            // Exit is the backstop for the paths that skip it.
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                app.state::<jobs::JobManager>().shutdown();
+            }
+        });
+}
+
+/// The database is the app: without it every screen is empty and every write
+/// fails, so there is nothing useful to open a window onto. Launched from
+/// Finder there is no stderr to read either, which is why the reason is left
+/// in a file next to the database the migration could not open.
+fn report_startup_failure(data_dir: &std::path::Path, e: &anyhow::Error) -> ! {
+    let message = format!(
+        "ClassHub could not open its database.\n\n{e:#}\n\n\
+         The database is at {}. Nothing has been changed.",
+        data_dir.join("classhub.db").display()
+    );
+    let _ = std::fs::write(data_dir.join("startup-error.txt"), &message);
+    eprintln!("{message}");
+    panic!("{message}");
 }

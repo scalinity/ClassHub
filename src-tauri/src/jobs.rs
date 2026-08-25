@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -48,6 +49,29 @@ fn disallowed_tools(kind: &str) -> &'static str {
 }
 
 const SELF_CHECK_PROMPT: &str = "Reply with exactly: OK";
+
+/// How long a spawned run may produce nothing before it is presumed wedged.
+const STALL_LIMIT: Duration = Duration::from_secs(10 * 60);
+
+/// Raw job logs older than this are removed at startup. They are a debugging
+/// aid for a run that already finished, and `master_guide` writes a large one
+/// every time; without a sweep the folder only ever grows.
+const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Says once, in the run's own progress stream, that the raw log is short —
+/// the job itself is unaffected and keeps going.
+fn log_write_failed(app: &AppHandle, job: &QueuedJob, reported: &mut bool, e: &std::io::Error) {
+    if *reported {
+        return;
+    }
+    *reported = true;
+    push_event(
+        app,
+        job.id,
+        "status",
+        format!("raw log could not be written ({e}) — progress here is unaffected"),
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -175,6 +199,36 @@ impl JobManager {
     pub fn auth_check(&self) -> AuthCheck {
         self.lock_inner().auth.clone()
     }
+
+    /// Kills every running child on the way out.
+    ///
+    /// `std::process::Child` has no `Drop` that kills or reaps, so quitting
+    /// mid-job used to leave `claude` running, reparented to launchd: it went
+    /// on burning subscription quota with nothing reading its output, and
+    /// `startup_recovery` then marked the row failed while keeping its
+    /// `session_id`, so RESUME would put a second writer on the same output
+    /// file. Draining the queue first stops the pump handing out new work
+    /// while this runs.
+    pub fn shutdown(&self) {
+        let children: Vec<Arc<Mutex<Option<Child>>>> = {
+            let mut inner = self.lock_inner();
+            inner.queue.clear();
+            inner
+                .running
+                .values()
+                .map(|r| {
+                    r.cancelled.store(true, Ordering::SeqCst);
+                    r.child.clone()
+                })
+                .collect()
+        };
+        for slot in children {
+            if let Some(mut child) = lock(&slot).take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +287,24 @@ pub fn startup_recovery(conn: &Connection) -> Result<()> {
         [now()],
     )?;
     Ok(())
+}
+
+/// Drops raw job logs past `LOG_RETENTION`. Best effort throughout: a log that
+/// cannot be read or removed is not worth failing a launch over.
+pub fn prune_logs(data_dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(data_dir.join("logs")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let aged = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m.elapsed().map(|age| age > LOG_RETENTION).unwrap_or(false))
+            .unwrap_or(false);
+        if aged {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// SPEC §7 step 3: one batched extract job per class per run. `payload` is the
@@ -611,7 +683,13 @@ fn run_job(
 
     {
         let mgr = app.state::<JobManager>();
-        mgr.lock_inner().running.remove(&job.id);
+        let mut inner = mgr.lock_inner();
+        inner.running.remove(&job.id);
+        // The live-source tail exists to feed the streaming viewer while the
+        // run composes; once the row settles nothing reads it again, and it is
+        // the largest per-job buffer. The condensed event list stays — the Job
+        // Center still shows it for a finished run.
+        inner.tails.remove(&job.id);
     }
     let _ = app.emit("jobs-changed", ());
     // Files dropped while a sort ran were invisible to its prompt; with the
@@ -701,6 +779,25 @@ fn unescape_fragment(carry: &mut String, fragment: &str) -> String {
     out
 }
 
+/// `Command::output()` with a deadline: kills and reaps on expiry rather than
+/// blocking forever on a child that never exits.
+fn wait_bounded(mut child: Child, limit: Duration) -> Option<std::process::Output> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// The long-lived `claude setup-token` credential, exported from `.zshrc`.
 ///
 /// Launched from Finder, the app is started by launchd, which supplies none of
@@ -724,12 +821,21 @@ fn subscription_token() -> Option<&'static str> {
             // Terminal's session restore alone prepends a "Restored session:"
             // line, which lands in the header and is rejected as a line break
             // mid-token. Only what sits between the markers is the value.
-            let out = Command::new("/bin/zsh")
+            // Bounded, because `-i` sources the whole rc file and this runs
+            // inside a OnceLock every other job thread waits on: an rc file
+            // that stalls on a plugin manager or a network-touching prompt
+            // would otherwise take the entire runner down with it, with the
+            // jobs stuck in `running` and nothing to cancel. Falling back to
+            // "no subscription auth" is an outcome the self-check reports
+            // honestly, so giving up is safe.
+            let child = Command::new("/bin/zsh")
                 .args(["-ic", r#"print -rn -- "<<CHTOK>>$CLAUDE_CODE_OAUTH_TOKEN<</CHTOK>>""#])
                 .stdin(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .output()
+                .spawn()
                 .ok()?;
+            let out = wait_bounded(child, Duration::from_secs(5))?;
             let stdout = String::from_utf8_lossy(&out.stdout);
             let token = stdout
                 .rsplit_once("<<CHTOK>>")
@@ -766,6 +872,7 @@ fn execute_job(
     let log_path = log_dir.join(format!("job-{}.jsonl", job.id));
     let mut log = fs::File::create(&log_path)
         .with_context(|| format!("creating log {}", log_path.display()))?;
+    let mut log_broken = false;
 
     with_conn(app, |conn| {
         conn.execute(
@@ -867,26 +974,78 @@ fn execute_job(
         })
     };
 
-    let mut stream = StreamState::default();
-    for line in BufReader::new(stdout).lines() {
-        let line = line.context("reading child stdout")?;
-        let _ = writeln!(log, "{line}");
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        handle_event(app, job, &value, &mut stream);
-        if stream.auth_abort.is_some() {
-            if let Some(c) = lock(child_slot).as_mut() {
-                let _ = c.kill();
+    // A child that connects and then goes quiet holds its concurrency slot
+    // forever, and a master_guide holds the exclusive slot, so everything
+    // queued behind it stops too. Duration is not the signal — SPEC §8.2
+    // expects master synthesis to run past thirty minutes — but it streams
+    // throughout, so silence is.
+    let last_line = Arc::new(Mutex::new(Instant::now()));
+    let stalled = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let last_line = last_line.clone();
+        let stalled = stalled.clone();
+        let child_slot = child_slot.clone();
+        let cancelled = cancelled.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            // The slot empties when the run finishes; that is the exit signal.
+            if lock(&child_slot).is_none() || cancelled.load(Ordering::SeqCst) {
+                return;
             }
-            break;
+            if lock(&last_line).elapsed() >= STALL_LIMIT {
+                stalled.store(true, Ordering::SeqCst);
+                if let Some(c) = lock(&child_slot).as_mut() {
+                    let _ = c.kill();
+                }
+                return;
+            }
+        })
+    };
+
+    let mut stream = StreamState::default();
+    // Read in a closure so an I/O error cannot return past the cleanup below:
+    // the child is still running and still in the slot at that point, and
+    // nothing else would kill it or join the stderr thread parked on its pipe.
+    let read_result = (|| -> Result<()> {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.context("reading child stdout")?;
+            *lock(&last_line) = Instant::now();
+            if let Err(e) = writeln!(log, "{line}") {
+                // The Job Center points at this file; a silently truncated log
+                // would make it lie about what the run did.
+                log_write_failed(app, job, &mut log_broken, &e);
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            handle_event(app, job, &value, &mut stream);
+            if stream.auth_abort.is_some() {
+                if let Some(c) = lock(child_slot).as_mut() {
+                    let _ = c.kill();
+                }
+                break;
+            }
         }
-    }
+        Ok(())
+    })();
 
     // Take the child out of the slot so a late cancel can't block on wait().
     let mut child = lock(child_slot).take().context("child handle missing")?;
+    if read_result.is_err() {
+        let _ = child.kill();
+    }
     let exit = child.wait().context("waiting for child")?;
     let _ = stderr_thread.join();
+    let _ = watchdog.join();
+    if stalled.load(Ordering::SeqCst) {
+        return Ok(Outcome::Failed {
+            error: format!(
+                "no output for {} minutes — the run was stopped as wedged",
+                STALL_LIMIT.as_secs() / 60
+            ),
+        });
+    }
+    read_result?;
 
     if job.kind == "self_check" {
         return Ok(resolve_self_check(app, &stream, &lock(&stderr_tail)));
