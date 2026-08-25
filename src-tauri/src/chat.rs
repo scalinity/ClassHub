@@ -735,6 +735,19 @@ struct Run<'a> {
     today_iso: &'a str,
 }
 
+/// The thirteen tool schemas, with a cache breakpoint on the last one.
+///
+/// A breakpoint covers everything before it, so marking the final schema makes
+/// the whole block cacheable — roughly two thousand tokens that would otherwise
+/// be re-billed on every round of the loop.
+fn cacheable_tools() -> Value {
+    let mut tools = crate::tools::definitions();
+    if let Some(last) = tools.as_array_mut().and_then(|t| t.last_mut()) {
+        last["cache_control"] = json!({ "type": "ephemeral" });
+    }
+    tools
+}
+
 /// SPEC §9 tool loop: send → run `tool_use` locally → append `tool_result` →
 /// send again, until the model answers without asking for a tool.
 fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
@@ -749,7 +762,16 @@ fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
         let mut body = json!({
             "model": run.model,
             "max_tokens": run.max_tokens,
-            "system": run.system,
+            // The system prompt is byte-identical across every round of a turn
+            // and every turn of a session, and chat is explicitly pay-per-token
+            // (SPEC §15) — so it is marked cacheable rather than re-billed up
+            // to thirteen times for one question. The tool schemas below get
+            // the same treatment for the same reason.
+            "system": [{
+                "type": "text",
+                "text": run.system,
+                "cache_control": { "type": "ephemeral" },
+            }],
             "messages": messages,
             "stream": true,
         });
@@ -762,7 +784,7 @@ fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
         if thinking {
             body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         }
-        body["tools"] = crate::tools::definitions();
+        body["tools"] = cacheable_tools();
         // Out of tool budget: answer from what has already been read instead
         // of retrieving forever. `tool_choice: none` is how that is said —
         // dropping `tools` outright is rejected, because by this round the

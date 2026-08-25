@@ -516,3 +516,57 @@ pub fn manifest_is_stale(stored_manifest_json: &str, current: &[ManifestEntry]) 
     let current: std::collections::HashSet<&ManifestEntry> = current.iter().collect();
     stored != current
 }
+
+#[cfg(test)]
+mod tests {
+    use super::strip_html;
+
+    /// Class HTML notebooks are extracted locally, so this parser is what
+    /// stands between their markup and the text the agent later searches.
+    #[test]
+    fn keeps_text_and_drops_tags() {
+        assert_eq!(strip_html("<p>Hello <b>world</b></p>").trim(), "Hello world");
+    }
+
+    #[test]
+    fn drops_script_and_style_content_entirely() {
+        let html = "<p>before</p><script>var x = 1 < 2;</script><p>after</p>";
+        let out = strip_html(html);
+        assert!(!out.contains("var x"), "script body leaked: {out:?}");
+        assert!(out.contains("before") && out.contains("after"));
+
+        let styled = "<style>.a { color: red }</style><p>body</p>";
+        let out = strip_html(styled);
+        assert!(!out.contains("color"), "style body leaked: {out:?}");
+        assert!(out.contains("body"));
+    }
+
+    #[test]
+    fn drops_comments() {
+        let out = strip_html("<p>a</p><!-- hidden note --><p>b</p>");
+        assert!(!out.contains("hidden"), "comment leaked: {out:?}");
+    }
+
+    #[test]
+    fn decodes_entities() {
+        let out = strip_html("<p>a &amp; b &lt;c&gt; &quot;d&quot; &#39;e&#39; &nbsp;f</p>");
+        assert!(out.contains("a & b"), "{out:?}");
+        assert!(out.contains("<c>"), "{out:?}");
+        assert!(out.contains("\"d\""), "{out:?}");
+    }
+
+    #[test]
+    fn survives_a_truncated_tag_at_eof() {
+        // No panic and no infinite loop: a half-written file is a real input.
+        let _ = strip_html("<p>text</p><div class=\"unclosed");
+        let _ = strip_html("<!-- unterminated comment");
+        let _ = strip_html("<script>never closed");
+    }
+
+    #[test]
+    fn matches_a_closing_tag_case_insensitively() {
+        let out = strip_html("<p>a</p><SCRIPT>junk</SCRIPT><p>b</p>");
+        assert!(!out.contains("junk"), "{out:?}");
+        assert!(out.contains("b"), "{out:?}");
+    }
+}

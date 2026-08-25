@@ -401,3 +401,93 @@ pub fn hash_file(path: &Path) -> Result<String> {
         .map(|b| format!("{b:02x}"))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{diff_fingerprints, fingerprint_sources};
+    use std::collections::HashMap;
+
+    fn sig(entries: &[(&str, u64, i64)]) -> HashMap<String, (u64, i64)> {
+        entries
+            .iter()
+            .map(|(p, len, mtime)| (p.to_string(), (*len, *mtime)))
+            .collect()
+    }
+
+    /// This diff is what demotes a synthesis run that wrote outside its
+    /// contracted output path, so it has to notice every kind of change.
+    #[test]
+    fn reports_nothing_when_the_sources_are_untouched() {
+        let before = sig(&[("Module 1/a.pdf", 10, 100), ("b.R", 20, 200)]);
+        assert!(diff_fingerprints(&before, &before.clone()).is_empty());
+    }
+
+    #[test]
+    fn reports_a_rewritten_file() {
+        let before = sig(&[("a.pdf", 10, 100)]);
+        let after = sig(&[("a.pdf", 11, 100)]); // size changed
+        assert_eq!(diff_fingerprints(&before, &after), vec!["a.pdf"]);
+
+        let touched = sig(&[("a.pdf", 10, 101)]); // mtime changed
+        assert_eq!(diff_fingerprints(&before, &touched), vec!["a.pdf"]);
+    }
+
+    #[test]
+    fn reports_a_deleted_file() {
+        let before = sig(&[("a.pdf", 10, 100), ("b.R", 20, 200)]);
+        let after = sig(&[("b.R", 20, 200)]);
+        assert_eq!(diff_fingerprints(&before, &after), vec!["a.pdf"]);
+    }
+
+    #[test]
+    fn reports_a_file_added_outside_the_contract() {
+        let before = sig(&[("a.pdf", 10, 100)]);
+        let after = sig(&[("a.pdf", 10, 100), ("Module 1/new.md", 5, 300)]);
+        assert_eq!(diff_fingerprints(&before, &after), vec!["Module 1/new.md"]);
+    }
+
+    #[test]
+    fn returns_a_sorted_deduped_list() {
+        let before = sig(&[("z.pdf", 1, 1), ("a.pdf", 1, 1)]);
+        let after = sig(&[("m.pdf", 1, 1)]);
+        assert_eq!(
+            diff_fingerprints(&before, &after),
+            vec!["a.pdf", "m.pdf", "z.pdf"]
+        );
+    }
+
+    /// The contracted output paths are exactly what must NOT be reported —
+    /// otherwise every successful run would demote itself.
+    #[test]
+    fn ignores_the_contracted_output_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "classhub-fingerprint-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Study Guides")).unwrap();
+        std::fs::create_dir_all(dir.join(".classhub/extracts")).unwrap();
+        std::fs::create_dir_all(dir.join("Module 1")).unwrap();
+        std::fs::create_dir_all(dir.join("Notes")).unwrap();
+        std::fs::write(dir.join("Module 1/source.md"), "x").unwrap();
+        // Notes are source material too — a job has no business writing here.
+        std::fs::write(dir.join("Notes/mine.md"), "y").unwrap();
+
+        let before = fingerprint_sources(&dir);
+        assert!(before.contains_key("Module 1/source.md"));
+        assert!(before.contains_key("Notes/mine.md"));
+
+        // Writing the contracted outputs must leave the fingerprint unchanged.
+        std::fs::write(dir.join("Study Guides/Module 1.html"), "guide").unwrap();
+        std::fs::write(dir.join(".classhub/extracts/source.md"), "extract").unwrap();
+        assert!(diff_fingerprints(&before, &fingerprint_sources(&dir)).is_empty());
+
+        // Touching a source is what must be caught.
+        std::fs::write(dir.join("Module 1/source.md"), "changed").unwrap();
+        assert_eq!(
+            diff_fingerprints(&before, &fingerprint_sources(&dir)),
+            vec!["Module 1/source.md"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

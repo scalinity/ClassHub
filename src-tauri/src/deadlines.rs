@@ -748,3 +748,53 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
     tx.commit()?;
     Ok(format!("added — {title} due {due_at}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::valid_due_at;
+
+    /// The one gate between model-invented dates and storage: a date that is
+    /// merely well-shaped sorts and dedupes as text but renders as a different
+    /// day, so the calendar itself has to be checked.
+    #[test]
+    fn accepts_the_stored_shapes() {
+        assert!(valid_due_at("2026-09-03"));
+        assert!(valid_due_at("2026-09-03T23:59"));
+        assert!(valid_due_at("2026-09-03T23:59:59"));
+    }
+
+    #[test]
+    fn rejects_malformed_shapes() {
+        for s in [
+            "", "2026-9-3", "2026/09/03", "26-09-03", "2026-09-03 23:59",
+            "2026-09-03T23:59:", "2026-09-03T2359", "2026-09-03Textra",
+        ] {
+            assert!(!valid_due_at(s), "should reject {s:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_days_the_month_does_not_have() {
+        assert!(!valid_due_at("2026-09-31"));
+        assert!(!valid_due_at("2026-02-30"));
+        assert!(!valid_due_at("2026-13-01"));
+        assert!(!valid_due_at("2026-00-10"));
+        assert!(!valid_due_at("2026-01-00"));
+    }
+
+    #[test]
+    fn follows_the_leap_year_rules() {
+        assert!(valid_due_at("2024-02-29"), "2024 is a leap year");
+        assert!(!valid_due_at("2026-02-29"), "2026 is not");
+        assert!(valid_due_at("2000-02-29"), "divisible by 400");
+        assert!(!valid_due_at("1900-02-29"), "divisible by 100, not 400");
+    }
+
+    #[test]
+    fn rejects_out_of_range_times() {
+        assert!(!valid_due_at("2026-09-03T24:00"));
+        assert!(!valid_due_at("2026-09-03T23:60"));
+        assert!(!valid_due_at("2026-09-03T23:59:60"));
+        assert!(valid_due_at("2026-09-03T00:00:00"));
+    }
+}

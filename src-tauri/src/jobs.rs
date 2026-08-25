@@ -1451,3 +1451,72 @@ pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
     bail!("no JSON array of proposals in the job output")
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_entries, unescape_fragment};
+
+    /// The decoder carries state across fragments, because the API splits a
+    /// stream wherever it likes — including mid-escape.
+    #[test]
+    fn decodes_escapes_within_one_fragment() {
+        let mut carry = String::new();
+        assert_eq!(unescape_fragment(&mut carry, r"a\nb\tc"), "a\nb\tc");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn carries_an_escape_split_across_fragments() {
+        let mut carry = String::new();
+        assert_eq!(unescape_fragment(&mut carry, r"line\"), "line");
+        assert_eq!(carry, r"\");
+        assert_eq!(unescape_fragment(&mut carry, "n next"), "\n next");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn carries_a_unicode_escape_split_mid_sequence() {
+        let mut carry = String::new();
+        assert_eq!(unescape_fragment(&mut carry, r"x\u00"), "x");
+        assert_eq!(carry, r"\u00");
+        assert_eq!(unescape_fragment(&mut carry, "e9 y"), "é y");
+    }
+
+    #[test]
+    fn drops_carriage_returns_and_keeps_literal_quotes() {
+        let mut carry = String::new();
+        assert_eq!(unescape_fragment(&mut carry, r#"a\r\nb\"c\\d"#), "a\nb\"c\\d");
+    }
+
+    /// The sort and syllabus jobs return their contract as a JSON array
+    /// embedded in prose, so the opening bracket has to be found without a
+    /// prose bracket winning the slice.
+    #[test]
+    fn finds_the_array_after_prose() {
+        let out = parse_entries("Here is what I found:\n[{\"a\": 1}]\nDone.").unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["a"], 1);
+    }
+
+    #[test]
+    fn skips_a_bracket_that_opens_prose() {
+        let out = parse_entries("[note] the answer is [{\"a\": 2}]").unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["a"], 2);
+    }
+
+    #[test]
+    fn accepts_an_empty_array() {
+        assert!(parse_entries("nothing found: []").unwrap().is_empty());
+    }
+
+    #[test]
+    fn handles_a_trailing_bracket_without_panicking() {
+        assert!(parse_entries("no array here [").is_err());
+    }
+
+    #[test]
+    fn errors_when_there_is_no_array() {
+        assert!(parse_entries("I could not find anything.").is_err());
+    }
+}
