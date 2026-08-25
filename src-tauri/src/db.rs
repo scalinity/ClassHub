@@ -10,6 +10,20 @@ use tauri::{AppHandle, Emitter, Manager};
 // ---------------------------------------------------------------------------
 // Shared infrastructure — the single definitions every module imports.
 
+/// SPEC §4 filesystem contract. One definition each, because these names are
+/// the layout: a module that keeps its own copy is a module that can drift out
+/// of agreement with the scanner about what a class folder contains.
+pub const INBOX_DIR: &str = "_Inbox";
+pub const NOTES_DIR: &str = "Notes";
+pub const GUIDES_DIR: &str = "Study Guides";
+pub const PRACTICE_DIR: &str = "Study Guides/Practice";
+pub const EXTRACTS_DIR: &str = ".classhub/extracts";
+pub const MASTER_SCOPE: &str = "master";
+
+/// The only paths a synthesis job is contracted to write. Everything else in a
+/// class folder is source material, and SPEC §4 says the app never destroys it.
+pub const JOB_WRITABLE: &[&str] = &[GUIDES_DIR, EXTRACTS_DIR];
+
 /// Unix seconds.
 pub fn now() -> i64 {
     SystemTime::now()
@@ -18,12 +32,20 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A poisoned lock means another thread panicked mid-write, not that this
+/// connection is unusable — recovering the guard keeps one panic from taking
+/// the rest of the session down with it. Every lock site uses this, so the
+/// policy is uniform rather than split between readers and writers.
+pub fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Runs `f` with the shared connection guard held for exactly that window.
 /// The mutex is NOT reentrant: never reach anything that takes it again
 /// (e.g. `jobs::enqueue`) from inside `f`.
 pub fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let db = app.state::<crate::Db>();
-    let guard = db.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = lock(&db.0);
     f(&guard)
 }
 

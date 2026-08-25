@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -18,12 +18,17 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::db::{now, truncate, with_conn};
+use crate::db::{lock, now, truncate, with_conn};
 
 /// SPEC §6: never allow these, regardless of user-level claude settings. The
 /// `--allowedTools` list alone does not restrict tools the user's own config
 /// permits (verified against claude 2.1.237), so deny rules are passed too.
-const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch";
+///
+/// `Task` belongs here for the same reason it belongs in the read-only list: a
+/// spawned sub-agent is a path around the parent's tool scoping, so leaving it
+/// available to the write-capable kinds would hand a prompt-injected synthesis
+/// run the one tool this list exists to withhold.
+const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch,Task";
 /// Kinds that only propose (sort/syllabus) must not be able to touch the tree
 /// at all — the additive-allowedTools behavior above applies to the write
 /// tools just the same, so read-only is only real if they are denied.
@@ -31,8 +36,7 @@ const DISALLOWED_TOOLS: &str = "Bash,WebFetch,WebSearch";
 /// This deny list IS the security boundary for read-only kinds (the allow
 /// list does not restrict, see above), and a deny list only stops names it
 /// enumerates — when the CLI grows a new write-capable or delegating tool,
-/// its name must be added here. `Task` is denied because a spawned sub-agent
-/// is a path around the parent's tool scoping.
+/// its name must be added here.
 const READ_ONLY_DISALLOWED: &str =
     "Bash,WebFetch,WebSearch,Write,Edit,MultiEdit,NotebookEdit,Task";
 
@@ -45,10 +49,6 @@ fn disallowed_tools(kind: &str) -> &'static str {
 
 const SELF_CHECK_PROMPT: &str = "Reply with exactly: OK";
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 // ---------------------------------------------------------------------------
 // Types
 
@@ -56,7 +56,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEvent {
     pub seq: u64,
-    /// status | text | tool | tool_result | retry | result | error
+    /// status | text | tool | tool_result | retry | result | error | phase
     pub kind: String,
     pub text: String,
     /// Full tool-result text (truncated); the UI shows it behind a disclosure.
@@ -191,6 +191,34 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         }
         "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),
         _ => None, // self_check needs no tools
+    }
+}
+
+/// Kinds that get write tools, and so need their output path checked after.
+fn writes_to_disk(kind: &str) -> bool {
+    matches!(kind, "extract" | "module_guide" | "master_guide" | "practice")
+}
+
+/// Parks the full list of out-of-contract paths in the audit log. The row is
+/// the record of what a run actually did; the job's error message only has
+/// room for the count and the first name.
+fn record_contract_breach(app: &AppHandle, job: &QueuedJob, touched: &[String]) {
+    eprintln!(
+        "job {} ({}) wrote outside {:?}: {touched:?}",
+        job.id,
+        job.kind,
+        crate::db::JOB_WRITABLE
+    );
+    let payload = serde_json::json!({
+        "jobId": job.id,
+        "kind": job.kind,
+        "classId": job.class_id,
+        "writable": crate::db::JOB_WRITABLE,
+        "touched": touched,
+    });
+    let recorded = with_conn(app, |conn| crate::db::audit(conn, "job.out_of_contract", payload));
+    if let Err(e) = recorded {
+        eprintln!("job {} contract-breach audit row failed: {e:#}", job.id);
     }
 }
 
@@ -452,6 +480,16 @@ fn run_job(
     child_slot: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
 ) {
+    // Fingerprinted before the spawn and compared after, so a run that wandered
+    // outside its contracted output path is caught rather than trusted.
+    let guarded_dir = writes_to_disk(&job.kind)
+        .then(|| job.class_id)
+        .flatten()
+        .and_then(|id| with_conn(&app, |c| crate::scanner::class_dir(c, id)).ok());
+    let before = guarded_dir
+        .as_deref()
+        .map(crate::scanner::fingerprint_sources);
+
     let outcome = execute_job(&app, &job, &child_slot, &cancelled);
 
     let (mut status, mut error, mut summary, result_text) =
@@ -471,69 +509,91 @@ fn run_job(
         push_event(&app, job.id, "status", "cancelled — child process killed".into());
     }
 
+    // Runs whatever the outcome: a cancelled or failed run had the same tools.
+    if let (Some(dir), Some(before)) = (guarded_dir.as_deref(), before) {
+        let touched = crate::scanner::diff_fingerprints(
+            &before,
+            &crate::scanner::fingerprint_sources(dir),
+        );
+        if !touched.is_empty() {
+            record_contract_breach(&app, &job, &touched);
+            if status == "succeeded" {
+                status = "failed";
+                summary = None;
+            }
+            error = Some(truncate(
+                &format!(
+                    "the run wrote outside its contracted output path — {} file(s) changed, \
+                     starting with {}. Nothing was recorded; the audit log holds the full list.",
+                    touched.len(),
+                    touched.first().map(String::as_str).unwrap_or("?")
+                ),
+                2000,
+            ));
+        }
+    }
+
     // Kind-specific record keeping runs BEFORE the row leaves 'running':
     // the extract pipeline treats "no active job + stale columns" as a signal
     // to enqueue, and the guides upsert must land before the UI refetches on
     // the succeeded transition.
-    if status == "succeeded" && job.kind == "extract" {
-        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
-            if let Err(e) = crate::extract::finalize_job(&app, class_id, payload) {
-                eprintln!("extract job {} record keeping failed: {e:#}", job.id);
-            }
-        }
-    }
-    if status == "succeeded" && (job.kind == "module_guide" || job.kind == "master_guide") {
-        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
-            if let Err(e) = crate::guides::finalize_job(&app, class_id, payload) {
-                // A "succeeded" job with no recorded guide would be invisible
-                // in the UI; surface it as the failure it is.
-                status = "failed";
-                error = Some(format!("synthesis finished but no guide was recorded: {e:#}"));
-                summary = None;
-            }
-        }
-    }
-    if status == "succeeded" && job.kind == "sort_proposal" {
-        if let Some(class_id) = job.class_id {
-            // Same demotion as guides: a "succeeded" sort with nothing in the
-            // confirm queue would be invisible in the UI.
-            match crate::sorter::finalize_job(&app, class_id, result_text.as_deref().unwrap_or(""))
-            {
-                Ok(recorded) => summary = Some(recorded),
-                Err(e) => {
-                    status = "failed";
-                    error = Some(format!("sort job finished but recorded no proposals: {e:#}"));
-                    summary = None;
+    if status == "succeeded" {
+        // A succeeded job with no artifact behind it is a lie: every kind that
+        // produces one reconciles here, and demotes itself when it cannot.
+        let mut demote = |what: &str, e: anyhow::Error| {
+            status = "failed";
+            error = Some(format!("{what}: {e:#}"));
+            summary = None;
+        };
+        match job.kind.as_str() {
+            "extract" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    if let Err(e) = crate::extract::finalize_job(&app, class_id, payload) {
+                        eprintln!("extract job {} record keeping failed: {e:#}", job.id);
+                    }
                 }
             }
-        }
-    }
-    if status == "succeeded" && job.kind == "syllabus_scan" {
-        if let Some(class_id) = job.class_id {
-            // An empty array is a legitimate outcome (finalize reports it
-            // honestly); only unparseable/all-invalid output demotes to failure.
-            match crate::deadlines::finalize_job(
-                &app,
-                class_id,
-                result_text.as_deref().unwrap_or(""),
-            ) {
-                Ok(recorded) => summary = Some(recorded),
-                Err(e) => {
-                    status = "failed";
-                    error = Some(format!("syllabus scan finished but recorded no proposals: {e:#}"));
-                    summary = None;
+            "module_guide" | "master_guide" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    if let Err(e) = crate::guides::finalize_job(&app, class_id, payload) {
+                        demote("synthesis finished but no guide was recorded", e);
+                    }
                 }
             }
-        }
-    }
-    if status == "succeeded" && job.kind == "practice" {
-        if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
-            // Same demotion as guides: success with no exam on disk is a lie.
-            if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload) {
-                status = "failed";
-                error = Some(format!("practice job finished but no exam was written: {e:#}"));
-                summary = None;
+            "practice" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload) {
+                        demote("practice job finished but no exam was written", e);
+                    }
+                }
             }
+            "sort_proposal" => {
+                if let Some(class_id) = job.class_id {
+                    match crate::sorter::finalize_job(
+                        &app,
+                        class_id,
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("sort job finished but recorded no proposals", e),
+                    }
+                }
+            }
+            "syllabus_scan" => {
+                if let Some(class_id) = job.class_id {
+                    // An empty array is a legitimate outcome (finalize reports
+                    // it honestly); only unparseable output demotes to failure.
+                    match crate::deadlines::finalize_job(
+                        &app,
+                        class_id,
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("syllabus scan finished but recorded no proposals", e),
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -641,6 +701,49 @@ fn unescape_fragment(carry: &mut String, fragment: &str) -> String {
     out
 }
 
+/// The long-lived `claude setup-token` credential, exported from `.zshrc`.
+///
+/// Launched from Finder, the app is started by launchd, which supplies none of
+/// the interactive shell environment — so the variable is simply absent and
+/// `claude` falls back to the Keychain OAuth the setup token exists to bypass,
+/// failing the self-check with a 401. Read it back out of an interactive shell
+/// so `.zshrc` stays the one place the token lives. Cached for the process:
+/// sourcing the rc file is not free, and the token does not change under a
+/// running app. A terminal launch already has it inherited and never forks.
+fn subscription_token() -> Option<&'static str> {
+    static TOKEN: OnceLock<Option<String>> = OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            if let Some(t) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+            {
+                return Some(t);
+            }
+            // Fenced, because an interactive rc file writes to stdout too —
+            // Terminal's session restore alone prepends a "Restored session:"
+            // line, which lands in the header and is rejected as a line break
+            // mid-token. Only what sits between the markers is the value.
+            let out = Command::new("/bin/zsh")
+                .args(["-ic", r#"print -rn -- "<<CHTOK>>$CLAUDE_CODE_OAUTH_TOKEN<</CHTOK>>""#])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let token = stdout
+                .rsplit_once("<<CHTOK>>")
+                .and_then(|(_, rest)| rest.split_once("<</CHTOK>>"))
+                .map(|(token, _)| token.trim())?;
+            // An Authorization header cannot hold whitespace: a token that has
+            // any is contaminated, and passing it on would trade the honest
+            // "no subscription auth" verdict for a confusing 400.
+            (!token.is_empty() && !token.contains(char::is_whitespace))
+                .then(|| token.to_string())
+        })
+        .as_deref()
+}
+
 fn execute_job(
     app: &AppHandle,
     job: &QueuedJob,
@@ -722,6 +825,9 @@ fn execute_job(
     // SPEC §1 auth precedence: without this, synthesis silently bills API credits.
     cmd.env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN");
+    if let Some(token) = subscription_token() {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

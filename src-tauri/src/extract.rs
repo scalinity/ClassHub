@@ -12,25 +12,20 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::db::now;
+use crate::db::{EXTRACTS_DIR, lock, now};
 
-const EXTRACTS_DIR: &str = ".classhub/extracts";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/extract.md");
 
 /// Serializes pipeline runs: headless soffice tolerates one instance at a
 /// time, and the check-then-enqueue job guard must not race a second scan.
 static PIPELINE_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 // ---------------------------------------------------------------------------
 // Pipeline

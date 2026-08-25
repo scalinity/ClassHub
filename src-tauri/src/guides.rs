@@ -10,22 +10,18 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::db::now;
+use crate::db::{GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, lock, now};
 use crate::extract::{current_manifest, manifest_is_stale};
 
-const GUIDES_DIR: &str = "Study Guides";
 /// SPEC §8.3: practice exams are dated files, several per scope — no staleness,
 /// no `guides` row, the directory listing is the record.
-const PRACTICE_DIR: &str = "Study Guides/Practice";
 /// SPEC §5/§8.2: the guides/jobs scope value for the semester master.
-const MASTER_SCOPE: &str = "master";
 const MASTER_OUTPUT: &str = "Study Guides/Semester Master.html";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/module_guide.md");
 const MASTER_TEMPLATE: &str = include_str!("../prompts/master_guide.md");
@@ -44,10 +40,6 @@ First Write the head plus the first section ending with the literal line \
 replace `<!-- CONTINUE -->` with the next chunk (roughly 20-30 KB) plus the marker \
 again; the final Edit removes the marker. When finished, reply with exactly one \
 line: `DONE: <output path>` or `FAILED: <output path> — <reason>`.";
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// The class accent as concrete values for the guide's design contract,
 /// mirroring the `--class-*` tokens in src/index.css (light, dark).

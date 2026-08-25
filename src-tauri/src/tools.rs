@@ -34,7 +34,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::db::{audit, emit_hub_change, now, truncate, with_conn};
+use crate::db::{EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR, audit, emit_hub_change, now, truncate, with_conn};
 use crate::deadlines::{valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS};
 use crate::grades::{grades_line, trim_num, weighted_grade, weights_line};
 
@@ -46,9 +46,6 @@ pub struct ToolCtx<'a> {
     pub today_iso: &'a str,
 }
 
-const EXTRACTS_DIR: &str = ".classhub/extracts";
-const GUIDES_DIR: &str = "Study Guides";
-const NOTES_DIR: &str = "Notes";
 
 /// `read_material` reads text only; binaries are read through their extract.
 const READABLE_EXTS: &[&str] = &[

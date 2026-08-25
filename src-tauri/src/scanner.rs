@@ -100,6 +100,82 @@ pub fn resolve_rel(conn: &Connection, class_id: i64, rel_path: &str) -> Result<P
     Ok(abs)
 }
 
+/// Every file in the class folder a synthesis job is NOT contracted to write,
+/// fingerprinted by (size, mtime) — the same pair `scan_class` already trusts
+/// to decide a file changed.
+///
+/// A job gets `Write`/`Edit` over the whole class folder, because `--add-dir`
+/// grants read and write together and the sources have to be readable. Until
+/// now the only thing keeping those tools on the contracted output path was a
+/// line of prose in the prompt, which is precisely what a poisoned source
+/// document can talk the model out of. Comparing this map across the run is
+/// what makes SPEC §4's "the app never destroys source material" checkable
+/// rather than merely stated.
+pub fn fingerprint_sources(class_dir: &Path) -> HashMap<String, (u64, i64)> {
+    let mut out = HashMap::new();
+    fingerprint_walk(class_dir, class_dir, 0, &mut out);
+    out
+}
+
+fn fingerprint_walk(dir: &Path, class_dir: &Path, depth: usize, out: &mut HashMap<String, (u64, i64)>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `.classhub` holds the extracts a job legitimately writes, and the
+        // guides folder is the other contracted destination.
+        if depth == 0 && (name == crate::db::GUIDES_DIR || name.starts_with('.')) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            fingerprint_walk(&path, class_dir, depth + 1, out);
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Ok(rel) = path.strip_prefix(class_dir) {
+            out.insert(rel.to_string_lossy().into_owned(), (meta.len(), mtime));
+        }
+    }
+}
+
+/// Paths present in `before` that the run changed or removed, plus anything it
+/// added outside the contract. Sorted, so the audit row reads the same way twice.
+pub fn diff_fingerprints(
+    before: &HashMap<String, (u64, i64)>,
+    after: &HashMap<String, (u64, i64)>,
+) -> Vec<String> {
+    let mut touched: Vec<String> = before
+        .iter()
+        .filter(|(rel, sig)| after.get(*rel).map_or(true, |now| now != *sig))
+        .map(|(rel, _)| rel.clone())
+        .chain(
+            after
+                .keys()
+                .filter(|rel| !before.contains_key(*rel))
+                .cloned(),
+        )
+        .collect();
+    touched.sort();
+    touched.dedup();
+    touched
+}
+
 fn load_existing(conn: &Connection, class_id: i64) -> Result<ExistingIndex> {
     let mut stmt =
         conn.prepare("SELECT rel_path, size, mtime, sha256 FROM files WHERE class_id = ?1")?;

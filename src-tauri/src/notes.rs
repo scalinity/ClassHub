@@ -10,9 +10,8 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{audit, emit_hub_change, with_conn};
+use crate::db::{NOTES_DIR, audit, emit_hub_change, with_conn};
 
-pub const NOTES_DIR: &str = "Notes";
 /// Notes are prose; anything bigger than this is not a note.
 const MAX_NOTE_BYTES: usize = 1024 * 1024;
 

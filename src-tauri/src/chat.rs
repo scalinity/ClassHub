@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::db::{now, set_setting, setting, truncate, with_conn};
+use crate::db::{lock, now, set_setting, setting, truncate, with_conn};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
@@ -60,10 +60,6 @@ const MAX_TOOL_ROUNDS: usize = 12;
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
 /// What the sidebar shows behind a chip's disclosure.
 const MAX_DETAIL_CHARS: usize = 4_000;
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// In-flight runs, keyed by session — one answer per chat at a time, and the
 /// flag is how STOP reaches the streaming thread.

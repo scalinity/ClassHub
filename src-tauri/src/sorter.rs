@@ -19,11 +19,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{emit_hub_change, now, with_conn};
+use crate::db::{EXTRACTS_DIR, INBOX_DIR, emit_hub_change, now, with_conn};
 use crate::scanner::APP_MANAGED_DIRS;
 
-const INBOX_DIR: &str = "_Inbox";
-const EXTRACTS_PREFIX: &str = ".classhub/extracts";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
 
 // ---------------------------------------------------------------------------
@@ -735,7 +733,7 @@ fn record_move(
 /// Best-effort reversal of `update_index`'s artifact renames, for the
 /// failure path: each relocated extract file goes back to its source mirror.
 fn undo_artifact_moves(class_dir: &Path, source_rel: &str, dest_rel: &str) {
-    let extracts = class_dir.join(EXTRACTS_PREFIX);
+    let extracts = class_dir.join(EXTRACTS_DIR);
     for suffix in [".md", ".pdf", ".pdf.sha256"] {
         let new = extracts.join(format!("{dest_rel}{suffix}"));
         let old = extracts.join(format!("{source_rel}{suffix}"));
@@ -768,7 +766,7 @@ fn update_index(
     if let Some(file_id) = existing {
         // The markdown extract plus any PPTX-conversion sidecars mirror the
         // source rel_path — move them along so nothing goes stale.
-        let extracts = class_dir.join(EXTRACTS_PREFIX);
+        let extracts = class_dir.join(EXTRACTS_DIR);
         for suffix in [".md", ".pdf", ".pdf.sha256"] {
             let old = extracts.join(format!("{source_rel}{suffix}"));
             if old.is_file() {
@@ -799,7 +797,7 @@ fn update_index(
                 params![dest_rel, file_id],
             )?;
         } else {
-            let new_extract = recorded.map(|_| format!("{EXTRACTS_PREFIX}/{dest_rel}.md"));
+            let new_extract = recorded.map(|_| format!("{EXTRACTS_DIR}/{dest_rel}.md"));
             conn.execute(
                 "UPDATE files SET rel_path = ?1, extract_rel_path = ?2 WHERE id = ?3",
                 params![dest_rel, new_extract, file_id],
