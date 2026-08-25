@@ -13,6 +13,34 @@ use tauri::AppHandle;
 /// flagged in the other.
 pub const WEIGHT_EPSILON: f64 = 0.01;
 
+/// The weighted-grade formula, in one place.
+///
+/// Two callers accumulate it from different row sources — `list_grades` from
+/// rows it already read, `weighted_grade` from a GROUP BY — and the module
+/// header promises the class card, the Grades tab and chat all report the same
+/// number. Sharing the gate and the step makes that true by construction
+/// rather than by comment.
+#[derive(Default)]
+pub(crate) struct GradeAccumulator {
+    weight_sum: f64,
+    acc: f64,
+}
+
+impl GradeAccumulator {
+    /// A category counts only when it has a positive weight and something
+    /// graded; the total is renormalized over whatever qualified.
+    fn add(&mut self, weight: f64, score_sum: f64, max_sum: f64) {
+        if max_sum > 0.0 && weight > 0.0 {
+            self.weight_sum += weight;
+            self.acc += weight * (score_sum / max_sum);
+        }
+    }
+
+    fn percent(&self) -> Option<f64> {
+        (self.weight_sum > 0.0).then(|| self.acc / self.weight_sum * 100.0)
+    }
+}
+
 use crate::db::{audit, emit_hub_change, with_conn};
 
 const MAX_NAME_CHARS: usize = 80;
@@ -68,8 +96,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
 
     let mut categories = Vec::with_capacity(heads.len());
     let mut weight_total = 0.0;
-    let mut grade_weight_sum = 0.0;
-    let mut grade_acc = 0.0;
+    let mut grade = GradeAccumulator::default();
     for (id, name, weight) in heads {
         let items = item_stmt
             .query_map([id], |row| {
@@ -85,13 +112,8 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
         let max_sum: f64 = items.iter().map(|i| i.max_score).sum();
         let score_sum: f64 = items.iter().map(|i| i.score).sum();
         let percent = (max_sum > 0.0).then(|| score_sum / max_sum * 100.0);
-        // Same gate as weighted_grade (the card and chat path): categories
-        // with graded items and a positive weight, renormalized. Derived from
-        // the rows already in hand so the two numbers cannot drift.
-        if max_sum > 0.0 && weight > 0.0 {
-            grade_weight_sum += weight;
-            grade_acc += weight * (score_sum / max_sum);
-        }
+        // Derived from the rows already in hand rather than re-queried.
+        grade.add(weight, score_sum, max_sum);
         weight_total += weight;
         categories.push(GradeCategory {
             id,
@@ -102,7 +124,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
         });
     }
     Ok(GradesInfo {
-        current_grade: (grade_weight_sum > 0.0).then(|| grade_acc / grade_weight_sum * 100.0),
+        current_grade: grade.percent(),
         categories,
         weight_total,
     })
@@ -411,15 +433,11 @@ pub(crate) fn weighted_grade(conn: &Connection, class_id: i64) -> Result<Option<
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut weight_sum = 0.0;
-    let mut acc = 0.0;
+    let mut grade = GradeAccumulator::default();
     for (weight, score, max) in rows {
-        if max > 0.0 && weight > 0.0 {
-            weight_sum += weight;
-            acc += weight * (score / max);
-        }
+        grade.add(weight, score, max);
     }
-    Ok((weight_sum > 0.0).then(|| acc / weight_sum * 100.0))
+    Ok(grade.percent())
 }
 
 /// Grades summary for the detailed overview (the agent needs category names

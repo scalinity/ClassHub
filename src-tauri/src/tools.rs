@@ -720,7 +720,15 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
         }
     }
 
-    let notes = list_notes(&root.join(&class.folder_name).join(NOTES_DIR));
+    // notes::list_dir_files already applies the read-dir/hidden/sort policy;
+    // only the names are needed here.
+    let notes: Vec<String> = crate::notes::list_dir_files(
+        &root.join(&class.folder_name).join(NOTES_DIR),
+        NOTES_DIR,
+    )
+    .into_iter()
+    .map(|f| f.name)
+    .collect();
     text.push_str("\nNotes:\n");
     if notes.is_empty() {
         text.push_str("none yet\n");
@@ -731,20 +739,6 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
     }
 
     Ok(Outcome::ok(text))
-}
-
-fn list_notes(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.starts_with('.'))
-        .collect();
-    names.sort();
-    names
 }
 
 // ---------------------------------------------------------------------------

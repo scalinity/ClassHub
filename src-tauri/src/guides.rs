@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -74,6 +74,54 @@ pub struct GuideInfo {
 // ---------------------------------------------------------------------------
 // Synthesis trigger (manual only, SPEC §7)
 
+/// The steps all three synthesis triggers share: the class name and its accent
+/// pair, the manifest captured at enqueue time, and the prompt blocks derived
+/// from it. Each caller then owns only its own output path, template and
+/// payload shape — which is the part that actually differs between them.
+struct SynthesisContext {
+    class_name: String,
+    accent_light: &'static str,
+    accent_dark: &'static str,
+    manifest: Vec<crate::extract::ManifestEntry>,
+    manifest_block: String,
+    files_block: String,
+    class_dir: PathBuf,
+}
+
+fn synthesis_context(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    empty_message: &str,
+) -> Result<SynthesisContext> {
+    let (class_name, color): (String, String) = conn.query_row(
+        "SELECT display_name, color FROM classes WHERE id = ?1",
+        [class_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    // SPEC §8.1: the manifest is captured at enqueue time (extract-pattern
+    // semantics: a source edited mid-job leaves the guide stale afterwards).
+    let manifest = current_manifest(conn, class_id, scope)?;
+    if manifest.is_empty() {
+        bail!("{empty_message}");
+    }
+    let manifest_block = manifest
+        .iter()
+        .map(|e| format!("- {}", e.rel_path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (accent_light, accent_dark) = accent_values(&color);
+    Ok(SynthesisContext {
+        class_name,
+        accent_light,
+        accent_dark,
+        manifest,
+        manifest_block,
+        files_block: files_block(conn, class_id, scope)?,
+        class_dir: crate::scanner::class_dir(conn, class_id)?,
+    })
+}
+
 /// Enqueues a `module_guide` job for one module. `generated_at_label` is the
 /// display-only footer stamp (formatted by the frontend at enqueue time; the
 /// guides row's `generated_at` is set at completion and is the DB truth).
@@ -102,39 +150,27 @@ pub fn synthesize_module(
             bail!("not a module folder: {module_rel}");
         }
 
-        let (class_name, color): (String, String) = conn.query_row(
-            "SELECT display_name, color FROM classes WHERE id = ?1",
-            [class_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+        let ctx = synthesis_context(
+            &conn,
+            class_id,
+            module_rel,
+            &format!("no indexed files in {module_rel} — rescan the class first"),
         )?;
-        // SPEC §8.1: the manifest is captured at enqueue time (extract-pattern
-        // semantics: a source edited mid-job leaves the guide stale afterwards).
-        let manifest = current_manifest(&conn, class_id, module_rel)?;
-        if manifest.is_empty() {
-            bail!("no indexed files in {module_rel} — rescan the class first");
-        }
-        let manifest_block = manifest
-            .iter()
-            .map(|e| format!("- {}", e.rel_path))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (accent_light, accent_dark) = accent_values(&color);
-
         let prompt = PROMPT_TEMPLATE
-            .replace("{class}", &class_name)
+            .replace("{class}", &ctx.class_name)
             .replace("{module}", &module_name)
             .replace("{output}", &output_rel)
-            .replace("{accent_light}", accent_light)
-            .replace("{accent_dark}", accent_dark)
+            .replace("{accent_light}", ctx.accent_light)
+            .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &files_block(&conn, class_id, module_rel)?)
-            .replace("{manifest}", &manifest_block);
+            .replace("{files}", &ctx.files_block)
+            .replace("{manifest}", &ctx.manifest_block);
         let payload = serde_json::to_string(&GuidePayload {
             scope: module_rel.to_string(),
             rel_path: output_rel.clone(),
-            source_manifest: serde_json::to_string(&manifest)?,
+            source_manifest: serde_json::to_string(&ctx.manifest)?,
         })?;
-        (crate::scanner::class_dir(&conn, class_id)?, prompt, payload)
+        (ctx.class_dir, prompt, payload)
     };
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
@@ -155,19 +191,16 @@ pub fn synthesize_master(
         if has_active_job(&conn, class_id, "master_guide", MASTER_SCOPE)? {
             bail!("a master synthesis for this class is already queued or running");
         }
-        let (class_name, color): (String, String) = conn.query_row(
-            "SELECT display_name, color FROM classes WHERE id = ?1",
-            [class_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        // Manifest captured at enqueue, extract-pattern semantics (see module).
         // Scope 'master' = every indexed file in the class (SPEC §7 step 5).
-        let manifest = current_manifest(&conn, class_id, MASTER_SCOPE)?;
-        if manifest.is_empty() {
-            bail!("no indexed files in this class — rescan first");
-        }
+        let ctx = synthesis_context(
+            &conn,
+            class_id,
+            MASTER_SCOPE,
+            "no indexed files in this class — rescan first",
+        )?;
         // Module roster = distinct depth-0 folders holding indexed files.
-        let modules: BTreeSet<String> = manifest
+        let modules: BTreeSet<String> = ctx
+            .manifest
             .iter()
             .filter_map(|e| {
                 let (first, rest) = e.rel_path.split_once('/')?;
@@ -179,28 +212,21 @@ pub fn synthesize_master(
             .map(|m| format!("- {m}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let manifest_block = manifest
-            .iter()
-            .map(|e| format!("- {}", e.rel_path))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (accent_light, accent_dark) = accent_values(&color);
-
         let prompt = MASTER_TEMPLATE
-            .replace("{class}", &class_name)
+            .replace("{class}", &ctx.class_name)
             .replace("{output}", MASTER_OUTPUT)
             .replace("{modules}", &modules_block)
-            .replace("{accent_light}", accent_light)
-            .replace("{accent_dark}", accent_dark)
+            .replace("{accent_light}", ctx.accent_light)
+            .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &files_block(&conn, class_id, MASTER_SCOPE)?)
-            .replace("{manifest}", &manifest_block);
+            .replace("{files}", &ctx.files_block)
+            .replace("{manifest}", &ctx.manifest_block);
         let payload = serde_json::to_string(&GuidePayload {
             scope: MASTER_SCOPE.to_string(),
             rel_path: MASTER_OUTPUT.to_string(),
-            source_manifest: serde_json::to_string(&manifest)?,
+            source_manifest: serde_json::to_string(&ctx.manifest)?,
         })?;
-        (crate::scanner::class_dir(&conn, class_id)?, prompt, payload)
+        (ctx.class_dir, prompt, payload)
     };
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
@@ -244,19 +270,16 @@ pub fn generate_practice(
         if has_active_job(&conn, class_id, "practice", scope)? {
             bail!("a practice exam for this scope is already queued or running");
         }
-        let (class_name, color): (String, String) = conn.query_row(
-            "SELECT display_name, color FROM classes WHERE id = ?1",
-            [class_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+        let ctx = synthesis_context(
+            &conn,
+            class_id,
+            scope,
+            "no indexed files in that scope — rescan the class first",
         )?;
-        let manifest = current_manifest(&conn, class_id, scope)?;
-        if manifest.is_empty() {
-            bail!("no indexed files in that scope — rescan the class first");
-        }
 
         // Same-day exams for the same scope get a numeric suffix instead of
         // silently overwriting the earlier one.
-        let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+        let class_dir = ctx.class_dir.clone();
         let base = format!("{PRACTICE_DIR}/{scope_label} — {date_label}");
         let mut output_rel = format!("{base}.html");
         let mut n = 2;
@@ -265,9 +288,8 @@ pub fn generate_practice(
             n += 1;
         }
 
-        let (accent_light, accent_dark) = accent_values(&color);
         let prompt = PRACTICE_TEMPLATE
-            .replace("{class}", &class_name)
+            .replace("{class}", &ctx.class_name)
             .replace("{scope_label}", &scope_label)
             .replace(
                 "{focus}",
@@ -276,10 +298,10 @@ pub fn generate_practice(
                 ),
             )
             .replace("{output}", &output_rel)
-            .replace("{accent_light}", accent_light)
-            .replace("{accent_dark}", accent_dark)
+            .replace("{accent_light}", ctx.accent_light)
+            .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &files_block(&conn, class_id, scope)?);
+            .replace("{files}", &ctx.files_block);
         let payload = serde_json::to_string(&PracticePayload {
             rel_path: output_rel.clone(),
         })?;
