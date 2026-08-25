@@ -13,15 +13,7 @@ import {
   type GradeCategory,
   type GradeItem,
 } from "@/lib/grades";
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
-
-const inputBase =
-  "h-8 rounded-md border bg-transparent px-2.5 text-[13px] focus-visible:outline-2 focus-visible:outline-(--accent)";
-
-const iconAction =
-  "cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-(--accent)";
+import { monoAction, inputBase, iconActionAccent } from "@/lib/styles";
 
 type Editing =
   | { kind: "category"; target: GradeCategory | "new" }
@@ -207,7 +199,7 @@ function CategoryRow({
           aria-label={`Record a score in ${category.name}`}
           disabled={busy}
           onClick={onAddItem}
-          className={`${iconAction} hover:text-(--accent)`}
+          className={`${iconActionAccent} hover:text-(--accent)`}
         >
           <Plus size={12} aria-hidden />
         </button>
@@ -217,7 +209,7 @@ function CategoryRow({
           aria-label={`Edit ${category.name}`}
           disabled={busy}
           onClick={onEdit}
-          className={`${iconAction} hover:text-foreground`}
+          className={`${iconActionAccent} hover:text-foreground`}
         >
           <Pencil size={12} aria-hidden />
         </button>
@@ -227,7 +219,7 @@ function CategoryRow({
           aria-label={`Delete ${category.name}`}
           disabled={busy}
           onClick={remove}
-          className={`${iconAction} hover:text-destructive`}
+          className={`${iconActionAccent} hover:text-destructive`}
         >
           <Trash2 size={12} aria-hidden />
         </button>
@@ -271,7 +263,7 @@ function ItemRow({
           aria-label={`Edit ${item.name}`}
           disabled={busy}
           onClick={onEdit}
-          className={`${iconAction} hover:text-foreground`}
+          className={`${iconActionAccent} hover:text-foreground`}
         >
           <Pencil size={12} aria-hidden />
         </button>
@@ -281,7 +273,7 @@ function ItemRow({
           aria-label={`Delete ${item.name}`}
           disabled={busy}
           onClick={remove}
-          className={`${iconAction} hover:text-destructive`}
+          className={`${iconActionAccent} hover:text-destructive`}
         >
           <Trash2 size={12} aria-hidden />
         </button>

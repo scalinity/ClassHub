@@ -14,9 +14,7 @@ import {
   setJobEffort,
   setJobModel,
 } from "@/lib/settings";
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-ring";
+import { monoActionNeutral } from "@/lib/styles";
 
 /**
  * SPEC §12 Settings view: the AIBHS library root and the job runner's model,
@@ -301,7 +299,7 @@ function RootForm({
         <button
           type="submit"
           disabled={pending || !changed}
-          className={`${monoAction} bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-30`}
+          className={`${monoActionNeutral} bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-30`}
         >
           {pending ? "APPLYING…" : "USE THIS FOLDER"}
         </button>
@@ -355,7 +353,7 @@ function ChatSection() {
       <button
         type="button"
         onClick={openChatSettings}
-        className={`${monoAction} mt-4 border px-2.5 text-muted-foreground hover:bg-muted hover:text-foreground`}
+        className={`${monoActionNeutral} mt-4 border px-2.5 text-muted-foreground hover:bg-muted hover:text-foreground`}
       >
         OPEN CHAT SETTINGS
       </button>

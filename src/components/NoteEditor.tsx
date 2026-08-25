@@ -2,13 +2,11 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
-import { docShell, renderMarkdown } from "@/components/FileViewer";
+import { docShell, renderMarkdown } from "@/lib/document";
 import { readClassFile, revealInFinder, saveNote } from "@/lib/materials";
 import { queryClient } from "@/lib/query";
 import { dragWindow } from "@/lib/window";
-
-const headerAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)";
+import { headerAction } from "@/lib/styles";
 
 export interface EditedNote {
   /** null starts a blank note; a title opens `Notes/<title>.md`. */

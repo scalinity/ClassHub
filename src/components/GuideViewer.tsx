@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
+import { withDocumentCsp } from "@/lib/document";
 import { formatGeneratedAt, readGuide, type GuideInfo } from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
 import { dragWindow } from "@/lib/window";
-
-const headerAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)";
+import { headerAction } from "@/lib/styles";
 
 /**
  * SPEC §12: sandboxed in-app guide viewer. allow-scripts (without
@@ -99,7 +98,7 @@ export function GuideViewer({
         ) : (
           <iframe
             sandbox="allow-scripts"
-            srcDoc={html}
+            srcDoc={withDocumentCsp(html)}
             title={`${guide.scope} study guide`}
             className="block h-full w-full border-0"
           />

@@ -19,12 +19,7 @@ import {
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
 import { daysUntil, dueDayLabel, formatDueDate } from "@/lib/schedule";
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
-
-const inputBase =
-  "h-8 rounded-md border bg-transparent px-2.5 text-[13px] focus-visible:outline-2 focus-visible:outline-(--accent)";
+import { monoAction, inputBase } from "@/lib/styles";
 
 function collectFiles(
   nodes: readonly TreeNode[],

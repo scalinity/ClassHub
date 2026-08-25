@@ -23,6 +23,7 @@ import {
   VIEWABLE_KINDS,
   type TreeNode,
 } from "@/lib/materials";
+import { monoAction } from "@/lib/styles";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   pptx: Presentation,
@@ -174,9 +175,6 @@ function DirNode({
     </div>
   );
 }
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
 
 /**
  * SPEC §8.1 / M5: per-module guide state. Synthesis is manual only; staleness

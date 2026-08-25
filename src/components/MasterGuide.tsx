@@ -8,63 +8,14 @@ import {
   type GuideInfo,
 } from "@/lib/guides";
 import {
+  derivePhase,
   ensureTail,
   formatElapsed,
+  PHASES,
   useJobs,
   type ProgressEvent,
 } from "@/lib/jobs";
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
-
-/**
- * SPEC §8.2 long-job UX: the run's real phases, derived from the stream.
- * ORIENT until the first source read; READ while extracts stream in; COMPOSE
- * once Write input starts streaming (`phase` events carry live byte counts);
- * VERIFY when the model greps/re-reads after writing.
- */
-const PHASES = ["ORIENT", "READ", "COMPOSE", "VERIFY"] as const;
-
-export function derivePhase(events: readonly ProgressEvent[]): {
-  index: number;
-  detail: string;
-} {
-  let reads = 0;
-  let composing = false;
-  let verifying = false;
-  let kb: number | null = null;
-  for (const e of events) {
-    if (e.kind === "phase") {
-      composing = true;
-      verifying = false;
-      const m = /~(\d+) KB/.exec(e.text);
-      if (m) kb = Number(m[1]);
-    } else if (e.kind === "tool") {
-      const tool = e.text.split(" · ")[0];
-      if (tool === "Write" || tool === "Edit") {
-        composing = true;
-        verifying = false;
-      } else if (tool === "Read" || tool === "Glob" || tool === "Grep") {
-        if (composing) verifying = true;
-        else reads += 1;
-      }
-    }
-  }
-  if (verifying) return { index: 3, detail: "VERIFYING OUTPUT" };
-  if (composing) {
-    return {
-      index: 2,
-      detail: kb === null ? "COMPOSING GUIDE" : `COMPOSING · ~${kb} KB WRITTEN`,
-    };
-  }
-  if (reads > 0) {
-    return {
-      index: 1,
-      detail: `READING SOURCES · ${reads} ${reads === 1 ? "READ" : "READS"}`,
-    };
-  }
-  return { index: 0, detail: "ORIENTING" };
-}
+import { monoAction } from "@/lib/styles";
 
 function PhaseRail({ current }: { current: number }) {
   return (

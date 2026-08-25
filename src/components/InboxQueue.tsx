@@ -12,9 +12,7 @@ import {
   useDragState,
   type MoveProposal,
 } from "@/lib/sorter";
-
-const monoAction =
-  "shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] transition-colors focus-visible:outline-2 focus-visible:outline-(--accent)";
+import { monoAction } from "@/lib/styles";
 
 const chipBase =
   "shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] tracking-[0.12em]";

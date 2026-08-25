@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   ChevronDown,
@@ -10,11 +10,15 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { Marked } from "marked";
-import katex from "katex";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "katex/dist/katex.min.css";
 
 import { FileViewer } from "@/components/FileViewer";
+import {
+  formatArgs,
+  renderAnswer,
+  shortModel,
+} from "@/lib/answer";
 import { listClasses, type ClassInfo } from "@/lib/classes";
 import {
   chooseEffort,
@@ -39,9 +43,7 @@ import {
   type ChatItem,
   type ChatSnapshot,
 } from "@/lib/chat";
-
-const iconAction =
-  "shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring";
+import { iconAction } from "@/lib/styles";
 
 /**
  * The answer's document register, expressed as element rules so a rendered
@@ -453,7 +455,11 @@ function EmptyState({
   );
 }
 
-function Turn({
+/**
+ * Memoized because the streaming store notifies on every delta: without it a
+ * single token re-parses every answer in the transcript, KaTeX and all.
+ */
+const Turn = memo(function Turn({
   item,
   classes,
   streaming,
@@ -474,37 +480,7 @@ function Turn({
     case "thinking":
       return <ThinkingBlock item={item} />;
     case "answer":
-      return (
-        <div
-          onClick={(e) => {
-            const cite = (e.target as HTMLElement).closest("button.cite");
-            if (!(cite instanceof HTMLElement)) return;
-            openCitation(cite);
-          }}
-          className={`mt-2.5 ${PROSE}`}
-        >
-          {item.text !== "" && (
-            <div
-              dangerouslySetInnerHTML={{ __html: renderAnswer(item.text, classes) }}
-            />
-          )}
-          {item.tail.length > 0 && (
-            // The unparsed tail: each delta is its own element, so React only
-            // ever appends — settled text never re-mounts and never re-fades.
-            <p className="my-2 whitespace-pre-wrap first:mt-0">
-              {item.tail.map((chunk, index) => (
-                <span
-                  key={index}
-                  className="animate-in fade-in duration-700 motion-reduce:animate-none"
-                >
-                  {chunk}
-                </span>
-              ))}
-              {streaming && <Caret />}
-            </p>
-          )}
-        </div>
-      );
+      return <Answer item={item} classes={classes} streaming={streaming} />;
     case "notice":
       return (
         <p className="mt-2.5 rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 font-mono text-[10.5px] leading-relaxed text-destructive">
@@ -512,6 +488,62 @@ function Turn({
         </p>
       );
   }
+});
+
+function Answer({
+  item,
+  classes,
+  streaming,
+}: {
+  item: Extract<ChatItem, { kind: "answer" }>;
+  classes: readonly ClassInfo[];
+  streaming: boolean;
+}) {
+  // `item.text` only advances at settled block boundaries, so the parse runs
+  // once per block rather than once per streamed token.
+  const html = useMemo(
+    () => renderAnswer(item.text, classes),
+    [item.text, classes],
+  );
+
+  return (
+    <div
+      onClick={(e) => {
+        const target = e.target as HTMLElement;
+        const cite = target.closest("button.cite");
+        if (cite instanceof HTMLElement) {
+          openCitation(cite);
+          return;
+        }
+        // An answer's links are the model's, not the app's: the webview must
+        // never navigate off the app document, so they open in the browser.
+        const anchor = target.closest("a");
+        if (anchor instanceof HTMLAnchorElement) {
+          e.preventDefault();
+          const href = anchor.getAttribute("href") ?? "";
+          if (/^https?:\/\//i.test(href)) void openUrl(href).catch(() => {});
+        }
+      }}
+      className={`mt-2.5 ${PROSE}`}
+    >
+      {item.text !== "" && <div dangerouslySetInnerHTML={{ __html: html }} />}
+      {item.tail.length > 0 && (
+        // The unparsed tail: each delta is its own element, so React only
+        // ever appends — settled text never re-mounts and never re-fades.
+        <p className="my-2 whitespace-pre-wrap first:mt-0">
+          {item.tail.map((chunk, index) => (
+            <span
+              key={index}
+              className="animate-in fade-in duration-700 motion-reduce:animate-none"
+            >
+              {chunk}
+            </span>
+          ))}
+          {streaming && <Caret />}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function Caret() {
@@ -812,88 +844,6 @@ function SettingsPane({ chat }: { chat: ChatSnapshot }) {
   );
 }
 
-// --- Answer rendering ---
-
-/** The model's output is prose, not markup: raw HTML renders as literal text. */
-const md = new Marked({ renderer: { html: ({ text }) => escapeHtml(text) } });
-
-const VIEWABLE: Record<string, string> = {
-  md: "md",
-  markdown: "md",
-  txt: "md",
-  rmd: "rmd",
-  r: "r",
-  html: "html",
-  htm: "html",
-};
-
-/**
- * Math, then markdown, then citations.
- *
- * TeX has to come out first: to a markdown parser `_` is emphasis and `\` is an
- * escape, so `$\dfrac{\sum x_i}{n}$` is mangled beyond rescue by the time the
- * HTML exists. Each span is lifted out, rendered by KaTeX, and put back after.
- * Code is matched by the same pass purely to be skipped — a `$` in an R snippet
- * is a column selector, not a formula.
- */
-const MATH_OR_CODE =
-  /(```[\s\S]*?```|`[^`\n]*`)|(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])|(\$(?![\s$])[^\n$]+?(?<![\s\\])\$|\\\([\s\S]+?\\\))/g;
-
-function liftMath(text: string): { source: string; rendered: string[] } {
-  const rendered: string[] = [];
-  const source = text.replace(
-    MATH_OR_CODE,
-    (whole: string, code?: string, display?: string, inline?: string) => {
-      if (code !== undefined) return whole;
-      const body = display ?? inline ?? "";
-      const tex = body.startsWith("$$")
-        ? body.slice(2, -2)
-        : body.startsWith("$")
-          ? body.slice(1, -1)
-          : body.slice(2, -2);
-      rendered.push(
-        katex.renderToString(tex, {
-          displayMode: display !== undefined,
-          throwOnError: false,
-          output: "html",
-        }),
-      );
-      return `@@MATH${rendered.length - 1}@@`;
-    },
-  );
-  return { source, rendered };
-}
-
-/**
- * Markdown, then citations: inline code naming a class-relative file (the
- * citation shape the system prompt asks for) becomes a button that opens it.
- */
-function renderAnswer(text: string, classes: readonly ClassInfo[]): string {
-  const { source, rendered } = liftMath(text);
-  const parsed = md.parse(source, { async: false }) as string;
-  const html = parsed.replace(
-    /@@MATH(\d+)@@/g,
-    (whole, index: string) => rendered[Number(index)] ?? whole,
-  );
-  // Fenced blocks carry a language class or sit inside <pre>; skip those.
-  return html.replace(
-    /(?<!<pre>)<code>([^<]+)<\/code>/g,
-    (whole, inner: string) => {
-      const path = decodeEntities(inner);
-      const cls = classes.find((c) => path.startsWith(`${c.folderName}/`));
-      if (!cls) return whole;
-      const relPath = path.slice(cls.folderName.length + 1);
-      const kind = VIEWABLE[relPath.split(".").pop()?.toLowerCase() ?? ""];
-      if (!kind) return whole;
-      return (
-        `<button type="button" class="cite" style="--cite: var(--class-${cls.color})" ` +
-        `data-class="${cls.id}" data-kind="${kind}" data-path="${escapeHtml(relPath)}" ` +
-        `data-name="${escapeHtml(relPath.split("/").pop() ?? relPath)}">${inner}</button>`
-      );
-    },
-  );
-}
-
 function openCitation(cite: HTMLElement) {
   const classId = Number(cite.dataset.class);
   const relPath = cite.dataset.path;
@@ -906,40 +856,3 @@ function openCitation(cite: HTMLElement) {
   });
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&");
-}
-
-/** Tool arguments read better as lines than as JSON. */
-function formatArgs(json: string): string {
-  try {
-    const entries = Object.entries(JSON.parse(json) as Record<string, unknown>);
-    if (entries.length === 0) return "no arguments";
-    return entries
-      .map(
-        ([k, v]) =>
-          `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`,
-      )
-      .join("\n");
-  } catch {
-    return json;
-  }
-}
-
-/** Model ids carry a release date the composer footer does not need. */
-function shortModel(id: string): string {
-  return id.replace(/-\d{8}$/, "").toUpperCase();
-}
