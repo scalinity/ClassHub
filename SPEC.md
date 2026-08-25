@@ -150,6 +150,7 @@ jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|
      class_id INTEGER NULL, scope TEXT NULL,  -- e.g. module rel path, or 'master'
      status TEXT,                          -- queued|running|succeeded|failed|cancelled
      session_id TEXT NULL,                 -- claude session id (for --resume)
+     payload TEXT NULL,                    -- kind-specific completion data; survives a restart for --resume
      created_at INTEGER, started_at INTEGER NULL, finished_at INTEGER NULL,
      log_path TEXT NULL, error TEXT NULL, summary TEXT NULL);
 
@@ -162,9 +163,30 @@ deadlines(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,  -- assignm
           due_at TEXT, notes TEXT NULL, status TEXT,  -- open|done
           source TEXT);                    -- manual|agent|syllabus
 
-grade_categories(id INTEGER PK, class_id INTEGER FK, name TEXT, weight REAL);
+grade_categories(id INTEGER PK, class_id INTEGER FK, name TEXT,
+                 weight REAL CHECK (weight >= 0 AND weight <= 100));
 grade_items(id INTEGER PK, category_id INTEGER FK, name TEXT,
-            score REAL, max_score REAL, graded_at TEXT NULL);
+            score REAL CHECK (score >= 0), max_score REAL CHECK (max_score > 0),
+            graded_at TEXT NULL);
+
+-- The drop-to-sort confirm queue (§10). Nothing here has moved anything;
+-- approval is what performs the move.
+move_proposals(id INTEGER PK, class_id INTEGER FK,
+               source_rel_path TEXT,       -- class-relative, exists on disk at proposal time
+               dest_rel_path TEXT,         -- class-relative target incl. filename
+               reasoning TEXT,
+               confidence TEXT NULL,       -- high|medium|low from sort jobs; NULL from chat
+               source TEXT,                -- chat|sort_job
+               status TEXT,                -- pending|approved|dismissed
+               created_at INTEGER, resolved_at INTEGER NULL);
+
+-- The syllabus-scan confirm queue (§11), so proposals survive an app restart
+-- between job completion and confirmation. Approval inserts into deadlines
+-- with source='syllabus'; nothing here has created a deadline.
+deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
+                   due_at TEXT, notes TEXT NULL,
+                   status TEXT,            -- pending|approved|dismissed
+                   created_at INTEGER, resolved_at INTEGER NULL);
 
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
 chat_messages(id INTEGER PK, session_id INTEGER FK, role TEXT,
@@ -207,11 +229,22 @@ claude -p <prompt>
   (see §1). A startup self-check job asserts the active auth is the subscription (the
   stream-json init event exposes the auth/rate-limit type) and surfaces a blocking warning
   in the UI if not.
-- **Tool scoping by job kind** (least privilege; never allow Bash, WebFetch, WebSearch):
-  - `extract`, `module_guide`, `master_guide`, `practice`: `Read,Glob,Grep,Write`
-  - `sort_proposal`, `syllabus_scan`: `Read,Glob,Grep` (read-only; output is JSON on stdout)
-- **Models**: `opus` for `module_guide`, `master_guide`, `practice`; default (`sonnet`) for
-  `extract`, `sort_proposal`, `syllabus_scan`.
+- **Tool scoping by job kind** (least privilege). `--allowedTools` is additive against
+  the user's own claude config and does not restrict, so the **deny** list is the actual
+  boundary and both are passed:
+  - Never allowed, any kind: `Bash,WebFetch,WebSearch,Task` — `Task` because a spawned
+    sub-agent is a path around the parent's tool scoping.
+  - `extract`, `module_guide`, `master_guide`, `practice`: allow `Read,Glob,Grep,Write`.
+  - `sort_proposal`, `syllabus_scan`: allow `Read,Glob,Grep`, and additionally deny
+    `Write,Edit,MultiEdit,NotebookEdit` (read-only is only real if the writes are denied).
+- **Write scope is verified, not trusted**: `--add-dir` grants read and write together, so a
+  write-capable job can physically reach every source file in the class folder. Sources are
+  fingerprinted by (size, mtime) before the spawn and compared after; a run that changed
+  anything outside `Study Guides/` and `.classhub/extracts/` is demoted to failed, records
+  nothing, and its full path list is written to `audit_log`. This is what enforces §4's
+  promise that the app never destroys source material.
+- **Models**: one global model/effort pair, set in Settings and read at spawn time so a
+  change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
   use, result). Persist raw lines to `log_path`; forward condensed progress events to the
   frontend via Tauri events (`job://{id}/progress`).
@@ -375,6 +408,16 @@ and apply it. Non-negotiable per project owner.
 - Commits: small, per-milestone; no AI attribution lines; existing git config untouched.
 - Secrets: API key only in Keychain. `.gitignore`: `node_modules`, `target`, app-data,
   any `.env`.
+- **Model output never reaches the DOM unfiltered.** Answers render into the app document
+  itself, which holds the IPC bridge, so `src/lib/answer.ts` is the single place markdown
+  becomes markup: raw HTML is escaped and link/image URLs outside `http(s)`/`mailto`/
+  relative are dropped (marked only runs `encodeURI`, which leaves `javascript:` intact).
+  Generated guides and class HTML notebooks keep `allow-scripts` to work, so a
+  document-level CSP is what stops them reaching the network; the app window carries a real
+  CSP of its own.
+- Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
+  the streamed-escape decoder, the job-output array parser, the HTML stripper, and the
+  source fingerprint diff. UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
