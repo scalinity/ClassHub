@@ -11,8 +11,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -78,6 +79,10 @@ pub fn spawn_pipeline(app: &AppHandle, class_id: i64) {
         }
     });
 }
+
+/// A single conversion may take a while on a large deck, but not this long —
+/// past it, soffice is wedged rather than slow.
+const CONVERT_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
     let _serial = lock(&PIPELINE_LOCK);
@@ -390,13 +395,26 @@ fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str)
     // ("Application Support"), which unencoded aborts soffice with a
     // RuntimeException.
     let profile_url = format!("file://{}", profile.display()).replace(' ', "%20");
-    let output = Command::new(soffice_bin())
+    // Bounded: headless soffice hanging on a stale profile lock is a known
+    // failure mode, and this runs while the pipeline lock is held — an
+    // unbounded wait would park every later scan's thread behind it and leave
+    // extraction dead for the rest of the session.
+    let child = Command::new(soffice_bin())
         .arg(format!("-env:UserInstallation={profile_url}"))
         .args(["--headless", "--convert-to", "pdf", "--outdir"])
         .arg(out_dir)
         .arg(class_dir.join(rel_path))
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("spawning soffice (is LibreOffice installed?)")?;
+    let output = crate::jobs::wait_bounded(child, CONVERT_TIMEOUT).with_context(|| {
+        format!(
+            "soffice did not finish converting {rel_path} within {}s — it was stopped",
+            CONVERT_TIMEOUT.as_secs()
+        )
+    })?;
     if !output.status.success() {
         bail!(
             "soffice exited {}: {}",
@@ -445,27 +463,47 @@ pub struct ManifestEntry {
 
 /// Current `{rel_path, sha256}` set for a guide scope: `'master'` covers the
 /// whole class, anything else is a module rel-path prefix.
+/// The prefix filter runs in SQL rather than over every row of the class:
+/// `list_guides` calls this once per guide, `stale_guide_count` wraps
+/// `list_guides`, and `db::list_classes` calls that per class — so filtering in
+/// Rust made one dashboard refetch materialize every file row, once per guide,
+/// once per class.
 pub fn current_manifest(
     conn: &Connection,
     class_id: i64,
     scope: &str,
 ) -> Result<Vec<ManifestEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 ORDER BY rel_path",
-    )?;
-    let rows = stmt
-        .query_map([class_id], |row| {
+    let read = |rows: rusqlite::Rows<'_>| -> rusqlite::Result<Vec<ManifestEntry>> {
+        rows.mapped(|row| {
             Ok(ManifestEntry {
                 rel_path: row.get(0)?,
                 sha256: row.get(1)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let prefix = format!("{scope}/");
-    Ok(rows
-        .into_iter()
-        .filter(|e| scope == "master" || e.rel_path == *scope || e.rel_path.starts_with(&prefix))
-        .collect())
+        })
+        .collect()
+    };
+    let entries = if scope == crate::db::MASTER_SCOPE {
+        let mut stmt = conn.prepare(
+            "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 ORDER BY rel_path",
+        )?;
+        let rows = stmt.query([class_id])?;
+        read(rows)?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT rel_path, sha256 FROM files
+             WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
+             ORDER BY rel_path",
+        )?;
+        // The separator is appended before matching, so `Module 1` cannot
+        // capture `Module 10`; LIKE wildcards in a folder name are escaped.
+        let prefix = format!(
+            "{}/%",
+            scope.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        );
+        let rows = stmt.query(rusqlite::params![class_id, scope, prefix])?;
+        read(rows)?
+    };
+    Ok(entries)
 }
 
 /// SPEC §7 step 5: a guide is stale when its stored `source_manifest` differs

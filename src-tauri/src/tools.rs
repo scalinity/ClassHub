@@ -314,7 +314,7 @@ pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Out
     let result = match name {
         "get_overview" => with_conn(app, |conn| overview_text(conn, true)).map(Outcome::ok),
         "list_material" => with_conn(app, |conn| list_material(conn, input)),
-        "search_material" => with_conn(app, |conn| search_material(conn, input)),
+        "search_material" => search_material(app, input),
         "read_material" => with_conn(app, |conn| read_material(conn, input)),
         "upsert_deadline" => upsert_deadline(app, input),
         "complete_deadline" => complete_deadline(app, input),
@@ -728,13 +728,20 @@ fn list_notes(dir: &Path) -> Vec<String> {
 // ---------------------------------------------------------------------------
 // search_material (ripgrep over extracts, notes and guides — SPEC §9)
 
-fn search_material(conn: &Connection, input: &Value) -> Result<Outcome> {
+/// The lock is held only long enough to resolve the class folders; the grep
+/// itself runs without it. Spawning ripgrep and waiting for it under the app's
+/// single connection blocked every other command, every chat tool, and the job
+/// runner for the whole search.
+fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let query = str_arg(input, "query")?;
-    let root = crate::db::aibhs_root(conn)?;
-    let classes = match opt_str_arg(input, "class") {
-        Some(name) => vec![resolve_class(conn, &name)?],
-        None => class_rows(conn)?,
-    };
+    let (root, classes) = with_conn(app, |conn| {
+        let root = crate::db::aibhs_root(conn)?;
+        let classes = match opt_str_arg(input, "class") {
+            Some(name) => vec![resolve_class(conn, &name)?],
+            None => class_rows(conn)?,
+        };
+        Ok((root, classes))
+    })?;
 
     let mut dirs = Vec::new();
     for class in &classes {

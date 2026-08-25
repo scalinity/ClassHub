@@ -51,18 +51,30 @@ pub fn class_dir(conn: &Connection, class_id: i64) -> Result<PathBuf> {
 
 /// Walks the class folder, syncs the `files` table (upsert added/changed, delete removed),
 /// and returns the module/file tree.
-pub fn scan_class(conn: &mut Connection, class_id: i64) -> Result<Vec<TreeNode>> {
-    let dir = class_dir(conn, class_id)?;
-    if !dir.is_dir() {
-        bail!("class folder not found: {}", dir.display());
-    }
+/// Takes the connection itself, in two short windows rather than one long one:
+/// the walk in between recurses the whole class folder and SHA-256s everything
+/// that changed, and holding the app's single connection across it blocked
+/// every other command, every chat tool, and the job runner for the duration.
+pub fn scan_class(
+    db: &std::sync::Mutex<Connection>,
+    class_id: i64,
+) -> Result<Vec<TreeNode>> {
+    let (dir, existing) = {
+        let conn = crate::db::lock(db);
+        let dir = class_dir(&conn, class_id)?;
+        if !dir.is_dir() {
+            bail!("class folder not found: {}", dir.display());
+        }
+        let existing = load_existing(&conn, class_id)?;
+        (dir, existing)
+    };
 
-    let existing = load_existing(conn, class_id)?;
     let mut files = Vec::new();
     let tree = walk_dir(&dir, &dir, 0, &existing, &mut files)
         .with_context(|| format!("scanning {}", dir.display()))?;
 
     let seen: HashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+    let mut conn = crate::db::lock(db);
     let tx = conn.transaction()?;
     {
         let mut upsert = tx.prepare(

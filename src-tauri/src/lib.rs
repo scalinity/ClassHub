@@ -30,10 +30,7 @@ fn scan_class(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<scanner::TreeNode>, String> {
-    let tree = {
-        let mut conn = db::lock(&state.0);
-        scanner::scan_class(&mut conn, class_id).map_err(|e| format!("{e:#}"))?
-    };
+    let tree = scanner::scan_class(&state.0, class_id).map_err(|e| format!("{e:#}"))?;
     // SPEC §7: auto-extract after every scan; a no-change scan is a no-op there.
     extract::spawn_pipeline(&app, class_id);
     Ok(tree)
@@ -490,11 +487,7 @@ fn scan_and_extract_all(app: &tauri::AppHandle) {
             .unwrap_or_default()
     };
     for class_id in class_ids {
-        let scanned = match db.0.lock() {
-            Ok(mut conn) => scanner::scan_class(&mut conn, class_id),
-            Err(e) => Err(anyhow::anyhow!("db lock poisoned: {e}")),
-        };
-        match scanned {
+        match scanner::scan_class(&db.0, class_id) {
             Ok(_) => extract::spawn_pipeline(app, class_id),
             Err(e) => eprintln!("launch scan skipped class {class_id}: {e:#}"),
         }

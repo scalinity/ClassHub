@@ -781,7 +781,7 @@ fn unescape_fragment(carry: &mut String, fragment: &str) -> String {
 
 /// `Command::output()` with a deadline: kills and reaps on expiry rather than
 /// blocking forever on a child that never exits.
-fn wait_bounded(mut child: Child, limit: Duration) -> Option<std::process::Output> {
+pub(crate) fn wait_bounded(mut child: Child, limit: Duration) -> Option<std::process::Output> {
     let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
