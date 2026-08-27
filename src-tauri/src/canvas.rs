@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::webview::Cookie;
+use tauri::webview::cookie::Cookie;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const CANVAS_HOST: &str = "ufl.instructure.com";
@@ -228,7 +228,7 @@ impl Session {
     /// ended it rather than merely that the app was restarted.
     pub fn open(app: &AppHandle, on_stage: &dyn Fn(&str)) -> Result<Session> {
         close_existing(app)?;
-        restore(app);
+        restore(app, on_stage);
         let url = tauri::Url::parse(CANVAS_ORIGIN).context("parsing the Canvas origin")?;
         let window = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
             .title("Canvas — sign in so ClassHub can read your courses")
@@ -303,6 +303,12 @@ impl Session {
                     // Worth naming: landing on login.ufl.edu means SSO bounced
                     // rather than that Canvas is broken, and those need
                     // different things from the reader.
+                    // An empty host is the initial empty document rather than a
+                    // place, and naming it renders a blank where a hostname
+                    // should be.
+                    Outcome::Offsite(host) if host.is_empty() => {
+                        bail!("the Canvas window never finished loading")
+                    }
                     Outcome::Offsite(host) => {
                         bail!("the Canvas window ended up on {host} rather than {CANVAS_HOST}")
                     }
@@ -569,10 +575,17 @@ impl Session {
     /// Best-effort: a Keychain that will not answer costs a sign-in next
     /// launch, not this sync.
     fn remember(&self) {
-        let Ok(url) = tauri::Url::parse(CANVAS_ORIGIN) else {
+        // The one webview touch in this file that `poll` has not already
+        // guarded. Cheap, and it turns the ordinary "closed the window straight
+        // after signing in" case into a return rather than a caught panic.
+        if self.ensure_open().is_err() {
             return;
-        };
-        let Ok(cookies) = self.window.cookies_for_url(url) else {
+        }
+        let Some(cookies) = read_jar(&self.window) else {
+            eprintln!(
+                "canvas: could not read the session out of the window — the next launch \
+                 will ask for a sign-in"
+            );
             return;
         };
         let cookies = worth_remembering(&cookies);
@@ -585,10 +598,23 @@ impl Session {
             captured_at: crate::db::now(),
             cookies,
         };
-        let (Ok(entry), Ok(json)) = (keychain(), serde_json::to_string(&session)) else {
+        let Some(entry) = keychain() else {
             return;
         };
-        let _ = entry.set_password(&json);
+        let Ok(json) = serde_json::to_string(&session) else {
+            return;
+        };
+        // Still best-effort — a Keychain that will not answer must not fail a
+        // sync that otherwise worked. But saying so matters: without it, a
+        // permanently broken save is indistinguishable from Canvas expiring the
+        // session, and "why does Duo ask me every launch again" is exactly the
+        // question this mechanism exists to answer.
+        if let Err(e) = entry.set_password(&json) {
+            eprintln!(
+                "canvas: could not save the session ({e}) — the next launch will ask \
+                 for a sign-in"
+            );
+        }
     }
 
     /// Writes a course file to `dest`, fetched by the page like everything else.
@@ -680,6 +706,13 @@ const CSRF_COOKIE: &str = "_csrf_token";
 /// session that outlived this would have needed the full sign-in regardless.
 const REMEMBERED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// How many times reading the cookie jar is worth attempting, and how long to
+/// wait between. wry's own budget for the read is one second (see `read_jar`),
+/// which is generous until the main thread is busy — and giving up after one
+/// try means silently storing nothing.
+const JAR_READ_TRIES: u32 = 3;
+const JAR_READ_RETRY: Duration = Duration::from_millis(150);
+
 #[derive(Serialize, Deserialize)]
 struct Remembered {
     /// When these were read out of the webview — what `REMEMBERED_FOR` is
@@ -689,9 +722,18 @@ struct Remembered {
 }
 
 /// One cookie, minus its domain: everything stored here is `CANVAS_HOST` by
-/// construction, and writing it down would only create a way for the two to
-/// disagree.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+/// construction (`worth_remembering` enforces it), and writing it down would
+/// only create a way for the two to disagree.
+///
+/// `SameSite` and the expiry are dropped on purpose, and both drops are exact
+/// rather than lossy. Canvas sends `canvas_session` as `SameSite=None`, which
+/// wry serializes to no attribute at all — the same bytes as storing nothing —
+/// and it maps a missing policy back to `None`, so the round trip is faithful
+/// in both directions. The missing expiry is the whole design: a cookie with no
+/// expiry is a session cookie, which is exactly what WKWebView refuses to write
+/// to its own on-disk jar, leaving the Keychain as the only copy at rest.
+/// Widening either of these would trade that property away for nothing.
+#[derive(PartialEq, Serialize, Deserialize)]
 struct RememberedCookie {
     name: String,
     value: String,
@@ -700,20 +742,49 @@ struct RememberedCookie {
     http_only: bool,
 }
 
-fn keychain() -> Result<keyring::v1::Entry> {
-    keyring::v1::Entry::new(crate::chat::KEYCHAIN_SERVICE, KEYCHAIN_USER)
-        .context("the macOS Keychain is unavailable")
+impl std::fmt::Debug for RememberedCookie {
+    /// Renders the value's length rather than the value. This is a bearer
+    /// credential, and a `{:?}` added later — in a log line, an error chain, a
+    /// test failure — should not be able to print it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RememberedCookie")
+            .field("name", &self.name)
+            .field("value", &format_args!("<{} bytes>", self.value.len()))
+            .field("path", &self.path)
+            .field("secure", &self.secure)
+            .field("http_only", &self.http_only)
+            .finish()
+    }
+}
+
+/// `Option` rather than `Result`: every caller here is best-effort and none has
+/// anywhere to report a reason, so a `Result` only built a message that was
+/// discarded three times over. `chat.rs` keeps its error because its caller
+/// shows it to the user.
+fn keychain() -> Option<keyring::v1::Entry> {
+    keyring::v1::Entry::new(crate::KEYCHAIN_SERVICE, KEYCHAIN_USER).ok()
 }
 
 /// Which of Canvas's cookies are worth keeping.
-fn worth_remembering(cookies: &[Cookie<'static>]) -> Vec<RememberedCookie> {
+///
+/// The host filter is not redundant with the caller's `cookies_for_url`, which
+/// is what makes it true today: `RememberedCookie` documents "everything here
+/// is `CANVAS_HOST` by construction", and until now nothing in this file made
+/// that so. `restore` re-stamps `CANVAS_HOST` onto whatever it reads back, so
+/// one slip upstream — reading the whole jar instead of Canvas's slice — would
+/// turn a wide capture into cross-host injection. Enforcing it here costs a
+/// line and removes that whole shape.
+fn worth_remembering(cookies: &[Cookie<'_>]) -> Vec<RememberedCookie> {
     cookies
         .iter()
+        .filter(|cookie| cookie.domain() == Some(CANVAS_HOST))
         .filter(|cookie| cookie.name() != CSRF_COOKIE)
         .map(|cookie| RememberedCookie {
             name: cookie.name().to_string(),
             value: cookie.value().to_string(),
-            path: cookie.path().unwrap_or("/").to_string(),
+            // The hazard is an empty path rather than an absent one — wry always
+            // sets it, and `NSHTTPCookie` refuses to build from "".
+            path: cookie.path().filter(|path| !path.is_empty()).unwrap_or("/").to_string(),
             // Canvas sets both, and defaulting the other way would hand a
             // session cookie to a plaintext request or to `document.cookie`.
             secure: cookie.secure().unwrap_or(true),
@@ -722,14 +793,63 @@ fn worth_remembering(cookies: &[Cookie<'static>]) -> Vec<RememberedCookie> {
         .collect()
 }
 
+/// Reads Canvas's cookies out of `window`, or nothing if the jar will not answer.
+///
+/// Both hazards here live in Tauri's dispatcher rather than in this file.
+///
+/// It answers with `rx.recv().unwrap()`, and a webview destroyed before the
+/// main thread drains the message drops the reply channel — so a window closed
+/// at the wrong instant panics the calling thread. For a best-effort cookie
+/// save that would unwind an otherwise finished sync and report it to the user
+/// as "the sync stopped unexpectedly", which is both wrong and worse than the
+/// message a closed window already has.
+///
+/// And wry gives the underlying `getAllCookies` one second, measured at exactly
+/// the moment WebKit's network process is busiest — right after a whole SSO
+/// chain finished loading. A single failed read is worth retrying, because
+/// treating it as an answer means silently storing nothing, whose symptom is a
+/// full sign-in on the next launch: indistinguishable from the bug all of this
+/// exists to fix.
+fn read_jar(window: &WebviewWindow) -> Option<Vec<Cookie<'static>>> {
+    let url = tauri::Url::parse(CANVAS_ORIGIN).ok()?;
+    for attempt in 0..JAR_READ_TRIES {
+        if attempt > 0 {
+            std::thread::sleep(JAR_READ_RETRY);
+        }
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            window.cookies_for_url(url.clone())
+        }));
+        match read {
+            Ok(Ok(cookies)) => return Some(cookies),
+            // The window is gone. Retrying cannot help, and the next attempt
+            // would panic the same way.
+            Err(_) => return None,
+            Ok(Err(_)) => {}
+        }
+    }
+    None
+}
+
 /// The remembered session, or nothing when there is none worth replaying.
 ///
-/// Anything unreadable counts as nothing. The cost of being wrong here is one
-/// sign-in — the very state this exists to avoid, and not one worth failing a
-/// sync over.
-fn remembered() -> Option<Remembered> {
-    let session: Remembered = serde_json::from_str(&keychain().ok()?.get_password().ok()?).ok()?;
-    if crate::db::now().saturating_sub(session.captured_at) >= REMEMBERED_FOR.as_secs() as i64 {
+/// The two ways of failing want opposite responses. A *read* failure is
+/// transient — a locked Keychain, a denied prompt — and must never delete
+/// anything, since the cost of being wrong is one sign-in. A *parse* failure is
+/// not transient: this build can never use that item again, and leaving it
+/// would strand a live cookie at rest with nothing able to remove it, because
+/// the age check below sits downstream of the parse.
+fn stored_session() -> Option<Remembered> {
+    let stored = keychain()?.get_password().ok()?;
+    let Ok(session) = serde_json::from_str::<Remembered>(&stored) else {
+        forget();
+        return None;
+    };
+    let age = crate::db::now().saturating_sub(session.captured_at);
+    // Both ends, because `saturating_sub` on `i64` clamps at `i64::MIN` rather
+    // than at zero: a `captured_at` ahead of the clock reads as a negative age,
+    // which would sit below the cap forever and quietly disable it. A timestamp
+    // from the future is its own reason to distrust the copy.
+    if !(0..REMEMBERED_FOR.as_secs() as i64).contains(&age) {
         forget();
         return None;
     }
@@ -737,42 +857,98 @@ fn remembered() -> Option<Remembered> {
 }
 
 /// Drops the stored cookies.
+///
+/// Only the copy at rest. Whatever is in the live jar stays there until Canvas
+/// overwrites it at the next sign-in, which is the moment it becomes wrong
+/// anyway — deleting it here would be another fire-and-forget hop to the main
+/// thread buying nothing.
 fn forget() {
-    if let Ok(entry) = keychain() {
+    if let Some(entry) = keychain() {
         let _ = entry.delete_credential();
     }
 }
 
 /// Puts the remembered cookies back, before the Canvas window is built.
 ///
-/// Timing is the point. WKWebView gives every non-incognito webview the same
-/// process-wide `defaultDataStore`, so a cookie set through any of the app's
-/// windows is already in the jar when the Canvas window issues its first
-/// request — and that first request is what decides whether Canvas serves the
-/// page or bounces to SSO. Setting it on the Canvas window itself would be a
-/// navigation too late.
+/// Two invariants hold this up, and only one of them is about the data store.
+///
+/// WKWebView gives every non-incognito webview the same process-wide
+/// `defaultDataStore`, which is why *which* window the cookie goes through does
+/// not matter. What matters more is *ordering*: off the main thread
+/// `set_cookie` queues a message and returns `Ok(())` before the cookie exists
+/// anywhere, so nothing is written by the time this returns. Window creation
+/// rides the same event-loop queue, and that queue is drained in order and
+/// cannot be drained re-entrantly, so the writes are handled first — and the
+/// blocking read at the end is what turns "handled first" from an argument
+/// about someone else's internals into something this function observes.
+/// Moving this after `build()`, or onto the main thread, breaks it in a way
+/// that looks exactly like Canvas expiring the session.
 ///
 /// Best-effort throughout: with nothing restored, the sync asks for a sign-in,
 /// which is what it did before any of this existed.
-fn restore(app: &AppHandle) {
-    let Some(session) = remembered() else {
-        return;
-    };
-    // Any window will do, since they share one cookie store. `close_existing`
-    // has already run, so this is never the stale Canvas window.
+fn restore(app: &AppHandle, on_stage: &dyn Fn(&str)) {
+    // `close_existing` has already run, so this is never the stale Canvas
+    // window. By name rather than whichever the map happens to yield first:
+    // any window is correct, but a deterministic one keeps a failure
+    // reproducible instead of varying per run.
     let windows = app.webview_windows();
-    let Some(window) = windows.values().next() else {
+    let Some(window) = windows.get("main").or_else(|| windows.values().next()) else {
         return;
     };
+    // Named before the Keychain read, which is the one call here that can put a
+    // system prompt in front of the user. It happens with no Canvas window on
+    // screen yet, so an unnamed stall would read as a hang.
+    on_stage("Checking for a saved Canvas session…");
+    let Some(session) = stored_session() else {
+        return;
+    };
+    // Whatever the jar already holds came from this run, so it is at least as
+    // fresh as a copy captured when some earlier sync opened. Restoring repairs
+    // a cold jar; writing over a live cookie could only move the session
+    // backwards. Compared by name rather than by "is the jar empty", since
+    // Canvas keeps a non-session cookie for its host too and a blanket check
+    // would skip the restore entirely.
+    let live: Vec<String> = read_jar(window)
+        .unwrap_or_default()
+        .iter()
+        .map(|cookie| cookie.name().to_string())
+        .collect();
+    let mut restored = 0;
     for cookie in session.cookies {
+        // An empty name or path reaches an `expect` inside wry — `NSHTTPCookie`
+        // refuses to build one — and that runs on the main thread, where the
+        // sync's own `catch_unwind` cannot reach it. It would also fire before
+        // anything could delete the offending item, so every later sync would
+        // take the app down the same way. Skipping is the whole fix.
+        if cookie.name.is_empty() || live.iter().any(|name| *name == cookie.name) {
+            continue;
+        }
+        let path = if cookie.path.is_empty() {
+            "/".to_string()
+        } else {
+            cookie.path
+        };
         let _ = window.set_cookie(
             Cookie::build((cookie.name, cookie.value))
                 .domain(CANVAS_HOST)
-                .path(cookie.path)
+                .path(path)
                 .secure(cookie.secure)
                 .http_only(cookie.http_only)
                 .build(),
         );
+        restored += 1;
+    }
+    if restored == 0 {
+        return;
+    }
+    // The barrier described above. This read rides the same queue as the writes
+    // and blocks for its answer, so it cannot come back before every one of them
+    // has been handled — and the answer says whether they actually landed,
+    // which `set_cookie` alone can never report.
+    let landed =
+        read_jar(window).is_some_and(|jar| jar.iter().any(|cookie| cookie.name() != CSRF_COOKIE));
+    if !landed {
+        eprintln!("canvas: the saved session did not reach the webview — expect a sign-in");
     }
 }
 
@@ -1119,12 +1295,27 @@ mod tests {
     fn keeps_canvas_cookies_but_never_the_csrf_token() {
         let cookies = vec![
             Cookie::build(("canvas_session", "opaque"))
+                .domain(CANVAS_HOST)
                 .path("/")
                 .secure(true)
                 .http_only(true)
                 .build(),
-            Cookie::build((CSRF_COOKIE, "not wanted")).path("/").build(),
-            Cookie::build(("log_session_id", "6f0c")).path("/").build(),
+            Cookie::build((CSRF_COOKIE, "not wanted"))
+                .domain(CANVAS_HOST)
+                .path("/")
+                .build(),
+            Cookie::build(("log_session_id", "6f0c"))
+                .domain(CANVAS_HOST)
+                .path("/")
+                .build(),
+            // `restore` re-stamps CANVAS_HOST onto everything it reads back, so
+            // anything captured from another host would be re-labelled as
+            // Canvas's. Nothing upstream should hand these over — but the
+            // filter is what makes that a property of this file rather than of
+            // someone else's.
+            Cookie::build(("browsertrust", "duo")).domain("api.duosecurity.com").build(),
+            Cookie::build(("_shibsession", "sso")).domain("login.ufl.edu").build(),
+            Cookie::build(("wide", "parent")).domain("instructure.com").build(),
         ];
         let kept = worth_remembering(&cookies);
         assert_eq!(
@@ -1134,15 +1325,41 @@ mod tests {
         // A cookie that declares neither flag is stored with both, never with
         // a session cookie downgraded to plaintext or to `document.cookie`.
         assert!(kept[1].secure && kept[1].http_only);
+        // An empty path is what `NSHTTPCookie` refuses to build from, and a
+        // refusal there panics the main thread rather than this one.
+        let blank = vec![Cookie::build(("canvas_session", "v"))
+            .domain(CANVAS_HOST)
+            .path("")
+            .build()];
+        assert_eq!(worth_remembering(&blank)[0].path, "/");
     }
 
-    /// The Keychain holds a string, so the round trip through it is the only
-    /// thing standing between a live session and a sign-in on the next launch.
+    /// What a *future* build does with *this* build's item — the contract that
+    /// actually matters, since the Keychain outlives the binary that wrote it.
+    /// Every drift must land on the sign-in path rather than on a half-filled
+    /// struct, which is what having no `#[serde(default)]` anywhere buys.
     #[test]
-    fn a_remembered_session_survives_the_keychain_round_trip() {
+    fn a_changed_schema_falls_back_to_signing_in() {
+        // A renamed or dropped field fails closed rather than defaulting.
+        assert!(serde_json::from_str::<Remembered>(r#"{"cookies":[]}"#).is_err());
+        assert!(serde_json::from_str::<Remembered>(r#"{"captured_at":1}"#).is_err());
+        // An added field does not, so widening the struct later costs nothing.
+        assert!(
+            serde_json::from_str::<Remembered>(r#"{"captured_at":1,"cookies":[],"later":true}"#)
+                .is_ok()
+        );
+    }
+
+    /// The Keychain stores a string, so a cookie value carrying `/`, `+` or `=`
+    /// has to survive serde before it can survive the Keychain. The I/O around
+    /// this is deliberately untested — it needs a real Keychain — so the name
+    /// says JSON rather than promising more than it proves.
+    #[test]
+    fn a_remembered_session_survives_the_json_the_keychain_stores() {
         let session = Remembered {
             captured_at: 1_756_000_000,
             cookies: worth_remembering(&[Cookie::build(("canvas_session", "opaque.value-with_/+="))
+                .domain(CANVAS_HOST)
                 .path("/")
                 .secure(true)
                 .http_only(true)

@@ -1,3 +1,9 @@
+/// SPEC §13: everything credential-shaped lives in the macOS Keychain under
+/// this one service, each feature adding its own account beneath it — the
+/// Anthropic API key, and the Canvas session cookies (§7.2). One literal, so
+/// two accounts cannot drift onto different services.
+pub(crate) const KEYCHAIN_SERVICE: &str = "classhub";
+
 mod canvas;
 mod canvas_sync;
 mod chat;
