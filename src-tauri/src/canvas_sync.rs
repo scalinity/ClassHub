@@ -580,44 +580,22 @@ fn sync_files(
         seen.insert((landed.clone(), size));
         let source_rel = format!("{INBOX_DIR}/{landed}");
 
-        // Where Canvas filed it is a proposal, never a placement — approval is
-        // what moves a file (SPEC §10). Canvas keeping it loose in the root is
-        // no signal at all, so those stay in the inbox for the sorter to read
-        // by content instead of being given an invented home.
-        let folder = canvas_folder_path(file, &folders, &vocabulary);
-        let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
-        let recorded = with_conn(app, |conn| {
-            // Logged where the bytes land, not where they are proposed to go:
-            // the question this answers is "what did the sync put on my disk",
-            // and a loose file is on disk just the same.
-            audit(
-                conn,
-                "canvas.staged_file",
-                json!({ "classId": class.id, "source": source_rel, "dest": dest_rel }),
-            )?;
-            match (&folder, &dest_rel) {
-                (Some(folder), Some(dest_rel)) => {
-                    // Says both names when they differ, so a retargeted
-                    // destination is legible rather than looking like a misread.
-                    let original = raw_canvas_folder(file, &folders);
-                    let reasoning = match original {
-                        Some(ref original) if !original.eq_ignore_ascii_case(folder) => format!(
-                            "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
-                        ),
-                        _ => format!("Canvas files it under \"{folder}\""),
-                    };
-                    propose_move(conn, class.id, &class_dir, &source_rel, dest_rel, &reasoning)
-                }
-                _ => Ok(()),
-            }
-        });
-        match (recorded, folder.is_some()) {
-            (Err(e), _) => {
+        match record_landed(
+            app,
+            class.id,
+            &class_dir,
+            file,
+            &folders,
+            &vocabulary,
+            &source_rel,
+            &landed,
+        ) {
+            Err(e) => {
                 outcome.notes.push(format!("{landed}: {e:#}"));
                 unproposed += 1;
             }
-            (Ok(()), false) => loose += 1,
-            (Ok(()), true) => {}
+            Ok(false) => loose += 1,
+            Ok(true) => {}
         }
     }
 
@@ -648,6 +626,52 @@ fn sync_files(
         }
     }
     Ok(())
+}
+
+/// Logs a downloaded file and proposes where it goes, returning whether Canvas
+/// had a destination for it.
+///
+/// Where Canvas filed something is a proposal, never a placement — approval is
+/// what moves a file (SPEC §10). Canvas keeping it loose in the course root is
+/// no signal at all, so those stay in the inbox for the content-aware sorter to
+/// read rather than being given an invented home.
+#[allow(clippy::too_many_arguments)]
+fn record_landed(
+    app: &AppHandle,
+    class_id: i64,
+    class_dir: &std::path::Path,
+    file: &Value,
+    folders: &[Value],
+    vocabulary: &[(String, usize)],
+    source_rel: &str,
+    landed: &str,
+) -> Result<bool> {
+    let folder = canvas_folder_path(file, folders, vocabulary);
+    let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
+    with_conn(app, |conn| {
+        // Logged where the bytes land, not where they are proposed to go: the
+        // question this answers is "what did the sync put on my disk", and a
+        // loose file is on disk just the same.
+        audit(
+            conn,
+            "canvas.staged_file",
+            json!({ "classId": class_id, "source": source_rel, "dest": dest_rel }),
+        )?;
+        let (Some(folder), Some(dest_rel)) = (&folder, &dest_rel) else {
+            return Ok(false);
+        };
+        // Says both names when they differ, so a retargeted destination is
+        // legible rather than looking like a misread of Canvas.
+        let original = raw_canvas_folder(file, folders);
+        let reasoning = match original {
+            Some(ref original) if !original.eq_ignore_ascii_case(folder) => format!(
+                "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
+            ),
+            _ => format!("Canvas files it under \"{folder}\""),
+        };
+        propose_move(conn, class_id, class_dir, source_rel, dest_rel, &reasoning)?;
+        Ok(true)
+    })
 }
 
 /// A Canvas file's name, as a single path segment safe to write.

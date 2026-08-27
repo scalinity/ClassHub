@@ -5,19 +5,22 @@
 //! layout the app imposed would be wrong for at least two of them, so it reads
 //! each course's own and stores the course's own words.
 //!
-//! Three sources can supply them, in precedence order **canvas > syllabus >
-//! folder**:
+//! Two sources declare them, in precedence order **canvas > syllabus**:
 //!
 //! - **canvas** — the course's published modules. Ground truth when it exists,
 //!   which today it does not: none of the four courses uses Canvas Modules.
 //! - **syllabus** — the weekly schedule inside the syllabus, read by the same
 //!   `syllabus_scan` that already reads it for deadlines.
-//! - **folder** — the top-level folders in the class tree, which is what the
-//!   app inferred before this table existed.
 //!
-//! `source` is stored rather than resolved away, because "Module 1 exists
-//! because a folder is called that" and "Module 1 exists because the course
-//! says so" are different claims and the UI marks them differently.
+//! `source` is stored rather than resolved away, because "Canvas says Module 1
+//! runs from the 20th" and "a syllabus PDF seemed to say so" are different
+//! claims, and the workspace names which one it is showing.
+//!
+//! A folder is not a third source. It is where material sits, not something the
+//! course declared — listing the top-level folders as divisions put a second
+//! numbering sequence under the course's own and labelled it a guess. What the
+//! folder does know is recorded on the declared unit's own row: see
+//! `attach_folder_paths`.
 //!
 //! Nothing here ever deletes. A unit that stops appearing in Canvas is kept
 //! (SPEC §7.2): a mid-semester reshuffle must not silently orphan a guide.
