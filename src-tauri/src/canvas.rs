@@ -249,8 +249,8 @@ impl Session {
                     Outcome::Unauthorized(status) => Err(Refused {
                         path: path.to_string(),
                         status,
-                    })
-                    .map_err(anyhow::Error::from),
+                    }
+                    .into()),
                     // Worth naming: landing on login.ufl.edu means SSO bounced
                     // rather than that Canvas is broken, and those need
                     // different things from the reader.
