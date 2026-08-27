@@ -228,6 +228,7 @@ impl JobManager {
                 let _ = child.wait();
             }
         }
+        reap_foreign_children();
     }
 }
 
@@ -844,23 +845,86 @@ fn unescape_fragment(carry: &mut String, fragment: &str) -> String {
     out
 }
 
-/// `Command::output()` with a deadline: kills and reaps on expiry rather than
-/// blocking forever on a child that never exits.
-pub(crate) fn wait_bounded(mut child: Child, limit: Duration) -> Option<std::process::Output> {
-    let deadline = Instant::now() + limit;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().ok(),
-            Ok(None) => {}
-            Err(_) => return None,
-        }
-        if Instant::now() >= deadline {
+/// Children spawned outside the queue — LibreOffice and Parakeet, which run on
+/// the thread that needed them rather than as queued jobs. `shutdown` reaps
+/// these too: a transcription run holds a whole model resident, and quitting
+/// the app would otherwise reparent it to launchd for the rest of its bound
+/// with nobody left to read its output.
+static FOREIGN_CHILDREN: Mutex<Vec<Arc<Mutex<Option<Child>>>>> = Mutex::new(Vec::new());
+
+fn register_foreign_child(slot: &Arc<Mutex<Option<Child>>>) {
+    let mut all = lock(&FOREIGN_CHILDREN);
+    all.retain(|s| lock(s).is_some());
+    all.push(slot.clone());
+}
+
+fn reap_foreign_children() {
+    for slot in std::mem::take(&mut *lock(&FOREIGN_CHILDREN)) {
+        if let Some(mut child) = lock(&slot).take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+/// `Command::output()` with a deadline: kills and reaps on expiry rather than
+/// blocking forever on a child that never exits.
+///
+/// Both pipes are drained on their own threads for the duration, not read after
+/// the child exits. A child whose output fills the ~64KB pipe buffer blocks in
+/// `write` and never exits, so reading afterwards turns a chatty run into a
+/// hang that lasts the entire bound — and both callers are quiet only in the
+/// ordinary case: the first Parakeet run downloads model weights, and soffice
+/// is loud whenever a profile is rebuilt.
+pub(crate) fn wait_bounded(mut child: Child, limit: Duration) -> Option<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+    register_foreign_child(&slot);
+
+    let deadline = Instant::now() + limit;
+    let started = Instant::now();
+    let status = loop {
+        match lock(&slot).as_mut().map(Child::try_wait) {
+            Some(Ok(Some(status))) => break status,
+            Some(Ok(None)) => {}
+            // Either the wait failed or shutdown took the child out from under
+            // us; neither leaves an exit status to report.
+            _ => return None,
+        }
+        if Instant::now() >= deadline {
+            if let Some(mut child) = lock(&slot).take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             return None;
         }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+        // Tight at first so a quick conversion is not held up by the poll, then
+        // slack: the transcription bound is hours, and 25ms for that long is a
+        // quarter of a million needless wakeups on battery.
+        std::thread::sleep(if started.elapsed() < Duration::from_secs(5) {
+            Duration::from_millis(25)
+        } else {
+            Duration::from_millis(250)
+        });
+    };
+    let _ = lock(&slot).take();
+
+    Some(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// The long-lived `claude setup-token` credential, exported from `.zshrc`.

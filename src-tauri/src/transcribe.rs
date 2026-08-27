@@ -72,6 +72,11 @@ pub fn to_vtt(app: &AppHandle, media: &Path, on_stage: &dyn Fn(&str)) -> Result<
     if !media.is_file() {
         bail!("no recording at {}", media.display());
     }
+    // Absolute, so the positional argument can never begin with a dash and be
+    // read as a flag. Everything already reaching here is absolute; this is
+    // what keeps that true rather than assumed.
+    let media = &fs::canonicalize(media)
+        .with_context(|| format!("resolving {}", media.display()))?;
     let interpreter = interpreter(app);
     if !Path::new(&interpreter).is_file() {
         bail!(
@@ -86,12 +91,17 @@ pub fn to_vtt(app: &AppHandle, media: &Path, on_stage: &dyn Fn(&str)) -> Result<
     let _ = fs::remove_dir_all(&out_dir);
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("creating {}", out_dir.display()))?;
+    // Held rather than removed at each exit: a spawn failure, a timeout, or a
+    // missing output all left the directory — and whatever partial the run had
+    // written into it — behind on disk.
+    let scratch = Scratch(out_dir);
+    let out_dir = &scratch.0;
 
     on_stage("Loading Parakeet…");
     let child = Command::new(&interpreter)
         .arg("-c")
         .arg(CLI_ENTRY)
-        .arg(media)
+        .arg(&media)
         .args(["--model", MODEL, "--output-format", "vtt", "--output-dir"])
         .arg(&out_dir)
         .env("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -104,13 +114,12 @@ pub fn to_vtt(app: &AppHandle, media: &Path, on_stage: &dyn Fn(&str)) -> Result<
     on_stage("Transcribing…");
     let output = crate::jobs::wait_bounded(child, TRANSCRIBE_TIMEOUT).with_context(|| {
         format!(
-            "Parakeet did not finish {} within {}h — it was stopped",
+            "Parakeet did not finish {} within {}h, or could not be waited on — it was stopped",
             media.display(),
             TRANSCRIBE_TIMEOUT.as_secs() / 3600
         )
     })?;
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&out_dir);
         bail!(
             "Parakeet exited {}: {}",
             output.status,
@@ -121,16 +130,24 @@ pub fn to_vtt(app: &AppHandle, media: &Path, on_stage: &dyn Fn(&str)) -> Result<
     // The directory is created fresh per run and holds nothing else, so the one
     // .vtt in it is this run's — more robust than predicting how the CLI
     // derived the name from the source file.
-    let produced = sole_vtt(&out_dir)?;
+    let produced = sole_vtt(out_dir)?;
     let vtt = fs::read_to_string(&produced)
         .with_context(|| format!("reading {}", produced.display()))?;
-    let _ = fs::remove_dir_all(&out_dir);
 
     if vtt.trim().is_empty() {
         bail!("Parakeet produced an empty transcript for {}", media.display());
     }
     on_stage("Transcribed");
     Ok(vtt)
+}
+
+/// The run's output directory, removed however the run ends.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn sole_vtt(dir: &Path) -> Result<PathBuf> {
