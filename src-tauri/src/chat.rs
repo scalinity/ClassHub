@@ -25,11 +25,12 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::{lock, now, set_setting, setting, truncate, with_conn};
+use crate::KEYCHAIN_SERVICE;
 
 const API_BASE: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
-/// SPEC §9: the key lives in the macOS Keychain under service `classhub`.
-use crate::KEYCHAIN_SERVICE;
+/// SPEC §9: the key lives in the macOS Keychain, under the app's own service
+/// and this account.
 const KEYCHAIN_USER: &str = "anthropic-api-key";
 const MODEL_SETTING: &str = "chat_model";
 const EFFORT_SETTING: &str = "chat_effort";

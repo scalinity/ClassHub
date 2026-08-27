@@ -810,6 +810,14 @@ fn worth_remembering(cookies: &[Cookie<'_>]) -> Vec<RememberedCookie> {
 /// treating it as an answer means silently storing nothing, whose symptom is a
 /// full sign-in on the next launch: indistinguishable from the bug all of this
 /// exists to fix.
+///
+/// The one wait in this file that is not bounded from here. Every other is —
+/// `EVAL_TIMEOUT`, `REQUEST_TIMEOUT`, `DOWNLOAD_TIMEOUT`, `SIGN_IN_TIMEOUT`,
+/// even `close_existing`'s three seconds — because a stalled call otherwise
+/// parks the sync thread. Tauri owns this channel and offers no deadline, and
+/// buying one back means routing the read through `run_on_main_thread` and
+/// re-implementing the reply. wry's own one-second cap bounds it in practice,
+/// so this is recorded rather than worked around.
 fn read_jar(window: &WebviewWindow) -> Option<Vec<Cookie<'static>>> {
     let url = tauri::Url::parse(CANVAS_ORIGIN).ok()?;
     for attempt in 0..JAR_READ_TRIES {
