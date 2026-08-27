@@ -164,7 +164,10 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
 }
 
 /// `name.pdf` → `name (2).pdf` when the inbox already holds that name.
-fn free_slot(dir: &Path, name: &str) -> PathBuf {
+///
+/// Every path that puts a file in the inbox goes through this, so no ingestion
+/// route can overwrite what another one left there waiting for approval.
+pub(crate) fn free_slot(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;

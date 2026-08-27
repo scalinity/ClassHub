@@ -390,12 +390,6 @@ fn sync_assignments(
     Ok(())
 }
 
-/// Bytes as something a person reads, for the one message that quotes a size.
-fn human_size(bytes: i64) -> String {
-    let mb = bytes as f64 / (1024.0 * 1024.0);
-    format!("{mb:.0} MB")
-}
-
 /// `100` rather than `100.0`, since points are almost always whole.
 fn trim_number(value: f64) -> String {
     if (value.fract()).abs() < f64::EPSILON {
@@ -422,9 +416,18 @@ fn sync_files(
     }
     // Canvas's folder paths are the only placement signal it offers, since
     // none of these courses uses modules. One request buys every file's home.
-    let folders = session
-        .get_all(&format!("/api/v1/courses/{course_id}/folders"), on_stage)
-        .unwrap_or_default();
+    let folders = match session.get_all(&format!("/api/v1/courses/{course_id}/folders"), on_stage) {
+        Ok(folders) => folders,
+        // Said rather than absorbed. With no folder list every file reports as
+        // "Canvas gave no folder for it", which is a different claim from
+        // "Canvas was never successfully asked" and calls for something else.
+        Err(e) => {
+            outcome.notes.push(format!(
+                "Canvas's folder list could not be read ({e:#}) — files land in the inbox unplaced"
+            ));
+            Vec::new()
+        }
+    };
 
     let (class_dir, vocabulary) = with_conn(app, |conn| {
         Ok((
@@ -448,22 +451,21 @@ fn sync_files(
 
     let mut staged = 0usize;
     let mut skipped = 0usize;
-    let mut unplaced = 0usize;
+    let mut loose = 0usize;
+    let mut unproposed = 0usize;
     for file in &files {
-        let Some(name) = file["display_name"]
-            .as_str()
-            .or_else(|| file["filename"].as_str())
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-        else {
+        let Some(name) = canvas_file_name(file) else {
             continue;
         };
-        // A name that sanitizes away entirely would resolve to the inbox
-        // folder itself, and the download would write over a directory path.
-        let Some(name) = sanitize_name(name).filter(|n| !n.is_empty()) else {
+        // Without a size neither the ceiling nor the duplicate check can do its
+        // job, so the file is named and passed over rather than let through on
+        // a sentinel that reads as "small" to one and "new" to the other.
+        let Some(size) = file["size"].as_i64().filter(|s| *s >= 0) else {
+            outcome
+                .notes
+                .push(format!("{name} has no size in Canvas — not downloaded"));
             continue;
         };
-        let size = file["size"].as_i64().unwrap_or(-1);
         // Also catches Canvas's own duplicates: two of these courses file the
         // same PDF under two folders, and both come back in one listing.
         if !seen.insert((name.clone(), size)) {
@@ -476,18 +478,28 @@ fn sync_files(
         };
         // Checked before fetching, not after: the ceiling exists because the
         // bytes travel through the page in memory, and discovering the size by
-        // loading it would defeat the point.
+        // loading it would defeat the point. The page enforces it again on what
+        // actually arrives, since this number is Canvas's claim.
         if size > crate::canvas::MAX_DOWNLOAD_BYTES {
             outcome.notes.push(format!(
                 "{name} is {} — too large to pull through Canvas; download it there",
-                human_size(size)
+                crate::tools::format_size(size)
             ));
             continue;
         }
 
         on_stage(&format!("Downloading {name}…"));
-        let dest = inbox.join(&name);
-        if let Err(e) = download_once_retried(session, url, &dest, on_stage) {
+        // Never onto a name the inbox already holds. The (name, size) check
+        // above lets a same-named file of a different size through, and what it
+        // would land on may be the only copy of something dropped by hand and
+        // still waiting for approval.
+        let dest = crate::sorter::free_slot(&inbox, &name);
+        let landed = dest
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = download_once_retried(session, url, &dest, Some(size), on_stage) {
             outcome.notes.push(format!("{name} did not download: {e:#}"));
             // Released, so a second copy of the same file elsewhere in Canvas
             // still gets a turn — two of these courses keep the same PDF in
@@ -497,33 +509,47 @@ fn sync_files(
             continue;
         }
         staged += 1;
+        seen.insert((landed.clone(), size));
+        let source_rel = format!("{INBOX_DIR}/{landed}");
 
         // Where Canvas filed it is a proposal, never a placement — approval is
         // what moves a file (SPEC §10). Canvas keeping it loose in the root is
         // no signal at all, so those stay in the inbox for the sorter to read
         // by content instead of being given an invented home.
-        match canvas_folder_path(file, &folders, &vocabulary) {
-            Some(folder) => {
-                let dest_rel = format!("{folder}/{name}");
-                let source_rel = format!("{INBOX_DIR}/{name}");
-                // Says both names when they differ, so a retargeted destination
-                // is legible rather than looking like a misread of Canvas.
-                let canvas_name = raw_canvas_folder(file, &folders);
-                let reasoning = match canvas_name {
-                    Some(ref original) if !original.eq_ignore_ascii_case(&folder) => format!(
-                        "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
-                    ),
-                    _ => format!("Canvas files it under \"{folder}\""),
-                };
-                let recorded = with_conn(app, |conn| {
-                    propose_move(conn, class.id, &class_dir, &source_rel, &dest_rel, &reasoning)
-                });
-                if let Err(e) = recorded {
-                    outcome.notes.push(format!("{name}: {e:#}"));
-                    unplaced += 1;
+        let folder = canvas_folder_path(file, &folders, &vocabulary);
+        let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
+        let recorded = with_conn(app, |conn| {
+            // Logged where the bytes land, not where they are proposed to go:
+            // the question this answers is "what did the sync put on my disk",
+            // and a loose file is on disk just the same.
+            audit(
+                conn,
+                "canvas.staged_file",
+                json!({ "classId": class.id, "source": source_rel, "dest": dest_rel }),
+            )?;
+            match (&folder, &dest_rel) {
+                (Some(folder), Some(dest_rel)) => {
+                    // Says both names when they differ, so a retargeted
+                    // destination is legible rather than looking like a misread.
+                    let original = raw_canvas_folder(file, &folders);
+                    let reasoning = match original {
+                        Some(ref original) if !original.eq_ignore_ascii_case(folder) => format!(
+                            "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
+                        ),
+                        _ => format!("Canvas files it under \"{folder}\""),
+                    };
+                    propose_move(conn, class.id, &class_dir, &source_rel, dest_rel, &reasoning)
                 }
+                _ => Ok(()),
             }
-            None => unplaced += 1,
+        });
+        match (recorded, folder.is_some()) {
+            (Err(e), _) => {
+                outcome.notes.push(format!("{landed}: {e:#}"));
+                unproposed += 1;
+            }
+            (Ok(()), false) => loose += 1,
+            (Ok(()), true) => {}
         }
     }
 
@@ -531,15 +557,42 @@ fn sync_files(
     if skipped > 0 {
         outcome.notes.push(format!("{skipped} file(s) already in the class"));
     }
-    if unplaced > 0 {
+    if loose > 0 {
         outcome.notes.push(format!(
-            "{unplaced} file(s) waiting in the inbox — Canvas gave no folder for them"
+            "{loose} file(s) waiting in the inbox — Canvas keeps them loose, so the sorter reads \
+             them by content"
+        ));
+    }
+    // A different situation from the one above, with a different remedy: these
+    // downloaded but could not be proposed.
+    if unproposed > 0 {
+        outcome.notes.push(format!(
+            "{unproposed} file(s) downloaded but could not be proposed — see the lines above"
         ));
     }
     if staged > 0 {
         emit_hub_change(app, "proposals");
+        // The loose ones have no placement to inherit, so they wait for the
+        // content-aware sorter — which SPEC §7.2 promises and which nothing was
+        // actually asking for.
+        if loose > 0 {
+            crate::sorter::enqueue_followup(app, class.id);
+        }
     }
     Ok(())
+}
+
+/// A Canvas file's name, as a single path segment safe to write.
+///
+/// A name that sanitizes away entirely would resolve to the inbox folder
+/// itself, and the download would write over a directory path.
+fn canvas_file_name(file: &Value) -> Option<String> {
+    let raw = file["display_name"]
+        .as_str()
+        .or_else(|| file["filename"].as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())?;
+    sanitize_name(raw).filter(|n| !n.is_empty())
 }
 
 /// One retry, for the one failure mode that is worth retrying.
@@ -555,13 +608,14 @@ fn download_once_retried(
     session: &Session,
     url: &str,
     dest: &std::path::Path,
+    expected: Option<i64>,
     on_stage: &dyn Fn(&str),
 ) -> Result<u64> {
-    match session.download(url, dest, on_stage) {
+    match session.download(url, dest, expected, on_stage) {
         Ok(bytes) => Ok(bytes),
         Err(first) if is_transient(&first) => {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            session.download(url, dest, on_stage).map_err(|second| {
+            session.download(url, dest, expected, on_stage).map_err(|second| {
                 // Both attempts, because "it failed twice the same way" and
                 // "it failed two different ways" call for different things.
                 anyhow::anyhow!("{first:#}; on retry: {second:#}")
@@ -571,9 +625,18 @@ fn download_once_retried(
     }
 }
 
+/// Whether the failure was the page's rather than Canvas's answer.
+///
+/// A fetch that never completed reaches `catch` and comes out as a
+/// `PageFailure`; a refusal resolves with a status and is not one. So the retry
+/// decision is a type test rather than a reading of the error's prose — which
+/// by the time it arrived here also carried the file URL and up to 200
+/// characters of Canvas's own response body, and would have gone quiet the day
+/// WebKit reworded "Load failed".
 fn is_transient(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_lowercase();
-    text.contains("load failed") || text.contains("network")
+    error
+        .chain()
+        .any(|cause| cause.is::<crate::canvas::PageFailure>())
 }
 
 /// (name, size) for everything the scanner has indexed for this class.
@@ -721,11 +784,6 @@ fn propose_move(
             params![class_id, source_rel, dest_rel, reasoning, now()],
         )?;
     }
-    audit(
-        conn,
-        "canvas.staged_file",
-        json!({ "classId": class_id, "source": source_rel, "dest": dest_rel }),
-    )?;
     Ok(())
 }
 

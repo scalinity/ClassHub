@@ -106,6 +106,27 @@ impl Drop for Session {
     }
 }
 
+/// The page reporting that a fetch never completed — WebKit's bare "Load
+/// failed" and its kin, which carry no status because no response arrived.
+///
+/// A type rather than a phrase to recognize later. The retry decision used to
+/// re-read the rendered error chain, which by then also carried the request
+/// path and up to 200 characters of Canvas's own response body — so an
+/// unrelated failure whose text happened to contain "network" earned a retry,
+/// and a WebKit rewording would have quietly stopped one that deserved it.
+/// Anything that reaches `fetch`'s `catch` is a transport failure by
+/// construction; a refusal resolves instead, with a status.
+#[derive(Debug)]
+pub struct PageFailure(pub String);
+
+impl std::fmt::Display for PageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PageFailure {}
+
 enum Outcome {
     Json { value: Value, next: Option<String> },
     /// A file's bytes, base64 as the page encoded them.
@@ -240,13 +261,44 @@ impl Session {
     }
 
     /// Issues one in-page fetch and polls until it settles.
+    ///
+    /// The slot the page parks the answer in belongs to this call either way,
+    /// so it is released here rather than by the script that reads it — see
+    /// `release`.
     fn request(&self, path: &str, mode: Mode) -> Result<Outcome> {
         let id = format!("q{}", self.counter.fetch_add(1, Ordering::Relaxed));
+        let outcome = self.poll(&id, path, mode);
+        self.release(&id);
+        outcome
+    }
+
+    /// Frees a request's slot on the page, best-effort and without waiting.
+    ///
+    /// Deleting inside the script that returns the answer looked simpler and
+    /// was wrong: the value still has to survive being marshalled out of the
+    /// page, and if that round trip exceeds `EVAL_TIMEOUT` the result is gone
+    /// while Rust believes nothing was ever started — so the next poll refetches
+    /// a file that had already arrived. Clearing from this side means the slot
+    /// is released exactly when the answer is in hand.
+    ///
+    /// Also the only cleanup a timed-out request gets. For a download the slot
+    /// holds the whole file base64, which is not something to leave on the page
+    /// for the rest of the sync.
+    fn release(&self, id: &str) {
+        let js = RELEASE_JS.replace("__ID__", &js_string(id));
+        let _ = self.window.eval_with_callback(&js, |_| {});
+    }
+
+    fn poll(&self, id: &str, path: &str, mode: Mode) -> Result<Outcome> {
         let script = REQUEST_JS
-            .replace("__ID__", &js_string(&id))
+            // `__BINARY__` and `__MAXBYTES__` first: substituting `__PATH__`
+            // ahead of them would let a URL containing one of those literals
+            // rewrite itself inside its own string.
+            .replace("__BINARY__", if mode == Mode::Binary { "true" } else { "false" })
+            .replace("__MAXBYTES__", &MAX_DOWNLOAD_BYTES.to_string())
+            .replace("__ID__", &js_string(id))
             .replace("__HOST__", &js_string(CANVAS_HOST))
-            .replace("__PATH__", &js_string(path))
-            .replace("__BINARY__", if mode == Mode::Binary { "true" } else { "false" });
+            .replace("__PATH__", &js_string(path));
 
         let started = Instant::now();
         // A file has to be read, encoded and marshalled whole, none of which a
@@ -257,14 +309,18 @@ impl Session {
             REQUEST_TIMEOUT
         };
         let deadline = started + budget;
+        // Kept for the timeout message. When the eval itself is what keeps
+        // failing — a page that never finished loading, a script that threw —
+        // the state is empty precisely when knowing why would help most.
+        let mut last_error: Option<String> = None;
         loop {
             self.ensure_open()?;
             match self.eval(&script) {
                 // A page mid-navigation cannot answer, and SSO navigates
                 // several times. Ordinary, so it is polled through rather than
                 // reported — the deadline is what ends this loop.
-                Err(_) => {}
-                Ok(v) => match v["state"].as_str().unwrap_or_default() {
+                Err(e) => last_error = Some(format!("{e:#}")),
+                Ok(mut v) => match v["state"].as_str().unwrap_or_default().to_string().as_str() {
                     "pending" => {}
                     "offsite" => {
                         return Ok(Outcome::Offsite(
@@ -273,29 +329,51 @@ impl Session {
                     }
                     "error" => {
                         let message = v["message"].as_str().unwrap_or("no reason given");
-                        bail!("the Canvas page could not request {path}: {message}");
+                        return Err(PageFailure(message.to_string()))
+                            .with_context(|| format!("the Canvas page could not request {path}"));
+                    }
+                    // Refused before the bytes were read, so the ceiling costs
+                    // one header rather than the memory it exists to bound.
+                    "toolarge" => {
+                        let bytes = v["bytes"].as_i64().unwrap_or(-1);
+                        bail!(
+                            "the file is {} — past the {} that can be pulled through the Canvas \
+                             page; download it from Canvas directly",
+                            if bytes < 0 {
+                                "larger than the ceiling".to_string()
+                            } else {
+                                crate::tools::format_size(bytes)
+                            },
+                            crate::tools::format_size(MAX_DOWNLOAD_BYTES)
+                        );
                     }
                     "response" => {
                         let status = v["status"].as_u64().unwrap_or(0);
-                        let body = v["body"].as_str().unwrap_or_default();
                         if status == 401 || status == 403 {
                             return Ok(Outcome::Unauthorized(status));
                         }
                         if !(200..300).contains(&status) {
                             bail!(
                                 "Canvas answered {status} for {path}: {}",
-                                crate::db::truncate(body.trim(), 200)
+                                crate::db::truncate(
+                                    v["body"].as_str().unwrap_or_default().trim(),
+                                    200
+                                )
                             );
                         }
                         if mode == Mode::Binary {
-                            return Ok(Outcome::Binary(
-                                v["b64"].as_str().unwrap_or_default().to_string(),
-                            ));
+                            // Taken rather than cloned: this string *is* the
+                            // file, so a copy of it costs another whole file.
+                            return Ok(Outcome::Binary(match v["b64"].take() {
+                                Value::String(encoded) => encoded,
+                                _ => bail!("the page returned no bytes for {path}"),
+                            }));
                         }
+                        let next = next_link(v["link"].as_str().unwrap_or_default());
                         return Ok(Outcome::Json {
-                            value: parse_body(body)
+                            value: parse_body(v["body"].as_str().unwrap_or_default())
                                 .with_context(|| format!("reading Canvas's answer to {path}"))?,
-                            next: next_link(v["link"].as_str().unwrap_or_default()),
+                            next,
                         });
                     }
                     other => bail!("the Canvas page reported an unknown state: {other}"),
@@ -303,7 +381,14 @@ impl Session {
             }
 
             if Instant::now() >= deadline {
-                bail!("Canvas did not answer {path} within {}s", budget.as_secs());
+                match last_error {
+                    Some(why) => bail!(
+                        "Canvas did not answer {path} within {}s — the page kept failing to run \
+                         the request: {why}",
+                        budget.as_secs()
+                    ),
+                    None => bail!("Canvas did not answer {path} within {}s", budget.as_secs()),
+                }
             }
             // A read taking this long is not a live session behaving normally,
             // so stop hiding what is happening.
@@ -361,9 +446,21 @@ impl Session {
     ///
     /// The cost is that bytes come back base64 through `eval_with_callback`
     /// instead of streaming, so this holds a whole file in memory a few times
-    /// over. `MAX_DOWNLOAD_BYTES` is what keeps that bounded, and a file past
-    /// it is named rather than silently skipped.
-    pub fn download(&self, url: &str, dest: &Path, on_stage: &dyn Fn(&str)) -> Result<u64> {
+    /// over. `MAX_DOWNLOAD_BYTES` is what keeps that bounded. The page refuses
+    /// anything past it before reading the body (see `REQUEST_JS`), which is
+    /// where the memory would actually be committed; the check here is what
+    /// makes the constant true for every caller regardless.
+    ///
+    /// `expected` is Canvas's own byte count for the file when it published
+    /// one. A short read otherwise writes a truncated deck that looks like a
+    /// successful download and gets proposed into the tree as real material.
+    pub fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        expected: Option<i64>,
+        on_stage: &dyn Fn(&str),
+    ) -> Result<u64> {
         let host = tauri::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
@@ -386,9 +483,46 @@ impl Session {
 
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encoded)
             .context("the page returned something that is not the file")?;
-        std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
+        drop(encoded);
+        let written = bytes.len() as i64;
+        if written > MAX_DOWNLOAD_BYTES {
+            bail!(
+                "the file is {} — past the {} that can be pulled through the Canvas page",
+                crate::tools::format_size(written),
+                crate::tools::format_size(MAX_DOWNLOAD_BYTES)
+            );
+        }
+        if let Some(expected) = expected.filter(|e| *e != written) {
+            bail!(
+                "only {} of the {} Canvas lists for this file came back",
+                crate::tools::format_size(written),
+                crate::tools::format_size(expected)
+            );
+        }
+        write_atomic(dest, &bytes)?;
         Ok(bytes.len() as u64)
     }
+}
+
+/// Writes through a temporary sibling, so a failure partway leaves the
+/// destination absent rather than truncated.
+///
+/// `fs::write` truncates in place, which for a download means a half-written
+/// slide deck sitting at the real name — indistinguishable from a complete one
+/// to the scanner that indexes it next. The temporary is dot-prefixed so a
+/// leftover from a killed process stays invisible to the scanner too.
+fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let tmp = dest.with_file_name(format!(".{name}.part"));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("moving into place at {}", dest.display()));
+    }
+    Ok(())
 }
 
 fn close_existing(app: &AppHandle) -> Result<()> {
@@ -507,11 +641,17 @@ const REQUEST_JS: &str = r#"
   var S = (window.__classhub_canvas = window.__classhub_canvas || {});
   var id = __ID__;
   var done = S[id];
-  if (done) { delete S[id]; delete S["p:" + id]; return done; }
+  // Returned without clearing the slot. The answer still has to survive being
+  // marshalled out of the page, and deleting it here would mean an eval that
+  // times out mid-flight loses the result *and* the record that anything was
+  // started — so the next poll would refetch a file that had already arrived.
+  // Rust releases the slot once it holds the answer.
+  if (done) return done;
   if (S["p:" + id]) return { state: "pending" };
   if (location.host !== __HOST__) return { state: "offsite", host: location.host };
 
   var binary = __BINARY__;
+  var max = __MAXBYTES__;
   S["p:" + id] = 1;
   fetch(__PATH__, {
     credentials: "same-origin",
@@ -526,8 +666,19 @@ const REQUEST_JS: &str = r#"
           S[id] = { state: "response", status: res.status, body: body, link: link };
         });
       }
+      // The ceiling is checked here because here is where the memory would be
+      // committed: every copy this function makes is a multiple of the file.
+      var declared = Number(res.headers.get("Content-Length") || -1);
+      if (declared > max) {
+        S[id] = { state: "toolarge", bytes: declared };
+        return;
+      }
       return res.arrayBuffer().then(function (buffer) {
         var bytes = new Uint8Array(buffer);
+        if (bytes.length > max) {
+          S[id] = { state: "toolarge", bytes: bytes.length };
+          return;
+        }
         var chunks = [];
         // btoa takes a string, and String.fromCharCode.apply overflows the
         // argument limit on anything megabyte-sized — hence the chunking.
@@ -546,6 +697,19 @@ const REQUEST_JS: &str = r#"
       S[id] = { state: "error", message: String((e && e.message) || e) };
     });
   return { state: "pending" };
+})()
+"#;
+
+/// Frees one request's slot. Separate from `REQUEST_JS` because the page must
+/// not forget an answer until Rust has actually received it.
+const RELEASE_JS: &str = r#"
+(function () {
+  var S = window.__classhub_canvas;
+  if (!S) return { state: "gone" };
+  var id = __ID__;
+  delete S[id];
+  delete S["p:" + id];
+  return { state: "released" };
 })()
 "#;
 
