@@ -122,16 +122,11 @@ fn run(
     }
 
     on_stage("Opening Canvas…");
+    // Whatever happens below, the window closes when `session` goes out of
+    // scope: it *is* the app's reach, so leaving it open would leave the reach
+    // open. `Session`'s own `Drop` is what guarantees that on every path,
+    // including the ones where opening it is what failed.
     let session = Session::open(app, on_stage)?;
-    // Whatever happens below, the window closes: it *is* the app's reach, so
-    // leaving it open would leave the reach open.
-    struct Closer<'a>(&'a Session);
-    impl Drop for Closer<'_> {
-        fn drop(&mut self) {
-            self.0.close();
-        }
-    }
-    let _closer = Closer(&session);
 
     on_stage("Reading your courses…");
     let courses = session.get_all("/api/v1/courses?enrollment_state=active", on_stage)?;

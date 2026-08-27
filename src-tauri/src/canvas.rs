@@ -88,11 +88,22 @@ pub const MAX_DOWNLOAD_BYTES: i64 = 48 * 1024 * 1024;
 /// The window *is* the client. It stays open for the duration of a sync and is
 /// closed after, because there is no credential to keep: closing it is what
 /// ends the app's reach.
+///
+/// That makes closing it an obligation rather than a courtesy, so it belongs to
+/// the value's lifetime. Dropping a `Session` closes its window — including on
+/// the paths where `open` itself fails, which would otherwise leave a signed-in
+/// webview alive with no way for anyone to see or close it.
 pub struct Session {
     app: AppHandle,
     window: WebviewWindow,
     shown: AtomicBool,
     counter: AtomicU64,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.window.close();
+    }
 }
 
 enum Outcome {
@@ -140,6 +151,9 @@ impl Session {
             shown: AtomicBool::new(false),
             counter: AtomicU64::new(0),
         };
+        // Built before the probe, so a refusal here drops `session` and its
+        // `Drop` closes the window. Returning the error without that would
+        // strand a hidden, signed-in webview the user cannot even see.
         session.await_session(on_stage)?;
         Ok(session)
     }
@@ -216,7 +230,6 @@ impl Session {
                 }
             }
             if Instant::now() >= deadline {
-                let _ = self.window.close();
                 bail!(
                     "timed out waiting for the Canvas sign-in. Nothing was read, and \
                      nothing is stored — starting the sync again reopens the window."
@@ -375,10 +388,6 @@ impl Session {
             .context("the page returned something that is not the file")?;
         std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
         Ok(bytes.len() as u64)
-    }
-
-    pub fn close(&self) {
-        let _ = self.window.close();
     }
 }
 
