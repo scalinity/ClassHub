@@ -121,6 +121,11 @@ const MAX_VOCABULARY: usize = 30;
 /// holding the same kind of document under two different names. Sorted
 /// most-shared first: that is the order convergence should follow.
 ///
+/// Counted case-insensitively and reported in whichever casing is most used:
+/// "Slides" in one class and "slides" in another are one convention drifting,
+/// not two names, and counting them apart understates exactly the convergence
+/// this list exists to measure.
+///
 /// Read from the file index rather than the disk, so it costs a query rather
 /// than four directory walks. The one thing that misses is an empty folder —
 /// which is not a convention worth propagating anyway.
@@ -129,7 +134,8 @@ pub fn folder_vocabulary(conn: &Connection) -> Result<Vec<(String, usize)>> {
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     })?;
-    let mut by_name: HashMap<String, HashSet<i64>> = HashMap::new();
+    // lowercased name -> (the classes using it, how often each spelling appears)
+    let mut by_name: HashMap<String, (HashSet<i64>, HashMap<String, usize>)> = HashMap::new();
     for row in rows {
         let (class_id, rel_path) = row?;
         let mut segments: Vec<&str> = rel_path.split('/').collect();
@@ -139,15 +145,20 @@ pub fn folder_vocabulary(conn: &Connection) -> Result<Vec<(String, usize)>> {
             if segment.is_empty() {
                 continue;
             }
-            by_name
-                .entry(segment.to_string())
-                .or_default()
-                .insert(class_id);
+            let entry = by_name.entry(segment.to_lowercase()).or_default();
+            entry.0.insert(class_id);
+            *entry.1.entry(segment.to_string()).or_default() += 1;
         }
     }
     let mut names: Vec<(String, usize)> = by_name
-        .into_iter()
-        .map(|(name, classes)| (name, classes.len()))
+        .into_values()
+        .map(|(classes, spellings)| {
+            let mut spellings: Vec<(String, usize)> = spellings.into_iter().collect();
+            // Most used first; alphabetical breaks a tie, so the answer does
+            // not depend on hash order.
+            spellings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            (spellings.remove(0).0, classes.len())
+        })
         .collect();
     names.sort_by(|a, b| {
         b.1.cmp(&a.1)
@@ -484,6 +495,7 @@ mod tests {
                (2, 'Syllabus/syllabus.pdf'),
                (2, 'Slides/intro.pptx'),
                (3, 'Course Info/syllabus.pdf'),
+               (3, 'slides/lecture.pptx'),
                (3, 'loose-at-the-root.pdf');",
         )
         .expect("fixture");
@@ -502,9 +514,13 @@ mod tests {
         // shared, and one class with fifty decks does not make "Slides" a
         // convention.
         assert_eq!(count("Syllabus"), 2);
-        assert_eq!(count("Slides"), 2);
         assert_eq!(count("Reading Material"), 1);
         assert_eq!(count("Course Info"), 1);
+        // Casing drift is one convention, not two names — class 3's "slides"
+        // is the same folder as the other two's "Slides", and the list reports
+        // the spelling most of them use.
+        assert_eq!(count("Slides"), 3);
+        assert_eq!(count("slides"), 0);
 
         // Most-shared first — the order convergence should follow.
         assert!(
@@ -600,5 +616,36 @@ mod tests {
             vec!["Module 1/source.md"]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cap is what keeps a long tail of one-off folders — "Week 01 — …",
+    /// "Week 02 — …" — from crowding the shared names out of the prompt, which
+    /// are the whole reason the list is sent.
+    #[test]
+    fn the_vocabulary_keeps_the_names_that_are_actually_shared() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE files (class_id INTEGER, rel_path TEXT);")
+            .expect("fixture");
+        // One class with a long tail of folders only it uses.
+        for week in 1..=40 {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path) VALUES (1, ?1)",
+                [format!("Week {week:02} — Topic/notes.md")],
+            )
+            .expect("insert");
+        }
+        // And one name three classes share, added last so position cannot come
+        // from insertion order.
+        for class_id in 1..=3 {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path) VALUES (?1, 'Slides/deck.pptx')",
+                [class_id],
+            )
+            .expect("insert");
+        }
+
+        let vocabulary = folder_vocabulary(&conn).expect("vocabulary");
+        assert_eq!(vocabulary.len(), super::MAX_VOCABULARY, "the cap did not hold");
+        assert_eq!(vocabulary[0], ("Slides".to_string(), 3), "{vocabulary:?}");
     }
 }

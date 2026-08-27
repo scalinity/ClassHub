@@ -127,8 +127,30 @@ impl std::fmt::Display for PageFailure {
 
 impl std::error::Error for PageFailure {}
 
+/// Canvas serving the page but refusing one collection, with the session
+/// demonstrably live. A course whose Files tab the professor disabled answers
+/// 401 for `/files` while `/users/self` answers 200 — a course setting rather
+/// than a lapsed sign-in, and the two want different things from the reader.
+#[derive(Debug)]
+pub struct Refused {
+    pub path: String,
+    pub status: u64,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the session is live but Canvas will not share {} for this course (status {})",
+            self.path, self.status
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
 enum Outcome {
-    Json { value: Value, next: Option<String> },
+    Json { value: Value, next: NextPage },
     /// A file's bytes, base64 as the page encoded them.
     Binary(String),
     /// Canvas served the page but refused the call — the session lapsed.
@@ -196,14 +218,21 @@ impl Session {
                 other => bail!("{path} returned {} rather than a list", kind_of(&other)),
             }
             match next {
-                Some(n) => url = n,
-                None => return Ok(items),
+                NextPage::Follow(next) => url = next,
+                NextPage::End => return Ok(items),
+                // Bailing rather than returning what was collected. A short
+                // list handed back as a complete one is the failure mode here;
+                // an error the reader can see is not.
+                NextPage::Refused(why) => bail!(
+                    "{path} has more pages, but Canvas offered {why} — stopping rather than \
+                     reporting a partial list as the whole collection"
+                ),
             }
         }
         bail!("{path} kept paginating past {MAX_PAGES} pages — stopping rather than looping")
     }
 
-    fn get_page(&self, path: &str, on_stage: &dyn Fn(&str)) -> Result<(Value, Option<String>)> {
+    fn get_page(&self, path: &str, on_stage: &dyn Fn(&str)) -> Result<(Value, NextPage)> {
         match self.request(path, Mode::Json)? {
             Outcome::Json { value, next } => Ok((value, next)),
             // The session lapsed partway through a sync. Expected rather than
@@ -213,9 +242,15 @@ impl Session {
                 self.await_session(on_stage)?;
                 match self.request(path, Mode::Json)? {
                     Outcome::Json { value, next } => Ok((value, next)),
-                    Outcome::Unauthorized(status) => {
-                        bail!("Canvas refused {path} with {status} even after signing in")
-                    }
+                    // `await_session` just proved the session is live, so a
+                    // second refusal is this course's setting rather than a
+                    // sign-in problem — and blaming the sign-in sends the
+                    // reader after the wrong thing.
+                    Outcome::Unauthorized(status) => Err(Refused {
+                        path: path.to_string(),
+                        status,
+                    })
+                    .map_err(anyhow::Error::from),
                     // Worth naming: landing on login.ufl.edu means SSO bounced
                     // rather than that Canvas is broken, and those need
                     // different things from the reader.
@@ -561,41 +596,61 @@ fn parse_body(body: &str) -> Result<Value> {
     })
 }
 
+/// What a response's `Link` header says about the rest of the collection.
+#[derive(Debug, PartialEq)]
+enum NextPage {
+    /// No `rel="next"`: this was the last page.
+    End,
+    /// A same-origin path to fetch next.
+    Follow(String),
+    /// There is a next page and it cannot be followed. Distinct from `End` on
+    /// purpose — treating the two alike is what turns a truncated collection
+    /// into one that looks complete, which SPEC §7.2 names as the failure this
+    /// whole walk exists to avoid.
+    Refused(String),
+}
+
 /// The `rel="next"` URL from a `Link` header, as a same-origin path.
 ///
 /// Returned as a path rather than the absolute URL Canvas sends, so the next
-/// fetch stays same-origin by construction: a `Link` pointing at another host
-/// ends the walk instead of sending the session's cookies somewhere new.
-fn next_link(header: &str) -> Option<String> {
+/// fetch stays same-origin by construction: nothing downstream can be handed a
+/// URL that would send this session's cookies to another host.
+fn next_link(header: &str) -> NextPage {
     for part in header.split(',') {
         let mut segments = part.split(';');
         let Some(raw) = segments.next() else { continue };
-        let url = raw
-            .trim()
-            .strip_prefix('<')
-            .and_then(|u| u.strip_suffix('>'))
-            .unwrap_or_default();
+        let trimmed = raw.trim();
         let is_next = segments.any(|s| {
             let s = s.trim().trim_end_matches(';');
             s.eq_ignore_ascii_case("rel=\"next\"") || s.eq_ignore_ascii_case("rel=next")
         });
-        if !is_next || url.is_empty() {
+        if !is_next {
             continue;
         }
+        let url = trimmed
+            .strip_prefix('<')
+            .and_then(|u| u.strip_suffix('>'))
+            .unwrap_or_default();
+        if url.is_empty() {
+            return NextPage::Refused(format!("a next link that is not a URL ({trimmed})"));
+        }
         let Ok(parsed) = tauri::Url::parse(url) else {
-            continue;
+            return NextPage::Refused(format!("a next URL that will not parse ({url})"));
         };
         if parsed.host_str() != Some(CANVAS_HOST) {
-            continue;
+            return NextPage::Refused(format!(
+                "a next page at {} rather than {CANVAS_HOST}",
+                parsed.host_str().unwrap_or("nowhere")
+            ));
         }
         let mut path = parsed.path().to_string();
         if let Some(query) = parsed.query() {
             path.push('?');
             path.push_str(query);
         }
-        return Some(path);
+        return NextPage::Follow(path);
     }
-    None
+    NextPage::End
 }
 
 /// Canvas serves 10 items per page by default and caps `per_page` at 100.
@@ -732,24 +787,31 @@ mod tests {
         }
     }
 
-    /// A refusal must be read as text in both modes. Read as a file, a 403's
-    /// HTML body would be base64-encoded and written into the inbox as though
-    /// it were the slide deck.
+    /// Drives the script itself against a mock page.
+    ///
+    /// Nothing in Rust can execute it, and asserting that a phrase appears in
+    /// the source passes just as happily when the branch is inverted — writing
+    /// `!binary || res.ok` keeps the substring and encodes a 403's HTML body
+    /// into the inbox as though it were the slide deck. The harness covers the
+    /// behaviours that actually matter: the host check before the fetch, a
+    /// refusal read as text in both modes, the chunking across its 0x8000
+    /// boundary, the ceiling refused before the body is read, and the result
+    /// surviving being read.
     #[test]
-    fn a_refused_download_is_read_as_text_not_as_a_file() {
+    fn the_request_script_behaves_against_a_mock_page() {
+        let out = std::process::Command::new("node")
+            .args(["tests/canvas_request.mjs", "src/canvas.rs"])
+            .output();
+        let Ok(out) = out else {
+            eprintln!("skipping the request harness: node is not on PATH");
+            return;
+        };
         assert!(
-            REQUEST_JS.contains("!binary || !res.ok"),
-            "a non-OK binary response would be encoded as file bytes"
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
-    }
-
-    /// The host check must precede the fetch. Reversed, an unfinished SSO
-    /// produces a CORS error that reads as a broken Canvas integration.
-    #[test]
-    fn the_script_checks_its_origin_before_fetching() {
-        let check = REQUEST_JS.find("location.host").expect("the host check");
-        let fetch = REQUEST_JS.find("fetch(").expect("the fetch");
-        assert!(check < fetch, "the fetch can fire off-origin");
     }
 
     #[test]
@@ -757,22 +819,32 @@ mod tests {
         let header = "<https://ufl.instructure.com/api/v1/courses?page=2&per_page=100>; rel=\"next\",\
                       <https://ufl.instructure.com/api/v1/courses?page=9>; rel=\"last\"";
         assert_eq!(
-            next_link(header).as_deref(),
-            Some("/api/v1/courses?page=2&per_page=100")
+            next_link(header),
+            NextPage::Follow("/api/v1/courses?page=2&per_page=100".into())
         );
 
         // Only `next` — `current`, `first` and `last` are on every response, and
         // following `last` or `first` would loop forever.
         let no_next = "<https://ufl.instructure.com/api/v1/courses?page=1>; rel=\"current\",\
                        <https://ufl.instructure.com/api/v1/courses?page=1>; rel=\"first\"";
-        assert_eq!(next_link(no_next), None);
+        assert_eq!(next_link(no_next), NextPage::End);
+        assert_eq!(next_link(""), NextPage::End);
+    }
 
-        // A Link header pointing elsewhere ends the walk rather than sending
-        // this session's cookies to another host.
+    /// A next page that cannot be followed is not the end of the collection.
+    /// Read as one, the walk would hand back a short list as a complete one —
+    /// which is the whole failure mode following `next` exists to prevent.
+    #[test]
+    fn an_unusable_next_link_is_not_the_end_of_the_collection() {
+        // Pointing elsewhere: the walk stops rather than sending this session's
+        // cookies to another host, and says so rather than claiming completion.
         let offsite = "<https://evil.example.com/api/v1/courses?page=2>; rel=\"next\"";
-        assert_eq!(next_link(offsite), None);
-
-        assert_eq!(next_link(""), None);
+        assert!(matches!(next_link(offsite), NextPage::Refused(_)));
+        assert!(matches!(
+            next_link("<not a url>; rel=\"next\""),
+            NextPage::Refused(_)
+        ));
+        assert!(matches!(next_link("; rel=\"next\""), NextPage::Refused(_)));
     }
 
     #[test]

@@ -217,9 +217,15 @@ fn sync_class(
         Ok(())
     })?;
 
-    sync_units(app, session, class, course_id, outcome, on_stage)?;
-    sync_assignments(app, session, class, course_id, outcome, on_stage)?;
-    sync_files(app, session, class, course_id, outcome, on_stage)?;
+    if let Err(e) = sync_units(app, session, class, course_id, outcome, on_stage) {
+        note_or_fail(outcome, e, "modules")?;
+    }
+    if let Err(e) = sync_assignments(app, session, class, course_id, outcome, on_stage) {
+        note_or_fail(outcome, e, "assignments")?;
+    }
+    if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
+        note_or_fail(outcome, e, "files")?;
+    }
 
     // Stamped only now. Written alongside the mapping it claimed a sync that
     // had not happened yet: all three reads can fail, the caller records that
@@ -233,6 +239,22 @@ fn sync_class(
         Ok(())
     })?;
     Ok(())
+}
+
+/// A course refusing one of its tabs is a setting, not a failed sync.
+///
+/// A professor can disable Files or Modules for a course; Canvas then answers
+/// 401 for that collection while the session stays demonstrably live. That is
+/// worth a line, and the other two reads still count — failing the class over
+/// it would throw away the assignments that did come across.
+fn note_or_fail(outcome: &mut ClassOutcome, error: anyhow::Error, what: &str) -> Result<()> {
+    if error.chain().any(|cause| cause.is::<crate::canvas::Refused>()) {
+        outcome
+            .notes
+            .push(format!("Canvas will not share this course's {what} — {error}"));
+        return Ok(());
+    }
+    Err(error)
 }
 
 /// Maps a `classes` row to a Canvas course by course code, exactly.
@@ -1078,5 +1100,52 @@ mod tests {
     fn writes_whole_point_values_without_a_decimal() {
         assert_eq!(trim_number(100.0), "100");
         assert_eq!(trim_number(2.5), "2.5");
+    }
+
+    /// The retry fires for a fetch that never completed, and for nothing else.
+    /// A refusal would answer the same way twice, and a retry loop is the one
+    /// thing that could make a sync approach the rate limit.
+    #[test]
+    fn only_a_page_level_failure_is_retried() {
+        let page = anyhow::Error::from(crate::canvas::PageFailure("Load failed".into()))
+            .context("the Canvas page could not request /files/9/download");
+        assert!(is_transient(&page));
+
+        let refused = anyhow::anyhow!("Canvas answered 404 for /files/9/download: not found");
+        assert!(!is_transient(&refused));
+
+        // The rule used to read the rendered chain, which by this point also
+        // carries the request path and 200 characters of Canvas's own response
+        // body — so a maintenance page merely containing the word earned a
+        // retry, and a WebKit rewording would have silently stopped one.
+        let prose = anyhow::anyhow!(
+            "Canvas answered 500 for /files/9: <h1>network maintenance</h1> Load failed"
+        );
+        assert!(!is_transient(&prose), "matched on prose again");
+    }
+
+    /// What the whole re-sync no-op rests on: material the tree already holds
+    /// has to be recognized from a Canvas listing entry, which knows only a
+    /// name and a size.
+    #[test]
+    fn recognizes_material_the_class_already_holds() {
+        let conn = crate::db::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind) VALUES
+               (1, 'Slides/week1.pptx', 'a', 100, 0, 'pptx'),
+               (1, 'deck.pdf', 'b', 200, 0, 'pdf'),
+               (2, 'Slides/other.pptx', 'c', 300, 0, 'pptx');",
+        )
+        .expect("fixture");
+
+        let seen = indexed_files(&conn, 1).expect("indexed");
+        assert!(seen.contains(&("week1.pptx".to_string(), 100)), "nested file");
+        assert!(seen.contains(&("deck.pdf".to_string(), 200)), "file at the class root");
+        assert!(
+            !seen.contains(&("other.pptx".to_string(), 300)),
+            "another class's file counted as this one's"
+        );
+        // Same name, different bytes: a revised deck is not the one on disk.
+        assert!(!seen.contains(&("week1.pptx".to_string(), 101)));
     }
 }
