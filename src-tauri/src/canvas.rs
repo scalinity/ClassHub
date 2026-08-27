@@ -271,12 +271,16 @@ impl Session {
         let mut asked = false;
         loop {
             match self.request("/api/v1/users/self", Mode::SignIn)? {
-                Outcome::Json { .. } | Outcome::Binary(_) => {
+                Outcome::Json { .. } => {
                     if asked {
                         on_stage("Signed in — reading your courses…");
                     }
                     return Ok(());
                 }
+                // `Mode::SignIn` never sets binary mode, so this cannot happen
+                // — and reading it as a successful sign-in would have been the
+                // wrong way to be wrong about it.
+                Outcome::Binary(_) => bail!("the sign-in probe answered with a file"),
                 Outcome::Unauthorized(_) | Outcome::Offsite(_) => {
                     if !asked {
                         asked = true;

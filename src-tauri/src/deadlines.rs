@@ -669,9 +669,11 @@ fn split_output(result_text: &str) -> Result<(Vec<serde_json::Value>, Vec<serde_
 
 /// Records the divisions the syllabus declared, as SPEC §7.2's middle source.
 ///
-/// Failures here are reported, never propagated: the deadlines half of the
-/// scan has already succeeded by this point, and losing it because a week
-/// entry was malformed would be the wrong trade.
+/// Failures here are reported, never propagated: the two halves of a scan are
+/// independent findings out of one document, and losing the deadlines because
+/// a week entry was malformed would be the wrong trade. Run before the
+/// deadlines block for the same reason in reverse — a scan whose deadline half
+/// is unusable has still read the schedule, and that is worth keeping.
 fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Option<String> {
     if raw.is_empty() {
         return None;

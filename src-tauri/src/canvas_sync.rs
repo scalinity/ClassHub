@@ -740,15 +740,7 @@ fn canvas_folder_path(
     folders: &[Value],
     vocabulary: &[(String, usize)],
 ) -> Option<String> {
-    let folder_id = file["folder_id"].as_i64()?;
-    let full_name = folders
-        .iter()
-        .find(|f| f["id"].as_i64() == Some(folder_id))?["full_name"]
-        .as_str()?;
-    let trimmed = full_name
-        .trim()
-        .trim_start_matches("course files")
-        .trim_matches('/');
+    let trimmed = folder_full_name(file, folders)?;
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unfiled") {
         return None;
     }
@@ -775,16 +767,28 @@ fn canvas_folder_path(
 /// Canvas's own name for the folder, before the vocabulary is applied — only
 /// used to say so in the reasoning when the two differ.
 fn raw_canvas_folder(file: &Value, folders: &[Value]) -> Option<String> {
+    let trimmed = folder_full_name(file, folders)?;
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The professor's own path for a file's folder, with Canvas's "course files"
+/// root stripped.
+///
+/// One reader, so the two callers cannot come to disagree about what the root
+/// is — the copy that lacked the `unfiled` check was reachable only because of
+/// the order the caller happened to use them in.
+fn folder_full_name<'a>(file: &Value, folders: &'a [Value]) -> Option<&'a str> {
     let folder_id = file["folder_id"].as_i64()?;
     let full_name = folders
         .iter()
         .find(|f| f["id"].as_i64() == Some(folder_id))?["full_name"]
         .as_str()?;
-    let trimmed = full_name
-        .trim()
-        .trim_start_matches("course files")
-        .trim_matches('/');
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    Some(
+        full_name
+            .trim()
+            .trim_start_matches("course files")
+            .trim_matches('/'),
+    )
 }
 
 /// A Canvas folder name in the tree's own words, where the tree has a word.

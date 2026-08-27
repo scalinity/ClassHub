@@ -61,6 +61,11 @@ pub struct NewUnit {
 
 /// canvas > syllabus > folder. Higher wins; an equal source refreshes its own
 /// rows, which is what makes a re-sync an update rather than a duplicate.
+///
+/// `list_units`' `ORDER BY` encodes the same order in SQL. Two hand-kept
+/// orderings, because binding it once would mean building the clause with
+/// `format!` — so a fourth source means changing both, and this is the note
+/// saying so.
 fn rank(source: &str) -> u8 {
     match source {
         "canvas" => 3,
@@ -75,7 +80,7 @@ fn rank(source: &str) -> u8 {
 /// nonsense: a folder called "Module 1" lands between Week 1 and Week 2 because
 /// both call themselves first. Sorting by source before ordinal keeps each
 /// source's own sequence intact and puts what the course actually declared
-/// above what the app merely inferred.
+/// first. The `CASE` repeats `rank()`'s order in SQL — see the note there.
 pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
     let mut stmt = conn.prepare(
         "SELECT id, ordinal, kind, name, rel_path, starts_on, ends_on, source
