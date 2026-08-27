@@ -689,13 +689,19 @@ fn canvas_folder_path(
     // segment that sanitizes to nothing drops the whole path rather than
     // silently reparenting the file one level up.
     let cleaned: Option<Vec<String>> = trimmed.split('/').map(|s| sanitize_name(s.trim())).collect();
-    Some(
-        cleaned?
-            .iter()
-            .map(|segment| canonical_segment(segment, vocabulary))
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
+    let mut path: Vec<String> = Vec::new();
+    for segment in cleaned? {
+        let mapped = canonical_segment(&segment, vocabulary);
+        // Mapping a child onto a name already above it would nest a folder
+        // inside itself — "Coding Material/Coding Material" — which is not
+        // where the professor filed anything. Canvas's own name stands there.
+        if path.iter().any(|ancestor| ancestor.eq_ignore_ascii_case(&mapped)) {
+            path.push(segment);
+        } else {
+            path.push(mapped);
+        }
+    }
+    Some(path.join("/"))
 }
 
 /// Canvas's own name for the folder, before the vocabulary is applied — only
@@ -718,19 +724,36 @@ fn raw_canvas_folder(file: &Value, folders: &[Value]) -> Option<String> {
 /// Two matches count, and nothing else: the same name in different casing, and
 /// a vocabulary name the Canvas one ends with on a word boundary ("Lecture
 /// Slides" → "Slides"). Anything looser starts renaming folders on a
-/// resemblance, which is worse than a second folder — the vocabulary is sorted
-/// most-shared first, so the first match is the most widely used name.
+/// resemblance, which is worse than a second folder.
+///
+/// The exact rule is exhausted before the suffix rule is tried at all. Testing
+/// both per entry meant the first *entry* won rather than the better *match*,
+/// so a suffix hit on a more widely shared name beat an exact hit on a less
+/// shared one — "Reading Material" became "Material" whenever "Material"
+/// happened to rank higher. Within each rule the vocabulary is sorted
+/// most-shared first, which is the order convergence should follow.
 fn canonical_segment(segment: &str, vocabulary: &[(String, usize)]) -> String {
     for (name, _) in vocabulary {
         if name.eq_ignore_ascii_case(segment) {
             return name.clone();
         }
-        let (lower_segment, lower_name) = (segment.to_lowercase(), name.to_lowercase());
-        if let Some(prefix) = lower_segment.strip_suffix(&lower_name) {
-            if prefix.ends_with(' ') {
-                return name.clone();
-            }
+    }
+    let lower_segment = segment.to_lowercase();
+    for (name, _) in vocabulary {
+        let Some(prefix) = lower_segment.strip_suffix(&name.to_lowercase()) else {
+            continue;
+        };
+        if !prefix.ends_with(' ') {
+            continue;
         }
+        // A qualifier carrying a number is the thing that tells one division's
+        // folder from another's: "Week 2 Slides" and "Week 3 Slides" are two
+        // folders, and dropping the prefix would merge them into one and file
+        // three weeks of material together.
+        if prefix.chars().any(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        return name.clone();
     }
     segment.to_string()
 }
@@ -952,8 +975,47 @@ mod tests {
         assert!(same("Preslides"), "matched mid-word");
         assert!(same("Slides Archive"), "matched a prefix, not a suffix");
         assert!(same("Footnotes"), "matched mid-word");
-        assert_eq!(canonical_segment("Week 1 Slides", &vocabulary), "Slides");
+        assert_eq!(canonical_segment("Lecture Slides", &vocabulary), "Slides");
         assert_eq!(canonical_segment("anything", &[]), "anything");
+    }
+
+    /// A numbered qualifier is what tells one division's folder from another's.
+    /// Dropping it merges every week's folder into a single one, and then the
+    /// files inside them collide by name.
+    #[test]
+    fn a_numbered_qualifier_survives_the_vocabulary() {
+        let vocabulary = vec![("Slides".to_string(), 3)];
+        assert_eq!(canonical_segment("Week 2 Slides", &vocabulary), "Week 2 Slides");
+        assert_eq!(canonical_segment("Week 3 Slides", &vocabulary), "Week 3 Slides");
+    }
+
+    /// An exact match beats a suffix match on a more widely shared name. Tested
+    /// per entry, the first *entry* won rather than the better *match*.
+    #[test]
+    fn an_exact_name_outranks_a_more_popular_suffix() {
+        let vocabulary = vec![("Material".to_string(), 4), ("Reading Material".to_string(), 2)];
+        assert_eq!(
+            canonical_segment("Reading Material", &vocabulary),
+            "Reading Material"
+        );
+        // And the suffix rule still applies where nothing matches exactly.
+        assert_eq!(canonical_segment("Supplementary Material", &vocabulary), "Material");
+    }
+
+    /// Once a folder's own name is in the vocabulary, mapping its children onto
+    /// it would nest it inside itself and propose a different destination than
+    /// the sync before — which is what "re-syncing is a no-op" rules out.
+    #[test]
+    fn a_child_folder_is_not_renamed_onto_its_parent() {
+        let vocabulary = vec![("Coding Material".to_string(), 2)];
+        let folders = vec![json!({
+            "id": 3,
+            "full_name": "course files/Coding Material/Week 2 Coding Material"
+        })];
+        assert_eq!(
+            canvas_folder_path(&json!({"folder_id": 3}), &folders, &vocabulary).as_deref(),
+            Some("Coding Material/Week 2 Coding Material")
+        );
     }
 
     /// Canvas names are the professor's, not a path builder's.
