@@ -147,7 +147,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     if routed_to_inbox {
         crate::sorter::enqueue_followup(app, req.class_id);
     }
-    emit_hub_change(app, "materials");
+    emit_hub_change(app, "files");
 
     let mut speakers: Vec<String> = Vec::new();
     for cue in &cues {
@@ -419,7 +419,9 @@ pub fn finalize_digest(
     )?;
     drop(conn);
 
-    emit_hub_change(app, "guides");
+    // No hub-change push: this runs before the job row leaves `running`, and
+    // the settle edge is what refetches guides — the same path module and
+    // master guides take, and the reason `guides::finalize_job` emits nothing.
     Ok(format!("{} · {}", result.title, payload.date))
 }
 

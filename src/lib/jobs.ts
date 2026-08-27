@@ -213,7 +213,11 @@ async function refreshJobs() {
   // here rather than encoding a job counter into the query key keeps the keys
   // stable, and matches how hub-changed already drives every other refetch.
   for (const job of settled) {
-    if (job.kind === "module_guide" || job.kind === "master_guide") {
+    if (
+      job.kind === "module_guide" ||
+      job.kind === "master_guide" ||
+      job.kind === "lecture_digest"
+    ) {
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
     } else if (job.kind === "practice") {
       void queryClient.invalidateQueries({ queryKey: ["practice"] });
