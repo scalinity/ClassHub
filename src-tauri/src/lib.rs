@@ -374,9 +374,9 @@ fn list_units(state: tauri::State<Db>, class_id: i64) -> Result<Vec<units::UnitI
 
 /// When Canvas data last came across, and how many classes are linked.
 ///
-/// Deliberately not a "connected" state: no credential is stored, so there is
-/// nothing whose health could be reported. A session either still exists in the
-/// webview or it does not, and the only way to find out is to sync.
+/// Deliberately not a "connected" state: holding a session cookie is not the
+/// same as Canvas still honouring it, so there is nothing whose health could be
+/// reported. The only way to find out is to sync.
 #[tauri::command(async)]
 fn canvas_status(state: tauri::State<Db>) -> Result<canvas_sync::CanvasStatus, String> {
     let conn = db::lock(&state.0);

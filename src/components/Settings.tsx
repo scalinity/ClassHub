@@ -230,9 +230,10 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
  * SPEC §7.2 — Canvas.
  *
  * The section shows when data last came across and nothing more, because
- * nothing more is true: no credential is stored, so there is no connection
- * whose health could be reported. A green "connected" chip would stay green
- * long after the session behind it had expired.
+ * nothing more is true: holding a session cookie is not the same as Canvas
+ * still honouring it, so there is no connection whose health could be reported.
+ * A green "connected" chip would stay green long after the session behind it
+ * had expired.
  */
 function CanvasSection() {
   const { data: status } = useQuery({

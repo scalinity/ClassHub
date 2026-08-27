@@ -29,7 +29,9 @@ use crate::db::{lock, now, set_setting, setting, truncate, with_conn};
 const API_BASE: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 /// SPEC §9: the key lives in the macOS Keychain under service `classhub`.
-const KEYCHAIN_SERVICE: &str = "classhub";
+/// Shared with `canvas.rs`, which keeps the Canvas session cookies under the
+/// same service — one literal, so the two accounts cannot drift apart.
+pub(crate) const KEYCHAIN_SERVICE: &str = "classhub";
 const KEYCHAIN_USER: &str = "anthropic-api-key";
 const MODEL_SETTING: &str = "chat_model";
 const EFFORT_SETTING: &str = "chat_effort";

@@ -899,8 +899,9 @@ fn propose_move(
 #[serde(rename_all = "camelCase")]
 pub struct CanvasStatus {
     /// The most recent per-class sync, or None if nothing has ever synced.
-    /// There is no "connected" state to report: no credential is stored, so
-    /// the only honest thing to say is when data last came across.
+    /// There is no "connected" state to report: holding a session cookie says
+    /// nothing about whether Canvas still honours it, so the only honest thing
+    /// to say is when data last came across.
     pub last_synced_at: Option<i64>,
     pub classes_linked: i64,
     pub host: String,

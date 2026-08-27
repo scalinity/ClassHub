@@ -22,12 +22,14 @@
 //!
 //! Two consequences worth stating plainly:
 //!
-//! - **Nothing is stored.** No token is minted, nothing goes in the Keychain or
-//!   the settings table. The app's reach expires with the session, which is a
-//!   narrower exposure than the token the administrators disabled. It also
-//!   means there is no "connected" state to show: a sync either finds a live
-//!   session or asks for a sign-in, and the second is ordinary rather than an
-//!   error.
+//! - **Nothing is minted, and the cookie is kept.** No token is created and
+//!   `POST /users/:id/tokens` stays off-limits (SPEC §1); what the Keychain
+//!   holds is a copy of the cookie Canvas already set for its own host, so the
+//!   app's reach stays the reach the sign-in granted. Keeping it is what makes
+//!   a relaunch cheap: Canvas issues that cookie with no expiry, WKWebView
+//!   keeps expiry-less cookies in memory only, and quitting the app was
+//!   therefore ending the session every time — see `remember`. Canvas decides
+//!   when it dies, and a refusal is what throws the copy away.
 //! - **This is undocumented.** Session auth appears nowhere in Instructure's
 //!   OAuth2 or access-token references (SPEC §1). If a Canvas change breaks it,
 //!   the answer is the syllabus fallback, not something cleverer.
@@ -43,7 +45,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::webview::Cookie;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const CANVAS_HOST: &str = "ufl.instructure.com";
@@ -54,6 +58,18 @@ const WINDOW_LABEL: &str = "canvas-session";
 /// room — but bounded, so a forgotten window is not a hang.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SIGN_IN_POLL: Duration = Duration::from_millis(1_000);
+/// How long a window that has not navigated anywhere yet is given before it is
+/// treated as a Canvas that wants a sign-in.
+///
+/// A window spends its first moments on the initial empty document, which
+/// reports no host at all. Read as "somewhere other than Canvas", that
+/// transient reveals a window and throws away a restored cookie a moment before
+/// that cookie would have worked. This covers only that reading: a 401 from
+/// Canvas, or a page genuinely at login.ufl.edu, is acted on at once. Waiting
+/// on *those* would be actively harmful — a hidden webview has its JavaScript
+/// throttled by macOS, and Duo's prompt boots into a painted shell with no body
+/// if it starts up off screen.
+const SIGN_IN_SETTLE: Duration = Duration::from_secs(5);
 /// One API call, including the poll for its in-page completion.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const REQUEST_POLL: Duration = Duration::from_millis(250);
@@ -85,11 +101,11 @@ pub const MAX_DOWNLOAD_BYTES: i64 = 48 * 1024 * 1024;
 
 /// A live Canvas session — in practice, the webview the reads are issued from.
 ///
-/// The window *is* the client. It stays open for the duration of a sync and is
-/// closed after, because there is no credential to keep: closing it is what
-/// ends the app's reach.
+/// The window *is* the client, but it is not the session: cookies live in
+/// WKWebView's process-wide store, so closing the window ends a sync and leaves
+/// the session where `remember` can find it.
 ///
-/// That makes closing it an obligation rather than a courtesy, so it belongs to
+/// Closing it is still an obligation rather than a courtesy, so it belongs to
 /// the value's lifetime. Dropping a `Session` closes its window — including on
 /// the paths where `open` itself fails, which would otherwise leave a signed-in
 /// webview alive with no way for anyone to see or close it.
@@ -177,9 +193,12 @@ impl Session {
     /// Opens the Canvas window and returns once `/api/v1/users/self` answers.
     ///
     /// Starts hidden, so a sync with a live session never puts a window on
-    /// screen. The window is shown only when Canvas actually wants a sign-in.
+    /// screen. The window is shown only when Canvas actually wants a sign-in —
+    /// which, with the last session's cookies put back first, means Canvas has
+    /// ended it rather than merely that the app was restarted.
     pub fn open(app: &AppHandle, on_stage: &dyn Fn(&str)) -> Result<Session> {
         close_existing(app)?;
+        restore(app);
         let url = tauri::Url::parse(CANVAS_ORIGIN).context("parsing the Canvas origin")?;
         let window = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
             .title("Canvas — sign in so ClassHub can read your courses")
@@ -236,8 +255,8 @@ impl Session {
         match self.request(path, Mode::Json)? {
             Outcome::Json { value, next } => Ok((value, next)),
             // The session lapsed partway through a sync. Expected rather than
-            // exceptional — nothing is stored, so this is simply what time
-            // passing looks like. Sign in again and repeat the request.
+            // exceptional — Canvas ends a session on its own schedule, so this
+            // is what time passing looks like. Sign in again and repeat.
             Outcome::Unauthorized(_) | Outcome::Offsite(_) => {
                 self.await_session(on_stage)?;
                 match self.request(path, Mode::Json)? {
@@ -267,7 +286,8 @@ impl Session {
     /// Polls `/api/v1/users/self` until it answers, showing the window and
     /// asking for a sign-in as soon as Canvas indicates it wants one.
     fn await_session(&self, on_stage: &dyn Fn(&str)) -> Result<()> {
-        let deadline = Instant::now() + SIGN_IN_TIMEOUT;
+        let started = Instant::now();
+        let deadline = started + SIGN_IN_TIMEOUT;
         let mut asked = false;
         loop {
             match self.request("/api/v1/users/self", Mode::SignIn)? {
@@ -275,24 +295,35 @@ impl Session {
                     if asked {
                         on_stage("Signed in — reading your courses…");
                     }
+                    // Here rather than in `open`, so a session that lapses
+                    // mid-sync is re-remembered too — and so the stored copy's
+                    // age is refreshed by every sync that uses it.
+                    self.remember();
                     return Ok(());
                 }
                 // `Mode::SignIn` never sets binary mode, so this cannot happen
                 // — and reading it as a successful sign-in would have been the
                 // wrong way to be wrong about it.
                 Outcome::Binary(_) => bail!("the sign-in probe answered with a file"),
-                Outcome::Unauthorized(_) | Outcome::Offsite(_) => {
-                    if !asked {
-                        asked = true;
-                        self.reveal();
-                        on_stage("Waiting for you to sign in to Canvas…");
+                // Canvas served the page and refused the call. Conclusive.
+                Outcome::Unauthorized(_) => self.ask(&mut asked, on_stage),
+                // Somewhere other than Canvas — which is either a real SSO page
+                // or a window that has not navigated anywhere yet. The initial
+                // empty document reports no host at all, and only that reading
+                // waits; a page really at login.ufl.edu is shown immediately,
+                // because it has JavaScript to run and a hidden webview does
+                // not reliably get to run it.
+                Outcome::Offsite(host) => {
+                    if !host.is_empty() || started.elapsed() >= SIGN_IN_SETTLE {
+                        self.ask(&mut asked, on_stage);
                     }
                 }
             }
             if Instant::now() >= deadline {
                 bail!(
-                    "timed out waiting for the Canvas sign-in. Nothing was read, and \
-                     nothing is stored — starting the sync again reopens the window."
+                    "timed out waiting for the Canvas sign-in. Nothing was read, and the \
+                     session Canvas refused has been forgotten — starting the sync again \
+                     reopens the window."
                 );
             }
             std::thread::sleep(SIGN_IN_POLL);
@@ -473,6 +504,61 @@ impl Session {
         let _ = self.window.set_focus();
     }
 
+    /// Puts the sign-in in front of the user, once.
+    ///
+    /// Drops the stored session on the way: Canvas has just refused the copy in
+    /// hand, and a credential known to be dead has no business outliving the
+    /// discovery — the sign-in about to happen writes a live one in its place.
+    fn ask(&self, asked: &mut bool, on_stage: &dyn Fn(&str)) {
+        if *asked {
+            return;
+        }
+        *asked = true;
+        forget();
+        self.reveal();
+        on_stage("Waiting for you to sign in to Canvas…");
+    }
+
+    /// Stores the cookies Canvas has set for its own host, so the next launch
+    /// does not begin with a Duo push.
+    ///
+    /// This is the whole of what makes a session outlive the app. Canvas sends
+    /// `canvas_session` and `log_session_id` with neither `Expires` nor
+    /// `Max-Age`, which makes them session cookies; WKWebView keeps those in
+    /// memory and never writes them to its own jar, so quitting the app was
+    /// what kept ending the session — not a Tauri setting and not an unflushed
+    /// write. Duo's month-long device-trust cookie persisted through the same
+    /// runs, which is how that was told apart.
+    ///
+    /// Everything Canvas set for the host is kept except the CSRF token, which
+    /// only matters for writes. Listing the two by name instead would go stale
+    /// the day Canvas renames one, and would go stale silently.
+    ///
+    /// Best-effort: a Keychain that will not answer costs a sign-in next
+    /// launch, not this sync.
+    fn remember(&self) {
+        let Ok(url) = tauri::Url::parse(CANVAS_ORIGIN) else {
+            return;
+        };
+        let Ok(cookies) = self.window.cookies_for_url(url) else {
+            return;
+        };
+        let cookies = worth_remembering(&cookies);
+        // Remembering nothing is not the same as having nothing to remember:
+        // an empty list would replace a working item with a useless one.
+        if cookies.is_empty() {
+            return;
+        }
+        let session = Remembered {
+            captured_at: crate::db::now(),
+            cookies,
+        };
+        let (Ok(entry), Ok(json)) = (keychain(), serde_json::to_string(&session)) else {
+            return;
+        };
+        let _ = entry.set_password(&json);
+    }
+
     /// Writes a course file to `dest`, fetched by the page like everything else.
     ///
     /// Reading the cookies out with `cookies_for_url` and downloading from
@@ -540,6 +626,121 @@ impl Session {
         }
         write_atomic(dest, &bytes)?;
         Ok(bytes.len() as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remembering the session across launches
+
+/// The Keychain account holding the Canvas cookies, under the same service as
+/// the API key — a credential belongs there and nowhere else (SPEC §13).
+const KEYCHAIN_USER: &str = "canvas-session-cookies";
+
+/// Canvas's CSRF token, excluded deliberately: it is read only for mutating
+/// verbs, and ClassHub never writes to Canvas.
+const CSRF_COOKIE: &str = "_csrf_token";
+
+/// How long a remembered session may sit in the Keychain unused.
+///
+/// Canvas is what actually ends a session, and a refusal is what normally
+/// clears the item; this is the backstop for the case where no later sync ever
+/// asks. Thirty days is the window Duo's own device-trust cookie keeps, so a
+/// session that outlived this would have needed the full sign-in regardless.
+const REMEMBERED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+#[derive(Serialize, Deserialize)]
+struct Remembered {
+    /// When these were read out of the webview — what `REMEMBERED_FOR` is
+    /// measured against. Refreshed by every sync that finds the session live.
+    captured_at: i64,
+    cookies: Vec<RememberedCookie>,
+}
+
+/// One cookie, minus its domain: everything stored here is `CANVAS_HOST` by
+/// construction, and writing it down would only create a way for the two to
+/// disagree.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct RememberedCookie {
+    name: String,
+    value: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+}
+
+fn keychain() -> Result<keyring::v1::Entry> {
+    keyring::v1::Entry::new(crate::chat::KEYCHAIN_SERVICE, KEYCHAIN_USER)
+        .context("the macOS Keychain is unavailable")
+}
+
+/// Which of Canvas's cookies are worth keeping.
+fn worth_remembering(cookies: &[Cookie<'static>]) -> Vec<RememberedCookie> {
+    cookies
+        .iter()
+        .filter(|cookie| cookie.name() != CSRF_COOKIE)
+        .map(|cookie| RememberedCookie {
+            name: cookie.name().to_string(),
+            value: cookie.value().to_string(),
+            path: cookie.path().unwrap_or("/").to_string(),
+            // Canvas sets both, and defaulting the other way would hand a
+            // session cookie to a plaintext request or to `document.cookie`.
+            secure: cookie.secure().unwrap_or(true),
+            http_only: cookie.http_only().unwrap_or(true),
+        })
+        .collect()
+}
+
+/// The remembered session, or nothing when there is none worth replaying.
+///
+/// Anything unreadable counts as nothing. The cost of being wrong here is one
+/// sign-in — the very state this exists to avoid, and not one worth failing a
+/// sync over.
+fn remembered() -> Option<Remembered> {
+    let session: Remembered = serde_json::from_str(&keychain().ok()?.get_password().ok()?).ok()?;
+    if crate::db::now().saturating_sub(session.captured_at) >= REMEMBERED_FOR.as_secs() as i64 {
+        forget();
+        return None;
+    }
+    Some(session)
+}
+
+/// Drops the stored cookies.
+fn forget() {
+    if let Ok(entry) = keychain() {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Puts the remembered cookies back, before the Canvas window is built.
+///
+/// Timing is the point. WKWebView gives every non-incognito webview the same
+/// process-wide `defaultDataStore`, so a cookie set through any of the app's
+/// windows is already in the jar when the Canvas window issues its first
+/// request — and that first request is what decides whether Canvas serves the
+/// page or bounces to SSO. Setting it on the Canvas window itself would be a
+/// navigation too late.
+///
+/// Best-effort throughout: with nothing restored, the sync asks for a sign-in,
+/// which is what it did before any of this existed.
+fn restore(app: &AppHandle) {
+    let Some(session) = remembered() else {
+        return;
+    };
+    // Any window will do, since they share one cookie store. `close_existing`
+    // has already run, so this is never the stale Canvas window.
+    let windows = app.webview_windows();
+    let Some(window) = windows.values().next() else {
+        return;
+    };
+    for cookie in session.cookies {
+        let _ = window.set_cookie(
+            Cookie::build((cookie.name, cookie.value))
+                .domain(CANVAS_HOST)
+                .path(cookie.path)
+                .secure(cookie.secure)
+                .http_only(cookie.http_only)
+                .build(),
+        );
     }
 }
 
@@ -861,6 +1062,49 @@ mod tests {
         // A `next` URL already carries Canvas's own paging parameters.
         let paged = "/api/v1/courses?page=2&per_page=100";
         assert_eq!(with_per_page(paged), paged);
+    }
+
+    /// The CSRF token is the one cookie Canvas sets for its host that is not
+    /// wanted: it exists for mutating verbs, which never happen. Everything
+    /// else is kept by rule rather than by name, so a Canvas rename cannot
+    /// quietly drop the cookie the whole thing rests on.
+    #[test]
+    fn keeps_canvas_cookies_but_never_the_csrf_token() {
+        let cookies = vec![
+            Cookie::build(("canvas_session", "opaque"))
+                .path("/")
+                .secure(true)
+                .http_only(true)
+                .build(),
+            Cookie::build((CSRF_COOKIE, "not wanted")).path("/").build(),
+            Cookie::build(("log_session_id", "6f0c")).path("/").build(),
+        ];
+        let kept = worth_remembering(&cookies);
+        assert_eq!(
+            kept.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["canvas_session", "log_session_id"]
+        );
+        // A cookie that declares neither flag is stored with both, never with
+        // a session cookie downgraded to plaintext or to `document.cookie`.
+        assert!(kept[1].secure && kept[1].http_only);
+    }
+
+    /// The Keychain holds a string, so the round trip through it is the only
+    /// thing standing between a live session and a sign-in on the next launch.
+    #[test]
+    fn a_remembered_session_survives_the_keychain_round_trip() {
+        let session = Remembered {
+            captured_at: 1_756_000_000,
+            cookies: worth_remembering(&[Cookie::build(("canvas_session", "opaque.value-with_/+="))
+                .path("/")
+                .secure(true)
+                .http_only(true)
+                .build()]),
+        };
+        let json = serde_json::to_string(&session).expect("serializes");
+        let back: Remembered = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back.captured_at, session.captured_at);
+        assert_eq!(back.cookies, session.cookies);
     }
 
     #[test]

@@ -110,11 +110,11 @@ A Canvas section in Settings: last sync time and a **Sync now** button that open
 window when there is no live session. Per-class sync from the Class Workspace. Sync is manual,
 never on a timer (SPEC §7.2).
 
-There is no credential to manage, so the UI has no key field and no "connected" state to
-persist — a Canvas session simply expires, and the honest presentation is "sign in to sync"
-rather than a connection that appears healthy until it silently isn't. Expect to hit this: a
-sync started hours after the last one will find the session gone, so re-opening the window has
-to be an ordinary part of the flow rather than an error path.
+There is no key to manage, so the UI has no key field, and no "connected" state is persisted —
+a Canvas session expires on Canvas's schedule, and the honest presentation is "sign in to sync"
+rather than a connection that appears healthy until it silently isn't. The session itself
+survives a relaunch (SPEC §7.2), but not forever, so re-opening the window has to be an ordinary
+part of the flow rather than an error path.
 
 Show `units` in the Class Workspace with the course's own names, and mark units whose `source`
 is `folder` so it is obvious which structure is real and which is inferred.
@@ -124,8 +124,8 @@ Read the frontend-design skill first (SPEC §12).
 ## Acceptance
 
 - Signing in through the Canvas window makes `/api/v1/users/self` return the real user, and
-  `/api/v1/courses?enrollment_state=active` the four enrolled classes — with no credential
-  stored anywhere.
+  `/api/v1/courses?enrollment_state=active` the four enrolled classes — with nothing minted, and
+  the session cookie kept as SPEC §7.2 describes.
 - A sync attempted after the session has expired re-opens the sign-in window instead of failing.
 - All four classes' real divisions land in `units` with nothing typed by hand, from whichever
   source declares them. Canvas publishes no modules for any of the four (SPEC §1), so in
@@ -142,8 +142,10 @@ Read the frontend-design skill first (SPEC §12).
 - **Do not delete on sync.** A mid-semester Canvas reshuffle must not orphan a guide.
 - **Reads only.** ClassHub never writes to Canvas — that is what keeps the session approach a
   narrower exposure than the token the administrators disabled, and it is not negotiable.
-- **Store no credential.** Nothing goes in the Keychain and nothing in the settings table; the
-  reach expires with the session, which is the point.
+- **Mint no credential.** `POST /api/v1/users/:id/tokens` stays off-limits and nothing goes in
+  the settings table. Canvas's own session cookie is kept in the Keychain so a relaunch does not
+  re-run SSO (SPEC §7.2) — that is the credential Canvas already issued to the browser, and
+  Canvas is what ends it.
 - **Rate limit** 700 requests / 10 minutes. A full sync is far inside it; a retry loop is not.
 - **Pagination.** Canvas paginates via the `Link` header. A class with 50 files returns 10 by
   default, and missing the rest looks exactly like success.

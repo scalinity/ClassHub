@@ -99,16 +99,23 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   supported integration, and nothing should assume it is contractual.
 
   The line this app holds: reading through the user's own session automates their own browsing;
-  minting a credential through it does not. Only the first is done.
+  minting a credential through it does not. Only the first is done. Keeping the session's own
+  cookie so it survives a relaunch stays on the first side of that line — it is the credential
+  Canvas already issued to the browser, extended in duration and not in reach.
 
   Two properties of that session were measured rather than assumed:
 
-  - **It does not survive a relaunch.** The webview's cookie store starts empty each time the
-    app opens, so the first sync of a session signs in. That is the flow's normal state, not a
-    failure (§7.2), and it is why the window opens hidden: a live session is read without ever
-    putting a window on screen. It is shown when Canvas asks for a sign-in, and also once a
-    read has run long enough that hiding it would be hiding a stall — which a multi-megabyte
-    download routinely does.
+  - **Canvas issues it as a session cookie, so the app keeps it itself.** `canvas_session` and
+    `log_session_id` arrive with neither `Expires` nor `Max-Age`. WKWebView holds expiry-less
+    cookies in memory and never writes them to its own jar, so quitting the app ends the
+    session — measured 2026-08-27 against that jar, which held Duo's month-long device-trust
+    cookie from the same runs and not one cookie for `ufl.instructure.com`. This is a property
+    of what Canvas sends, not of the webview's configuration: the data store is persistent and
+    on disk. ClassHub therefore stores those cookies itself (§7.2), and a relaunch reads Canvas
+    without a sign-in. The window still opens hidden — a live session is read without ever
+    putting a window on screen — and is shown when Canvas genuinely asks for a sign-in, and
+    also once a read has run long enough that hiding it would be hiding a stall, which a
+    multi-megabyte download routinely does.
   - **The in-page rule covers file bytes too.** `/files/:id/download` refused every request
     issued from `reqwest` with cookies read out of the webview (403, all files) — the session
     lives in cookies the webview does not hand out. Fetched from inside the page it serves
@@ -550,10 +557,32 @@ GETs need no CSRF token; ClassHub never writes to Canvas, so the `X-CSRF-Token` 
 mutating verbs never arises. Pagination follows the `Link` header's `rel="next"`, since Canvas
 serves 10 items per page by default and a truncated collection looks exactly like a complete one.
 
-No durable credential is ever minted or stored — there is nothing to leak, and the app's reach
-expires with the session, which is a narrower exposure than the token the administrators
-disabled. It is nonetheless undocumented (§1): if it stops working, it stops, and the fallback
-is the syllabus path below rather than anything cleverer.
+**The session is kept across launches.** Canvas sets `canvas_session` and `log_session_id`
+without an expiry, so WKWebView discards them the moment the app quits (§1) and every launch
+would otherwise open with a Duo push. ClassHub stores those cookies in the macOS Keychain —
+under the same service as the API key, never in the database and never in a file — and puts
+them back *before* the Canvas window issues its first request, which is the request that decides
+whether Canvas serves the page or bounces to SSO. Everything Canvas set for its own host is kept
+except `_csrf_token`, which only matters for writes; keeping by that rule rather than by a list
+of names means a Canvas rename cannot silently drop the cookie the whole thing rests on.
+
+No credential is minted. What is stored is the cookie Canvas already issued to the browser, so
+the app's reach stays the reach the sign-in granted, and `POST /api/v1/users/:id/tokens` remains
+off-limits (§1). Canvas sets the lifetime: a refusal deletes the stored copy and opens the
+sign-in window, which is what a password change, an admin revoke and Canvas's own timeout each
+look like from here. A copy no sync has used for 30 days is deleted regardless — that being the
+window Duo's device-trust cookie keeps, past which the full sign-in was coming anyway.
+
+A window that has not navigated anywhere yet is not a Canvas asking for a sign-in. The initial
+empty document reports no host at all, and reading that as "somewhere other than Canvas" would
+reveal a window and discard a restored cookie a moment before it worked — so that one reading
+waits a few seconds. Everything conclusive is acted on at once: a 401 from Canvas, or a page
+genuinely at `login.ufl.edu`. Delaying *those* is worse than useless, because macOS throttles a
+hidden webview's JavaScript and Duo's prompt boots into a painted shell with no body when it
+starts up off screen — measured 2026-08-27. The sign-in window is shown the moment SSO is real.
+
+It is nonetheless undocumented (§1): if it stops working, it stops, and the fallback is the
+syllabus path below rather than anything cleverer.
 
 **Structure precedence is canvas > syllabus > folder.** Canvas is ground truth when it has
 anything to say, which today it does not — no course publishes modules (§1) — so the syllabus
