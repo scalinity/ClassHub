@@ -91,10 +91,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     // do from `_Inbox/` (SPEC §10).
     let routed_to_inbox = req.module_rel_path.is_none();
     let dir_rel = match &req.module_rel_path {
-        Some(module) => {
-            validate_module(module)?;
-            format!("{}/{TRANSCRIPTS_DIR}", module.trim_end_matches('/'))
-        }
+        Some(module) => format!("{}/{TRANSCRIPTS_DIR}", validate_module(module)?),
         None => INBOX_DIR.to_string(),
     };
 
@@ -188,18 +185,25 @@ fn fetch(app: &AppHandle, source: &str, on_stage: &dyn Fn(&str)) -> Result<(Stri
 
 /// A module must be a real folder inside the class and not an app-managed one —
 /// the transcript is source material and belongs in the material tree.
-fn validate_module(module: &str) -> Result<()> {
-    let module = module.trim_matches('/');
+///
+/// Returns the normalized path, so the check and the write agree on what was
+/// checked: validating a trimmed copy while building the destination from the
+/// caller's original let a leading slash through, and joining an absolute path
+/// discards the class directory entirely.
+fn validate_module(module: &str) -> Result<String> {
+    let module = module.trim().trim_matches('/');
     if module.is_empty() {
         bail!("choose a module folder");
     }
     let first = module.split('/').next().unwrap_or_default();
-    if module.split('/').any(|seg| seg == ".." || seg.starts_with('.'))
+    if module
+        .split('/')
+        .any(|seg| seg.trim().is_empty() || seg == ".." || seg.starts_with('.'))
         || crate::scanner::APP_MANAGED_DIRS.contains(&first)
     {
         bail!("'{module}' is not a module folder");
     }
-    Ok(())
+    Ok(module.to_string())
 }
 
 /// `2026-08-24 — Lecture.md`. Slashes and colons would repoint the write, so
@@ -597,14 +601,36 @@ mod tests {
 
     #[test]
     fn rejects_app_managed_and_escaping_module_paths() {
-        assert!(validate_module("Module 1").is_ok());
-        assert!(validate_module("Module 1/Week 2").is_ok());
+        assert_eq!(validate_module("Module 1").unwrap(), "Module 1");
+        assert_eq!(validate_module("Module 1/Week 2").unwrap(), "Module 1/Week 2");
         assert!(validate_module("").is_err());
         assert!(validate_module("Study Guides").is_err());
         assert!(validate_module("Notes").is_err());
         assert!(validate_module("_Inbox").is_err());
         assert!(validate_module("../../etc").is_err());
         assert!(validate_module(".classhub/extracts").is_err());
+    }
+
+    /// The check normalizes and the write must use what was checked. An
+    /// absolute path joined onto the class directory discards it outright, so
+    /// "passes validation" and "writes inside the class" have to be the same
+    /// question about the same string.
+    #[test]
+    fn normalizes_what_it_validates() {
+        assert_eq!(validate_module("/Module 1/").unwrap(), "Module 1");
+        assert_eq!(validate_module("  Module 1  ").unwrap(), "Module 1");
+        assert!(validate_module("Module 1//Week 2").is_err());
+        assert!(validate_module("/").is_err());
+
+        // Whatever it returns is relative, so joining it onto the class
+        // directory cannot land anywhere else — an absolute path would have
+        // discarded the class directory outright.
+        for candidate in ["/Users/danny/elsewhere", "/etc/passwd", "//tmp/x"] {
+            if let Ok(module) = validate_module(candidate) {
+                assert!(!Path::new(&module).is_absolute(), "{candidate} → {module}");
+                assert!(!module.contains(".."), "{candidate} → {module}");
+            }
+        }
     }
 
     /// The digest job writes through the ordinary job write-contract. If

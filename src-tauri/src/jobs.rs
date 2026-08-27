@@ -1566,7 +1566,10 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
     let bytes = text.as_bytes();
     for (i, _) in text.match_indices('{') {
         let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
-        if !matches!(next, Some(b'"') | Some(b'}')) {
+        // A quoted key only. `{}` also parses, and admitting it meant an empty
+        // pair anywhere in the prose won the scan and returned a record with no
+        // fields — failing a run whose files were written correctly.
+        if next != Some(&b'"') {
             continue;
         }
         let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
@@ -1608,6 +1611,23 @@ mod tests {
         assert!(parse_object("no json at all").is_err());
         let value = parse_object("Note {not this}, but {\"title\": \"T\"}").expect("object");
         assert_eq!(value["title"], "T");
+    }
+
+    /// An empty pair parses as a perfectly good object, so admitting it let one
+    /// anywhere in the prose win the scan and shadow the real record.
+    #[test]
+    fn an_empty_pair_does_not_win_the_scan() {
+        let value = parse_object("Wrote the files {}. Result: {\"title\": \"T\"}")
+            .expect("object");
+        assert_eq!(value["title"], "T");
+        assert!(parse_object("Nothing here: {}").is_err());
+    }
+
+    /// Truncated output is a miss, not a partial record.
+    #[test]
+    fn reports_a_miss_on_truncated_json() {
+        assert!(parse_object("{\"title\": \"T\"").is_err());
+        assert!(parse_object("{\"title\": ").is_err());
     }
 
 
