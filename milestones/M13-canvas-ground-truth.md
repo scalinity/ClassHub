@@ -127,9 +127,10 @@ Read the frontend-design skill first (SPEC §12).
   `/api/v1/courses?enrollment_state=active` the four enrolled classes — with no credential
   stored anywhere.
 - A sync attempted after the session has expired re-opens the sign-in window instead of failing.
-- All four classes' real divisions land in `units` from Canvas with nothing typed by hand:
-  14 weekly topics for Fundamentals, 15 for Biostatistics, 3 Parts for Applied Generative AI.
-  Design Studio takes whatever Canvas has, which may be nothing.
+- All four classes' real divisions land in `units` with nothing typed by hand, from whichever
+  source declares them. Canvas publishes no modules for any of the four (SPEC §1), so in
+  practice that is the syllabus scan: 14 weekly topics for Fundamentals, 15 for Design Studio,
+  17 for Biostatistics, 3 Parts for Applied Generative AI.
 - A Canvas assignment appears as a deadline with its true due date, through the confirm queue.
 - A course file downloads into the tree via an approved move and is indexed by the scanner.
 - Re-syncing changes nothing: no duplicate units, files, or deadlines.

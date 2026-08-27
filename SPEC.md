@@ -69,7 +69,7 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   from the course's own schedule.
 - **Canvas offers exactly one usable way in, and it is not a credential.**
   `https://ufl.instructure.com/api/v1/` is live (401 unauthenticated) and exposes
-  `/courses/:id/modules?include[]=items`, `/files`, `/assignments` and `syllabus_body` — the
+  `/courses/:id/modules?include[]=items`, `/files`, `/folders` and `/assignments` — the
   authoritative course structure, without a human transcribing it. Both credentialed paths are
   closed by the same administrators:
   - **Personal access token** — disabled. Canvas answers *"Your Canvas administrators have
@@ -105,8 +105,10 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
 
   - **It does not survive a relaunch.** The webview's cookie store starts empty each time the
     app opens, so the first sync of a session signs in. That is the flow's normal state, not a
-    failure (§7.2), and it is also why the window opens hidden and is shown only when Canvas
-    asks for something.
+    failure (§7.2), and it is why the window opens hidden: a live session is read without ever
+    putting a window on screen. It is shown when Canvas asks for a sign-in, and also once a
+    read has run long enough that hiding it would be hiding a stall — which a multi-megabyte
+    download routinely does.
   - **The in-page rule covers file bytes too.** `/files/:id/download` refused every request
     issued from `reqwest` with cookies read out of the webview (403, all files) — the session
     lives in cookies the webview does not hand out. Fetched from inside the page it serves
@@ -292,7 +294,7 @@ units(id INTEGER PK, class_id INTEGER FK, ordinal INTEGER,
       canvas_id TEXT NULL,   -- set when Canvas is the source
       rel_path TEXT NULL,    -- its folder, when it has one; units need not be folders
       starts_on TEXT NULL, ends_on TEXT NULL,
-      source TEXT,           -- canvas|syllabus|folder — precedence in that order
+      source TEXT,           -- canvas|syllabus — which reader declared it, canvas winning
       UNIQUE(class_id, name));
 
 -- One span of one lecture, mapped to one unit (§8.5). This is the join that lets a
@@ -509,11 +511,17 @@ passes through a human loses something. This section removes that hop.
 
 | Endpoint | Gives |
 | --- | --- |
-| `/courses?enrollment_state=active` | the enrolled classes, mapped to `classes` by name |
+| `/courses?enrollment_state=active` | the enrolled classes, matched to `classes` on the course code, exactly |
 | `/courses/:id/modules?include[]=items` | **the course's own divisions** → `units` (§5) |
 | `/courses/:id/files` | slides and readings, downloadable into the tree |
+| `/courses/:id/folders` | where the professor filed each file — the destination a move proposal takes |
 | `/courses/:id/assignments` | deadlines with real due dates — no syllabus guesswork |
-| `/courses/:id?include[]=syllabus_body` | the syllabus as HTML |
+
+The course code is the only field worth matching on. The account is enrolled in a dozen
+"active" courses, orientation shells and years-old org sites among them, and a name match would
+have to survive `CAI5724- AI in Health Design Studio I` against `AI in Health Design Studio I`.
+A near-miss files one class's material into another, so zero matches and two matches are both
+reported rather than guessed at.
 
 Reads only. ClassHub never writes to Canvas.
 
@@ -552,24 +560,48 @@ anything to say, which today it does not — no course publishes modules (§1) �
 scan is what actually supplies `units`: it reads the weekly schedule out of the same document,
 in the same pass that reads the due dates, and returns it beside them. Where a course groups its
 weeks under named Parts or Modules, those are the divisions and the weeks are the schedule
-filling them in; where nothing groups them, the weeks are the divisions. With neither Canvas nor
-a scanned syllabus, the top-level folders stand in. A unit's `source` column records which, so a
-folder-derived unit is never mistaken for something the course actually declared, and the
-workspace marks those as inferred.
+filling them in; where nothing groups them, the weeks are the divisions. A unit's `source`
+column records which reader supplied it, and the workspace names that on the list.
+
+A course with neither is shown as having none. A folder is where material sits, not something
+the course declared, and listing the top-level folders as divisions put a second numbering
+sequence under the course's own and labelled it a guess. What the folder does know is recorded
+where it belongs: each scan points a declared unit at the folder matching its name, filling
+`units.rel_path` so §8.1's guide has something to read.
 
 **Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
 inserted and existing ones updated in place; units whose name no longer appears in Canvas are
-kept, not deleted — a mid-semester Canvas reshuffle must not silently orphan a guide. A
-higher-precedence source fills a unit's fields in rather than replacing the row, because only
-the folder source ever learns where the material sits on disk.
+kept, not deleted — a mid-semester Canvas reshuffle must not silently orphan a guide. A unit
+Canvas has an id for is matched on that id, so renaming a published module updates it rather
+than forking a second row under the new name. A higher-precedence source fills a unit's fields
+in rather than replacing them, because only the tree ever learns where the material sits on
+disk; a source refreshing its own row replaces them, so a date the course removed can be
+cleared.
 
 Assignments become `deadline_proposals` with `source='canvas'`, and their UTC due dates are
-converted through the machine's real timezone (§1). Files download into `_Inbox/` and are
-proposed through the §10 confirm queue, destination taken from the folder Canvas keeps them in;
-where Canvas keeps a file loose, no destination is invented and the file waits for the
-content-aware sorter. Re-syncing is a no-op: files are matched by name and size against
-everything the class already holds, and a proposal already waiting is refreshed rather than
-stacked.
+converted through the machine's real timezone (§1). One card per (title, calendar day) whichever
+reader proposed it, and Canvas outranks the syllabus on that card: Canvas returns the
+assignment's own `due_at` while a scan returns a model's reading of prose about it, so a rescan
+never replaces a stated time with a bare date.
+
+Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
+from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
+invented and the file waits for the content-aware sorter, which the sync enqueues. **A sort job
+never replaces a Canvas destination.** Where Canvas filed a file is an observation — the
+professor put it there — and a sort job's destination is an inference from a filename and a
+tree; a file Canvas has placed is out of a sort's scope entirely, and the card's own "change
+destination" is how to disagree with it. A chat move is the reader asking, so it retargets.
+
+Each folder name is mapped onto the vocabulary the tree already uses, so a course calling its
+decks "Lecture Slides" does not earn that class a second folder beside the "Slides" every other
+class has. An exact name always wins over a suffix match, and a numbered qualifier is never
+stripped — "Week 2 Slides" and "Week 3 Slides" are two folders, and collapsing them would file
+two weeks of material together.
+
+Re-syncing is a no-op: files are matched by name and size against everything the class already
+holds, a proposal already waiting is refreshed rather than stacked, and a download never lands
+on a name the inbox already holds. A file whose size Canvas does not publish is named and
+skipped, since without it neither the duplicate check nor the size ceiling can do its job.
 
 ## 8. Study guide synthesis
 
@@ -669,10 +701,10 @@ transcript. This is what makes the cost sane — the expensive read happens once
 rather than once per guide per lecture — and it makes the corpus inspectable, so what a guide
 drew on can be read directly rather than inferred from the guide.
 
-**A unit guide's sources** are therefore: files under the unit's folder when it has one · files
-Canvas assigned to it (§7.2) · its corpus notes, each listed with the transcript path and the
-raw span's line range so the job can open the professor's exact words when the distillation is
-not enough. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so
+**A unit guide's sources** are therefore: files under the unit's folder when it has one — which
+is what `units.rel_path` records (§7.2) — and its corpus notes, each listed with the transcript
+path and the raw span's line range so the job can open the professor's exact words when the
+distillation is not enough. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so
 chat retrieves it too.
 
 **Trust follows the app's existing habit.** `high`-confidence spans apply on write; `medium`
@@ -895,9 +927,10 @@ Mark the checkbox when the acceptance criteria pass.
 - [x] **M13 — Canvas as ground truth.** (`milestones/M13-canvas-ground-truth.md`)
   Settle the auth path first (token or signed-in window, §7.2), then `units` from Canvas
   modules with a syllabus fallback, course-file sync into the tree, and assignments → deadlines.
-  *Accepted when:* all four classes' real divisions land in `units` from Canvas with nothing
-  typed by hand — 14 weekly topics for Fundamentals, 15 for Biostatistics, 3 Parts for Applied
-  Generative AI — and a Canvas assignment appears as a deadline with its true due date.
+  *Accepted when:* all four classes' real divisions land in `units` with nothing typed by hand,
+  from whichever source declares them — the syllabus, for every course that publishes no modules
+  (§1) — a Canvas assignment appears as a deadline card carrying its true due date, and a course
+  file reaches the tree through an approved move.
 
 - [ ] **M14 — Lecture content mapping.** (`milestones/M14-lecture-mapping.md`)
   Transcripts file into `Weeks/` (§4), mapping folded into the `lecture_digest` pass, anchor →
