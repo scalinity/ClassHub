@@ -33,6 +33,14 @@ pub const MASTER_SCOPE: &str = "master";
 /// into an update, and staleness has something real to hash.
 pub const SESSION_SCOPE_PREFIX: &str = "session:";
 
+/// Session digests live in the `guides` table so they inherit the viewer and
+/// staleness, but they are not module guides — the Study Guides list tells them
+/// apart by this. Here rather than in `lectures.rs` so `guides.rs` needs no
+/// dependency on the lecture module to ask.
+pub fn is_session_scope(scope: &str) -> bool {
+    scope.starts_with(SESSION_SCOPE_PREFIX)
+}
+
 /// The only paths a synthesis job is contracted to write. Everything else in a
 /// class folder is source material, and SPEC §4 says the app never destroys it.
 pub const JOB_WRITABLE: &[&str] = &[GUIDES_DIR, EXTRACTS_DIR];

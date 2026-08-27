@@ -170,15 +170,13 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     }
     emit_hub_change(app, "files");
 
-    let mut speakers: Vec<String> = Vec::new();
-    for cue in &cues {
-        if let Some(name) = &cue.speaker {
-            if !speakers.contains(name) {
-                speakers.push(name.clone());
-            }
-        }
-    }
-    Ok(AddResult { rel_path, routed_to_inbox, speakers, digest_job_id, digest_error })
+    Ok(AddResult {
+        rel_path,
+        routed_to_inbox,
+        speakers: crate::transcripts::speakers(&cues),
+        digest_job_id,
+        digest_error,
+    })
 }
 
 /// Resolves whatever the user pointed at into caption text plus a display name
@@ -601,13 +599,6 @@ fn record_session(
     Ok(format!("{} · {}", result.title, payload.date))
 }
 
-/// Session digests live in the `guides` table so they inherit the viewer and
-/// staleness, but they are not module guides — the Study Guides list tells them
-/// apart by this.
-pub fn is_session_scope(scope: &str) -> bool {
-    scope.starts_with(SESSION_SCOPE_PREFIX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,8 +722,8 @@ mod tests {
 
     #[test]
     fn recognises_a_session_scope() {
-        assert!(is_session_scope("session:Module 1/Transcripts/2026-08-24 — Lecture.md"));
-        assert!(!is_session_scope("Module 1"));
-        assert!(!is_session_scope("master"));
+        assert!(crate::db::is_session_scope("session:Module 1/Transcripts/2026-08-24 — Lecture.md"));
+        assert!(!crate::db::is_session_scope("Module 1"));
+        assert!(!crate::db::is_session_scope("master"));
     }
 }

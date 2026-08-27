@@ -314,13 +314,20 @@ fn transcript_hint(class_dir: &Path, name: &str) -> Option<String> {
         return None;
     }
     let path = class_dir.join(INBOX_DIR).join(name);
-    let mut head = vec![0u8; 4096];
-    let read = {
+    // `read` may legally return fewer bytes than asked for, and a short one
+    // that stops before the `source:` line makes a real transcript look like
+    // any other note — which changes where the sorter files it.
+    let mut head = Vec::with_capacity(4096);
+    {
         use std::io::Read;
-        let mut file = fs::File::open(&path).ok()?;
-        file.read(&mut head).ok()?
-    };
-    head.truncate(read);
+        let file = fs::File::open(&path)
+            .inspect_err(|e| eprintln!("transcript hint: opening {} — {e}", path.display()))
+            .ok()?;
+        file.take(4096)
+            .read_to_end(&mut head)
+            .inspect_err(|e| eprintln!("transcript hint: reading {} — {e}", path.display()))
+            .ok()?;
+    }
     crate::transcripts::describe(&String::from_utf8_lossy(&head))
 }
 

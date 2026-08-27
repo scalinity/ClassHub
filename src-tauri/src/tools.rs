@@ -879,6 +879,12 @@ fn run_rg(query: &str, dirs: &[PathBuf], fixed: bool) -> Result<std::process::Ou
         "--max-columns-preview",
         "--max-count",
         "6",
+        // A session digest is written twice, as HTML for reading and markdown
+        // for exactly this — so searching both returns every hit twice, at
+        // twice the tokens, with the HTML copy carrying its own markup through
+        // the match. Module and master guides are HTML-only and unaffected.
+        "--glob",
+        "!Sessions/*.html",
     ]);
     if fixed {
         cmd.arg("--fixed-strings");

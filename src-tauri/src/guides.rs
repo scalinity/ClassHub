@@ -504,7 +504,7 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
         let current = current_manifest(conn, class_id, &scope)?;
         guides.push(GuideInfo {
             stale: manifest_is_stale(&manifest_json, &current),
-            session: crate::lectures::is_session_scope(&scope),
+            session: crate::db::is_session_scope(&scope),
             scope,
             rel_path,
             generated_at,

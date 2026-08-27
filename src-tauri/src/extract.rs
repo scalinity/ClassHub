@@ -69,7 +69,13 @@ fn route(rel_path: &str, kind: &str) -> Route {
         // happens when a lecture is explicitly added, never as a side effect of
         // a scan noticing a media file somewhere in the tree.
         "media" => Route::Skip,
-        _ if rel_path.to_lowercase().ends_with(".txt") => Route::Text,
+        // Zoom's in-meeting "Save Transcript" writes a `.txt` that is a caption
+        // track in everything but extension. Down the text route its extract is
+        // the raw two-second timing grid — the exact thing `Caption` exists to
+        // collapse — and the same file added through Add lecture is normalized,
+        // so the two paths disagreed about one input. `parse` falls through to
+        // untimed blocks when there is no grid, so an ordinary .txt is fine.
+        _ if rel_path.to_lowercase().ends_with(".txt") => Route::Caption,
         _ => Route::Skip,
     }
 }
@@ -256,13 +262,19 @@ fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, how: &Rout
             crate::transcripts::to_markdown(
                 &crate::transcripts::parse(&text),
                 &crate::transcripts::Meta {
-                    title: name.trim_end_matches(".vtt").trim_end_matches(".srt"),
+                    title: name
+                        .trim_end_matches(".vtt")
+                        .trim_end_matches(".srt")
+                        .trim_end_matches(".txt"),
                     date: "",
                     source_name: &name,
                 },
             )
         }
-        _ => text,
+        Route::Text => text,
+        // Named rather than caught by a catch-all, so a fourth local route has
+        // to say what it does instead of silently extracting as raw text.
+        Route::Pdf | Route::Pptx | Route::Skip => text,
     };
     content.truncate(content.trim_end().len());
     content.push('\n');

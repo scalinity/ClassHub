@@ -167,7 +167,10 @@ export function collectTranscripts(
       if (node.dir) {
         walk(node.children ?? []);
       } else if (
-        node.relPath.includes(`/${TRANSCRIPTS_DIR}/`) &&
+        // By segment, not substring: a transcript the sorter moved to a
+        // `Transcripts/` folder at the class root has no parent folder before
+        // it, and would never have appeared in the Lectures list.
+        node.relPath.split("/").includes(TRANSCRIPTS_DIR) &&
         node.relPath.toLowerCase().endsWith(".md")
       ) {
         found.push({ name: node.name, relPath: node.relPath });

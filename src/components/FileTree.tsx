@@ -1,6 +1,8 @@
 import { useState } from "react";
 import {
   ArrowUpRight,
+  AudioLines,
+  Captions,
   ChevronRight,
   CodeXml,
   File,
@@ -32,6 +34,8 @@ const KIND_ICONS: Record<string, LucideIcon> = {
   r: FileCode,
   html: CodeXml,
   md: NotepadText,
+  caption: Captions,
+  media: AudioLines,
 };
 
 /** Guide state + actions for depth-0 module rows (SPEC §8.1 / M5). */

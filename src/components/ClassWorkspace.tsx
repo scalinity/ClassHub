@@ -100,10 +100,9 @@ export function ClassWorkspace({
   const digestedPaths = new Set(
     sessions.map((s) => s.scope.slice(SESSION_SCOPE_PREFIX.length)),
   );
+  const activeDigestPaths = new Set(activeDigests.map((j) => j.scope ?? ""));
   const pendingTranscripts = collectTranscripts(tree).filter(
-    (t) =>
-      !digestedPaths.has(t.relPath) &&
-      !activeDigests.some((j) => j.scope === t.relPath),
+    (t) => !digestedPaths.has(t.relPath) && !activeDigestPaths.has(t.relPath),
   );
 
   // Practice exams and notes (M8): both chat-written, both listed from disk.

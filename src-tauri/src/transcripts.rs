@@ -231,7 +231,12 @@ fn parse_timestamp(stamp: &str) -> Option<i64> {
 fn split_speaker(payload: &str, seen: &Attribution) -> (Option<String>, String) {
     let payload = payload.trim();
     // A voice span is explicit markup, not a guess — it needs no corroboration.
-    if let Some(rest) = payload.strip_prefix("<v ") {
+    // The spec allows classes on it (`<v.loud Esra Adiyeke>`); missing those
+    // leaves the span to `strip_tags`, which keeps the words and drops the name.
+    if let Some(rest) = payload
+        .strip_prefix("<v ")
+        .or_else(|| payload.strip_prefix("<v.").and_then(|r| r.split_once(' ').map(|(_, r)| r)))
+    {
         if let Some((name, text)) = rest.split_once('>') {
             let name = name.trim().trim_end_matches('.').trim();
             return (
@@ -420,6 +425,21 @@ fn ends_sentence(text: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Rendering
 
+/// Who spoke, in the order they first did. The header lists them and `AddResult`
+/// reports them, and two loops over the same cues drifted apart the moment one
+/// of them changed.
+pub fn speakers(cues: &[Cue]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for cue in cues {
+        if let Some(name) = &cue.speaker {
+            if !seen.iter().any(|s| s == name) {
+                seen.push(name.clone());
+            }
+        }
+    }
+    seen
+}
+
 /// Renders parsed cues as the markdown that gets written into the class tree.
 pub fn to_markdown(cues: &[Cue], meta: &Meta<'_>) -> String {
     let paragraphs = merge(cues);
@@ -443,14 +463,7 @@ pub fn to_markdown(cues: &[Cue], meta: &Meta<'_>) -> String {
 
     // Speakers up front: a digest prompt reading this benefits from knowing who
     // is in the room before it meets them mid-transcript.
-    let mut speakers: Vec<&str> = Vec::new();
-    for p in &paragraphs {
-        if let Some(name) = p.speaker.as_deref() {
-            if !speakers.contains(&name) {
-                speakers.push(name);
-            }
-        }
-    }
+    let speakers = speakers(cues);
     if !speakers.is_empty() {
         let _ = writeln!(out, "Speakers: {}\n", speakers.join(", "));
     }
