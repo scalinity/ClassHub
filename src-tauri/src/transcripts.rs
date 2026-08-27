@@ -417,10 +417,18 @@ pub fn describe(markdown: &str) -> Option<String> {
         parts.push(format!("speakers: {}", speakers.trim()));
     }
     // The first spoken paragraph says what the session was about far more
-    // reliably than any of the header does.
+    // reliably than any of the header does — so the search starts past the
+    // header. Both the facts line and the speaker list run well over the length
+    // test below, and a real Zoom source name is long enough that the facts
+    // line would otherwise always win and hand the sorter back a file name.
     if let Some(opening) = markdown
         .lines()
-        .find(|l| l.starts_with("**") || (!l.starts_with(['#', '*']) && l.len() > 60))
+        .skip_while(|l| !l.contains("source: "))
+        .skip(1)
+        .find(|l| {
+            !l.starts_with("Speakers: ")
+                && (l.starts_with("**") || (!l.starts_with(['#', '*']) && l.len() > 60))
+        })
     {
         parts.push(format!("opens: \"{}\"", truncate_words(opening.trim(), 24)));
     }
@@ -744,6 +752,10 @@ mod tests {
         );
     }
 
+    /// What the sorter is given has to be the subject matter — the file name
+    /// carries no routing signal, which is the whole reason this exists. The
+    /// source name here is a real Zoom one deliberately: a short one leaves the
+    /// facts line under the length test and hides the bug this pins.
     #[test]
     fn describes_a_transcript_for_the_sorter() {
         let md = to_markdown(
@@ -751,13 +763,14 @@ mod tests {
             &Meta {
                 title: "2026-08-24 — Lecture",
                 date: "2026-08-24",
-                source_name: "recording.vtt",
+                source_name: "GMT20260824-210000_Recording.transcript.vtt",
             },
         );
         let described = describe(&md).expect("described");
         assert!(described.contains("lecture transcript"), "{described}");
         assert!(described.contains("Benjamin Shickel"), "{described}");
-        assert!(described.contains("opens:"), "{described}");
+        assert!(described.contains("opens: \"**Benjamin Shickel:** Today we're"), "{described}");
+        assert!(!described.contains("source:"), "the header is not the opening: {described}");
     }
 
     /// Everything else in an inbox is not a transcript, and must not be
