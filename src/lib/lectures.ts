@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
+import type { TreeNode } from "@/lib/materials";
 import { queryClient } from "@/lib/query";
 
 /** Mirrors transcribe.rs MEDIA_EXTS — what can be handed to Parakeet. */
@@ -159,10 +160,10 @@ export interface FiledTranscript {
  * would have no way left to be distilled.
  */
 export function collectTranscripts(
-  nodes: TranscriptNode[] | undefined,
+  nodes: TreeNode[] | undefined,
 ): FiledTranscript[] {
   const found: FiledTranscript[] = [];
-  const walk = (list: TranscriptNode[]) => {
+  const walk = (list: TreeNode[]) => {
     for (const node of list) {
       if (node.dir) {
         walk(node.children ?? []);
@@ -179,11 +180,4 @@ export function collectTranscripts(
   };
   walk(nodes ?? []);
   return found.sort((a, b) => b.relPath.localeCompare(a.relPath));
-}
-
-interface TranscriptNode {
-  name: string;
-  relPath: string;
-  dir: boolean;
-  children?: TranscriptNode[];
 }

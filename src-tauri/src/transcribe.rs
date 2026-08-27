@@ -186,7 +186,7 @@ pub fn interpreter_of(conn: &Connection) -> PathBuf {
 /// A per-recording scratch directory in app data. Keyed by the source name so
 /// two concurrent transcriptions cannot land in one another's output.
 fn workspace(app: &AppHandle, media: &Path) -> Result<PathBuf> {
-    let stem = media
+    let name = media
         .file_name()
         .map(|n| n.to_string_lossy().replace(['/', '\\', ':'], "_"))
         .unwrap_or_else(|| "recording".into());
@@ -195,7 +195,7 @@ fn workspace(app: &AppHandle, media: &Path) -> Result<PathBuf> {
         .app_data_dir()
         .context("resolving app data dir")?
         .join("transcribe")
-        .join(stem))
+        .join(name))
 }
 
 #[cfg(test)]

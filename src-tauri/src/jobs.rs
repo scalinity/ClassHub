@@ -1544,54 +1544,52 @@ fn count_label(n: usize, noun: &str) -> String {
     }
 }
 
-/// Parses the proposal-shaped jobs' output contract (sort_proposal,
-/// syllabus_scan): a bare JSON array as the final message, tolerating a
-/// fenced block or stray prose around it. A candidate `[` counts only when
-/// the next non-whitespace character is `{` (or `]`), so a bracket inside
-/// prose — e.g. a filename like `[draft] notes.pdf` — never wins the slice;
-/// the stream deserializer then stops at the array's end, so trailing prose
-/// is harmless too.
-pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
+/// The first JSON value of the wanted shape in a job's output, tolerating a
+/// fenced block or stray prose around it.
+///
+/// `opens` guards which candidate delimiters count: only when the next
+/// non-whitespace byte is one of them is the slice tried at all, so a bracket
+/// inside prose — a filename like `[draft] notes.pdf`, or an empty `{}` in a
+/// sentence — never wins. The stream deserializer then stops at the value's
+/// end, so trailing prose is harmless too.
+///
+/// Scanned forward, so an outer value always beats the ones nested inside it;
+/// searching backwards would return an inner `{...}` and drop the record that
+/// contained it.
+fn first_json(text: &str, open: char, opens: &[u8], want: fn(&Value) -> bool) -> Option<Value> {
     let bytes = text.as_bytes();
-    for (i, _) in text.match_indices('[') {
+    for (i, _) in text.match_indices(open) {
         let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
-        if !matches!(next, Some(b'{') | Some(b']')) {
+        if !next.is_some_and(|b| opens.contains(b)) {
             continue;
         }
         let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
-        if let Some(Ok(Value::Array(entries))) = stream.next() {
-            return Ok(entries);
+        if let Some(Ok(value)) = stream.next() {
+            if want(&value) {
+                return Some(value);
+            }
         }
     }
-    bail!("no JSON array of proposals in the job output")
+    None
+}
+
+/// Parses the proposal-shaped jobs' output contract (sort_proposal,
+/// syllabus_scan): a bare JSON array as the final message.
+pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
+    match first_json(text, '[', b"{]", Value::is_array) {
+        Some(Value::Array(entries)) => Ok(entries),
+        _ => bail!("no JSON array of proposals in the job output"),
+    }
 }
 
 /// The single-object sibling of `parse_entries`, for jobs whose contract is one
-/// record rather than a list (lecture_digest). Same tolerance for fences and
-/// surrounding prose, and the same guard against a brace inside prose winning
-/// the slice: a candidate `{` counts only when a quoted key follows.
-///
-/// Scanned forward, so an outer object always beats the objects nested inside
-/// it — searching backwards would return an inner `{...}` and drop the record
-/// that contained it.
+/// record rather than a list (lecture_digest). A candidate `{` counts only when
+/// a quoted key follows — an empty pair parses perfectly well, and admitting it
+/// let one anywhere in the prose shadow the real record.
 pub(crate) fn parse_object(text: &str) -> Result<Value> {
-    let bytes = text.as_bytes();
-    for (i, _) in text.match_indices('{') {
-        let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
-        // A quoted key only. `{}` also parses, and admitting it meant an empty
-        // pair anywhere in the prose won the scan and returned a record with no
-        // fields — failing a run whose files were written correctly.
-        if next != Some(&b'"') {
-            continue;
-        }
-        let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
-        if let Some(Ok(value @ Value::Object(_))) = stream.next() {
-            return Ok(value);
-        }
-    }
-    bail!("no JSON object in the job output")
+    first_json(text, '{', b"\"", Value::is_object)
+        .context("no JSON object in the job output")
 }
-
 
 #[cfg(test)]
 mod tests {
