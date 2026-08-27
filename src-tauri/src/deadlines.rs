@@ -306,7 +306,9 @@ pub struct DeadlineProposal {
     pub source: String,
 }
 
-pub fn syllabus_proposals(conn: &Connection, class_id: i64) -> Result<Vec<DeadlineProposal>> {
+/// The class's confirm queue: every proposed deadline still awaiting a
+/// decision, whichever reader proposed it.
+pub fn pending_proposals(conn: &Connection, class_id: i64) -> Result<Vec<DeadlineProposal>> {
     let mut stmt = conn.prepare(
         "SELECT id, class_id, title, kind, due_at, notes, created_at, source
          FROM deadline_proposals WHERE class_id = ?1 AND status = 'pending'
@@ -623,7 +625,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         }
         Ok(summary)
     })?;
-    emit_hub_change(app, "syllabus");
+    emit_hub_change(app, "deadlineProposals");
     let summary = match unit_summary {
         Some(units) => format!("{summary} · {units}"),
         None => summary,
@@ -888,7 +890,7 @@ pub(crate) fn record_proposal(
 /// parks the row — either way the card leaves the queue.
 pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Result<String> {
     let summary = with_conn(app, |conn| resolve_in_conn(conn, proposal_id, approve))?;
-    emit_hub_change(app, "syllabus");
+    emit_hub_change(app, "deadlineProposals");
     if approve {
         emit_hub_change(app, "deadlines");
     }
@@ -923,7 +925,7 @@ pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchO
         }
         Ok(BatchOutcome { approved, skipped })
     })?;
-    emit_hub_change(app, "syllabus");
+    emit_hub_change(app, "deadlineProposals");
     if !outcome.approved.is_empty() {
         emit_hub_change(app, "deadlines");
     }

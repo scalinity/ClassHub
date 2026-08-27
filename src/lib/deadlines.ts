@@ -90,7 +90,7 @@ export function deleteDeadline(id: number): Promise<void> {
 
 // --- Syllabus scan (SPEC §11): job → proposals → confirm → insert -----------
 
-export interface SyllabusProposal {
+export interface DeadlineProposal {
   id: number;
   classId: number;
   title: string;
@@ -104,10 +104,10 @@ export interface SyllabusProposal {
   source: "syllabus" | "canvas";
 }
 
-export function getSyllabusProposals(
+export function getDeadlineProposals(
   classId: number,
-): Promise<SyllabusProposal[]> {
-  return invoke<SyllabusProposal[]>("get_syllabus_proposals", { classId });
+): Promise<DeadlineProposal[]> {
+  return invoke<DeadlineProposal[]>("get_deadline_proposals", { classId });
 }
 
 /** Scan one class file (relPath) or the whole class folder (null). */
@@ -123,11 +123,11 @@ export function runSyllabusScan(
 }
 
 /** Approve inserts the deadline with source='syllabus'; skip parks the card. */
-export function resolveSyllabusProposal(
+export function resolveDeadlineProposal(
   proposalId: number,
   approve: boolean,
 ): Promise<string> {
-  return invoke<string>("resolve_syllabus_proposal", { proposalId, approve });
+  return invoke<string>("resolve_deadline_proposal", { proposalId, approve });
 }
 
 /** What ADD ALL did: ids now safe to hide, and one line per card it couldn't
@@ -139,8 +139,8 @@ export interface BatchOutcome {
 
 /** Approves a batch server-side: one rejection costs its card, never the
  * rest, and the backend pushes hub-changed once for the whole batch. */
-export function approveAllProposals(
+export function approveDeadlineProposals(
   proposalIds: number[],
 ): Promise<BatchOutcome> {
-  return invoke<BatchOutcome>("approve_syllabus_proposals", { proposalIds });
+  return invoke<BatchOutcome>("approve_deadline_proposals", { proposalIds });
 }

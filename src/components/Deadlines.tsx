@@ -3,19 +3,19 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 
 import {
-  approveAllProposals,
+  approveDeadlineProposals,
   DEADLINE_KINDS,
   deadlineSourceBadge,
   deleteDeadline,
-  getSyllabusProposals,
+  getDeadlineProposals,
   listDeadlines,
-  resolveSyllabusProposal,
+  resolveDeadlineProposal,
   runSyllabusScan,
   saveDeadline,
   setDeadlineStatus,
   type Deadline,
   type DeadlineKind,
-  type SyllabusProposal,
+  type DeadlineProposal,
 } from "@/lib/deadlines";
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
@@ -52,8 +52,8 @@ export function DeadlinesSection({
     queryFn: listDeadlines,
   });
   const { data: proposals } = useQuery({
-    queryKey: ["syllabusProposals", classId],
-    queryFn: () => getSyllabusProposals(classId),
+    queryKey: ["deadlineProposals", classId],
+    queryFn: () => getDeadlineProposals(classId),
     placeholderData: (prev) => prev,
   });
   const { jobs } = useJobs();
@@ -114,7 +114,7 @@ export function DeadlinesSection({
   const addAll = () => {
     setAddingAll(true);
     setActionError(null);
-    approveAllProposals(cards.map((card) => card.id))
+    approveDeadlineProposals(cards.map((card) => card.id))
       .then((outcome) => {
         setResolvedIds((prev) => {
           const next = new Set(prev);
@@ -555,7 +555,7 @@ function ProposalCard({
   disabled,
   onResolved,
 }: {
-  proposal: SyllabusProposal;
+  proposal: DeadlineProposal;
   disabled: boolean;
   onResolved: (id: number) => void;
 }) {
@@ -565,7 +565,7 @@ function ProposalCard({
   const resolve = (approve: boolean) => {
     setBusy(true);
     setError(null);
-    resolveSyllabusProposal(proposal.id, approve)
+    resolveDeadlineProposal(proposal.id, approve)
       .then(() => onResolved(proposal.id))
       .catch((e) => {
         setError(String(e));

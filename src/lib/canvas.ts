@@ -110,7 +110,7 @@ function init() {
       // committed, so every surface a sync touches has something new to show.
       void queryClient.invalidateQueries({ queryKey: ["units"] });
       void queryClient.invalidateQueries({ queryKey: ["canvasStatus"] });
-      void queryClient.invalidateQueries({ queryKey: ["syllabusProposals"] });
+      void queryClient.invalidateQueries({ queryKey: ["deadlineProposals"] });
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
     }

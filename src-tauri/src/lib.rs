@@ -319,14 +319,15 @@ fn delete_deadline(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     deadlines::delete_deadline(&app, id).map_err(|e| format!("{e:#}"))
 }
 
-/// Pending syllabus-scan proposals for the class's confirm cards.
+/// Pending proposed deadlines for the class's confirm cards — from either
+/// reader, the syllabus scan or the Canvas sync.
 #[tauri::command(async)]
-fn get_syllabus_proposals(
+fn get_deadline_proposals(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<deadlines::DeadlineProposal>, String> {
     let conn = db::lock(&state.0);
-    deadlines::syllabus_proposals(&conn, class_id).map_err(|e| format!("{e:#}"))
+    deadlines::pending_proposals(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
 /// Scan a chosen file (rel_path) or the whole class folder (None) for dated
@@ -342,9 +343,10 @@ fn run_syllabus_scan(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Approve (insert with source='syllabus') or skip a proposed deadline.
+/// Approve or skip a proposed deadline. Approval stamps the deadline with the
+/// proposal's own source, so it stays traceable to the reader that found it.
 #[tauri::command]
-fn resolve_syllabus_proposal(
+fn resolve_deadline_proposal(
     app: tauri::AppHandle,
     proposal_id: i64,
     approve: bool,
@@ -354,7 +356,7 @@ fn resolve_syllabus_proposal(
 
 /// ADD ALL: approve a batch — each card independently, one hub push at the end.
 #[tauri::command]
-fn approve_syllabus_proposals(
+fn approve_deadline_proposals(
     app: tauri::AppHandle,
     proposal_ids: Vec<i64>,
 ) -> Result<deadlines::BatchOutcome, String> {
@@ -618,10 +620,10 @@ pub fn run() {
             save_deadline,
             set_deadline_status,
             delete_deadline,
-            get_syllabus_proposals,
+            get_deadline_proposals,
             run_syllabus_scan,
-            resolve_syllabus_proposal,
-            approve_syllabus_proposals,
+            resolve_deadline_proposal,
+            approve_deadline_proposals,
             list_units,
             canvas_status,
             sync_canvas,

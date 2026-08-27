@@ -453,7 +453,7 @@ fn sync_assignments(
             .push(format!("{known} Canvas assignment(s) already accounted for"));
     }
     if proposed > 0 {
-        emit_hub_change(app, "syllabus");
+        emit_hub_change(app, "deadlineProposals");
     }
     Ok(())
 }

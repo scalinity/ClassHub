@@ -12,7 +12,7 @@ interface HubChange {
     | "notes"
     | "proposals"
     | "files"
-    | "syllabus"
+    | "deadlineProposals"
     | "units";
 }
 
@@ -36,9 +36,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["grades"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
-    case "syllabus":
-      // The workspace's syllabus confirm cards.
-      void queryClient.invalidateQueries({ queryKey: ["syllabusProposals"] });
+    case "deadlineProposals":
+      // The workspace's confirm cards — a syllabus scan or a Canvas sync
+      // proposed something, or one was approved or skipped.
+      void queryClient.invalidateQueries({ queryKey: ["deadlineProposals"] });
       break;
     case "notes":
       void queryClient.invalidateQueries({ queryKey: ["notes"] });
