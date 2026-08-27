@@ -17,10 +17,10 @@
 //! transcript that writes the session document and names it.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -328,6 +328,10 @@ pub fn spawn_add(app: &AppHandle, req: AddRequest) {
 struct DigestPayload {
     transcript_rel_path: String,
     date: String,
+    /// Captured at enqueue, not at finalize — SPEC §8.1's semantics, and what
+    /// `guides.rs` does: a transcript edited while the job runs leaves the
+    /// digest stale afterwards rather than recording as fresh.
+    source_manifest: String,
 }
 
 /// Queues the distillation of one filed transcript.
@@ -337,27 +341,45 @@ pub fn enqueue_digest(
     transcript_rel_path: &str,
     date: &str,
 ) -> Result<i64> {
-    let prompt = with_conn(app, |conn| {
+    let scope = session_scope(transcript_rel_path);
+    let (prompt, manifest) = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
-        if !class_dir.join(transcript_rel_path).is_file() {
+        let transcript = class_dir.join(transcript_rel_path);
+        if !transcript.is_file() {
             bail!("no transcript at {transcript_rel_path}");
         }
-        let class_name: String = conn.query_row(
-            "SELECT display_name FROM classes WHERE id = ?1",
+        // The job row's scope is the transcript path, not the guide scope.
+        if crate::guides::has_active_job(conn, class_id, "lecture_digest", transcript_rel_path)? {
+            bail!("a session document for this lecture is already queued or running");
+        }
+        let (class_name, color): (String, String) = conn.query_row(
+            "SELECT display_name, color FROM classes WHERE id = ?1",
             [class_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        Ok(PROMPT_TEMPLATE
+        let (accent_light, accent_dark) = crate::guides::accent_values(&color);
+        // The job reads the transcript with `Read`, which pages. A three-hour
+        // lecture runs past a single read, and a digest of the first fraction
+        // would come back looking like a complete one.
+        let lines = fs::read_to_string(&transcript).map(|t| t.lines().count()).unwrap_or(0);
+        let prompt = PROMPT_TEMPLATE
             .replace("{class}", &class_name)
             .replace("{date}", date)
             .replace("{transcript}", transcript_rel_path)
+            .replace("{transcript_lines}", &lines.to_string())
             .replace("{sessions_dir}", SESSIONS_DIR)
-            .replace("{context}", &module_context(conn, class_id, transcript_rel_path)?))
+            .replace("{accent_light}", &accent_light)
+            .replace("{accent_dark}", &accent_dark)
+            .replace("{context}", &module_context(conn, class_id, transcript_rel_path)?);
+        let manifest =
+            serde_json::to_string(&crate::extract::current_manifest(conn, class_id, &scope)?)?;
+        Ok((prompt, manifest))
     })?;
 
     let payload = serde_json::to_string(&DigestPayload {
         transcript_rel_path: transcript_rel_path.to_string(),
         date: date.to_string(),
+        source_manifest: manifest,
     })?;
     crate::jobs::enqueue_lecture_digest(app, class_id, transcript_rel_path, &prompt, payload)
 }
@@ -408,10 +430,6 @@ struct DigestResult {
     rel_path_md: String,
 }
 
-/// Verifies the two contracted documents exist where the job says it put them,
-/// then records the digest. Both halves are checked because "wrote the HTML,
-/// skipped the markdown" would otherwise pass as success and quietly leave the
-/// digest out of chat's search scope.
 pub fn finalize_digest(
     app: &AppHandle,
     class_id: i64,
@@ -424,18 +442,80 @@ pub fn finalize_digest(
     let result: DigestResult =
         serde_json::from_value(value).context("digest output is missing its title or paths")?;
 
-    let conn_paths = [&result.rel_path_html, &result.rel_path_md];
-    for rel in conn_paths {
-        if !rel.starts_with(&format!("{SESSIONS_DIR}/")) {
-            bail!("the digest wrote to {rel}, outside {SESSIONS_DIR}/");
-        }
-    }
-
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
     let class_dir = crate::scanner::class_dir(&conn, class_id)?;
-    for rel in conn_paths {
-        let written = fs::metadata(class_dir.join(rel))
+
+    let recorded = record_session(&conn, class_id, &class_dir, &payload, &result);
+    if recorded.is_err() {
+        // The job writes before it reports, so a rejected report leaves two
+        // files nothing references. `Study Guides` is app-managed, so the
+        // scanner never indexes them and the Sessions list is built from the
+        // table — they would be invisible and permanent, while chat's search
+        // walks that folder and would keep returning them.
+        for rel in [&result.rel_path_html, &result.rel_path_md] {
+            if let Some(abs) = session_path(&class_dir, rel) {
+                let _ = fs::remove_file(abs);
+            }
+        }
+    }
+    drop(conn);
+
+    // No hub-change push: this runs before the job row leaves `running`, and
+    // the settle edge is what refetches guides — the same path module and
+    // master guides take, and the reason `guides::finalize_job` emits nothing.
+    recorded
+}
+
+/// The absolute path for a reported output, or `None` when the report does not
+/// name a file inside the sessions folder. Compared by component rather than by
+/// byte prefix, so neither `..` nor a sibling named `Sessions-old` passes.
+fn session_path(class_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let path = Path::new(rel);
+    if path
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    path.starts_with(SESSIONS_DIR).then(|| class_dir.join(path))
+}
+
+fn session_scope(transcript_rel_path: &str) -> String {
+    format!("{SESSION_SCOPE_PREFIX}{transcript_rel_path}")
+}
+
+/// Verifies the two contracted documents exist where the job says it put them,
+/// then records the digest. Both halves are checked because "wrote the HTML,
+/// skipped the markdown" would otherwise pass as success and quietly leave the
+/// digest out of chat's search scope.
+fn record_session(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    payload: &DigestPayload,
+    result: &DigestResult,
+) -> Result<String> {
+    // One file reported twice passes an element-wise check on both counts, and
+    // is exactly the half-written outcome checking both is meant to catch.
+    if result.rel_path_html == result.rel_path_md {
+        bail!(
+            "the digest reported one file for both documents ({})",
+            result.rel_path_html
+        );
+    }
+    if !result.rel_path_html.ends_with(".html") || !result.rel_path_md.ends_with(".md") {
+        bail!(
+            "the digest reported {} and {}, not an .html and a .md",
+            result.rel_path_html,
+            result.rel_path_md
+        );
+    }
+    for rel in [&result.rel_path_html, &result.rel_path_md] {
+        let Some(abs) = session_path(class_dir, rel) else {
+            bail!("the digest reported {rel}, outside {SESSIONS_DIR}/");
+        };
+        let written = fs::metadata(abs)
             .map(|m| m.is_file() && m.len() > 0)
             .unwrap_or(false);
         if !written {
@@ -443,10 +523,15 @@ pub fn finalize_digest(
         }
     }
 
-    let scope = format!("{SESSION_SCOPE_PREFIX}{}", payload.transcript_rel_path);
-    let manifest = serde_json::to_string(&crate::extract::current_manifest(
-        &conn, class_id, &scope,
-    )?)?;
+    let scope = session_scope(&payload.transcript_rel_path);
+    let superseded: Option<String> = conn
+        .query_row(
+            "SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
+            rusqlite::params![class_id, &scope],
+            |row| row.get(0),
+        )
+        .optional()?;
+
     conn.execute(
         "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -454,13 +539,25 @@ pub fn finalize_digest(
            rel_path = excluded.rel_path,
            generated_at = excluded.generated_at,
            source_manifest = excluded.source_manifest",
-        rusqlite::params![class_id, scope, result.rel_path_html, now(), manifest],
+        rusqlite::params![
+            class_id,
+            scope,
+            result.rel_path_html,
+            now(),
+            payload.source_manifest
+        ],
     )?;
-    drop(conn);
 
-    // No hub-change push: this runs before the job row leaves `running`, and
-    // the settle edge is what refetches guides — the same path module and
-    // master guides take, and the reason `guides::finalize_job` emits nothing.
+    // The job names its own file, so a re-run under a different topic leaves
+    // the previous pair on disk with nothing pointing at it — and chat's search
+    // walks `Study Guides/`, so it would go on answering from the old one.
+    if let Some(old) = superseded.filter(|p| *p != result.rel_path_html) {
+        for rel in [old.clone(), format!("{}.md", old.trim_end_matches(".html"))] {
+            if let Some(abs) = session_path(class_dir, &rel) {
+                let _ = fs::remove_file(abs);
+            }
+        }
+    }
     Ok(format!("{} · {}", result.title, payload.date))
 }
 
@@ -518,6 +615,56 @@ mod tests {
     fn keeps_the_digest_inside_the_contracted_write_scope() {
         assert!(SESSIONS_DIR.starts_with(crate::db::GUIDES_DIR), "{SESSIONS_DIR}");
         assert!(crate::db::JOB_WRITABLE.contains(&crate::db::GUIDES_DIR));
+    }
+
+    /// The one check standing between a model-chosen string and a write path.
+    #[test]
+    fn only_accepts_a_reported_path_inside_the_sessions_folder() {
+        let root = Path::new("/tmp/classhub-test");
+        let ok = session_path(root, "Study Guides/Sessions/2026-08-24 — Attention.html");
+        assert_eq!(ok, Some(root.join("Study Guides/Sessions/2026-08-24 — Attention.html")));
+
+        // Traversal, absolute, and a sibling that a byte-prefix check accepts.
+        assert_eq!(session_path(root, "Study Guides/Sessions/../../../.zshrc"), None);
+        assert_eq!(session_path(root, "/Users/danny/.zshrc"), None);
+        assert_eq!(session_path(root, "Study Guides/Sessions-old/x.html"), None);
+        assert_eq!(session_path(root, "Notes/x.html"), None);
+        assert_eq!(session_path(root, ""), None);
+    }
+
+    /// A pair that is really one file passes an element-wise existence check on
+    /// both counts, which is the failure checking both was added to prevent.
+    #[test]
+    fn rejects_a_digest_that_reported_one_file_twice() {
+        let dir = std::env::temp_dir().join("classhub-digest-pair");
+        let sessions = dir.join(SESSIONS_DIR);
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let html = "Study Guides/Sessions/2026-08-24 — Attention.html";
+        fs::write(dir.join(html), "<html></html>").expect("html");
+
+        let conn = Connection::open_in_memory().expect("conn");
+        let payload = DigestPayload {
+            transcript_rel_path: "Module 1/Transcripts/2026-08-24 — Lecture.md".into(),
+            date: "2026-08-24".into(),
+            source_manifest: "[]".into(),
+        };
+        let same = DigestResult {
+            title: "Attention".into(),
+            rel_path_html: html.into(),
+            rel_path_md: html.into(),
+        };
+        let err = record_session(&conn, 1, &dir, &payload, &same).expect_err("one file");
+        assert!(format!("{err:#}").contains("one file for both"), "{err:#}");
+
+        // The markdown genuinely missing is caught too, and named.
+        let missing = DigestResult {
+            rel_path_md: "Study Guides/Sessions/2026-08-24 — Attention.md".into(),
+            ..same
+        };
+        let err = record_session(&conn, 1, &dir, &payload, &missing).expect_err("no md");
+        assert!(format!("{err:#}").contains("no session document"), "{err:#}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -43,7 +43,7 @@ line: `DONE: <output path>` or `FAILED: <output path> — <reason>`.";
 
 /// The class accent as concrete values for the guide's design contract,
 /// mirroring the `--class-*` tokens in src/index.css (light, dark).
-fn accent_values(color: &str) -> (&'static str, &'static str) {
+pub(crate) fn accent_values(color: &str) -> (&'static str, &'static str) {
     match color {
         "orange" => ("oklch(0.646 0.175 45)", "oklch(0.748 0.145 50)"),
         "green" => ("oklch(0.578 0.135 158)", "oklch(0.732 0.13 158)"),
@@ -442,7 +442,7 @@ fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> 
     Ok(lines.join("\n"))
 }
 
-fn has_active_job(conn: &Connection, class_id: i64, kind: &str, scope: &str) -> Result<bool> {
+pub(crate) fn has_active_job(conn: &Connection, class_id: i64, kind: &str, scope: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM jobs
          WHERE kind = ?1 AND class_id = ?2 AND scope = ?3
