@@ -238,8 +238,8 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   └── .classhub/
 │       ├── extracts/                      ← APP-MANAGED: hidden extraction cache,
 │       │   └── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
-│       └── corpus/                        ← APP-MANAGED: distilled lecture contributions
-│           └── Module 1/2026-08-20 — Central Tendency.md     (§8.5)
+│       └── corpus/                        ← APP-MANAGED: distilled lecture contributions,
+│           └── Week 02 — Study Designs/2026-08-27 — Lecture.md   keyed by unit (§8.5)
 └── ... (3 more class folders)
 ```
 
@@ -251,10 +251,11 @@ Rules:
   `.classhub/extracts/`. PPTX→PDF conversions live alongside as `<name>.pptx.pdf`.
 - `Study Guides/`, `Notes/`, `_Inbox/`, `.classhub/` are excluded from scanning, drop-to-sort
   proposals, and staleness computation of source material.
-- **`Weeks/` is storage, not scope.** It is where a lecture goes, in every class, because a
-  lecture happens at a time. What a lecture is *about* is decided separately (§8.5) — the two
-  are deliberately not the same axis, since one three-hour lecture routinely spans two of the
-  course's units.
+- **`Weeks/` is storage, and for these four courses it also settles scope.** A lecture goes
+  there because a lecture happens at a time. Each course meets once a week and divides itself no
+  finer than a week, so the week a lecture was filed under is the division it belongs to (§8.5).
+  The two axes are kept separate anyway: a course that divided itself finer than its meetings
+  would need them apart, and nothing about storing a lecture by date assumes otherwise.
 - `Weeks/` is **not** app-managed. A transcript is source material like a slide deck: the
   scanner indexes it, extraction routes it through the zero-token text path, and chat searches
   it. Filing it in the tree is what joins it to the pipeline rather than parking it beside.
@@ -305,9 +306,10 @@ units(id INTEGER PK, class_id INTEGER FK, ordinal INTEGER,
       source TEXT,           -- canvas|syllabus — which reader declared it, canvas winning
       UNIQUE(class_id, name));
 
--- One span of one lecture, mapped to one unit (§8.5). This is the join that lets a
--- three-hour lecture feed two different guides, each from its own half, without the
--- transcript being stored twice or split.
+-- One span of one lecture, mapped to one unit (§8.5) — the join that lets a lecture
+-- stored by date feed a guide scoped by topic. A lecture contributes its whole length
+-- to one unit today, since no course divides itself finer than its meetings; the span
+-- columns are what the table would need if one ever did.
 lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
                       rel_path TEXT,          -- the transcript this span is cut from
                       start_ms INTEGER, end_ms INTEGER,
@@ -498,8 +500,8 @@ as a display name, but a single-word one has to recur before it counts, because 
 
 **Filing** puts every transcript at `<Class>/Weeks/Week NN — <topic>/<date> — <title>.md`.
 
-A lecture is filed by *when it happened*, never by what it covers — deciding the latter is
-§8.5's job and it does not have one answer. The week comes from the course's own schedule
+A lecture is filed by *when it happened*, and for these four courses that also settles what it
+counts as covering (§8.5). The week comes from the course's own schedule
 (§7.2), because breaks make arithmetic wrong: Fundamentals runs Week 13 on Nov 17 and Week 14
 on Dec 1. The Add lecture form shows the resolved week and lets it be corrected.
 
@@ -714,43 +716,48 @@ a session that covered something partially is reported with the gap named as a g
 
 ### 8.5 Unit corpus — what a guide is actually built from
 
-A three-hour lecture does not respect the course's divisions. A Week 2 lecture routinely covers
-the tail of one unit for ninety minutes and then moves into the next. Because ClassHub stores a
-lecture by time (§4) and synthesizes by topic, something has to map between them, and that map
-is what `lecture_contributions` (§5) holds.
+ClassHub stores a lecture by when it happened (§4) and synthesizes by what it is about, so
+something has to join the two. `lecture_contributions` (§5) is that join.
 
-**Mapping** is folded into the `lecture_digest` pass, which already reads the whole transcript
-once — doing it separately would pay for that read twice. The job receives the class's unit
-list and returns, alongside the session document, a set of spans:
+**The calendar is the join, not a model.** Each of the four courses meets once a week, and each
+declares divisions no finer than a week: three number their weeks, and the fourth declares three
+Parts whose own names carry the week ranges they span (`Part I: … (Weeks 1-8)`). A meeting
+therefore sits inside exactly one division — for a week-numbered course the week it happened in,
+and for a Part-numbered one the Part whose range contains that week. Nothing has to infer the
+mapping, because filing the transcript already decided it.
 
-```json
-[{"startAnchor":"00:00","endAnchor":"01:22","unit":"Module 1","confidence":"high",
-  "summary":"Decision trees, bagging, random forests — Module 1 as scheduled"},
- {"startAnchor":"01:22","endAnchor":"02:55","unit":"Module 2","confidence":"medium",
-  "summary":"Moved early into SVMs and margins — Module 2 material"}]
-```
+Resolving a lecture's week is the one step with any judgement in it, and it comes from `units`
+rather than from arithmetic: weeks are not uniformly spaced (§1), so a date cannot be divided
+into a week number. Where a course publishes no schedule the Add lecture form asks, defaulting
+to the nearest week by date.
 
-Rust resolves each anchor to a line range by scanning the `## HH:MM` headings it wrote into the
-transcript, **snapping outward** to anchor boundaries. Widening a span costs a paragraph of
-overlap; narrowing it to an exact timestamp severs a sentence, and a guide built from a severed
-sentence is wrong in a way nothing downstream can detect.
+This is worth stating because the obvious alternative is wrong here. Asking the digest to
+segment a lecture across units would buy nothing — no division is finer than a meeting, so
+every span it produced beyond the first would be an error — and a wrong boundary is the one
+mistake in this pipeline that quietly corrupts study material rather than failing visibly.
 
-**Each span is distilled once**, into `.classhub/corpus/<unit>/<date> — <topic>.md`: the
-high-yield content of that span, every point carrying its `HH:MM` anchor back to the
-transcript. This is what makes the cost sane — the expensive read happens once per lecture
-rather than once per guide per lecture — and it makes the corpus inspectable, so what a guide
-drew on can be read directly rather than inferred from the guide.
+**Each lecture is distilled once**, into `.classhub/corpus/<unit>/<date> — <topic>.md`: the
+high-yield content of the transcript, every point carrying its `HH:MM` anchor back to the
+source. This is what makes the cost sane — the expensive read happens once per lecture rather
+than once per guide per lecture — and it makes the corpus inspectable, so what a guide drew on
+can be read directly rather than inferred from the guide. A long lecture covers many topics;
+the anchors are what let a guide cite the right stretch of one, which is a different problem
+from splitting it across units and is already solved by §8.4's anchored key points.
 
 **A unit guide's sources** are therefore: files under the unit's folder when it has one — which
-is what `units.rel_path` records (§7.2) — and its corpus notes, each listed with the transcript
-path and the raw span's line range so the job can open the professor's exact words when the
-distillation is not enough. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so
-chat retrieves it too.
+is what `units.rel_path` records (§7.2) — files Canvas attributed to it (§7.2), and its corpus
+notes, each listed with the transcript path so the job can open the professor's exact words when
+the distillation is not enough. `.classhub/corpus/` joins the extract cache in
+`search_material`'s scope (§9), so chat retrieves it too.
 
-**Trust follows the app's existing habit.** `high`-confidence spans apply on write; `medium`
-and `low` land in the confirm queue beside file moves and syllabus deadlines. A misallocated
-span is not destructive — it means a guide cites a stretch of the wrong lecture — but it shapes
-what gets studied, so the uncertain ones are shown rather than assumed.
+A contribution is recorded as applied when it is written, because the filing decision it follows
+is the user's own rather than a model's reading. Correcting one means refiling the lecture into
+a different week, which is a move like any other — there is no separate span to reassign.
+
+`lecture_contributions` keeps its per-span shape (`start_ms`/`end_ms`, resolved line bounds)
+even though a lecture currently contributes its whole length to a single unit. The columns cost
+nothing, and they are what the table would need if a course ever declared divisions finer than
+its meetings.
 
 ## 9. Agent chat (direct Anthropic API)
 
@@ -973,13 +980,13 @@ Mark the checkbox when the acceptance criteria pass.
   (§1) — a Canvas assignment appears as a deadline card carrying its true due date, and a course
   file reaches the tree through an approved move.
 
-- [ ] **M14 — Lecture content mapping.** (`milestones/M14-lecture-mapping.md`)
-  Transcripts file into `Weeks/` (§4), mapping folded into the `lecture_digest` pass, anchor →
-  line resolution, distilled corpus notes, the confidence queue, and unit-scoped guide sources
-  (§8.5).
-  *Accepted when:* a lecture that starts in one unit and moves into the next contributes to both
-  guides — each drawing only its own span — the split is visible and correctable, and neither
-  guide contains the other's material.
+- [ ] **M14 — Lectures into weeks, and the unit corpus.** (`milestones/M14-lecture-mapping.md`)
+  Transcripts file into `Weeks/` (§4), which is what maps them to units; week → Part resolution
+  for the one course declaring Parts; distilled corpus notes; unit-scoped guide sources and the
+  manifest union that keeps a unit guide stale-aware (§8.5).
+  *Accepted when:* a filed lecture reaches its unit's guide through a corpus note, the guide goes
+  stale when the transcript changes, chat retrieves the note, and refiling the lecture to another
+  week moves its contribution with it.
 
 ## 15. Risks & trade-offs (accepted)
 
@@ -1011,10 +1018,12 @@ Mark the checkbox when the acceptance criteria pass.
   re-run, by units being visible and labelled with where they came from, and by nothing
   downstream deleting on a re-read. A wrong division is visible on the workspace rather than
   buried in a guide.
-- **Span mapping is a judgement call**: where one unit ends and the next begins inside a lecture
-  is genuinely fuzzy, and the model will sometimes place the boundary wrong. Mitigated rather
-  than solved: spans snap outward so nothing is severed, low-confidence splits are queued for
-  review, and the corpus note is readable so a wrong call is visible instead of silent.
+- **A lecture's unit is only as right as its week**: the join is the calendar (§8.5), so a
+  transcript filed under the wrong week feeds the wrong guide. Cheaper to live with than the
+  alternative — the week is shown on the Add lecture form and correctable by refiling, and the
+  corpus note is readable, so a wrong call is visible rather than silent. It also depends on no
+  course dividing itself more finely than it meets, which is true of all four and is a property
+  of the courses rather than a guarantee.
 - **Single-user, local-only**: no auth, no telemetry, no deployment infra. The subscription
   OAuth stays personal; nothing here is multi-tenant.
 
