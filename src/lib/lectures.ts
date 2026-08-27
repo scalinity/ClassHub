@@ -40,6 +40,8 @@ export interface AddResult {
   routedToInbox: boolean;
   speakers: string[];
   digestJobId: number | null;
+  /** Present when a digest was asked for and did not start. */
+  digestError?: string;
 }
 
 export interface LectureProgress {

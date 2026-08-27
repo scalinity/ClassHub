@@ -58,6 +58,11 @@ pub struct AddResult {
     pub routed_to_inbox: bool,
     pub speakers: Vec<String>,
     pub digest_job_id: Option<i64>,
+    /// Why no digest started, when one was asked for. The transcript is filed
+    /// either way, so this is a note rather than a failure — but silence here
+    /// reads as "no digest was wanted".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -95,15 +100,23 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         None => INBOX_DIR.to_string(),
     };
 
-    let rel_path = with_conn(app, |conn| {
-        let class_dir = crate::scanner::class_dir(conn, req.class_id)?;
-        let dir = class_dir.join(&dir_rel);
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Only the lookup needs the connection. Writing a multi-megabyte markdown
+    // with it held blocks every other command, the chat tools and the job
+    // runner for the duration — the arrangement `scan_class` and
+    // `search_material` were both restructured away from.
+    let class_dir = with_conn(app, |conn| crate::scanner::class_dir(conn, req.class_id))?;
+    let dir = class_dir.join(&dir_rel);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-        // Never overwrite: two lectures on one date, or a re-add of the same
-        // one, are both ordinary and neither should silently replace a file.
-        let rel_path = unique_rel_path(&class_dir, &dir_rel, &file_name);
-        crate::db::write_atomic(&class_dir.join(&rel_path), &markdown)?;
+    // Never overwrite: two lectures on one date, or a re-add of the same
+    // one, are both ordinary and neither should silently replace a file.
+    let rel_path = unique_rel_path(&class_dir, &dir_rel, &file_name);
+    crate::db::write_atomic(&class_dir.join(&rel_path), &markdown)?;
+
+    // Logged rather than propagated: the transcript is on disk by now, so
+    // failing the run here would report "could not add the lecture" over a
+    // filed file and earn a duplicate on the retry.
+    let audited = with_conn(app, |conn| {
         audit(
             conn,
             "lecture.added",
@@ -114,26 +127,37 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
                 "date": req.date,
                 "cues": cues.len(),
             }),
-        )?;
-        Ok(rel_path)
-    })?;
+        )
+    });
+    if let Err(e) = audited {
+        eprintln!("lecture.added audit row failed for {rel_path}: {e:#}");
+    }
 
     // Index it before anything downstream looks for it: the digest job's
-    // manifest reads the `files` row, and the sorter lists the inbox.
+    // manifest reads the `files` row, and the sorter lists the inbox. A failure
+    // here is not cosmetic: with no row the digest's manifest is empty, and the
+    // session then reads as permanently fresh, or as permanently stale once the
+    // row does appear.
     on_stage("Indexing…");
     {
         let db = app.state::<crate::Db>();
-        let _ = crate::scanner::scan_class(&db.0, req.class_id);
+        if let Err(e) = crate::scanner::scan_class(&db.0, req.class_id) {
+            bail!("filed {rel_path}, but indexing it failed: {e:#}");
+        }
     }
     crate::extract::spawn_pipeline(app, req.class_id);
 
+    let mut digest_error = None;
     let digest_job_id = if req.digest && !routed_to_inbox {
         match enqueue_digest(app, req.class_id, &rel_path, &req.date) {
             Ok(id) => Some(id),
             // The transcript is filed and that is the durable half; a digest
             // that failed to enqueue is a button away, not a reason to unwind.
+            // Said out loud, though — the outcome panel otherwise shows the
+            // same line as for a lecture no digest was ever asked for.
             Err(e) => {
                 eprintln!("lecture digest failed to enqueue: {e:#}");
+                digest_error = Some(format!("{e:#}"));
                 None
             }
         }
@@ -154,7 +178,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
             }
         }
     }
-    Ok(AddResult { rel_path, routed_to_inbox, speakers, digest_job_id })
+    Ok(AddResult { rel_path, routed_to_inbox, speakers, digest_job_id, digest_error })
 }
 
 /// Resolves whatever the user pointed at into caption text plus a display name
@@ -176,6 +200,18 @@ fn fetch(app: &AppHandle, source: &str, on_stage: &dyn Fn(&str)) -> Result<(Stri
 
     if crate::transcribe::is_media(path) {
         return Ok((crate::transcribe::to_vtt(app, path, on_stage)?, name));
+    }
+    // Anything that is not media is read whole, so it needs a ceiling: nothing
+    // upstream checks the extension, and a caption track for a three-hour
+    // lecture is a couple of megabytes. Past this it is not a transcript.
+    const MAX_CAPTION_BYTES: u64 = 64 * 1024 * 1024;
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size > MAX_CAPTION_BYTES {
+        bail!(
+            "{name} is {}MB — too large to be a caption track. Point at the \
+             recording itself, or at the transcript Zoom saved.",
+            size / (1024 * 1024)
+        );
     }
     let text = fs::read(path)
         .map(|b| String::from_utf8_lossy(&b).replace("\r\n", "\n"))

@@ -8,6 +8,7 @@ import {
   dateFromFileName,
   moduleOptions,
   useLectureProgress,
+  type LectureProgress,
   type SourceKind,
 } from "@/lib/lectures";
 import { todayIso } from "@/lib/schedule";
@@ -294,7 +295,7 @@ function Outcome({
   progress,
   onClose,
 }: {
-  progress: { result?: { relPath: string; routedToInbox: boolean; speakers: string[]; digestJobId: number | null } ; error?: string };
+  progress: LectureProgress;
   onClose: () => void;
 }) {
   const result = progress.result;
@@ -313,6 +314,11 @@ function Outcome({
                 ? "The session document is being written. Watch it in the Job Center."
                 : "It's filed with the module's material and will show up in the next guide you generate."}
           </p>
+          {result.digestError && (
+            <p className="mt-3 font-mono text-[11px] text-destructive">
+              NO SESSION DOCUMENT — {result.digestError}
+            </p>
+          )}
           {result.speakers.length > 0 && (
             <p className="mt-3 text-[12px] text-muted-foreground">
               Speakers: {result.speakers.join(", ")}
