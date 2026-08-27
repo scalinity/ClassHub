@@ -1,0 +1,18 @@
+-- SPEC §5/§7.2 — a folder is no longer one of a course's divisions.
+--
+-- The top-level folders were recorded as `units` with `source = 'folder'`,
+-- standing in for structure until a real source spoke. What that row carried
+-- beyond the folder's own name was an ordinal and a kind restating
+-- `files.rel_path`, which the Materials tree already renders — and the cost was
+-- a second numbering sequence in the Structure list and a label explaining that
+-- the app was showing something the course never said. Biostatistics listed
+-- "Module 1" and "Syllabus" beneath its seventeen real weeks.
+--
+-- What the folder actually knows is where a division's material sits on disk,
+-- and that is recorded on the declared unit's own row (`units.rel_path`, filled
+-- by `units::attach_folder_paths`). It never needed a row of its own.
+--
+-- Only folder-sourced rows go. A folder row that a real source has since taken
+-- over is no longer `source = 'folder'` — `units::upsert` rewrites `source` on
+-- takeover — so a declared division cannot be caught by this.
+DELETE FROM units WHERE source = 'folder';

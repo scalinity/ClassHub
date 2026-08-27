@@ -144,6 +144,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_grade_checks.sql"),
     include_str!("../migrations/0006_indexes.sql"),
     include_str!("../migrations/0007_units.sql"),
+    include_str!("../migrations/0008_folder_units.sql"),
 ];
 
 #[derive(Serialize)]

@@ -23,7 +23,7 @@
 //! (SPEC §7.2): a mid-semester reshuffle must not silently orphan a guide.
 
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 /// The kinds SPEC §5 allows, i.e. the words a course uses for its divisions.
@@ -130,44 +130,101 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> 
         kind_for_name(&name).to_string()
     };
 
-    type Row = (i64, String, i64, String, Option<String>, Option<String>, Option<String>, Option<String>);
-    let existing: Option<Row> = conn
-        .query_row(
-            "SELECT id, source, ordinal, kind, canvas_id, rel_path, starts_on, ends_on
-             FROM units WHERE class_id = ?1 AND name = ?2",
-            params![class_id, name],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
-        )
-        .ok();
+    type Row = (
+        i64,
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let map = |row: &rusqlite::Row| -> rusqlite::Result<Row> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        ))
+    };
+    // Identity is the Canvas id wherever there is one. A professor renaming a
+    // published module is the same division under a new name, and matching on
+    // name alone would insert a second row and go on presenting the old name
+    // as something the course still declares.
+    let by_canvas_id: Option<Row> = match unit.canvas_id.as_deref() {
+        Some(canvas_id) => conn
+            .query_row(
+                "SELECT id, source, ordinal, kind, canvas_id, rel_path, starts_on, ends_on, name
+                 FROM units WHERE class_id = ?1 AND canvas_id = ?2",
+                params![class_id, canvas_id],
+                map,
+            )
+            .optional()?,
+        None => None,
+    };
+    // `.optional()?` rather than `.ok()`: swallowing every error as "no such
+    // row" turned a locked database into an INSERT that then failed on the
+    // uniqueness constraint, reporting a cause that had nothing to do with it.
+    let existing = match by_canvas_id {
+        Some(row) => Some(row),
+        None => conn
+            .query_row(
+                "SELECT id, source, ordinal, kind, canvas_id, rel_path, starts_on, ends_on, name
+                 FROM units WHERE class_id = ?1 AND name = ?2",
+                params![class_id, name],
+                map,
+            )
+            .optional()?,
+    };
 
     match existing {
         // A folder called "Module 1" must not overwrite what Canvas says
         // Module 1 is — including its dates, which a folder never has.
         Some((_, current, ..)) if rank(unit.source) < rank(&current) => Ok(false),
-        Some((id, current, ordinal, current_kind, canvas_id, rel_path, starts_on, ends_on)) => {
+        Some((
+            id,
+            current,
+            ordinal,
+            current_kind,
+            canvas_id,
+            rel_path,
+            starts_on,
+            ends_on,
+            current_name,
+        )) => {
             // A higher source knows the division's name, order and dates; it
             // does not know where the material sits on disk, which only the
-            // folder source ever learns. So the incoming row fills fields in
-            // rather than replacing the row — otherwise Canvas taking over
-            // from a folder would blank the path its guide reads from.
-            let merged_canvas_id = unit.canvas_id.clone().or_else(|| canvas_id.clone());
+            // folder source ever learns. So a *takeover* fills fields in rather
+            // than replacing them — otherwise Canvas superseding a folder would
+            // blank the path its guide reads from.
+            //
+            // Within one source there is nothing to preserve: the incoming row
+            // simply is the current state, and carrying an old value forward
+            // would make a date the course removed impossible to clear.
+            let takeover = rank(unit.source) > rank(&current);
+            let keep = |incoming: &Option<String>, held: &Option<String>| match (takeover, incoming)
+            {
+                (true, None) => held.clone(),
+                _ => incoming.clone(),
+            };
+            let merged_canvas_id = keep(&unit.canvas_id, &canvas_id);
+            let merged_starts = keep(&unit.starts_on, &starts_on);
+            let merged_ends = keep(&unit.ends_on, &ends_on);
+            // `rel_path` is the exception in both directions: no source above
+            // `folder` ever supplies one, so an incoming None is silence rather
+            // than a correction.
             let merged_rel_path = unit.rel_path.clone().or_else(|| rel_path.clone());
-            let merged_starts = unit.starts_on.clone().or_else(|| starts_on.clone());
-            let merged_ends = unit.ends_on.clone().or_else(|| ends_on.clone());
             let unchanged = ordinal == unit.ordinal
                 && current_kind == kind
                 && current == unit.source
+                && current_name == name
                 && canvas_id == merged_canvas_id
                 && rel_path == merged_rel_path
                 && starts_on == merged_starts
@@ -177,12 +234,13 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> 
             }
             conn.execute(
                 "UPDATE units
-                 SET ordinal = ?1, kind = ?2, canvas_id = ?3, rel_path = ?4,
-                     starts_on = ?5, ends_on = ?6, source = ?7
-                 WHERE id = ?8",
+                 SET ordinal = ?1, kind = ?2, name = ?3, canvas_id = ?4, rel_path = ?5,
+                     starts_on = ?6, ends_on = ?7, source = ?8
+                 WHERE id = ?9",
                 params![
                     unit.ordinal,
                     kind,
+                    name,
                     merged_canvas_id,
                     merged_rel_path,
                     merged_starts,
@@ -215,33 +273,22 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> 
     }
 }
 
-/// Records the class tree's top-level folders as the last-resort source.
+/// Points each declared division at the folder that holds its material.
 ///
-/// Runs on every scan, which is what keeps it current without a second place
-/// to press. Precedence does the real work: once Canvas or a syllabus has
-/// spoken, these updates are dropped rather than clobbering a real division —
-/// and a folder that matches a declared unit by name simply annotates it.
-pub fn record_folder_units(conn: &Connection, class_id: i64, folders: &[String]) -> Result<()> {
-    for (index, name) in folders.iter().enumerate() {
-        let unit = NewUnit {
-            ordinal: index as i64 + 1,
-            kind: kind_for_name(name).to_string(),
-            name: name.clone(),
-            canvas_id: None,
-            rel_path: Some(name.clone()),
-            starts_on: None,
-            ends_on: None,
-            source: "folder",
-        };
+/// Runs on every scan, which is what keeps it current without a second place to
+/// press. A folder is not itself one of a course's divisions: recording it as
+/// one added a name, an ordinal and a kind restating `files.rel_path`, which
+/// the Materials tree renders better, and it cost the Structure list a second
+/// numbering sequence with a label explaining that the app was showing
+/// something the course never said.
+///
+/// The join is what the folder was ever needed for, and it never depended on
+/// that row. A Canvas or syllabus unit knows its name and dates but not where
+/// its material lives; this is what tells it, so §8.1's guide has something to
+/// read.
+pub fn attach_folder_paths(conn: &Connection, class_id: i64, folders: &[String]) -> Result<()> {
+    for name in folders {
         // One odd folder name must not cost the rest of the tree.
-        if let Err(e) = upsert(conn, class_id, &unit) {
-            eprintln!("units: skipping folder '{name}' for class {class_id}: {e:#}");
-            continue;
-        }
-        // Precedence rejected the upsert, which is correct — but the folder
-        // still knows the one thing the declaring source never does. Without
-        // this, a syllabus-declared "Module 1" and the folder called "Module 1"
-        // stay strangers, and the unit's guide has nothing to read.
         if let Err(e) = attach_rel_path(conn, class_id, name, name) {
             eprintln!("units: could not attach '{name}' for class {class_id}: {e:#}");
         }
@@ -280,6 +327,8 @@ mod tests {
         .expect("fixture");
         conn.execute_batch(include_str!("../migrations/0007_units.sql"))
             .expect("migration");
+        conn.execute_batch(include_str!("../migrations/0008_folder_units.sql"))
+            .expect("migration");
         conn
     }
 
@@ -299,7 +348,7 @@ mod tests {
 
     /// The precedence rule, which is the whole reason `source` is stored.
     #[test]
-    fn a_folder_never_overwrites_what_the_course_declared() {
+    fn a_syllabus_week_never_overwrites_what_canvas_declared() {
         let conn = db();
         let canvas = NewUnit {
             ordinal: 3,
@@ -313,52 +362,103 @@ mod tests {
         };
         assert!(upsert(&conn, 1, &canvas).expect("insert"));
 
-        let folder = NewUnit {
+        let syllabus = NewUnit {
             ordinal: 1,
             kind: "module".into(),
             name: "Module 1".into(),
             canvas_id: None,
-            rel_path: Some("Module 1".into()),
-            starts_on: None,
+            rel_path: None,
+            starts_on: Some("2026-09-01".into()),
             ends_on: None,
-            source: "folder",
+            source: "syllabus",
         };
-        assert!(!upsert(&conn, 1, &folder).expect("upsert"), "the folder won");
+        assert!(!upsert(&conn, 1, &syllabus).expect("upsert"), "the syllabus won");
 
         let units = list_units(&conn, 1).expect("list");
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].source, "canvas");
-        assert_eq!(units[0].ordinal, 3, "the folder reordered a Canvas unit");
+        assert_eq!(units[0].ordinal, 3, "the syllabus reordered a Canvas unit");
         assert_eq!(units[0].starts_on.as_deref(), Some("2026-08-20"));
     }
 
-    /// The other direction: Canvas arriving after the folders replaces them.
+    /// A folder is not a division. What it knows is where the material sits,
+    /// which the declaring source never learns — so it annotates rather than
+    /// adding a row of its own.
     #[test]
-    fn a_declared_unit_supersedes_the_folder_that_stood_in_for_it() {
+    fn a_folder_gives_a_declared_division_its_path() {
         let conn = db();
-        record_folder_units(&conn, 1, &["Module 1".into(), "Module 2".into()]).expect("folders");
-        let canvas = NewUnit {
+        let declared = NewUnit {
             ordinal: 1,
             kind: "module".into(),
             name: "Module 1".into(),
-            canvas_id: Some("55".into()),
+            canvas_id: None,
+            rel_path: None,
+            starts_on: None,
+            ends_on: None,
+            source: "syllabus",
+        };
+        assert!(upsert(&conn, 1, &declared).expect("insert"));
+        attach_folder_paths(&conn, 1, &["Module 1".into(), "Slides".into()]).expect("attach");
+
+        let units = list_units(&conn, 1).expect("list");
+        // "Slides" is a folder and nothing more — listing it as a division
+        // would put a second numbering sequence under the course's own.
+        assert_eq!(units.len(), 1, "a folder was recorded as a division");
+        assert_eq!(units[0].rel_path.as_deref(), Some("Module 1"));
+    }
+
+    /// A takeover fills in what the lower source knew; a refresh from the same
+    /// source does not, or a date the course removed could never be cleared.
+    #[test]
+    fn a_source_can_clear_a_date_it_set_itself() {
+        let conn = db();
+        let with_date = NewUnit {
+            ordinal: 1,
+            kind: "week".into(),
+            name: "Week 1".into(),
+            canvas_id: Some("9".into()),
             rel_path: None,
             starts_on: Some("2026-08-20".into()),
             ends_on: None,
             source: "canvas",
         };
-        assert!(upsert(&conn, 1, &canvas).expect("upsert"));
+        assert!(upsert(&conn, 1, &with_date).expect("insert"));
+
+        let cleared = NewUnit {
+            starts_on: None,
+            ..with_date
+        };
+        assert!(upsert(&conn, 1, &cleared).expect("update"), "reported no change");
+        assert_eq!(list_units(&conn, 1).expect("list")[0].starts_on, None);
+    }
+
+    /// Renaming a published module is the same division under a new name.
+    /// Matched on name alone it would become a second one, and the old name
+    /// would go on being presented as something the course declares.
+    #[test]
+    fn a_renamed_canvas_module_keeps_its_row() {
+        let conn = db();
+        let before = NewUnit {
+            ordinal: 1,
+            kind: "module".into(),
+            name: "Module 1".into(),
+            canvas_id: Some("55".into()),
+            rel_path: Some("Module 1".into()),
+            starts_on: None,
+            ends_on: None,
+            source: "canvas",
+        };
+        assert!(upsert(&conn, 1, &before).expect("insert"));
+        let after = NewUnit {
+            name: "Module 1 — Foundations".into(),
+            ..before
+        };
+        assert!(upsert(&conn, 1, &after).expect("rename"));
 
         let units = list_units(&conn, 1).expect("list");
-        assert_eq!(units.len(), 2, "the folder unit was deleted");
-        // Declared first, whatever the ordinals say: a folder that calls itself
-        // first must not land in the middle of the course's own sequence.
-        assert_eq!(units[0].source, "canvas");
-        assert_eq!(units[0].name, "Module 1");
-        // The folder's path survives the takeover: Canvas does not know it, and
-        // losing it would leave the unit's guide with nothing to read.
+        assert_eq!(units.len(), 1, "the rename forked the division");
+        assert_eq!(units[0].name, "Module 1 — Foundations");
         assert_eq!(units[0].rel_path.as_deref(), Some("Module 1"));
-        assert_eq!(units[1].source, "folder");
     }
 
     /// Re-syncing changes nothing (M13 acceptance): no duplicates, and the
