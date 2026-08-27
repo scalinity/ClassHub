@@ -4,11 +4,13 @@ import {
   ChevronLeft,
   FileQuestion,
   FolderOpen,
+  Mic,
   NotepadText,
   RefreshCw,
   type LucideIcon,
 } from "lucide-react";
 
+import { AddLecture } from "@/components/AddLecture";
 import { DeadlinesSection } from "@/components/Deadlines";
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
@@ -26,13 +28,18 @@ import {
 } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import {
+  collectTranscripts,
+  dateFromFileName,
+  digestLecture,
+} from "@/lib/lectures";
+import {
   listNotes,
   listPractice,
   openInDefaultApp,
   scanClass,
   type ManagedFile,
 } from "@/lib/materials";
-import { formatTimeRange, weekdayLabel } from "@/lib/schedule";
+import { formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { useDragState } from "@/lib/sorter";
 
 export function ClassWorkspace({
@@ -75,6 +82,28 @@ export function ClassWorkspace({
     placeholderData: (prev) => prev,
   });
   const guideMap = new Map((guides ?? []).map((g) => [g.scope, g]));
+  // Session documents share the guides table but are per-lecture, so they get
+  // their own listing. Rel paths open with the session date, which is the order
+  // they belong in — newest first.
+  const sessions = (guides ?? [])
+    .filter((g) => g.session)
+    .sort((a, b) => b.relPath.localeCompare(a.relPath));
+  const activeDigests = jobs.filter(
+    (j) =>
+      j.kind === "lecture_digest" &&
+      j.classId === info.id &&
+      (j.status === "running" || j.status === "queued"),
+  );
+  // Transcripts with no session document yet — the state a transcript lands in
+  // when the sorter filed it, since approving a move never touches ingestion.
+  const digestedPaths = new Set(
+    sessions.map((s) => s.scope.slice("session:".length)),
+  );
+  const pendingTranscripts = collectTranscripts(tree).filter(
+    (t) =>
+      !digestedPaths.has(t.relPath) &&
+      !activeDigests.some((j) => j.scope === t.relPath),
+  );
 
   // Practice exams and notes (M8): both chat-written, both listed from disk.
   // The practice query re-runs when a practice job settles (finalize verifies
@@ -100,6 +129,7 @@ export function ClassWorkspace({
   const [viewScope, setViewScope] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
+  const [addingLecture, setAddingLecture] = useState(false);
   const [synthError, setSynthError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
     setSynthError(null);
@@ -247,6 +277,110 @@ export function ClassWorkspace({
         </div>
       </section>
 
+      <section className="mt-12" aria-label="Lectures">
+        <div className="flex items-baseline justify-between border-b pb-3">
+          <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
+            LECTURES
+          </h2>
+          <div className="flex items-baseline gap-4">
+            <button
+              type="button"
+              onClick={() => setAddingLecture(true)}
+              className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent)"
+            >
+              ADD LECTURE
+            </button>
+            {sessions.length > 0 && (
+              <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+                {sessions.length === 1
+                  ? "1 SESSION"
+                  : `${sessions.length} SESSIONS`}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="mt-3 space-y-1">
+          {sessions.length === 0 &&
+            activeDigests.length === 0 &&
+            pendingTranscripts.length === 0 && (
+              <p className="py-2 text-[13px] text-muted-foreground">
+                Nothing recorded yet. Add a Zoom link or a recording and
+                ClassHub transcribes it, files it with the module's material,
+                and writes a summary of what the session covered.
+              </p>
+            )}
+          {pendingTranscripts.map((transcript) => (
+            <div
+              key={transcript.relPath}
+              className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60"
+            >
+              <Mic
+                size={14}
+                aria-hidden
+                className="shrink-0 text-muted-foreground/80"
+              />
+              <button
+                type="button"
+                title={`View ${transcript.name}`}
+                onClick={() =>
+                  setViewFile({
+                    relPath: transcript.relPath,
+                    name: transcript.name.replace(/\.md$/i, ""),
+                    kind: "md",
+                  })
+                }
+                className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+              >
+                {transcript.name.replace(/\.md$/i, "")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSynthError(null);
+                  digestLecture(
+                    info.id,
+                    transcript.relPath,
+                    dateFromFileName(transcript.name) ?? todayIso(),
+                  ).catch((e) => setSynthError(String(e)));
+                }}
+                className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
+              >
+                DISTILL
+              </button>
+            </div>
+          ))}
+          {activeDigests.map((job) => (
+            <div
+              key={job.id}
+              className="flex h-8 items-center gap-2 rounded-md px-2 font-mono text-[10px] tracking-[0.14em] text-(--accent)"
+            >
+              <span
+                aria-hidden
+                className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+              />
+              {job.status === "running" ? "DISTILLING" : "QUEUED"}
+              <span className="min-w-0 truncate font-normal text-muted-foreground/70">
+                · {job.scope?.split("/").pop() ?? "LECTURE"}
+              </span>
+            </div>
+          ))}
+          {sessions.map((session) => (
+            <ManagedRow
+              key={session.scope}
+              icon={Mic}
+              file={{
+                name: session.relPath.split("/").pop() ?? session.relPath,
+                relPath: session.relPath,
+                modifiedAt: session.generatedAt,
+              }}
+              strippedExt=".html"
+              stamp={formatGeneratedAt(session.generatedAt)}
+              onView={() => setViewScope(session.scope)}
+            />
+          ))}
+        </div>
+      </section>
+
       {(activePractice.length > 0 || (practice?.length ?? 0) > 0) && (
         <section className="mt-12">
           <div className="flex items-baseline justify-between border-b pb-3">
@@ -370,6 +504,13 @@ export function ClassWorkspace({
           classId={info.id}
           note={editingNote}
           onClose={() => setEditingNote(null)}
+        />
+      )}
+      {addingLecture && (
+        <AddLecture
+          classId={info.id}
+          tree={tree}
+          onClose={() => setAddingLecture(false)}
         />
       )}
     </main>

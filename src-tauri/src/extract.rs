@@ -52,6 +52,7 @@ struct BatchItem {
 enum Route {
     Text,
     Html,
+    Caption,
     Pdf,
     Pptx,
     Skip,
@@ -61,8 +62,13 @@ fn route(rel_path: &str, kind: &str) -> Route {
     match kind {
         "rmd" | "r" | "md" => Route::Text,
         "html" => Route::Html,
+        "caption" => Route::Caption,
         "pdf" => Route::Pdf,
         "pptx" => Route::Pptx,
+        // Deliberately skipped: transcribing is minutes of compute, so it
+        // happens when a lecture is explicitly added, never as a side effect of
+        // a scan noticing a media file somewhere in the tree.
+        "media" => Route::Skip,
         _ if rel_path.to_lowercase().ends_with(".txt") => Route::Text,
         _ => Route::Skip,
     }
@@ -106,9 +112,9 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
     for file in &stale {
         let extract_rel = format!("{EXTRACTS_DIR}/{}.md", file.rel_path);
         match route(&file.rel_path, &file.kind) {
-            Route::Text | Route::Html => {
-                let html = matches!(route(&file.rel_path, &file.kind), Route::Html);
-                match extract_local(&class_dir, &file.rel_path, &extract_rel, html) {
+            Route::Text | Route::Html | Route::Caption => {
+                let how = route(&file.rel_path, &file.kind);
+                match extract_local(&class_dir, &file.rel_path, &extract_rel, &how) {
                     Ok(()) => {
                         let db = app.state::<crate::Db>();
                         record(&lock(&db.0), class_id, &file.rel_path, &extract_rel, &file.sha256)?;
@@ -234,11 +240,30 @@ fn record(
 // ---------------------------------------------------------------------------
 // Local (zero-token) extraction
 
-fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, html: bool) -> Result<()> {
+fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, how: &Route) -> Result<()> {
     let raw = fs::read(class_dir.join(rel_path))
         .with_context(|| format!("reading {rel_path}"))?;
     let text = String::from_utf8_lossy(&raw).replace("\r\n", "\n");
-    let mut content = if html { strip_html(&text) } else { text };
+    let mut content = match how {
+        Route::Html => strip_html(&text),
+        // A raw caption track is thousands of two-second fragments. What the
+        // agent should search is the merged prose, not the timing grid.
+        Route::Caption => {
+            let name = Path::new(rel_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel_path.to_string());
+            crate::transcripts::to_markdown(
+                &crate::transcripts::parse(&text),
+                &crate::transcripts::Meta {
+                    title: name.trim_end_matches(".vtt").trim_end_matches(".srt"),
+                    date: "",
+                    source_name: &name,
+                },
+            )
+        }
+        _ => text,
+    };
     content.truncate(content.trim_end().len());
     content.push('\n');
 
@@ -482,6 +507,17 @@ pub fn current_manifest(
         })
         .collect()
     };
+    // A session digest's scope names one transcript rather than a folder, so
+    // the prefix match below would find nothing and report every digest stale
+    // forever. Its manifest is that single file.
+    if let Some(transcript_rel) = scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
+        let mut stmt = conn.prepare(
+            "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+        )?;
+        let rows = stmt.query(rusqlite::params![class_id, transcript_rel])?;
+        return Ok(read(rows)?);
+    }
+
     let entries = if scope == crate::db::MASTER_SCOPE {
         let mut stmt = conn.prepare(
             "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 ORDER BY rel_path",

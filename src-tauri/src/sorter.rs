@@ -269,7 +269,17 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
 
     let inbox_block = inbox
         .iter()
-        .map(|f| format!("- {INBOX_DIR}/{} ({})", f.name, crate::tools::format_size(f.size)))
+        .map(|f| {
+            let mut line = format!(
+                "- {INBOX_DIR}/{} ({})",
+                f.name,
+                crate::tools::format_size(f.size)
+            );
+            if let Some(hint) = transcript_hint(&class_dir, &f.name) {
+                line.push_str(&format!("\n  {hint}"));
+            }
+            line
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -294,6 +304,26 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
 // Queue state
 
 /// Files currently sitting in the inbox (flat — staging copies flat).
+/// Lecture transcripts are the one inbox file whose name says nothing useful —
+/// they are all "<date> — Lecture.md" — so the listing carries a line of their
+/// subject matter and the sorter routes them by what the session was about.
+/// Bounded: enough of the head to reach the speaker list and the first
+/// paragraph, never the whole lecture.
+fn transcript_hint(class_dir: &Path, name: &str) -> Option<String> {
+    if !name.to_lowercase().ends_with(".md") {
+        return None;
+    }
+    let path = class_dir.join(INBOX_DIR).join(name);
+    let mut head = vec![0u8; 4096];
+    let read = {
+        use std::io::Read;
+        let mut file = fs::File::open(&path).ok()?;
+        file.read(&mut head).ok()?
+    };
+    head.truncate(read);
+    crate::transcripts::describe(&String::from_utf8_lossy(&head))
+}
+
 fn list_inbox(class_dir: &Path) -> Vec<InboxFile> {
     let Ok(entries) = fs::read_dir(class_dir.join(INBOX_DIR)) else {
         return Vec::new();

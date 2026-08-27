@@ -93,6 +93,7 @@ function emitDrag(patch: Partial<DragSnapshot>) {
 }
 
 let dropClassId: number | null = null;
+let dropInterceptor: ((paths: string[]) => void) | null = null;
 
 /**
  * Called by App during render: the open workspace's class, or null. A pure
@@ -102,10 +103,24 @@ let dropClassId: number | null = null;
  */
 export function setDropTarget(classId: number | null) {
   dropClassId = classId;
+  // Navigating away can strand a dialog that had claimed drops (Add lecture,
+  // left open when the workspace closes), and a stale claim would silently
+  // swallow every later drop. Leaving a view always releases it.
+  dropInterceptor = null;
 }
 
 export function clearDropNotice() {
   if (snapshot.notice !== null) emitDrag({ notice: null });
+}
+
+/**
+ * Lets an open dialog claim dropped files for itself instead of staging them
+ * to the inbox — Add lecture uses it so dropping a recording onto the form
+ * fills the form, rather than silently starting a sort. Same render-time
+ * assignment contract as `setDropTarget`, and cleared when the dialog closes.
+ */
+export function setDropInterceptor(fn: ((paths: string[]) => void) | null) {
+  dropInterceptor = fn;
 }
 
 void getCurrentWebview().onDragDropEvent((event) => {
@@ -116,11 +131,17 @@ void getCurrentWebview().onDragDropEvent((event) => {
   const classId = dropClassId;
   const type = event.payload.type;
   if (type === "enter" || type === "over") {
-    if (!snapshot.active) emitDrag({ active: true });
+    // A dialog that has claimed drops owns the affordance too: showing the
+    // sort overlay on top of it would promise the wrong outcome.
+    if (!snapshot.active && dropInterceptor === null) emitDrag({ active: true });
   } else if (type === "leave") {
     emitDrag({ active: false });
   } else if (type === "drop") {
     emitDrag({ active: false, notice: null });
+    if (dropInterceptor !== null) {
+      dropInterceptor(event.payload.paths);
+      return;
+    }
     // Staged files announce themselves through the backend's hub-changed
     // push; what needs surfacing here is everything that did NOT stage.
     void invoke<StageResult>("stage_inbox_files", {

@@ -4,10 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
 
 export interface GuideInfo {
-  scope: string; // module rel path | 'master'
+  scope: string; // module rel path | 'master' | 'session:<transcript rel path>'
   relPath: string; // e.g. "Study Guides/Module 1.html"
   generatedAt: number; // unix seconds, set when the job succeeded
   stale: boolean; // source manifest no longer matches the files on disk
+  /** A lecture's session document rather than a module or semester guide.
+   *  Shares the table to inherit the viewer and staleness; listed separately. */
+  session: boolean;
 }
 
 /** Guides for a class, staleness computed on demand backend-side. */

@@ -7,6 +7,10 @@ export interface AppSettings {
   jobModel: string;
   jobEffort: string;
   jobConcurrency: number;
+  /** Interpreter the on-device transcriber runs through. It lives inside
+   *  LocalFlow's bundle, so an update there can move it out from under us. */
+  parakeetPython: string;
+  parakeetPresent: boolean;
   /** The values the backend's setters accept — the UI renders these. */
   jobModels: string[];
   jobEfforts: string[];
@@ -56,6 +60,11 @@ export function getAppSettings(): Promise<AppSettings> {
 
 export function setAibhsRoot(path: string): Promise<void> {
   return invoke("set_aibhs_root", { path });
+}
+
+/** Repoints on-device transcription; an empty path restores the default. */
+export function setParakeetPython(path: string): Promise<void> {
+  return invoke("set_parakeet_python", { path });
 }
 
 export function setJobModel(model: string): Promise<void> {

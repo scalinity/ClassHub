@@ -38,6 +38,12 @@ pub struct AppSettings {
     pub job_model: String,
     pub job_effort: String,
     pub job_concurrency: usize,
+    /// Interpreter the on-device transcriber runs through, and whether it is
+    /// there right now — it lives inside another app's bundle, so "LocalFlow
+    /// was updated or removed" needs to read as a settings problem rather than
+    /// as a mysteriously broken feature.
+    pub parakeet_python: String,
+    pub parakeet_present: bool,
     /// What the setters accept — served so the UI renders exactly the values
     /// the backend will take, instead of keeping a second copy of the lists.
     pub job_models: Vec<String>,
@@ -48,12 +54,15 @@ pub struct AppSettings {
 pub fn get(app: &AppHandle) -> Result<AppSettings> {
     with_conn(app, |conn| {
         let root = crate::db::aibhs_root(conn)?;
+        let parakeet = parakeet_python(conn);
         Ok(AppSettings {
             aibhs_root_present: root.is_dir(),
             aibhs_root: root.to_string_lossy().into_owned(),
             job_model: job_model(conn),
             job_effort: job_effort(conn),
             job_concurrency: concurrency(conn),
+            parakeet_present: std::path::Path::new(&parakeet).is_file(),
+            parakeet_python: parakeet,
             job_models: JOB_MODELS.iter().map(|m| m.to_string()).collect(),
             job_efforts: JOB_EFFORTS.iter().map(|e| e.to_string()).collect(),
             max_concurrency: MAX_JOB_CONCURRENCY,
@@ -87,6 +96,16 @@ fn job_model(conn: &Connection) -> String {
 
 fn job_effort(conn: &Connection) -> String {
     validated(conn, EFFORT_SETTING, &JOB_EFFORTS, DEFAULT_JOB_EFFORT)
+}
+
+fn parakeet_python(conn: &Connection) -> String {
+    setting(conn, crate::transcribe::INTERPRETER_SETTING)
+        .unwrap_or_else(|e| {
+            eprintln!("settings: parakeet_python unreadable ({e:#}) — using the default");
+            None
+        })
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| crate::transcribe::DEFAULT_INTERPRETER.to_string())
 }
 
 fn concurrency(conn: &Connection) -> usize {
@@ -173,6 +192,37 @@ pub fn set_job_concurrency(app: &AppHandle, count: usize) -> Result<()> {
     set_audited(app, CONCURRENCY_SETTING, &count.to_string())
 }
 
+/// Repoints the on-device transcriber at a different Python. Clearing the
+/// field restores the bundled-LocalFlow default rather than leaving the
+/// feature pointed at nothing.
+pub fn set_parakeet_python(app: &AppHandle, path: &str) -> Result<()> {
+    let path = path.trim();
+    if path.is_empty() {
+        return set_audited(app, crate::transcribe::INTERPRETER_SETTING, "");
+    }
+    let expanded = expand_home(path);
+    if !expanded.is_absolute() {
+        bail!("the path must be absolute (or start with ~/)");
+    }
+    if !expanded.is_file() {
+        bail!("no interpreter at {}", expanded.display());
+    }
+    set_audited(
+        app,
+        crate::transcribe::INTERPRETER_SETTING,
+        &expanded.to_string_lossy(),
+    )
+}
+
+fn expand_home(path: &str) -> std::path::PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| path.into()),
+        None => path.into(),
+    }
+}
+
 /// Points the app at a different AIBHS tree. `~/` expands; the folder must
 /// already exist — this setting selects a library, it never creates one. The
 /// previous root rides the audit entry.
@@ -181,13 +231,7 @@ pub fn set_aibhs_root(app: &AppHandle, path: &str) -> Result<()> {
     if path.is_empty() {
         bail!("enter the folder's path");
     }
-    let expanded = if let Some(rest) = path.strip_prefix("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| path.into())
-    } else {
-        path.into()
-    };
+    let expanded = expand_home(path);
     if !expanded.is_absolute() {
         bail!("the path must be absolute (or start with ~/)");
     }

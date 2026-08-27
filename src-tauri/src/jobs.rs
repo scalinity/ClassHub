@@ -240,7 +240,7 @@ impl JobManager {
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
-        "extract" | "module_guide" | "master_guide" | "practice" => {
+        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest" => {
             Some("Read,Glob,Grep,Write")
         }
         "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),
@@ -250,7 +250,10 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
 
 /// Kinds that get write tools, and so need their output path checked after.
 fn writes_to_disk(kind: &str) -> bool {
-    matches!(kind, "extract" | "module_guide" | "master_guide" | "practice")
+    matches!(
+        kind,
+        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest"
+    )
 }
 
 /// Parks the full list of out-of-contract paths in the audit log. The row is
@@ -360,6 +363,29 @@ pub fn enqueue_practice(
     payload: String,
 ) -> Result<i64> {
     enqueue(app, "practice", Some(class_id), Some(scope), prompt, Some(payload), None)
+}
+
+/// SPEC §8.4: distills one filed lecture transcript into a session document.
+/// `scope` is the transcript's rel path, so the Job Center says which lecture
+/// is being worked on. `payload` carries what lectures::finalize_digest needs
+/// to record it; the chosen output paths come back on stdout, since the job
+/// names its own file.
+pub fn enqueue_lecture_digest(
+    app: &AppHandle,
+    class_id: i64,
+    transcript_rel_path: &str,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue(
+        app,
+        "lecture_digest",
+        Some(class_id),
+        Some(transcript_rel_path),
+        prompt,
+        Some(payload),
+        None,
+    )
 }
 
 /// SPEC §10 step 2: sort_proposal job over a class inbox (read-only tools).
@@ -662,6 +688,19 @@ fn run_job(
                 if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
                     if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload) {
                         demote("practice job finished but no exam was written", e);
+                    }
+                }
+            }
+            "lecture_digest" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    match crate::lectures::finalize_digest(
+                        &app,
+                        class_id,
+                        payload,
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("digest finished but wrote no session document", e),
                     }
                 }
             }
@@ -1451,10 +1490,62 @@ pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
     bail!("no JSON array of proposals in the job output")
 }
 
+/// The single-object sibling of `parse_entries`, for jobs whose contract is one
+/// record rather than a list (lecture_digest). Same tolerance for fences and
+/// surrounding prose, and the same guard against a brace inside prose winning
+/// the slice: a candidate `{` counts only when a quoted key follows.
+///
+/// Scanned forward, so an outer object always beats the objects nested inside
+/// it — searching backwards would return an inner `{...}` and drop the record
+/// that contained it.
+pub(crate) fn parse_object(text: &str) -> Result<Value> {
+    let bytes = text.as_bytes();
+    for (i, _) in text.match_indices('{') {
+        let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
+        if !matches!(next, Some(b'"') | Some(b'}')) {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        if let Some(Ok(value @ Value::Object(_))) = stream.next() {
+            return Ok(value);
+        }
+    }
+    bail!("no JSON object in the job output")
+}
+
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_entries, unescape_fragment};
+    use super::{parse_entries, parse_object, unescape_fragment};
+
+    #[test]
+    fn reads_a_lone_object_through_fences_and_prose() {
+        let out = "Here is the result:\n```json\n\
+                   {\"title\": \"Transformers\", \"relPathHtml\": \"a.html\"}\n```\nDone.";
+        let value = parse_object(out).expect("object");
+        assert_eq!(value["title"], "Transformers");
+        assert_eq!(value["relPathHtml"], "a.html");
+    }
+
+    /// The outer record is the contract; an inner one must not be mistaken for
+    /// it, which is why the scan runs forward rather than backward.
+    #[test]
+    fn prefers_the_outer_object_over_a_nested_one() {
+        let value = parse_object(r#"{"title": "T", "meta": {"cues": 12}}"#).expect("object");
+        assert_eq!(value["title"], "T");
+        assert_eq!(value["meta"]["cues"], 12);
+    }
+
+    /// A brace inside prose is not a record — the same guard `parse_entries`
+    /// applies to stray brackets.
+    #[test]
+    fn ignores_braces_in_prose_and_reports_an_honest_miss() {
+        assert!(parse_object("I wrote it to {the sessions folder}.").is_err());
+        assert!(parse_object("no json at all").is_err());
+        let value = parse_object("Note {not this}, but {\"title\": \"T\"}").expect("object");
+        assert_eq!(value["title"], "T");
+    }
+
 
     /// The decoder carries state across fragments, because the API splits a
     /// stream wherever it likes — including mid-escape.

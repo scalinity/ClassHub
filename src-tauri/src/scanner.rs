@@ -380,6 +380,10 @@ pub fn kind_for(path: &Path) -> &'static str {
         "r" => "r",
         "html" | "htm" => "html",
         "md" => "md",
+        // Caption tracks a lecture arrived with, kept alongside the normalized
+        // markdown so the original is never the thing that got thrown away.
+        "vtt" | "srt" => "caption",
+        _ if crate::transcribe::is_media(path) => "media",
         _ => "other",
     }
 }

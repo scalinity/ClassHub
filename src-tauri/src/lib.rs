@@ -5,11 +5,15 @@ mod extract;
 mod grades;
 mod guides;
 mod jobs;
+mod lectures;
 mod notes;
 mod scanner;
 mod settings;
 mod sorter;
 mod tools;
+mod transcribe;
+mod transcripts;
+mod zoom;
 
 use std::sync::Mutex;
 
@@ -221,6 +225,28 @@ fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, Stri
 #[tauri::command(async)]
 fn set_aibhs_root(app: tauri::AppHandle, path: String) -> Result<(), String> {
     settings::set_aibhs_root(&app, &path).map_err(|e| format!("{e:#}"))
+}
+
+/// Starts an ingestion and returns immediately; progress and the result arrive
+/// on `lectures::PROGRESS_EVENT`.
+#[tauri::command]
+fn add_lecture(app: tauri::AppHandle, request: lectures::AddRequest) {
+    lectures::spawn_add(&app, request);
+}
+
+#[tauri::command(async)]
+fn digest_lecture(
+    app: tauri::AppHandle,
+    class_id: i64,
+    rel_path: String,
+    date: String,
+) -> Result<i64, String> {
+    lectures::enqueue_digest(&app, class_id, &rel_path, &date).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn set_parakeet_python(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    settings::set_parakeet_python(&app, &path).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -528,6 +554,8 @@ pub fn run() {
             synthesize_module,
             synthesize_master,
             resume_master_guide,
+            add_lecture,
+            digest_lecture,
             list_guides,
             read_guide,
             read_class_file,
@@ -541,6 +569,7 @@ pub fn run() {
             delete_grade_item,
             get_app_settings,
             set_aibhs_root,
+            set_parakeet_python,
             set_job_model,
             set_job_effort,
             set_job_concurrency,

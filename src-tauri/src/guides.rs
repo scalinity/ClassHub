@@ -69,6 +69,10 @@ pub struct GuideInfo {
     pub rel_path: String,
     pub generated_at: i64,
     pub stale: bool,
+    /// Session digests share this table to inherit the viewer and staleness,
+    /// but they are per-lecture rather than per-module, so the Study Guides tab
+    /// lists them separately instead of interleaving them with the guides.
+    pub session: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +504,7 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
         let current = current_manifest(conn, class_id, &scope)?;
         guides.push(GuideInfo {
             stale: manifest_is_stale(&manifest_json, &current),
+            session: crate::lectures::is_session_scope(&scope),
             scope,
             rel_path,
             generated_at,

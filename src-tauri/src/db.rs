@@ -17,8 +17,21 @@ pub const INBOX_DIR: &str = "_Inbox";
 pub const NOTES_DIR: &str = "Notes";
 pub const GUIDES_DIR: &str = "Study Guides";
 pub const PRACTICE_DIR: &str = "Study Guides/Practice";
+/// Where a lecture's distilled session document lands. Under `Study Guides/`
+/// deliberately: that is already contracted-writable for jobs and already in
+/// chat's search scope, so a session digest needs neither widened.
+pub const SESSIONS_DIR: &str = "Study Guides/Sessions";
 pub const EXTRACTS_DIR: &str = ".classhub/extracts";
+/// Per-module folder holding lecture transcripts. Ordinary *source* material,
+/// not app-managed: the scanner indexes it, extraction routes it through the
+/// zero-token text path, and module guides pick it up by rel-path prefix.
+pub const TRANSCRIPTS_DIR: &str = "Transcripts";
 pub const MASTER_SCOPE: &str = "master";
+/// `guides.scope` prefix for a session digest, followed by the transcript's
+/// class-relative path. Naming the source file rather than the date makes the
+/// scope unique per transcript, so `UNIQUE(class_id, scope)` turns a re-run
+/// into an update, and staleness has something real to hash.
+pub const SESSION_SCOPE_PREFIX: &str = "session:";
 
 /// The only paths a synthesis job is contracted to write. Everything else in a
 /// class folder is source material, and SPEC §4 says the app never destroys it.

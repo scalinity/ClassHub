@@ -10,6 +10,7 @@ import {
   JOB_MODEL_COPY,
   optionCopy,
   setAibhsRoot,
+  setParakeetPython,
   setJobConcurrency,
   setJobEffort,
   setJobModel,
@@ -92,12 +93,36 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               and writes only inside its own folders — Study Guides, Notes, the
               inbox and the extract cache."
           >
-            <RootForm
+            <PathForm
               key={settings.aibhsRoot}
               current={settings.aibhsRoot}
               present={settings.aibhsRootPresent}
               pending={pending}
+              label="AIBHS root folder path"
+              apply="USE THIS FOLDER"
+              missing="FOLDER NOT FOUND — nothing can scan until this points at a real folder."
+              hint="The folder must already exist — this picks a library, it never creates one. ~/ works."
               onApply={(path) => apply(setAibhsRoot(path), true)}
+            />
+          </Section>
+
+          <Section
+            title="LECTURE TRANSCRIPTION"
+            lead="Recordings without a caption track are transcribed on this Mac
+              with Parakeet, which ships inside LocalFlow. Nothing is uploaded,
+              and no tokens are spent — but an update to LocalFlow can move the
+              interpreter, so this is where to point it again."
+          >
+            <PathForm
+              key={settings.parakeetPython}
+              current={settings.parakeetPython}
+              present={settings.parakeetPresent}
+              pending={pending}
+              label="Python interpreter for Parakeet"
+              apply="USE THIS PYTHON"
+              missing="INTERPRETER NOT FOUND — transcription will fail until this points at a real Python. Zoom's own transcripts still work."
+              hint="A Python with parakeet-mlx installed. Clear the field to restore the default that ships with LocalFlow."
+              onApply={(path) => apply(setParakeetPython(path))}
             />
           </Section>
 
@@ -259,27 +284,34 @@ function OptionRow({
   );
 }
 
-function RootForm({
+/** One filesystem path the user can repoint: the AIBHS root, or the
+ *  interpreter on-device transcription runs through. */
+function PathForm({
   current,
   present,
   pending,
+  label,
+  apply,
+  missing,
+  hint,
   onApply,
 }: {
   current: string;
   present: boolean;
   pending: boolean;
+  label: string;
+  apply: string;
+  missing: string;
+  hint: string;
   onApply: (path: string) => void;
 }) {
   const [path, setPath] = useState(current);
-  const changed = path.trim() !== "" && path.trim() !== current;
+  const changed = path.trim() !== current;
 
   return (
     <div className="mt-4 max-w-xl">
       {!present && (
-        <p className="mb-2 font-mono text-[11px] text-destructive">
-          FOLDER NOT FOUND — nothing can scan until this points at a real
-          folder.
-        </p>
+        <p className="mb-2 font-mono text-[11px] text-destructive">{missing}</p>
       )}
       <form
         onSubmit={(e) => {
@@ -293,7 +325,7 @@ function RootForm({
           value={path}
           onChange={(e) => setPath(e.target.value)}
           spellCheck={false}
-          aria-label="AIBHS root folder path"
+          aria-label={label}
           className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2.5 font-mono text-[12px] focus-visible:outline-2 focus-visible:outline-ring"
         />
         <button
@@ -301,12 +333,11 @@ function RootForm({
           disabled={pending || !changed}
           className={`${monoActionNeutral} bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-30`}
         >
-          {pending ? "APPLYING…" : "USE THIS FOLDER"}
+          {pending ? "APPLYING…" : apply}
         </button>
       </form>
       <p className="mt-2 text-[11.5px] leading-relaxed text-muted-foreground">
-        The folder must already exist — this picks a library, it never creates
-        one. ~/ works.
+        {hint}
       </p>
     </div>
   );
