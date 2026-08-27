@@ -240,7 +240,17 @@ function CanvasSection() {
     queryFn: getCanvasStatus,
   });
   const progress = useCanvasSync();
+  const [refused, setRefused] = useState<string | null>(null);
   const running = progress !== null && !progress.done;
+
+  async function start() {
+    setRefused(null);
+    try {
+      await syncCanvas();
+    } catch (e) {
+      setRefused(String(e));
+    }
+  }
 
   return (
     <Section
@@ -283,12 +293,19 @@ function CanvasSection() {
       <button
         type="button"
         disabled={running}
-        onClick={() => void syncCanvas()}
+        onClick={() => void start()}
         className={`${monoActionNeutral} mt-4 bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-40`}
       >
         {running ? "SYNCING…" : "SYNC ALL CLASSES"}
       </button>
 
+      {/* The sync never began — one is already running, started from a class
+          workspace. Distinct from one that started and failed. */}
+      {refused && (
+        <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-destructive">
+          NOT STARTED — {refused}
+        </p>
+      )}
       <SyncReport progress={progress} />
 
       <p className="mt-3 max-w-xl text-[11.5px] leading-relaxed text-muted-foreground">
@@ -346,9 +363,9 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
           >
             {outcomeSummary(outcome)}
           </dd>
-          {outcome.notes.map((note) => (
+          {outcome.notes.map((note, index) => (
             <dd
-              key={note}
+              key={`${outcome.classId}-${index}`}
               className="text-[11.5px] leading-snug text-muted-foreground/70"
             >
               {note}

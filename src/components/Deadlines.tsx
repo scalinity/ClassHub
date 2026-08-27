@@ -5,7 +5,7 @@ import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 import {
   approveAllProposals,
   DEADLINE_KINDS,
-  DEADLINE_SOURCE_COPY,
+  deadlineSourceBadge,
   deleteDeadline,
   getSyllabusProposals,
   listDeadlines,
@@ -236,8 +236,11 @@ export function DeadlinesSection({
       {cards.length > 0 && (
         <div className="mt-4 space-y-2">
           <div className="flex items-center justify-between">
+            {/* Two readers land in this queue now, and each card says which
+                one proposed it. The line above them carries the promise that
+                covers all of them. */}
             <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-              FROM THE SYLLABUS SCAN — NOTHING IS ADDED UNTIL YOU CONFIRM
+              NOTHING IS ADDED UNTIL YOU CONFIRM
             </p>
             <button
               type="button"
@@ -396,12 +399,12 @@ function DeadlineRow({
           {deadline.kind.toUpperCase()}
         </span>
       )}
-      {deadline.source !== "manual" && (
+      {deadlineSourceBadge(deadline.source) && (
         <span
-          title={DEADLINE_SOURCE_COPY[deadline.source].title}
+          title={deadlineSourceBadge(deadline.source)?.title}
           className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
         >
-          {DEADLINE_SOURCE_COPY[deadline.source].label}
+          {deadlineSourceBadge(deadline.source)?.label}
         </span>
       )}
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
@@ -583,10 +586,10 @@ function ProposalCard({
       <p className="mt-1 flex items-baseline gap-2 font-mono text-[11px] font-medium text-(--accent)">
         {dueDayLabel(proposal.dueAt)}
         <span
-          title={DEADLINE_SOURCE_COPY[proposal.source].title}
+          title={deadlineSourceBadge(proposal.source)?.title}
           className="font-normal tracking-[0.12em] text-[9px] text-muted-foreground/60"
         >
-          {DEADLINE_SOURCE_COPY[proposal.source].label}
+          {deadlineSourceBadge(proposal.source)?.label}
         </span>
       </p>
       {proposal.notes && (

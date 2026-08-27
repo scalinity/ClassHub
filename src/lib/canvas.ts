@@ -26,7 +26,9 @@ export interface Unit {
   source: UnitSource;
 }
 
-export type UnitSource = "canvas" | "syllabus" | "folder";
+/** Which reader supplied the division. A folder is not one of them: it is where
+ *  material sits, not something the course declared. */
+export type UnitSource = "canvas" | "syllabus";
 
 export interface CanvasStatus {
   /** Unix seconds of the most recent per-class sync; null if never. */
@@ -61,10 +63,26 @@ export function getCanvasStatus(): Promise<CanvasStatus> {
   return invoke<CanvasStatus>("canvas_status");
 }
 
-/** Fire-and-forget: the outcome arrives on the progress event, not here.
- *  An empty `classIds` syncs every class. */
+/** Starts a sync. Rejects only when one could not be started — one already
+ *  running — since everything after that arrives on the progress event.
+ *  An empty `classIds` syncs every class.
+ *
+ *  The running state is set here rather than waited for. The first event is a
+ *  round trip away, and a button that still reads SYNC CANVAS after being
+ *  pressed invites a second press. Setting it also clears the previous run's
+ *  report, which stops being current the moment this one starts. */
 export function syncCanvas(classIds: number[] = []): Promise<void> {
-  return invoke("sync_canvas", { classIds });
+  // Never published over a run already in flight. The backend refuses this
+  // call, and clearing on that refusal would take the running sync's own
+  // progress with it.
+  if (snapshot !== null && !snapshot.done) {
+    return invoke<void>("sync_canvas", { classIds });
+  }
+  publish({ stage: "Starting…", done: false });
+  return invoke<void>("sync_canvas", { classIds }).catch((e: unknown) => {
+    publish(null);
+    throw e;
+  });
 }
 
 // --- External store (push-based Tauri events; no useEffect per workspace rules) ---
@@ -76,13 +94,17 @@ export function syncCanvas(classIds: number[] = []): Promise<void> {
 let snapshot: SyncProgress | null = null;
 const listeners = new Set<() => void>();
 
+function publish(next: SyncProgress | null) {
+  snapshot = next;
+  for (const notify of listeners) notify();
+}
+
 let initialized = false;
 function init() {
   if (initialized) return;
   initialized = true;
-  void listen<SyncProgress>("canvas://progress", (e) => {
-    snapshot = e.payload;
-    for (const notify of listeners) notify();
+  listen<SyncProgress>("canvas://progress", (e) => {
+    publish(e.payload);
     if (e.payload.done) {
       // By the time this fires the units, proposals and downloads are all
       // committed, so every surface a sync touches has something new to show.
@@ -92,7 +114,10 @@ function init() {
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
     }
-  });
+    // Registration failing is not something a screen can recover from — every
+    // later sync would appear to hang with nothing said anywhere — so it is at
+    // least worth a line in the console rather than a discarded promise.
+  }).catch((e: unknown) => console.error("canvas progress listener failed", e));
 }
 init();
 
@@ -104,13 +129,6 @@ export function useCanvasSync(): SyncProgress | null {
     },
     () => snapshot,
   );
-}
-
-/** Clears a finished run so a screen starts clean next time it opens. */
-export function clearCanvasSync() {
-  if (snapshot === null || !snapshot.done) return;
-  snapshot = null;
-  for (const notify of listeners) notify();
 }
 
 // --- Display helpers ---

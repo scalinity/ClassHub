@@ -60,6 +60,9 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // An approved move changed the tree on disk; the rescan also refreshes
       // guide staleness through the tree-keyed guides query.
       void queryClient.invalidateQueries({ queryKey: ["classTree"] });
+      // The same scan points each declared division at its folder, so the
+      // Structure list is reading a join the scan just rewrote.
+      void queryClient.invalidateQueries({ queryKey: ["units"] });
       break;
   }
 });

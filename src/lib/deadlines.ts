@@ -32,7 +32,7 @@ export interface Deadline {
 export type DeadlineSource = "manual" | "agent" | "syllabus" | "canvas";
 
 /** The badge a non-manual deadline or proposal carries. */
-export const DEADLINE_SOURCE_COPY: Record<
+const DEADLINE_SOURCE_COPY: Record<
   Exclude<DeadlineSource, "manual">,
   { label: string; title: string }
 > = {
@@ -40,6 +40,19 @@ export const DEADLINE_SOURCE_COPY: Record<
   canvas: { label: "VIA CANVAS", title: "Read from Canvas, with its own due date" },
   agent: { label: "VIA CHAT", title: "Added in chat" },
 };
+
+/** The badge for a source, or null where there is nothing to say.
+ *
+ *  `manual` earns no badge — the reader added it and knows. A source this
+ *  build does not recognize earns none either: indexing the record directly
+ *  threw on the unknown key and took the whole row's render down with it, and
+ *  a row that renders without a chip is better than a list that does not
+ *  render at all. */
+export function deadlineSourceBadge(
+  source: DeadlineSource,
+): { label: string; title: string } | null {
+  return source === "manual" ? null : (DEADLINE_SOURCE_COPY[source] ?? null);
+}
 
 /** Every deadline across every class, due-soonest first — one query for the
  * dashboard strip, the class list, and anything else that filters it. */

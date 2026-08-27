@@ -211,7 +211,7 @@ export function ClassWorkspace({
 
       <InboxQueue classId={info.id} tree={tree} />
 
-      <StructureSection classId={info.id} className={info.displayName} />
+      <StructureSection classId={info.id} />
 
       <DeadlinesSection classId={info.id} tree={tree} />
 

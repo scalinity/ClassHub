@@ -1,6 +1,13 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { listUnits, syncCanvas, useCanvasSync, type Unit } from "@/lib/canvas";
+import {
+  listUnits,
+  syncCanvas,
+  useCanvasSync,
+  type ClassOutcome,
+  type Unit,
+} from "@/lib/canvas";
 import { monoAction } from "@/lib/styles";
 
 /**
@@ -11,24 +18,30 @@ import { monoAction } from "@/lib/styles";
  * Numbering is the course's own order, which is real information here — these
  * are a sequence, and a reader looking for "week 7" is looking for a position.
  *
- * A division inferred from a folder is labelled as such. That is the one
- * distinction worth surfacing: "Module 1 exists because the syllabus says so"
- * and "Module 1 exists because a folder is called that" look identical on a
- * list, and only the first is the course speaking.
+ * Only what a course declares appears. A folder is where material sits, which
+ * the Materials tree above already shows; listing folders here put a second
+ * numbering sequence under the course's own and labelled it as a guess.
  */
-export function StructureSection({
-  classId,
-  className,
-}: {
-  classId: number;
-  className: string;
-}) {
+export function StructureSection({ classId }: { classId: number }) {
   const { data: units, error } = useQuery({
     queryKey: ["units", classId],
     queryFn: () => listUnits(classId),
   });
   const progress = useCanvasSync();
+  const [refused, setRefused] = useState<string | null>(null);
   const running = progress !== null && !progress.done;
+  const outcome = progress?.done
+    ? progress.results?.find((r) => r.classId === classId)
+    : undefined;
+
+  async function start() {
+    setRefused(null);
+    try {
+      await syncCanvas([classId]);
+    } catch (e) {
+      setRefused(String(e));
+    }
+  }
 
   return (
     <section className="mt-12" aria-label="Structure">
@@ -39,7 +52,7 @@ export function StructureSection({
         <button
           type="button"
           disabled={running}
-          onClick={() => void syncCanvas([classId])}
+          onClick={() => void start()}
           className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-40`}
         >
           {running ? "SYNCING…" : "SYNC CANVAS"}
@@ -55,16 +68,27 @@ export function StructureSection({
           {progress.stage.toUpperCase()}
         </p>
       )}
+      {/* The sync never began — one is already running. Distinct from a sync
+          that started and failed, and it clears on the next attempt. */}
+      {refused && (
+        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
+          NOT STARTED — {refused}
+        </p>
+      )}
       {progress?.done && progress.error && (
         <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
           SYNC STOPPED — {progress.error}
         </p>
       )}
-      {progress?.done && classNote(progress.results, classId) && (
-        <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
-          {classNote(progress.results, classId)}
+      {/* A class that failed inside a sync that otherwise finished. Carried in
+          the same ink as a stopped sync, because it is a failure and not a
+          remark about one. */}
+      {outcome?.error && (
+        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
+          THIS CLASS DID NOT SYNC — {outcome.error}
         </p>
       )}
+      <SyncNotes outcome={outcome} />
 
       <div className="mt-3">
         {error ? (
@@ -77,9 +101,10 @@ export function StructureSection({
           </p>
         ) : units.length === 0 ? (
           <p className="max-w-xl py-2 text-[13px] leading-relaxed text-muted-foreground">
-            Nothing yet. Sync Canvas for this course's published modules, or
-            scan its syllabus from the Deadlines section — the weekly schedule
-            is usually in the same document as the due dates.
+            Nothing yet. Scan this course's syllabus from the Deadlines section
+            — the weekly schedule is usually in the same document as the due
+            dates. Syncing Canvas picks up any modules the course publishes,
+            which not every course does.
           </p>
         ) : (
           <>
@@ -88,7 +113,7 @@ export function StructureSection({
             </p>
             <ol className="mt-2 space-y-0.5">
               {units.map((unit) => (
-                <UnitRow key={unit.id} unit={unit} className={className} />
+                <UnitRow key={unit.id} unit={unit} />
               ))}
             </ol>
           </>
@@ -98,8 +123,24 @@ export function StructureSection({
   );
 }
 
-function UnitRow({ unit, className }: { unit: Unit; className: string }) {
-  const inferred = unit.source === "folder";
+/** What a finished sync had to say about this class, beyond its counts. */
+function SyncNotes({ outcome }: { outcome: ClassOutcome | undefined }) {
+  if (!outcome || outcome.notes.length === 0) return null;
+  return (
+    <ul className="mt-3 max-w-xl space-y-1">
+      {outcome.notes.map((note, index) => (
+        <li
+          key={`${outcome.classId}-${index}`}
+          className="text-[12px] leading-relaxed text-muted-foreground"
+        >
+          {note}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function UnitRow({ unit }: { unit: Unit }) {
   return (
     <li className="flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
       <span
@@ -114,38 +155,25 @@ function UnitRow({ unit, className }: { unit: Unit; className: string }) {
           {formatUnitDate(unit.startsOn)}
         </span>
       )}
-      {/* Only the inferred ones are flagged. Where every row shares a source,
-          repeating it down the whole list says nothing the line above the list
-          has not already said — and it buries the one row that differs. */}
-      {inferred && (
-        <span
-          title={`A folder in ${className} is named this. The course itself does not declare ${unit.name} as one of its divisions.`}
-          className="shrink-0 font-mono text-[9.5px] italic tracking-[0.12em] text-muted-foreground/50"
-        >
-          INFERRED
-        </span>
-      )}
     </li>
   );
 }
 
 /** One line naming where this list came from, in place of a label per row. */
 function provenance(units: Unit[]): string {
-  const declared = units.filter((u) => u.source !== "folder");
-  const inferred = units.length - declared.length;
-  const inferredNote =
-    inferred === 0
-      ? ""
-      : ` · ${inferred} more inferred from folder${inferred === 1 ? "" : "s"}`;
-
-  if (declared.length === 0) {
-    return `Nothing declared yet — these ${units.length === 1 ? "is a folder" : "are folders"} in the class folder, not the course's own divisions.`;
-  }
+  const kinds = new Set(units.map((u) => u.kind));
+  const sources = new Set(units.map((u) => u.source));
+  // The course's own word where every row agrees on one. A course that
+  // declares two levels gets the neutral noun rather than the first row's.
+  const noun = kinds.size === 1 ? [...kinds][0] : "division";
+  const plural = units.length === 1 ? noun : `${noun}s`;
   const from =
-    declared[0].source === "canvas" ? "Canvas" : "this course's syllabus";
-  const noun = declared[0].kind === "part" ? "part" : declared[0].kind;
-  const plural = declared.length === 1 ? noun : `${noun}s`;
-  return `${declared.length} ${plural}, read from ${from}${inferredNote}.`;
+    sources.size > 1
+      ? "Canvas and this course's syllabus"
+      : sources.has("canvas")
+        ? "Canvas"
+        : "this course's syllabus";
+  return `${units.length} ${plural}, read from ${from}.`;
 }
 
 /** `2026-09-03` → `SEP 3`. Parsed as parts, never through `new Date(iso)` —
@@ -156,15 +184,4 @@ function formatUnitDate(iso: string): string {
   return new Date(year, month - 1, day)
     .toLocaleDateString("en-US", { month: "short", day: "numeric" })
     .toUpperCase();
-}
-
-/** The one line from a finished sync that belongs to this class. */
-function classNote(
-  results: { classId: number; notes: string[]; error: string | null }[] | undefined,
-  classId: number,
-): string | null {
-  const mine = results?.find((r) => r.classId === classId);
-  if (!mine) return null;
-  if (mine.error) return mine.error;
-  return mine.notes[0] ?? null;
 }
