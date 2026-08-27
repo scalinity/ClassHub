@@ -311,15 +311,31 @@ const PROBE: &str = r#"
       return out;
     }
     out.found.push("store");
+    // Pushed before the routes, not after them: every route below returns, so
+    // reporting this at the end meant the one diagnostic that explains a failed
+    // caption fetch could never reach the caller.
+    if (window.__classhub_cc_failed) out.found.push("cc-fetch-failed:" + window.__classhub_cc_failed);
 
     // 1. The caption file the player itself offers. Real WebVTT, with the
     //    speaker names Parakeet could never recover.
-    if (s.ccUrl) {
+    //
+    //    Tried once. Without the spent-marker this branch re-fires on every
+    //    poll — the caption token expires, the host restricted the track, the
+    //    body comes back empty — and since it returns each time, routes 2 and 3
+    //    are never reached and the capture spins out its whole timeout.
+    if (s.ccUrl && !window.__classhub_cc_failed) {
       out.found.push("ccUrl");
       window.__classhub_fetching = 1;
       fetch(s.ccUrl, { credentials: "include" })
         .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
-        .then(function (t) { window.__classhub_vtt = t; window.__classhub_fetching = 0; })
+        .then(function (t) {
+          // An expired session answers a caption URL with a login page: a 200
+          // whose body is not a caption track. Filed as source markdown it
+          // would look exactly like a successful capture.
+          if (t && t.indexOf("-->") !== -1) window.__classhub_vtt = t;
+          else window.__classhub_cc_failed = t ? "not-a-caption-track" : "empty";
+          window.__classhub_fetching = 0;
+        })
         .catch(function (e) { window.__classhub_fetching = 0; window.__classhub_cc_failed = String(e); });
       out.state = "fetching";
       return out;
@@ -328,10 +344,10 @@ const PROBE: &str = r#"
     // 2. The store's own transcript array. Complete — unlike the rendered
     //    panel, which is virtualized and holds only what is on screen.
     var list = s.transcriptList;
+    var rows = [];
+    var anyTimed = false;
     if (list && list.length) {
       out.found.push("transcriptList:" + list.length);
-      var rows = [];
-      var anyTimed = false;
       for (var i = 0; i < list.length; i++) {
         var it = list[i];
         var text = (it.text || it.originLangText || "").trim();
@@ -341,6 +357,11 @@ const PROBE: &str = r#"
         if (a) anyTimed = true;
         rows.push({ a: a, b: b, line: who ? who + ": " + text : text });
       }
+    }
+    // Keyed on the rows that survived, not on the list's length: a list whose
+    // entries are all empty would otherwise report "ready" with no text and
+    // stall here instead of falling through to the recording.
+    if (rows.length) {
       var lines = [];
       if (anyTimed) {
         lines.push("WEBVTT", "");
@@ -374,14 +395,73 @@ const PROBE: &str = r#"
     }
     if (mp4) { out.mp4 = mp4; out.state = "no-transcript"; out.found.push("media"); return out; }
 
-    // The player is mounted but still loading its data.
-    if (window.__classhub_cc_failed) out.found.push("cc-fetch-failed:" + window.__classhub_cc_failed);
     if (s.accessLevel) out.found.push("access:" + s.accessLevel);
     if (s.isLogin === false) out.found.push("anonymous");
+    // Both switched off, and the recording's own metadata has loaded — so this
+    // is settled rather than pending. Said plainly, because the caller's job
+    // here is to name the manual step; staying "waiting" polls out ten minutes
+    // on a page that will never produce either.
+    if (window.__classhub_cc_failed || s.accessLevel) out.state = "no-transcript";
+    // The player is mounted but still loading its data.
     return out;
+
   } catch (e) {
     out.found.push("error:" + (e && e.message ? e.message : e));
     return out;
   }
 })()
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe lives in a raw string, so a `"` immediately followed by a `#`
+    /// anywhere in the JS would close it early and truncate the script into
+    /// something that still compiles. It has happened once.
+    #[test]
+    fn the_probe_survives_its_raw_string() {
+        assert!(!PROBE.contains("\"#"), "the JS terminates its own raw string");
+        assert!(PROBE.trim_end().ends_with("})()"), "the probe is not a complete expression");
+        for route in ["ccUrl", "transcriptList", "viewMp4Url"] {
+            assert!(PROBE.contains(route), "route {route} is missing");
+        }
+    }
+
+    /// Every route reports itself, and a failed caption fetch is reported
+    /// before the routes rather than after them — the branch that returns is
+    /// what made the diagnostic unreachable the first time round.
+    #[test]
+    fn a_failed_caption_fetch_is_reported_and_not_retried() {
+        let gate = PROBE.find("if (s.ccUrl").expect("the ccUrl route");
+        let diagnostic = PROBE.find("cc-fetch-failed").expect("the failure diagnostic");
+        assert!(diagnostic < gate, "the diagnostic is behind a branch that returns");
+        assert!(
+            PROBE[gate..gate + 60].contains("!window.__classhub_cc_failed"),
+            "a failed caption fetch would re-fire on every poll"
+        );
+    }
+
+    /// The probe's whole output contract is that `transcripts::parse` can read
+    /// it. Both shapes it emits are pinned here, because the page it reads from
+    /// cannot be stood up in a test and this is the seam that would break.
+    #[test]
+    fn assembles_vtt_the_parser_can_read() {
+        let timed = "WEBVTT\n\n\
+            00:00:01.500 --> 00:00:04.000\nEsra Adiyeke: The mean.\n\n\
+            00:00:04.000 --> 00:00:04.000\nEsra Adiyeke: And the median.\n\n\
+            00:00:09.000 --> 00:00:12.000\nDaniel Escalante: Is that on the exam?\n";
+        let cues = crate::transcripts::parse(timed);
+        assert_eq!(cues.len(), 3, "{cues:?}");
+        assert_eq!(cues[0].speaker.as_deref(), Some("Esra Adiyeke"));
+        // The carry-forward shape: a row with no timing of its own lands on the
+        // previous row's end, which must still read back as a cue.
+        assert_eq!((cues[1].start_ms, cues[1].end_ms), (4_000, 4_000));
+        assert_eq!(cues[2].speaker.as_deref(), Some("Daniel Escalante"));
+
+        let untimed = "Esra Adiyeke: The mean.\n\nDaniel Escalante: Is that on the exam?\n\n";
+        let cues = crate::transcripts::parse(untimed);
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        assert_eq!(cues[1].speaker.as_deref(), Some("Daniel Escalante"), "{cues:?}");
+    }
+}
