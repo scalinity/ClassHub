@@ -73,7 +73,18 @@ static SYNCING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 /// A plain thread rather than an async command, for the same reason
 /// `lectures::spawn_add` uses one: this waits on a human completing SSO and
 /// then on blocking HTTP, neither of which belongs on the async runtime.
-pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) {
+pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
+    // Refused here rather than reported over the progress channel. That channel
+    // carries one snapshot, so a "already running" terminal event would
+    // overwrite the running sync's own progress and render as SYNC STOPPED for
+    // a sync that is still going.
+    {
+        let mut busy = lock(&SYNCING);
+        if *busy {
+            bail!("a Canvas sync is already running");
+        }
+        *busy = true;
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         let emit = |stage: &str, done: bool, results: Option<Vec<ClassOutcome>>, error: Option<String>| {
@@ -82,15 +93,7 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) {
                 Progress { stage: stage.to_string(), done, results, error },
             );
         };
-
-        {
-            let mut busy = lock(&SYNCING);
-            if *busy {
-                emit("Failed", true, None, Some("a Canvas sync is already running".into()));
-                return;
-            }
-            *busy = true;
-        }
+        // Claimed above, released here however this thread ends.
         struct Claim;
         impl Drop for Claim {
             fn drop(&mut self) {
@@ -100,14 +103,28 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) {
         let _claim = Claim;
 
         let on_stage = |stage: &str| emit(stage, false, None, None);
-        match run(&app, &class_ids, &on_stage) {
-            Ok(results) => {
+        let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(&app, &class_ids, &on_stage)
+        }));
+        match finished {
+            Ok(Ok(results)) => {
                 emit("Synced", true, Some(results), None);
                 emit_hub_change(&app, "units");
             }
-            Err(e) => emit("Failed", true, None, Some(format!("{e:#}"))),
+            Ok(Err(e)) => emit("Failed", true, None, Some(format!("{e:#}"))),
+            // The claim releases during the unwind, so the backend recovers —
+            // but without a terminal event `done` stays false forever, and both
+            // screens derive their button state from it. The backend would be
+            // fine and the UI would have no way back short of a relaunch.
+            Err(_) => emit(
+                "Failed",
+                true,
+                None,
+                Some("the sync stopped unexpectedly — nothing was left half-written".into()),
+            ),
         }
     });
+    Ok(())
 }
 
 /// The sync proper. `class_ids` empty means every class.
@@ -189,10 +206,13 @@ fn sync_class(
     let course_name = course["name"].as_str().unwrap_or(&class.code).to_string();
     outcome.canvas_course = Some(course_name.clone());
 
+    // The mapping is established the moment `match_course` succeeds, and being
+    // able to show which course a class resolved to is the whole point of
+    // storing it.
     with_conn(app, |conn| {
         conn.execute(
-            "UPDATE classes SET canvas_course_id = ?1, canvas_synced_at = ?2 WHERE id = ?3",
-            params![course_id.to_string(), now(), class.id],
+            "UPDATE classes SET canvas_course_id = ?1 WHERE id = ?2",
+            params![course_id.to_string(), class.id],
         )?;
         Ok(())
     })?;
@@ -200,6 +220,18 @@ fn sync_class(
     sync_units(app, session, class, course_id, outcome, on_stage)?;
     sync_assignments(app, session, class, course_id, outcome, on_stage)?;
     sync_files(app, session, class, course_id, outcome, on_stage)?;
+
+    // Stamped only now. Written alongside the mapping it claimed a sync that
+    // had not happened yet: all three reads can fail, the caller records that
+    // per class and carries on, and Settings would still have shown a fresh
+    // LAST SYNC for a class that read nothing.
+    with_conn(app, |conn| {
+        conn.execute(
+            "UPDATE classes SET canvas_synced_at = ?1 WHERE id = ?2",
+            params![now(), class.id],
+        )?;
+        Ok(())
+    })?;
     Ok(())
 }
 

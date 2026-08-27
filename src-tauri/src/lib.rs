@@ -384,8 +384,8 @@ fn canvas_status(state: tauri::State<Db>) -> Result<canvas_sync::CanvasStatus, S
 /// Starts a sync and returns immediately; progress and results arrive on
 /// `canvas_sync::PROGRESS_EVENT`. An empty `class_ids` syncs every class.
 #[tauri::command]
-fn sync_canvas(app: tauri::AppHandle, class_ids: Vec<i64>) {
-    canvas_sync::spawn(&app, class_ids);
+fn sync_canvas(app: tauri::AppHandle, class_ids: Vec<i64>) -> Result<(), String> {
+    canvas_sync::spawn(&app, class_ids).map_err(|e| format!("{e:#}"))
 }
 
 // --- Drop-to-sort (SPEC §10) --------------------------------------------------
