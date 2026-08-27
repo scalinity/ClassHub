@@ -165,6 +165,36 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// What a page that is not on Canvas's origin actually means.
+#[derive(Debug, PartialEq)]
+enum Offsite {
+    /// The window has not navigated anywhere yet. Not an answer — wait.
+    Loading,
+    /// Still nowhere, for longer than a first navigation should take. Worth
+    /// showing, so a stall is not hidden; not evidence of anything refused.
+    Stalled,
+    /// A real host: Canvas sent us to SSO. Conclusive.
+    Bounced,
+}
+
+/// How to read an off-origin sighting.
+///
+/// Pure and tested because the condition it replaced was invertible in place:
+/// it still compiled, still read plausibly, and failed silently in opposite
+/// directions — either the sign-in window never appears, or a live session is
+/// deleted a moment before it would have worked. The initial empty document
+/// reports no host at all, which is what makes waiting the only way to tell a
+/// slow first navigation from a page that really did land somewhere else.
+fn read_offsite(host: &str, waited: Duration) -> Offsite {
+    if !host.is_empty() {
+        Offsite::Bounced
+    } else if waited >= SIGN_IN_SETTLE {
+        Offsite::Stalled
+    } else {
+        Offsite::Loading
+    }
+}
+
 enum Outcome {
     Json { value: Value, next: NextPage },
     /// A file's bytes, base64 as the page encoded them.
@@ -305,25 +335,22 @@ impl Session {
                 // — and reading it as a successful sign-in would have been the
                 // wrong way to be wrong about it.
                 Outcome::Binary(_) => bail!("the sign-in probe answered with a file"),
-                // Canvas served the page and refused the call. Conclusive.
-                Outcome::Unauthorized(_) => self.ask(&mut asked, on_stage),
-                // Somewhere other than Canvas — which is either a real SSO page
-                // or a window that has not navigated anywhere yet. The initial
-                // empty document reports no host at all, and only that reading
-                // waits; a page really at login.ufl.edu is shown immediately,
-                // because it has JavaScript to run and a hidden webview does
-                // not reliably get to run it.
-                Outcome::Offsite(host) => {
-                    if !host.is_empty() || started.elapsed() >= SIGN_IN_SETTLE {
-                        self.ask(&mut asked, on_stage);
-                    }
-                }
+                // Canvas served the page and refused the call. A 401 is a
+                // lapsed session; a 403 is Canvas declining one call with the
+                // session perfectly alive — its rate limiter answers 403, and
+                // `Refused` further down exists because a course can too. Only
+                // the first is allowed to throw the stored copy away.
+                Outcome::Unauthorized(status) => self.ask(&mut asked, status == 401, on_stage),
+                Outcome::Offsite(host) => match read_offsite(&host, started.elapsed()) {
+                    Offsite::Loading => {}
+                    Offsite::Stalled => self.ask(&mut asked, false, on_stage),
+                    Offsite::Bounced => self.ask(&mut asked, true, on_stage),
+                },
             }
             if Instant::now() >= deadline {
                 bail!(
-                    "timed out waiting for the Canvas sign-in. Nothing was read, and the \
-                     session Canvas refused has been forgotten — starting the sync again \
-                     reopens the window."
+                    "timed out waiting for the Canvas sign-in. Nothing was read — starting \
+                     the sync again reopens the window."
                 );
             }
             std::thread::sleep(SIGN_IN_POLL);
@@ -506,15 +533,20 @@ impl Session {
 
     /// Puts the sign-in in front of the user, once.
     ///
-    /// Drops the stored session on the way: Canvas has just refused the copy in
-    /// hand, and a credential known to be dead has no business outliving the
-    /// discovery — the sign-in about to happen writes a live one in its place.
-    fn ask(&self, asked: &mut bool, on_stage: &dyn Fn(&str)) {
+    /// `refused` is whether Canvas actually turned the stored copy down. The
+    /// two halves of this are not equally reversible: showing a window costs a
+    /// window, while deleting the session costs a Duo round on the next launch
+    /// — so only a conclusive refusal does the second. A window that has not
+    /// navigated anywhere yet has refused nothing, and the copy it may be about
+    /// to prove has no business being thrown away first.
+    fn ask(&self, asked: &mut bool, refused: bool, on_stage: &dyn Fn(&str)) {
         if *asked {
             return;
         }
         *asked = true;
-        forget();
+        if refused {
+            forget();
+        }
         self.reveal();
         on_stage("Waiting for you to sign in to Canvas…");
     }
@@ -1062,6 +1094,21 @@ mod tests {
         // A `next` URL already carries Canvas's own paging parameters.
         let paged = "/api/v1/courses?page=2&per_page=100";
         assert_eq!(with_per_page(paged), paged);
+    }
+
+    /// The reading that decides whether a stored session survives. A real host
+    /// is Canvas bouncing us to SSO; an empty one is a window that has not
+    /// navigated yet, which must never be read as a refusal however long it
+    /// takes — the session is deleted on a refusal, and a slow Canvas is not one.
+    #[test]
+    fn only_a_real_host_is_canvas_turning_the_session_away() {
+        assert_eq!(read_offsite("login.ufl.edu", Duration::ZERO), Offsite::Bounced);
+        // Waiting does not turn "still loading" into "refused" — it only earns
+        // a visible window, so a stall is not hidden behind one.
+        assert_eq!(read_offsite("", Duration::ZERO), Offsite::Loading);
+        assert_eq!(read_offsite("", SIGN_IN_SETTLE - Duration::from_millis(1)), Offsite::Loading);
+        assert_eq!(read_offsite("", SIGN_IN_SETTLE), Offsite::Stalled);
+        assert_eq!(read_offsite("", SIGN_IN_SETTLE * 100), Offsite::Stalled);
     }
 
     /// The CSRF token is the one cookie Canvas sets for its host that is not
