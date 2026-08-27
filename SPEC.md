@@ -35,6 +35,75 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   not vector-based. No embedding provider, no vector DB.
 - **Claude cannot read `.pptx`.** It reads PDFs and images natively. LibreOffice
   (`soffice --headless --convert-to pdf`) converts PPTX → PDF during ingestion.
+- **A Zoom recording link cannot be fetched.** There is no supported way to pull a caption
+  track from a share link: university recordings sit behind institutional SSO and often a
+  passcode, whether a *viewer* may see the transcript is the host's setting, and the Zoom
+  API path needs host/admin OAuth that a student account does not have. A plain HTTP GET
+  lands on a login page. Only a browser session the user signed in themselves can reach the
+  recording, which is what §7.1's capture window is for.
+- **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
+  and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
+  LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
+  borrowed — each transcription pays its own model load. Its packaged `parakeet-mlx` console
+  script also carries a stale shebang from the machine it was built on, so the module entry
+  (`python -c "from parakeet_mlx.cli import app; app()"`) is what gets invoked.
+- **Parakeet does no speaker diarization.** Its output is unattributed text. Zoom's own caption
+  track carries speaker names, and for a lecture the professor/student distinction is most of
+  what makes a transcript worth reading — so Zoom's track is always preferred, and Parakeet is
+  the fallback for when the host published none.
+- **The four courses do not share an organizational structure.** Read from the syllabi:
+
+  | Class | The course's own divisions | Dates in syllabus |
+  | --- | --- | --- |
+  | Fundamentals of AI in Medicine I | 14 weekly topics, no grouping | yes (Aug 25 …) |
+  | Biostatistics for AI | 15 weekly topics, no grouping | yes (08/20 …) |
+  | Applied Generative AI in Medicine | 3 Parts spanning 16 weeks | no |
+  | AI in Health Design Studio I | none published | — |
+
+  So there is no uniform "weeks 1–15" and no universal module layer: 14 / 15 / 16 / unknown.
+  Two of the four declare no grouping above the weekly topic at all. The app therefore reads
+  each course's own structure (§7.2) rather than imposing one, and never assumes a hand-made
+  folder is the course's real division.
+- **Weeks are not uniformly spaced.** Fundamentals runs Week 13 on Nov 17 and Week 14 on Dec 1,
+  skipping Thanksgiving. A week number can never be computed as `(date − start) / 7`; it comes
+  from the course's own schedule.
+- **Canvas offers exactly one usable way in, and it is not a credential.**
+  `https://ufl.instructure.com/api/v1/` is live (401 unauthenticated) and exposes
+  `/courses/:id/modules?include[]=items`, `/files`, `/assignments` and `syllabus_body` — the
+  authoritative course structure, without a human transcribing it. Both credentialed paths are
+  closed by the same administrators:
+  - **Personal access token** — disabled. Canvas answers *"Your Canvas administrators have
+    chosen to limit your ability to generate your own access token."* Verified 2026-08-26.
+  - **OAuth2** — equally gated, and not a fallback. The flow needs a developer key
+    (`client_id`/`client_secret`) that only an institution admin can issue, usually after a
+    security review; without an enabled key Canvas returns `unauthorized_client`. There is no
+    self-service path for a student account.
+
+  - **`POST /api/v1/users/:id/tokens`** — the same permission gate as the UI button. Reaching
+    for it would be routing around a control an administrator deliberately set, which is a
+    different act from reading data the account can already read. Not used.
+
+  Existing `Canvas for iOS` tokens in the account are not a loophole either: Instructure's
+  mobile apps run on Instructure's own globally-enabled developer keys, which is exactly why
+  OAuth2 works for them and cannot for us. Regenerating one would break the real iOS app and
+  would file ClassHub's traffic under Instructure's key in UF's audit logs.
+
+  What works is **session reads**: `/api/v1` honours the browser's own session cookie for
+  same-origin GETs, which is how in-Canvas theme JavaScript queries it. The constraint is
+  strict — the request must originate from a page Canvas served, so it has to be issued *inside*
+  the signed-in page, not by a native HTTP client holding copied cookies (§7.2). Verified
+  2026-08-26 against Instructure's developer docs: session and cookie authentication appear
+  **nowhere** in the OAuth2 or access-token references. It is an undocumented side effect, not a
+  supported integration, and nothing should assume it is contractual.
+
+  The line this app holds: reading through the user's own session automates their own browsing;
+  minting a credential through it does not. Only the first is done.
+
+  Canvas also exposes **GraphQL** at `POST /api/graphql`, whose permissions mirror REST. It
+  would collapse a whole sync into one round trip, but being a POST it needs the `X-CSRF-Token`
+  header read from the `_csrf_token` cookie. REST GETs need no CSRF and the rate limit is 700
+  requests / 10 minutes — far above a full sync — so REST is the default and GraphQL is an
+  optimization only if request counts ever justify the extra moving part.
 - Toolchain verified installed: Rust 1.96.1, Node v26.3.1, Homebrew. LibreOffice is NOT yet
   installed (Milestone 4 installs it via `brew install --cask libreoffice`).
 
@@ -43,8 +112,9 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
 | Prerequisite | Needed by | Status |
 | --- | --- | --- |
 | `claude` CLI logged in to Max 20x subscription | Milestone 3 | Done |
-| LibreOffice (`brew install --cask libreoffice`) | Milestone 4 | To install |
-| Anthropic console API key with usage credits | Milestone 7 | To obtain at console.anthropic.com |
+| LibreOffice (`brew install --cask libreoffice`) | Milestone 4 | Installed |
+| Anthropic console API key with usage credits | Milestone 7 | Obtained |
+| LocalFlow (supplies Parakeet + `parakeet_mlx`) and `ffmpeg` | Milestone 12 | Installed |
 
 ## 3. Architecture
 
@@ -63,6 +133,8 @@ flowchart LR
         ChatLoop[Chat Tool Loop - SSE]
         Sorter[Drop-to-Sort]
         Scanner[File Scanner / Indexer]
+        Lectures[Lecture Ingest + Transcript Normalizer]
+        Canvas[Canvas Sync - course structure, files, assignments]
         DB[(SQLite - rusqlite)]
         Keychain[macOS Keychain - keyring]
     end
@@ -70,11 +142,24 @@ flowchart LR
     CLI[claude -p headless - subscription]
     API[Anthropic Messages API - pay-per-token]
     LO[LibreOffice headless]
+    PK[Parakeet MLX - on-device ASR]
+    ZM[Zoom capture window - user signs in]
+    CV[Canvas REST API - ufl.instructure.com]
 
     ui <--> Cmds
     Cmds --> Jobs
     Cmds --> ChatLoop
     Cmds --> Sorter
+    Cmds --> Lectures
+    Lectures --> PK
+    Lectures --> ZM
+    Lectures --> AIBHS
+    Lectures --> Jobs
+    Cmds --> Canvas
+    Canvas --> CV
+    Canvas -->|units, deadlines| DB
+    Canvas -->|course files| AIBHS
+    Canvas --> Keychain
     Jobs --> CLI
     Jobs --> LO
     ChatLoop --> API
@@ -99,7 +184,12 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 ```
 ~/Documents/AIBHS/
 ├── Biostatistics for AI/                  ← one folder per class (4 total)
-│   ├── Module 1/                          ← modules created by Daniel or by drop-to-sort
+│   ├── Weeks/                             ← WHERE A LECTURE LIVES (§7.1), every class
+│   │   ├── Week 01 — Intro to Biostatistics/
+│   │   │   ├── 2026-08-20 — Lecture.md    ← the normalized transcript, SOURCE material
+│   │   │   └── Slides/                    ← anything else specific to that week
+│   │   └── Week 02 — Study Designs/
+│   ├── Module 1/                          ← a unit folder, when the course has one (§7.2)
 │   │   ├── Slides/                        ← .pptx lecture slides
 │   │   ├── Reading Material/              ← .pdf readings
 │   │   └── R Files/
@@ -108,23 +198,35 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   ├── Study Guides/                      ← APP-MANAGED: generated artifacts
 │   │   ├── Module 1.html
 │   │   ├── Semester Master.html
-│   │   └── Practice/                      ← generated practice exams
+│   │   ├── Practice/                      ← generated practice exams
+│   │   └── Sessions/                      ← generated per-lecture session documents
+│   │       ├── 2026-08-20 — Central Tendency.html
+│   │       └── 2026-08-20 — Central Tendency.md
 │   ├── Notes/                             ← APP-MANAGED: per-class markdown notes
 │   ├── _Inbox/                            ← APP-MANAGED: drop-to-sort staging
 │   └── .classhub/
-│       └── extracts/                      ← APP-MANAGED: hidden extraction cache,
-│           └── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
+│       ├── extracts/                      ← APP-MANAGED: hidden extraction cache,
+│       │   └── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
+│       └── corpus/                        ← APP-MANAGED: distilled lecture contributions
+│           └── Module 1/2026-08-20 — Central Tendency.md     (§8.5)
 └── ... (3 more class folders)
 ```
 
 Rules:
 
-- Module folder structure inside each class is **arbitrary and user-owned**; never assume the
-  exact layout above. Scanner and agents must tolerate any nesting.
+- Folder structure inside each class is **arbitrary and user-owned**; never assume the exact
+  layout above. Scanner and agents must tolerate any nesting.
 - Extract paths mirror the source file's relative path with `.md` appended, under
   `.classhub/extracts/`. PPTX→PDF conversions live alongside as `<name>.pptx.pdf`.
-- `Study Guides/`, `Notes/`, `_Inbox/`, `.classhub/` are excluded from module scanning,
-  drop-to-sort proposals, and staleness computation of source material.
+- `Study Guides/`, `Notes/`, `_Inbox/`, `.classhub/` are excluded from scanning, drop-to-sort
+  proposals, and staleness computation of source material.
+- **`Weeks/` is storage, not scope.** It is where a lecture goes, in every class, because a
+  lecture happens at a time. What a lecture is *about* is decided separately (§8.5) — the two
+  are deliberately not the same axis, since one three-hour lecture routinely spans two of the
+  course's units.
+- `Weeks/` is **not** app-managed. A transcript is source material like a slide deck: the
+  scanner indexes it, extraction routes it through the zero-token text path, and chat searches
+  it. Filing it in the tree is what joins it to the pipeline rather than parking it beside.
 - The app never deletes source files. Moves happen only through the confirmed drop-to-sort flow
   and are audit-logged.
 
@@ -146,7 +248,7 @@ files(id INTEGER PK, class_id INTEGER FK, rel_path TEXT, sha256 TEXT, size INTEG
       extracted_sha256 TEXT NULL,          -- hash of source when extract was made
       UNIQUE(class_id, rel_path));
 
-jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice
+jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice|lecture_digest
      class_id INTEGER NULL, scope TEXT NULL,  -- e.g. module rel path, or 'master'
      status TEXT,                          -- queued|running|succeeded|failed|cancelled
      session_id TEXT NULL,                 -- claude session id (for --resume)
@@ -154,7 +256,39 @@ jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|
      created_at INTEGER, started_at INTEGER NULL, finished_at INTEGER NULL,
      log_path TEXT NULL, error TEXT NULL, summary TEXT NULL);
 
-guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- module rel path | 'master'
+-- A course's own divisions, whatever that course calls them (§7.2). This is what
+-- replaces "a top-level folder is a module": Biostatistics and Fundamentals divide
+-- into weekly topics and declare no modules at all, Applied Generative AI declares
+-- three Parts, and Canvas may say something different again. `kind` and `name` carry
+-- the course's own words; the app never shows the word "unit" to the reader.
+units(id INTEGER PK, class_id INTEGER FK, ordinal INTEGER,
+      kind TEXT,             -- module|week|part, as the course names it
+      name TEXT,             -- 'Module 3' | 'Week 7 — Tree-Based Models' | 'Part II'
+      canvas_id TEXT NULL,   -- set when Canvas is the source
+      rel_path TEXT NULL,    -- its folder, when it has one; units need not be folders
+      starts_on TEXT NULL, ends_on TEXT NULL,
+      source TEXT,           -- canvas|syllabus|folder — precedence in that order
+      UNIQUE(class_id, name));
+
+-- One span of one lecture, mapped to one unit (§8.5). This is the join that lets a
+-- three-hour lecture feed two different guides, each from its own half, without the
+-- transcript being stored twice or split.
+lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
+                      rel_path TEXT,          -- the transcript this span is cut from
+                      start_ms INTEGER, end_ms INTEGER,
+                      start_line INTEGER, end_line INTEGER,  -- resolved from ## HH:MM anchors
+                      corpus_rel_path TEXT,   -- the distilled note under .classhub/corpus/
+                      summary TEXT,
+                      confidence TEXT,        -- high|medium|low
+                      status TEXT,            -- applied|pending|dismissed
+                      created_at INTEGER,
+                      UNIQUE(class_id, rel_path, unit_id, start_ms));
+
+-- Also holds session documents (§8.4) under scope 'session:<transcript rel path>',
+-- so they inherit the viewer, the listing and staleness without a table of their own.
+-- Naming the source file rather than the date keeps the scope unique per transcript,
+-- which turns a re-run into an update and gives staleness something real to hash.
+guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- module rel path | 'master' | 'session:<path>'
        rel_path TEXT, generated_at INTEGER,
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
@@ -234,7 +368,8 @@ claude -p <prompt>
   boundary and both are passed:
   - Never allowed, any kind: `Bash,WebFetch,WebSearch,Task` — `Task` because a spawned
     sub-agent is a path around the parent's tool scoping.
-  - `extract`, `module_guide`, `master_guide`, `practice`: allow `Read,Glob,Grep,Write`.
+  - `extract`, `module_guide`, `master_guide`, `practice`, `lecture_digest`: allow
+    `Read,Glob,Grep,Write`.
   - `sort_proposal`, `syllabus_scan`: allow `Read,Glob,Grep`, and additionally deny
     `Write,Edit,MultiEdit,NotebookEdit` (read-only is only real if the writes are denied).
 - **Write scope is verified, not trusted**: `--add-dir` grants read and write together, so a
@@ -283,16 +418,125 @@ agent and synthesis prompts can search text instead of re-reading binaries.
 Extraction is triggered automatically after a scan finds changes (extraction is cheap:
 sonnet + mostly local), but **guide synthesis is never automatic**.
 
+Caption tracks (`.vtt`, `.srt`) found in the tree are extracted locally through the same
+normalizer §7.1 uses — the searchable copy is the merged prose, not the timing grid. Media
+files are indexed but never extracted: transcribing is minutes of compute, so it happens when
+a lecture is explicitly added, never as a side effect of a scan noticing an `.mp4`.
+
+## 7.1 Lecture transcripts
+
+A recording reaches the app as one of three things, and they converge on one path: whatever
+came in becomes cues, the cues become markdown, the markdown is filed as source material.
+
+1. **Caption track** (`.vtt` / `.srt` / Zoom's in-meeting "Save Transcript" `.txt`) — read
+   directly. Preferred whenever it exists, because it carries speaker names.
+2. **Media file** — transcribed on-device by Parakeet (§1), invoked as a bounded subprocess
+   the way LibreOffice is. The interpreter path is a Setting, defaulting to LocalFlow's.
+3. **Zoom recording link** — a webview opens the link, the user completes SSO and any
+   passcode themselves, and the transcript is read out of the authenticated page via
+   `eval_with_callback`. Deliberately **no JS injection into the app and no remote-IPC
+   grant**: zoom.us is read, and never becomes a caller into ClassHub. The capture window
+   needs no capability entry for exactly that reason — it calls no commands.
+
+   The recording player is a Vue 2 app on `#app`, and its Vuex store is the source:
+   `ccUrl` (the caption file the player itself offers), else `transcriptList`
+   (`{username, ts, endTs, text}`). Reading the store rather than the rendered panel is
+   not a shortcut but the only correct route — the panel is a `vue-recycle-scroller`, so
+   the DOM holds only the rows currently on screen, and scraping it would return twenty
+   cues of a three-hour lecture while looking like it had worked.
+
+   When the store exposes no caption track because the host disabled viewer transcripts,
+   `viewMp4Url` is downloaded with the same session's cookies and routed to (2). That
+   degradation is why on-device transcription earns its place rather than duplicating Zoom.
+
+**Normalization** is pure, local and zero-token. A raw caption track is one cue per couple of
+seconds, so a lecture arrives as thousands of fragments — unreadable, and hostile as input to
+a digest prompt. Consecutive cues from one speaker merge back into paragraphs, breaking on a
+speaker change, a long pause, or a soft length cap at a sentence boundary, with an `## HH:MM`
+anchor every five minutes so a digest can cite a time that scrubs to the right moment.
+
+Speaker attribution is a guess with a corroboration rule: a multi-word `Name:` prefix is taken
+as a display name, but a single-word one has to recur before it counts, because `Danny:` and
+`Remember:` are the same shape in isolation and only differ across a whole file.
+
+**Filing** puts every transcript at `<Class>/Weeks/Week NN — <topic>/<date> — <title>.md`.
+
+A lecture is filed by *when it happened*, never by what it covers — deciding the latter is
+§8.5's job and it does not have one answer. The week comes from the course's own schedule
+(§7.2), because breaks make arithmetic wrong: Fundamentals runs Week 13 on Nov 17 and Week 14
+on Dec 1. The Add lecture form shows the resolved week and lets it be corrected.
+
+A transcript whose week cannot be resolved lands in `_Inbox/` and the §10 sorter proposes one.
+A transcript's *name* carries no routing signal — they are all a date and "Lecture" — so the
+inbox listing carries a line of its subject matter and the sorter routes it by content.
+
+Ingestion never overwrites: a second lecture on one date, or re-adding the same one, gets a
+` (2)` suffix rather than replacing a file.
+
+## 7.2 Canvas sync — where the course's structure comes from
+
+The course's real divisions live in Canvas, and every hop between Canvas and ClassHub that
+passes through a human loses something. This section removes that hop.
+
+**What is read** from `https://ufl.instructure.com/api/v1/`:
+
+| Endpoint | Gives |
+| --- | --- |
+| `/courses?enrollment_state=active` | the enrolled classes, mapped to `classes` by name |
+| `/courses/:id/modules?include[]=items` | **the course's own divisions** → `units` (§5) |
+| `/courses/:id/files` | slides and readings, downloadable into the tree |
+| `/courses/:id/assignments` | deadlines with real due dates — no syllabus guesswork |
+| `/courses/:id?include[]=syllabus_body` | the syllabus as HTML |
+
+Reads only. ClassHub never writes to Canvas.
+
+**Authentication** has one available path, because UF has closed both credentialed ones (§1):
+neither a personal access token nor an OAuth2 developer key can be obtained by a student
+account.
+
+What remains is a **signed-in window**, the technique `zoom.rs` already proves: a Tauri webview
+the user completes UF SSO in, after which the app reads `/api/v1/…` on that session. Same
+posture as the Zoom capture — reads only, no IPC grant to the remote origin, and the response
+is parsed in Rust.
+
+One detail is load-bearing rather than incidental: **the request must be issued from inside the
+Canvas page**, via `eval_with_callback` running
+`fetch('/api/v1/…', {credentials: 'same-origin'})`. Canvas honours the session cookie for
+same-origin GETs only, so a native HTTP client replaying copied cookies is the wrong shape and
+invites a referer or CSRF refusal. Issued in-page, the request *is* the Canvas web UI's own.
+
+GETs need no CSRF token; ClassHub never writes to Canvas, so the `X-CSRF-Token` dance for
+mutating verbs never arises.
+
+No durable credential is ever minted or stored — there is nothing to leak, and the app's reach
+expires with the session, which is a narrower exposure than the token the administrators
+disabled. It is nonetheless undocumented (§1): if it stops working, it stops, and the fallback
+is the syllabus path below rather than anything cleverer.
+
+**Structure precedence is canvas > syllabus > folder.** Canvas is ground truth when connected.
+Without it, a syllabus scan supplies units — the weekly schedules in Fundamentals and
+Biostatistics are explicit enough to parse, including their dates. With neither, the top-level
+folders stand in, which is where the app started. A unit's `source` column records which, so a
+folder-derived unit is never mistaken for something the course actually declared.
+
+**Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
+inserted; units whose name no longer appears in Canvas are kept, not deleted — a mid-semester
+Canvas reshuffle must not silently orphan a guide. Downloaded files land through the §10
+confirm queue like anything else that moves material.
+
 ## 8. Study guide synthesis
 
-### 8.1 Module guides (`module_guide` job)
+### 8.1 Unit guides (`module_guide` job)
 
-Manual trigger per module from the Class Workspace. Prompt contract:
+Manual trigger per unit from the Class Workspace — one guide for one of the course's own
+divisions (§5), whatever that course calls them. The job kind keeps its original name; the UI
+shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
 
-- Inputs: all extracts in the module (primary) + originals via `--add-dir` when the extract
-  flags a figure worth re-inspecting; Daniel's classwork files marked as "learner work" for
-  the worked-examples section.
-- Output: **one self-contained HTML file** at `Study Guides/<Module name>.html`. No external
+- Inputs: all extracts under the unit's folder when it has one (primary) + originals via
+  `--add-dir` when the extract flags a figure worth re-inspecting; Daniel's classwork files
+  marked as "learner work" for the worked-examples section; and the unit's corpus notes, which
+  are how lecture content reaches a guide when the lecture itself lives under `Weeks/` (§8.5).
+- Output: **one self-contained HTML file** at `Study Guides/<Unit name>.html`. No external
   requests (no CDN fonts/JS/CSS). Inline CSS, inline SVG, and inline vanilla JS powering
   interactive teaching devices (owner decision 2026-08-22: interactivity is load-bearing).
   Fully readable with scripts disabled and in print. Print-friendly stylesheet.
@@ -322,6 +566,72 @@ plus a "Cross-module threads" section. This is a long-running exclusive job (pot
 Triggered from chat (M8) or a button in Study Guides. Inputs: scope (module or semester) +
 optional focus topics. Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style
 questions with hidden answers + scoring rubric.
+
+### 8.4 Session documents (`lecture_digest` job)
+
+Manual trigger per filed transcript, from the Add lecture form or the Lectures listing. The
+job reads the transcript plus the rest of its module (so spoken content ties to the slides it
+was about) and writes **two** documents — `Study Guides/Sessions/<date> — <topic>.html` for
+reading, and `.md` alongside it for retrieval, since §9's `search_material` covers
+`Study Guides/` and that markdown twin is the copy chat finds.
+
+Both land under `Study Guides/`, already inside §6's `JOB_WRITABLE`, so the write-contract
+check needs no widening.
+
+**The job names its own output.** `<topic>` is what the session was actually about in three to
+six words, drawn from the content — "Attention and Positional Encoding", not "Lecture". Having
+chosen a name, the job prints `{title, relPathHtml, relPathMd}` as strict JSON on stdout; the
+app verifies both files exist under `Sessions/` before recording anything, because "wrote the
+HTML, skipped the markdown" would otherwise pass as success and silently leave the session out
+of chat's reach.
+
+Required sections: one-line summary · session summary · key points with `HH:MM` anchors ·
+**said out loud, not on the slides** (emphasis, exam hints, corrections to the slides — the
+reason the document exists) · terms introduced · questions asked and how they were answered ·
+action items and dates as a record, never as created deadlines · open threads.
+
+The prompt is bound to the transcript: no outside knowledge, no invented speaker or time, and
+a session that covered something partially is reported with the gap named as a gap.
+
+### 8.5 Unit corpus — what a guide is actually built from
+
+A three-hour lecture does not respect the course's divisions. A Week 2 lecture routinely covers
+the tail of one unit for ninety minutes and then moves into the next. Because ClassHub stores a
+lecture by time (§4) and synthesizes by topic, something has to map between them, and that map
+is what `lecture_contributions` (§5) holds.
+
+**Mapping** is folded into the `lecture_digest` pass, which already reads the whole transcript
+once — doing it separately would pay for that read twice. The job receives the class's unit
+list and returns, alongside the session document, a set of spans:
+
+```json
+[{"startAnchor":"00:00","endAnchor":"01:22","unit":"Module 1","confidence":"high",
+  "summary":"Decision trees, bagging, random forests — Module 1 as scheduled"},
+ {"startAnchor":"01:22","endAnchor":"02:55","unit":"Module 2","confidence":"medium",
+  "summary":"Moved early into SVMs and margins — Module 2 material"}]
+```
+
+Rust resolves each anchor to a line range by scanning the `## HH:MM` headings it wrote into the
+transcript, **snapping outward** to anchor boundaries. Widening a span costs a paragraph of
+overlap; narrowing it to an exact timestamp severs a sentence, and a guide built from a severed
+sentence is wrong in a way nothing downstream can detect.
+
+**Each span is distilled once**, into `.classhub/corpus/<unit>/<date> — <topic>.md`: the
+high-yield content of that span, every point carrying its `HH:MM` anchor back to the
+transcript. This is what makes the cost sane — the expensive read happens once per lecture
+rather than once per guide per lecture — and it makes the corpus inspectable, so what a guide
+drew on can be read directly rather than inferred from the guide.
+
+**A unit guide's sources** are therefore: files under the unit's folder when it has one · files
+Canvas assigned to it (§7.2) · its corpus notes, each listed with the transcript path and the
+raw span's line range so the job can open the professor's exact words when the distillation is
+not enough. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so
+chat retrieves it too.
+
+**Trust follows the app's existing habit.** `high`-confidence spans apply on write; `medium`
+and `low` land in the confirm queue beside file moves and syllabus deadlines. A misallocated
+span is not destructive — it means a guide cites a stretch of the wrong lecture — but it shapes
+what gets studied, so the uncertain ones are shown rather than assumed.
 
 ## 9. Agent chat (direct Anthropic API)
 
@@ -401,7 +711,12 @@ and apply it. Non-negotiable per project owner.
 
 - TypeScript strict; React function components; **no `useEffect`** (per workspace rules — use
   event handlers, derived state, and TanStack Query for async server state from Tauri
-  commands). No Python anywhere.
+  commands).
+- **No Python in the codebase.** ClassHub ships no Python and imports none. Two external tools
+  are invoked as bounded subprocesses — LibreOffice for PPTX conversion (§7) and Parakeet for
+  transcription (§7.1) — and one of them happens to be written in Python. That is a property
+  of the tool, not of this stack: file in, file out, no shared runtime. The rule is about what
+  this project is written in, and it stays absolute there.
 - Dev loop only: `npm run tauri dev`. Never run production builds (`tauri build`) in sessions.
 - Rust: `anyhow` for errors in commands, typed event payloads (serde), no `unwrap()` outside
   tests/startup.
@@ -419,8 +734,10 @@ and apply it. Non-negotiable per project owner.
   is therefore an anti-exfiltration control (no external script origin, no external
   connect-src, no object/base/form), not the thing that blocks `javascript:` URLs.
 - Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
-  the streamed-escape decoder, the job-output array parser, the HTML stripper, and the
-  source fingerprint diff. UI and job plumbing are exercised by running the app.
+  the streamed-escape decoder, the job-output array and object parsers, the HTML stripper,
+  the source fingerprint diff, and the caption parser and cue merger (§7.1 — a transcript
+  shredded into fake speakers, or left unmerged, fails quietly and downstream). UI and job
+  plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -517,6 +834,32 @@ Mark the checkbox when the acceptance criteria pass.
   a worked example (weights warning at ≠100%), settings changes persist, and every view has a
   designed empty state.
 
+- [x] **M12 — Lecture transcripts + session documents.**
+  Caption normalization and cue merging with `cargo test` coverage (§7.1), on-device Parakeet
+  transcription with a Settings-overridable interpreter, the Zoom capture window with its
+  media-download fallback, both filing entrances (explicit module and content-aware sorting),
+  and the `lecture_digest` job writing a self-named HTML + Markdown pair (§8.4). Add lecture
+  form and a Lectures listing in the Class Workspace.
+  *Accepted when:* a Zoom `.vtt` becomes a merged, speaker-attributed transcript filed in a
+  module, a digest names itself for the topic and produces both documents, chat answers a
+  question about that session citing the markdown twin, and a regenerated module guide cites
+  the transcript — the proof it joined the pipeline rather than sitting beside it.
+
+- [ ] **M13 — Canvas as ground truth.** (`milestones/M13-canvas-ground-truth.md`)
+  Settle the auth path first (token or signed-in window, §7.2), then `units` from Canvas
+  modules with a syllabus fallback, course-file sync into the tree, and assignments → deadlines.
+  *Accepted when:* all four classes' real divisions land in `units` from Canvas with nothing
+  typed by hand — 14 weekly topics for Fundamentals, 15 for Biostatistics, 3 Parts for Applied
+  Generative AI — and a Canvas assignment appears as a deadline with its true due date.
+
+- [ ] **M14 — Lecture content mapping.** (`milestones/M14-lecture-mapping.md`)
+  Transcripts file into `Weeks/` (§4), mapping folded into the `lecture_digest` pass, anchor →
+  line resolution, distilled corpus notes, the confidence queue, and unit-scoped guide sources
+  (§8.5).
+  *Accepted when:* a lecture that starts in one unit and moves into the next contributes to both
+  guides — each drawing only its own span — the split is visible and correctable, and neither
+  guide contains the other's material.
+
 ## 15. Risks & trade-offs (accepted)
 
 - **Master re-synthesis cost/time**: full raw re-synthesis on every run is token-heavy and
@@ -526,13 +869,29 @@ Mark the checkbox when the acceptance criteria pass.
   context small; practice/synthesis work is delegated to the subscription via the job runner.
 - **LibreOffice fidelity**: rare PPTX features may render imperfectly in PDF; acceptable for
   lecture slides.
+- **Zoom page capture is undocumented**: §7.1's link path reads a page structure Zoom changes
+  without notice, so it is written to fail legibly — each probe reports what it did and did
+  not find, and a miss names the manual step (download the track, add it as a file) rather
+  than dead-ending. The file and media paths do not depend on it.
+- **Parakeet borrows another app's bundle**: the default interpreter lives inside LocalFlow,
+  so an update there can move it. Surfaced as a Settings path with a not-found warning, which
+  makes it a settings fix instead of a mystery.
+- **Digests are not cheap**: even merged, a long lecture is a large prompt against the shared
+  subscription limits. Like every other synthesis job, it stays manually triggered — never
+  automatic on ingest.
+- **Canvas access may have no supported path**: UF restricts API tokens (§1), and session auth
+  for `/api/v1` is unproven. If both fail, §7.2 falls back to syllabus-derived units and the
+  human stays in the loop for course files. M14 does not depend on Canvas — it needs *a* unit
+  list, not Canvas's.
+- **Span mapping is a judgement call**: where one unit ends and the next begins inside a lecture
+  is genuinely fuzzy, and the model will sometimes place the boundary wrong. Mitigated rather
+  than solved: spans snap outward so nothing is severed, low-confidence splits are queued for
+  review, and the corpus note is readable so a wrong call is visible instead of silent.
 - **Single-user, local-only**: no auth, no telemetry, no deployment infra. The subscription
   OAuth stays personal; nothing here is multi-tenant.
 
 ## 16. Future ideas (explicitly out of v1)
 
 - Spaced-repetition export (Anki) from quiz sections
-- Canvas/LMS integration for automatic assignment ingestion
-- Audio lecture transcription ingestion
 - Cross-class semester dashboard analytics (study time, grade trends)
 - Auto-sync of the AIBHS folder from cloud storage
