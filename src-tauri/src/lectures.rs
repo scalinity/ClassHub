@@ -400,15 +400,15 @@ pub fn enqueue_digest(
         // lecture runs past a single read, and a digest of the first fraction
         // would come back looking like a complete one.
         let lines = fs::read_to_string(&transcript).map(|t| t.lines().count()).unwrap_or(0);
-        let prompt = PROMPT_TEMPLATE
-            .replace("{class}", &class_name)
-            .replace("{date}", date)
-            .replace("{transcript}", transcript_rel_path)
-            .replace("{transcript_lines}", &lines.to_string())
-            .replace("{sessions_dir}", SESSIONS_DIR)
-            .replace("{accent_light}", &accent_light)
-            .replace("{accent_dark}", &accent_dark)
-            .replace("{context}", &module_context(conn, class_id, transcript_rel_path)?);
+        let prompt = render_prompt(&DigestPromptVars {
+            class: &class_name,
+            date,
+            transcript: transcript_rel_path,
+            transcript_lines: lines,
+            accent_light,
+            accent_dark,
+            context: &module_context(conn, class_id, transcript_rel_path)?,
+        });
         let manifest =
             serde_json::to_string(&crate::extract::current_manifest(conn, class_id, &scope)?)?;
         Ok((prompt, manifest))
@@ -420,6 +420,34 @@ pub fn enqueue_digest(
         source_manifest: manifest,
     })?;
     crate::jobs::enqueue_lecture_digest(app, class_id, transcript_rel_path, &prompt, payload)
+}
+
+/// Everything `lecture_digest.md` expects to be given.
+///
+/// A struct rather than eight positional arguments so that adding a `{…}` to
+/// the prompt without filling it in is a compile error here and a test failure
+/// next door — which is how the accent hue reached the model as the literal
+/// text `{accent_light}` for the whole of M12.
+struct DigestPromptVars<'a> {
+    class: &'a str,
+    date: &'a str,
+    transcript: &'a str,
+    transcript_lines: usize,
+    accent_light: &'a str,
+    accent_dark: &'a str,
+    context: &'a str,
+}
+
+fn render_prompt(vars: &DigestPromptVars<'_>) -> String {
+    PROMPT_TEMPLATE
+        .replace("{class}", vars.class)
+        .replace("{date}", vars.date)
+        .replace("{transcript_lines}", &vars.transcript_lines.to_string())
+        .replace("{transcript}", vars.transcript)
+        .replace("{sessions_dir}", SESSIONS_DIR)
+        .replace("{accent_light}", vars.accent_light)
+        .replace("{accent_dark}", vars.accent_dark)
+        .replace("{context}", vars.context)
 }
 
 /// The rest of the module the transcript sits in, so the digest can tie what
@@ -668,6 +696,64 @@ mod tests {
     fn keeps_the_digest_inside_the_contracted_write_scope() {
         assert!(SESSIONS_DIR.starts_with(crate::db::GUIDES_DIR), "{SESSIONS_DIR}");
         assert!(crate::db::JOB_WRITABLE.contains(&crate::db::GUIDES_DIR));
+    }
+
+    /// The digest job has an output contract, and the prompt is the only place
+    /// it is stated. An unfilled `{…}` reaches the model as literal text, which
+    /// is what happened to the accent hue for the whole of M12 — the prompt
+    /// asked for a colour nothing ever substituted, and no test could see it.
+    #[test]
+    fn fills_every_placeholder_in_the_digest_prompt() {
+        let rendered = render_prompt(&DigestPromptVars {
+            class: "Biostatistics for AI",
+            date: "2026-08-24",
+            transcript: "Module 1/Transcripts/2026-08-24 — Lecture.md",
+            transcript_lines: 4_210,
+            accent_light: "oklch(0.578 0.135 158)",
+            accent_dark: "oklch(0.732 0.13 158)",
+            context: "- Module 1/slides.pdf",
+        });
+
+        // A leftover reads as `{lower_snake}`; the JSON contract's own braces
+        // open with a quote, so they are not mistaken for one.
+        let placeholders = |text: &str| {
+            let mut found: Vec<String> = Vec::new();
+            let mut rest = text;
+            while let Some(open) = rest.find('{') {
+                rest = &rest[open + 1..];
+                if let Some(close) = rest.find('}') {
+                    let inner = &rest[..close];
+                    if !inner.is_empty()
+                        && inner.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    {
+                        found.push(inner.to_string());
+                    }
+                }
+            }
+            found
+        };
+        // The template really does carry them, so an empty result below means
+        // they were filled rather than that nothing was ever looked for.
+        assert!(
+            placeholders(PROMPT_TEMPLATE).contains(&"accent_light".to_string()),
+            "the placeholder scan finds nothing to miss"
+        );
+        assert!(
+            placeholders(&rendered).is_empty(),
+            "unsubstituted placeholders: {:?}",
+            placeholders(&rendered)
+        );
+
+        // And the values actually landed, rather than the template being empty.
+        for expected in [
+            "Biostatistics for AI",
+            "2026-08-24",
+            "4210 lines",
+            "oklch(0.578 0.135 158)",
+            SESSIONS_DIR,
+        ] {
+            assert!(rendered.contains(expected), "missing {expected:?}");
+        }
     }
 
     /// The one check standing between a model-chosen string and a write path.

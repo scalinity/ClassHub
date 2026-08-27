@@ -490,6 +490,34 @@ const PROBE: &str = r#"
 mod tests {
     use super::*;
 
+    /// The probe itself, actually executed.
+    ///
+    /// Everything else in this module tests the Rust around the script; this
+    /// runs the script. It reads a page nothing here can stand up, so a mock
+    /// player under node is the only way to find out whether the routes, the
+    /// timestamp conversion and the VTT assembly work at all — and a probe that
+    /// is wrong does not crash, it polls for ten minutes and reports that the
+    /// page had nothing.
+    ///
+    /// Skipped rather than failed without node: it is the frontend's toolchain,
+    /// not the backend's, and `cargo test` must still pass without it.
+    #[test]
+    fn the_probe_behaves_against_a_mock_player() {
+        let out = std::process::Command::new("node")
+            .args(["tests/zoom_probe.mjs", "src/zoom.rs"])
+            .output();
+        let Ok(out) = out else {
+            eprintln!("skipping the probe harness: node is not on PATH");
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn accepts_zoom_and_its_subdomains_only() {
         assert!(is_zoom_host("zoom.us"));

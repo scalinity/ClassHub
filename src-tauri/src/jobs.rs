@@ -241,19 +241,19 @@ impl JobManager {
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
-        // A digest reads one transcript and writes two files into one folder,
-        // and its input is untrusted — whatever was said in the room, or
-        // whatever a downloaded caption file contains. Scoping the write means
-        // a transcript carrying something shaped like an instruction is refused
-        // by the CLI, rather than caught afterwards by a fingerprint diff that
-        // does not walk `Study Guides/` at all.
-        //
-        // The pattern carries no space on purpose: `--allowedTools` splits on
-        // commas *and* spaces, so `Write(Study Guides/...)` would arrive as two
-        // broken specifiers. Matching the leaf folder is space-free, and the
-        // working directory is already the class.
-        "lecture_digest" => Some("Read,Glob,Grep,Write(**/Sessions/**)"),
-        "extract" | "module_guide" | "master_guide" | "practice" => {
+        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest" => {
+            // Worth scoping `lecture_digest` down to its output folder one day:
+            // its input is untrusted (whatever was said in the room, or whatever
+            // a downloaded caption file contains) and it needs one file in and
+            // two out, while the post-hoc contract check does not walk
+            // `Study Guides/` at all. Two things to know before trying again.
+            // `Write(<path>)` is inert — the CLI answers "not matched by file
+            // permission checks — only Edit(path) rules are", so `Edit(<path>)`
+            // is the form, and it covers every file-editing tool. And the
+            // pattern cannot contain a space, because `--allowedTools` splits on
+            // spaces as well as commas, which rules out naming `Study Guides`
+            // directly. Left unscoped until a real digest run can confirm the
+            // job still writes, since none has ever executed.
             Some("Read,Glob,Grep,Write")
         }
         "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),
@@ -1593,7 +1593,57 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_entries, parse_object, unescape_fragment};
+    use super::{parse_entries, parse_object, unescape_fragment, wait_bounded};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// The failure this function's drain threads exist for. A child that writes
+    /// past the ~64KB pipe buffer blocks in `write` and never exits, so waiting
+    /// first and reading afterwards hangs for the whole bound. Before the drain
+    /// this returned `None` after ten seconds; the assertion is that it returns
+    /// the output, promptly.
+    #[test]
+    fn drains_a_child_that_outfills_the_pipe_buffer() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("yes ....... | head -c 400000; yes ....... | head -c 400000 >&2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+
+        let started = Instant::now();
+        let output = wait_bounded(child, Duration::from_secs(10)).expect("child was wedged");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 400_000, "stdout was truncated");
+        assert_eq!(output.stderr.len(), 400_000, "stderr was truncated");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} — it blocked on a full pipe",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn kills_a_child_that_outlives_its_deadline() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+
+        let started = Instant::now();
+        assert!(wait_bounded(child, Duration::from_millis(200)).is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "did not stop the child: {:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn reads_a_lone_object_through_fences_and_prose() {

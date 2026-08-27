@@ -202,6 +202,44 @@ fn workspace(app: &AppHandle, media: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Verbatim Parakeet output, captured from a real run of exactly the
+    /// invocation above. It is the one input shape this module produces, and
+    /// nothing else in the test suite has ever seen it: `parse` must read it,
+    /// and — since Parakeet does no diarization — must find no speakers in it.
+    const PARAKEET_VTT: &str = "WEBVTT\n\n\
+        00:00:00.000 --> 00:00:04.800\n\
+        Today, we are going to look at transformers in clinical natural language processing.\n\n\
+        00:00:04.800 --> 00:00:07.840\n\
+        Remember, the null hypothesis is what we reject.\n";
+
+    #[test]
+    fn parses_what_parakeet_actually_writes() {
+        let cues = crate::transcripts::parse(PARAKEET_VTT);
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        assert_eq!((cues[0].start_ms, cues[0].end_ms), (0, 4_800));
+        assert!(
+            cues.iter().all(|c| c.speaker.is_none()),
+            "Parakeet writes no speakers: {cues:?}"
+        );
+        assert!(cues[1].text.starts_with("Remember, the null hypothesis"), "{cues:?}");
+    }
+
+    /// The output directory has to go however the run ends — a spawn failure, a
+    /// timeout and a missing `.vtt` all used to leave it, and whatever partial
+    /// output was in it, on disk.
+    #[test]
+    fn the_scratch_directory_does_not_outlive_the_run() {
+        let dir = std::env::temp_dir().join("classhub-scratch-drop");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create");
+        fs::write(dir.join("partial.vtt"), "WEBVTT\n").expect("write");
+        {
+            let _scratch = Scratch(dir.clone());
+            assert!(dir.is_dir());
+        }
+        assert!(!dir.exists(), "the scratch directory survived the run");
+    }
+
     #[test]
     fn recognises_media_by_extension() {
         assert!(is_media(Path::new("GMT20260824-210000_Recording.m4a")));
