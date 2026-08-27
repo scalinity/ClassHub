@@ -66,11 +66,11 @@ pub fn parse(source: &str) -> Vec<Cue> {
     if raw.is_empty() {
         raw = untimed_blocks(source);
     }
-    let recurring = recurring_single_words(&raw);
+    let seen = attribution(&raw);
 
     raw.into_iter()
         .filter_map(|(start_ms, end_ms, payload)| {
-            let (speaker, text) = split_speaker(&payload, &recurring);
+            let (speaker, text) = split_speaker(&payload, &seen);
             (!text.is_empty()).then_some(Cue { start_ms, end_ms, speaker, text })
         })
         .collect()
@@ -121,20 +121,45 @@ fn scan_cues(source: &str) -> Vec<(i64, i64, String)> {
 /// display name recurs cue after cue, a rhetorical lead-in appears once. So a
 /// single-word candidate has to earn its place by repeating.
 const MIN_SINGLE_WORD_HITS: usize = 2;
+/// A file is speaker-labeled when at least this fraction of its cues open with
+/// a name-shaped prefix. Generous, because some tracks carry the name only on a
+/// change of speaker — but three orders of magnitude above the rate at which a
+/// sentence happens to start with one.
+const LABELED_CUES_IN: usize = 4;
 
-fn recurring_single_words(raw: &[(i64, i64, String)]) -> std::collections::HashSet<String> {
+/// What the file as a whole says about attribution.
+struct Attribution {
+    /// Candidates that appear often enough to be somebody's name.
+    recurring: std::collections::HashSet<String>,
+    /// Whether this file carries speaker labels at all.
+    labeled: bool,
+}
+
+/// Whether a `Name:` prefix is a name cannot be settled from the prefix alone:
+/// `Law of Large Numbers:` and `Maria de la Cruz:` pass every structural test
+/// there is, and taking the first for a speaker *deletes the phrase* from the
+/// transcript. What separates them is the file around them. A caption track
+/// labels its cues — Zoom writes the name on every one — so a name-shaped
+/// prefix there is a name. Parakeet writes no speakers at all, so in its output
+/// the handful of cues opening with a capitalized phrase are sentences, and the
+/// whole file has to be read that way.
+fn attribution(raw: &[(i64, i64, String)]) -> Attribution {
     let mut hits: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut candidates = 0usize;
     for (_, _, payload) in raw {
         if let Some(head) = speaker_candidate(payload) {
-            if head.split_whitespace().count() == 1 {
-                *hits.entry(head).or_default() += 1;
-            }
+            candidates += 1;
+            *hits.entry(head).or_default() += 1;
         }
     }
-    hits.into_iter()
-        .filter(|(_, n)| *n >= MIN_SINGLE_WORD_HITS)
-        .map(|(head, _)| head)
-        .collect()
+    Attribution {
+        recurring: hits
+            .into_iter()
+            .filter(|(_, n)| *n >= MIN_SINGLE_WORD_HITS)
+            .map(|(head, _)| head)
+            .collect(),
+        labeled: !raw.is_empty() && candidates * LABELED_CUES_IN >= raw.len(),
+    }
 }
 
 /// The `Name:` prefix of a payload, if it has the shape of one at all.
@@ -180,10 +205,7 @@ fn parse_timestamp(stamp: &str) -> Option<i64> {
 
 /// Pulls the speaker off a cue payload. Zoom writes `Name: text`; the VTT spec
 /// writes `<v Name>text</v>`. Both appear in the wild, sometimes in one file.
-fn split_speaker(
-    payload: &str,
-    recurring: &std::collections::HashSet<String>,
-) -> (Option<String>, String) {
+fn split_speaker(payload: &str, seen: &Attribution) -> (Option<String>, String) {
     let payload = payload.trim();
     // A voice span is explicit markup, not a guess — it needs no corroboration.
     if let Some(rest) = payload.strip_prefix("<v ") {
@@ -198,7 +220,11 @@ fn split_speaker(
     let plain = strip_tags(payload);
     if let Some((_, tail)) = plain.split_once(':') {
         if let Some(name) = speaker_candidate(payload) {
-            if name.split_whitespace().count() > 1 || recurring.contains(&name) {
+            // Counted on the same stripped form `looks_like_speaker` judged, or
+            // a pronoun parenthetical would pass this as "multi-word" while
+            // having been judged as the single word it really is.
+            let multi = strip_parentheticals(&name).split_whitespace().count() > 1;
+            if seen.labeled && (multi || seen.recurring.contains(&name)) {
                 return (Some(name), collapse_ws(tail));
             }
         }
@@ -518,6 +544,68 @@ mod tests {
         assert_eq!(cues[1].speaker, None, "{cues:?}");
         assert_eq!(cues[1].text, "Remember: this is not a name.");
         assert_eq!(cues[2].speaker.as_deref(), Some("Danny"), "{cues:?}");
+    }
+
+    /// The failure this rule exists for, and the expensive direction of it: an
+    /// unattributed transcript (Parakeet writes no speakers) whose sentences
+    /// happen to open with a capitalized phrase. Reading one as a speaker would
+    /// delete the phrase, so the whole file has to be read as unlabeled.
+    #[test]
+    fn keeps_capitalized_lead_ins_out_of_an_unlabeled_transcript() {
+        // The proportions of a real machine transcript: a wall of prose, with
+        // the occasional sentence that opens like a name.
+        let lead_ins = [
+            "Law of Large Numbers: as n grows the sample mean converges.",
+            "Chapter 3: sampling distributions, and why they are not the data.",
+            "Learning Objectives: describe the difference between the two.",
+            "Note (important): this is the part people get wrong on the exam.",
+            "Yeah, Marcus: that is exactly the case I had in mind.",
+        ];
+        let mut vtt = String::from("WEBVTT\n\n");
+        let mut expected = Vec::new();
+        for i in 0..60usize {
+            let line = match i % 12 {
+                0 => lead_ins[i / 12 % lead_ins.len()],
+                _ => "So the estimator is consistent, which is what we want here.",
+            };
+            expected.push(line);
+            let s = i as i64 * 3_000;
+            vtt.push_str(&format!("{}\n{line}\n\n", timing(s, s + 3_000)));
+        }
+
+        let cues = parse(&vtt);
+        assert_eq!(cues.len(), 60, "{:?}", &cues[..4]);
+        assert!(cues.iter().all(|c| c.speaker.is_none()), "{:?}", &cues[..4]);
+        // Every phrase must survive in the text, not vanish into a speaker name.
+        for (cue, line) in cues.iter().zip(&expected) {
+            assert_eq!(&cue.text, line);
+        }
+    }
+
+    /// The same phrases in a file that *is* labeled sit behind a real name, so
+    /// the first colon takes the speaker and the phrase stays in the text.
+    #[test]
+    fn a_labeled_track_still_attributes_and_keeps_the_phrase() {
+        let vtt = "WEBVTT\n\n\
+            00:00:00.000 --> 00:00:03.000\n\
+            Esra Adiyeke: Law of Large Numbers: as n grows.\n\n\
+            00:00:03.000 --> 00:00:06.000\n\
+            Esra Adiyeke: Chapter 3: sampling distributions.\n\n\
+            00:00:06.000 --> 00:00:09.000\n\
+            Daniel Escalante: Is that on the exam?\n";
+        let cues = parse(vtt);
+        assert_eq!(cues[0].speaker.as_deref(), Some("Esra Adiyeke"), "{cues:?}");
+        assert_eq!(cues[0].text, "Law of Large Numbers: as n grows.");
+        assert_eq!(cues[1].text, "Chapter 3: sampling distributions.");
+        // A student who speaks once is still a speaker in a labeled file.
+        assert_eq!(cues[2].speaker.as_deref(), Some("Daniel Escalante"), "{cues:?}");
+    }
+
+    fn timing(start_ms: i64, end_ms: i64) -> String {
+        let stamp = |ms: i64| {
+            format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms % 3_600_000 / 60_000, ms % 60_000 / 1_000, ms % 1_000)
+        };
+        format!("{} --> {}", stamp(start_ms), stamp(end_ms))
     }
 
     /// The display-name shapes a university Zoom room actually produces.
