@@ -152,6 +152,9 @@ const MIGRATIONS: &[&str] = &[
 /// Tests that touch storage run against the real schema rather than a
 /// hand-copied subset of it, so a migration and the code that reads it cannot
 /// drift apart unnoticed.
+///
+/// **The four classes are already here** — `0001_init.sql` seeds them, ids 1–4.
+/// A fixture that inserts its own collides on `classes.id`; use one of theirs.
 #[cfg(test)]
 pub(crate) fn memory_db() -> Connection {
     let conn = Connection::open_in_memory().expect("opening an in-memory database");

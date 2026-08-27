@@ -565,9 +565,17 @@ column records which reader supplied it, and the workspace names that on the lis
 
 A course with neither is shown as having none. A folder is where material sits, not something
 the course declared, and listing the top-level folders as divisions put a second numbering
-sequence under the course's own and labelled it a guess. What the folder does know is recorded
-where it belongs: each scan points a declared unit at the folder matching its name, filling
-`units.rel_path` so §8.1's guide has something to read.
+sequence under the course's own and labelled it a guess. What the folder does know belongs on
+the declared unit's own row: each scan fills `units.rel_path` from the top-level folder whose
+name matches the unit's, which is what gives §8.1's guide something to read.
+
+**That match does not currently fire for any of the four courses**, and the join is the open
+problem M14 inherits. A division is named the way the course names it — `Week 1 — Introduction
+to Biostatistics for Artificial Intelligence in Medicine` — and the folders beside it are
+`Module 1` and `Syllabus`, so name equality never holds. Every unit's `rel_path` is NULL, and a
+unit guide's file sources are empty until a real mapping exists. Matching on the ordinal rather
+than the name is the obvious candidate; it is not built, because M14 has to decide how a lecture
+attaches to a unit anyway and the two questions are the same question.
 
 **Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
 inserted and existing ones updated in place; units whose name no longer appears in Canvas are
