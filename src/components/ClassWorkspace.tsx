@@ -24,6 +24,7 @@ import {
   formatGeneratedAt,
   listGuides,
   MASTER_OUTPUT_PATH,
+  SESSION_SCOPE_PREFIX,
   synthesizeModule,
 } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
@@ -97,7 +98,7 @@ export function ClassWorkspace({
   // Transcripts with no session document yet — the state a transcript lands in
   // when the sorter filed it, since approving a move never touches ingestion.
   const digestedPaths = new Set(
-    sessions.map((s) => s.scope.slice("session:".length)),
+    sessions.map((s) => s.scope.slice(SESSION_SCOPE_PREFIX.length)),
   );
   const pendingTranscripts = collectTranscripts(tree).filter(
     (t) =>
@@ -131,6 +132,10 @@ export function ClassWorkspace({
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
   const [addingLecture, setAddingLecture] = useState(false);
   const [synthError, setSynthError] = useState<string | null>(null);
+  // Its own, because the only render site for synthError is the Materials
+  // header — a failed distillation surfaced there, above the fold, under a
+  // heading about synthesis.
+  const [digestError, setDigestError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
     setSynthError(null);
     synthesizeModule(info.id, scope).catch((e) => setSynthError(String(e)));
@@ -299,6 +304,11 @@ export function ClassWorkspace({
             )}
           </div>
         </div>
+        {digestError && (
+          <p className="mt-3 font-mono text-[11px] text-destructive">
+            NO SESSION DOCUMENT — {digestError}
+          </p>
+        )}
         <div className="mt-3 space-y-1">
           {sessions.length === 0 &&
             activeDigests.length === 0 &&
@@ -336,12 +346,12 @@ export function ClassWorkspace({
               <button
                 type="button"
                 onClick={() => {
-                  setSynthError(null);
+                  setDigestError(null);
                   digestLecture(
                     info.id,
                     transcript.relPath,
                     dateFromFileName(transcript.name) ?? todayIso(),
-                  ).catch((e) => setSynthError(String(e)));
+                  ).catch((e) => setDigestError(String(e)));
                 }}
                 className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
               >
@@ -375,6 +385,27 @@ export function ClassWorkspace({
               }}
               strippedExt=".html"
               stamp={formatGeneratedAt(session.generatedAt)}
+              // Digesting removes the transcript from the pending list, so a
+              // session whose transcript has since changed had no way back.
+              action={
+                session.stale
+                  ? {
+                      label: "REDISTILL",
+                      onSelect: () => {
+                        const relPath = session.scope.slice(
+                          SESSION_SCOPE_PREFIX.length,
+                        );
+                        setDigestError(null);
+                        digestLecture(
+                          info.id,
+                          relPath,
+                          dateFromFileName(relPath.split("/").pop() ?? "") ??
+                            todayIso(),
+                        ).catch((e) => setDigestError(String(e)));
+                      },
+                    }
+                  : undefined
+              }
               onView={() => setViewScope(session.scope)}
             />
           ))}
@@ -523,12 +554,15 @@ function ManagedRow({
   file,
   strippedExt,
   stamp,
+  action,
   onView,
 }: {
   icon: LucideIcon;
   file: ManagedFile;
   strippedExt: string;
   stamp: string;
+  /** An optional second affordance, shown on hover the way DISTILL is. */
+  action?: { label: string; onSelect: () => void };
   onView: (name: string) => void;
 }) {
   const name = file.name.toLowerCase().endsWith(strippedExt)
@@ -545,6 +579,15 @@ function ManagedRow({
       >
         {name}
       </button>
+      {action && (
+        <button
+          type="button"
+          onClick={action.onSelect}
+          className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
+        >
+          {action.label}
+        </button>
+      )}
       <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
         {stamp}
       </span>

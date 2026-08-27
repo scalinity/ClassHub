@@ -514,8 +514,15 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
 }
 
 /// Dashboard card badge (SPEC §12): stale guide count for a class.
+///
+/// Study guides only. A session digest also lives in this table and also goes
+/// stale, but the badge means "guides worth regenerating" and the Lectures
+/// listing carries its own affordance for a stale session.
 pub fn stale_guide_count(conn: &Connection, class_id: i64) -> Result<i64> {
-    Ok(list_guides(conn, class_id)?.iter().filter(|g| g.stale).count() as i64)
+    Ok(list_guides(conn, class_id)?
+        .iter()
+        .filter(|g| g.stale && !g.session)
+        .count() as i64)
 }
 
 /// Guide HTML for the in-app sandboxed viewer.
