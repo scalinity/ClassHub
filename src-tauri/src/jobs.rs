@@ -241,7 +241,19 @@ impl JobManager {
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
-        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest" => {
+        // A digest reads one transcript and writes two files into one folder,
+        // and its input is untrusted — whatever was said in the room, or
+        // whatever a downloaded caption file contains. Scoping the write means
+        // a transcript carrying something shaped like an instruction is refused
+        // by the CLI, rather than caught afterwards by a fingerprint diff that
+        // does not walk `Study Guides/` at all.
+        //
+        // The pattern carries no space on purpose: `--allowedTools` splits on
+        // commas *and* spaces, so `Write(Study Guides/...)` would arrive as two
+        // broken specifiers. Matching the leaf folder is space-free, and the
+        // working directory is already the class.
+        "lecture_digest" => Some("Read,Glob,Grep,Write(**/Sessions/**)"),
+        "extract" | "module_guide" | "master_guide" | "practice" => {
             Some("Read,Glob,Grep,Write")
         }
         "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),

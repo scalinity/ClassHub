@@ -65,27 +65,39 @@ pub fn fetch_caption(
     let deadline = Instant::now() + CAPTURE_TIMEOUT;
     let mut last_state = String::new();
     let mut last_found = String::new();
+    let mut last_error: Option<String> = None;
     let outcome = loop {
         if Instant::now() >= deadline {
             let _ = window.close();
             // The probe's own account of what it found is the whole diagnostic
             // here: this reads an undocumented page, so "timed out" alone would
-            // leave nothing to act on.
+            // leave nothing to act on. Its errors are part of that account —
+            // when the eval itself is what keeps failing, state and found are
+            // empty precisely when they are most needed.
             bail!(
-                "timed out waiting for the Zoom recording ({host}). Last state: {} · page had: {}",
+                "timed out waiting for the Zoom recording ({host}). Last state: {} · \
+                 page had: {}{}",
                 if last_state.is_empty() { "nothing yet" } else { &last_state },
-                if last_found.is_empty() { "nothing recognizable" } else { &last_found }
+                if last_found.is_empty() { "nothing recognizable" } else { &last_found },
+                last_error.map(|e| format!(" · last probe error: {e}")).unwrap_or_default()
             );
         }
 
-        // A closed window is the user cancelling, not a failure to report.
+        // A closed window is the user cancelling, not a failure to report —
+        // and closing it is the test. Visibility is not: macOS reports a
+        // minimized window and a hidden app as invisible, so Cmd-Tabbing away
+        // to fetch a passcode read as a cancel that never happened, while a
+        // probe throwing mid-SSO-navigation is entirely ordinary.
+        if app.get_webview_window(WINDOW_LABEL).is_none() {
+            bail!("the Zoom window was closed before the transcript was captured");
+        }
         let probe = match probe(&window, PROBE) {
             Ok(v) => v,
-            Err(_) if window.is_visible().unwrap_or(false) => {
+            Err(e) => {
+                last_error = Some(format!("{e:#}"));
                 std::thread::sleep(POLL_INTERVAL);
                 continue;
             }
-            Err(_) => bail!("the Zoom window was closed before the transcript was captured"),
         };
 
         let state = probe["state"].as_str().unwrap_or("waiting").to_string();
@@ -183,7 +195,18 @@ fn stage_label(state: &str) -> &'static str {
 
 fn open_window(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
+        // `close` posts to the event loop and returns; the label is only freed
+        // once the main thread has processed it. Building immediately fails
+        // with "a webview with label zoom-capture already exists", and once it
+        // does, every later attempt fails the same way.
         let _ = existing.close();
+        let give_up = Instant::now() + Duration::from_secs(3);
+        while app.get_webview_window(WINDOW_LABEL).is_some() {
+            if Instant::now() >= give_up {
+                bail!("the previous Zoom window is still open — close it and try again");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     let parsed = tauri::Url::parse(url).context("parsing the recording link")?;
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(parsed))
