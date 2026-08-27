@@ -99,13 +99,9 @@ fn job_effort(conn: &Connection) -> String {
 }
 
 fn parakeet_python(conn: &Connection) -> String {
-    setting(conn, crate::transcribe::INTERPRETER_SETTING)
-        .unwrap_or_else(|e| {
-            eprintln!("settings: parakeet_python unreadable ({e:#}) — using the default");
-            None
-        })
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| crate::transcribe::DEFAULT_INTERPRETER.to_string())
+    crate::transcribe::interpreter_of(conn)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn concurrency(conn: &Connection) -> usize {
@@ -198,7 +194,15 @@ pub fn set_job_concurrency(app: &AppHandle, count: usize) -> Result<()> {
 pub fn set_parakeet_python(app: &AppHandle, path: &str) -> Result<()> {
     let path = path.trim();
     if path.is_empty() {
-        return set_audited(app, crate::transcribe::INTERPRETER_SETTING, "");
+        // Stored as the default rather than as empty. Both resolve the same
+        // way, but the settings screen serves the *resolved* path, so storing
+        // empty would leave the field showing the clear the user just made
+        // with nothing to say it had taken effect.
+        return set_audited(
+            app,
+            crate::transcribe::INTERPRETER_SETTING,
+            crate::transcribe::DEFAULT_INTERPRETER,
+        );
     }
     let expanded = expand_home(path);
     if !expanded.is_absolute() {

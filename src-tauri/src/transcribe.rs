@@ -30,6 +30,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use rusqlite::Connection;
 use tauri::{AppHandle, Manager};
 
 use crate::db::{setting, with_conn};
@@ -162,14 +163,23 @@ fn sole_vtt(dir: &Path) -> Result<PathBuf> {
 }
 
 fn interpreter(app: &AppHandle) -> PathBuf {
-    let configured = with_conn(app, |conn| Ok(setting(conn, INTERPRETER_SETTING)?))
+    with_conn(app, |conn| Ok(interpreter_of(conn))).unwrap_or_else(|e| {
+        eprintln!("transcribe: {INTERPRETER_SETTING} unreadable ({e:#}) — using the default");
+        PathBuf::from(DEFAULT_INTERPRETER)
+    })
+}
+
+/// The one place the setting is turned into a path. The settings screen reports
+/// this and `to_vtt` spawns it, so resolving it twice risks a screen that says
+/// the interpreter is present while the run reaches for a different one.
+pub fn interpreter_of(conn: &Connection) -> PathBuf {
+    setting(conn, INTERPRETER_SETTING)
         .unwrap_or_else(|e| {
             eprintln!("transcribe: {INTERPRETER_SETTING} unreadable ({e:#}) — using the default");
             None
-        });
-    configured
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        })
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| PathBuf::from(v.trim()))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_INTERPRETER))
 }
 

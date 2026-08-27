@@ -122,6 +122,7 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               apply="USE THIS PYTHON"
               missing="INTERPRETER NOT FOUND — transcription will fail until this points at a real Python. Zoom's own transcripts still work."
               hint="A Python with parakeet-mlx installed. Clear the field to restore the default that ships with LocalFlow."
+              allowEmpty
               onApply={(path) => apply(setParakeetPython(path))}
             />
           </Section>
@@ -294,6 +295,7 @@ function PathForm({
   apply,
   missing,
   hint,
+  allowEmpty = false,
   onApply,
 }: {
   current: string;
@@ -303,10 +305,12 @@ function PathForm({
   apply: string;
   missing: string;
   hint: string;
+  /** Whether clearing the field is itself a choice — it restores a default. */
+  allowEmpty?: boolean;
   onApply: (path: string) => void;
 }) {
   const [path, setPath] = useState(current);
-  const changed = path.trim() !== current;
+  const changed = (allowEmpty || path.trim() !== "") && path.trim() !== current;
 
   return (
     <div className="mt-4 max-w-xl">
