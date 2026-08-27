@@ -259,6 +259,11 @@ struct Progress<'a> {
 /// `chat::send` uses one: this path runs blocking HTTP and waits on child
 /// processes for minutes at a time, neither of which belongs on the async
 /// runtime's workers.
+/// Classes with an ingestion in flight. The dialog is not the guard: it can be
+/// closed and reopened mid-run, and two threads for one class race on the
+/// destination name and on the Zoom capture window.
+static INGESTING: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+
 pub fn spawn_add(app: &AppHandle, req: AddRequest) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -272,9 +277,43 @@ pub fn spawn_add(app: &AppHandle, req: AddRequest) {
         };
         let on_stage = |stage: &str| emit(stage, false, None, None);
 
-        match add(&app, &req, &on_stage) {
-            Ok(result) => emit("Done", true, Some(&result), None),
-            Err(e) => emit("Failed", true, None, Some(format!("{e:#}"))),
+        {
+            let mut busy = crate::db::lock(&INGESTING);
+            if busy.contains(&class_id) {
+                emit(
+                    "Failed",
+                    true,
+                    None,
+                    Some("a lecture is already being added for this class".into()),
+                );
+                return;
+            }
+            busy.push(class_id);
+        }
+        // Released however the run ends, panic included.
+        struct Claim(i64);
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                crate::db::lock(&INGESTING).retain(|id| *id != self.0);
+            }
+        }
+        let _claim = Claim(class_id);
+
+        // Caught, because the terminal event is the only thing that tells the
+        // dialog the run is over. A panic here would otherwise leave the last
+        // stage line standing forever with no outcome behind it.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            add(&app, &req, &on_stage)
+        }));
+        match outcome {
+            Ok(Ok(result)) => emit("Done", true, Some(&result), None),
+            Ok(Err(e)) => emit("Failed", true, None, Some(format!("{e:#}"))),
+            Err(_) => emit(
+                "Failed",
+                true,
+                None,
+                Some("adding the lecture crashed — see the log for the panic".into()),
+            ),
         }
     });
 }

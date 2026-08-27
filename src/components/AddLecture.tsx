@@ -61,7 +61,11 @@ export function AddLecture({
   const [error, setError] = useState<string | null>(null);
 
   const progress = useLectureProgress(classId);
-  const running = submitted && progress !== null && !progress.done;
+  // `submitted` covers the gap before the first progress event — without it the
+  // form re-renders enabled between the click and the backend's first stage
+  // line, and a second click starts a second ingestion. `progress` covers the
+  // reverse: reopening the dialog on a run already in flight.
+  const running = (submitted || progress !== null) && !progress?.done;
 
   // A dropped file fills the form instead of starting a sort. Assigned during
   // render (the contract `setDropTarget` already uses) and cleared by `close`.
@@ -74,9 +78,15 @@ export function AddLecture({
   });
 
   const close = () => {
-    setDropInterceptor(null);
-    clearLectureProgress(classId);
+    // A finished run's entry is done with; an unfinished one is kept, so
+    // reopening the dialog rejoins the run in progress rather than offering a
+    // form that would start a second one.
+    if (progress?.done) clearLectureProgress(classId);
     onClose();
+    // Last, and after the store write above: clearing the interceptor before a
+    // synchronous notify lets this component's own re-render re-arm it on the
+    // way out, leaving a stale claim that swallows every later drop.
+    setDropInterceptor(null);
   };
 
   const kind = classifySource(source);
@@ -108,7 +118,10 @@ export function AddLecture({
       aria-modal="true"
       aria-label="Add lecture"
       onKeyDown={(e) => {
-        if (e.key === "Escape" && !running) close();
+        // Closable at any point: the run continues in the background, and a
+        // modal that cannot be dismissed takes the whole app with it if a run
+        // ever ends without reporting.
+        if (e.key === "Escape") close();
       }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-6 backdrop-blur-[2px] animate-in fade-in duration-150 motion-reduce:animate-none"
     >
@@ -121,8 +134,7 @@ export function AddLecture({
             type="button"
             aria-label="Close"
             onClick={close}
-            disabled={running}
-            className="shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-40"
+            className="shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
           >
             <X size={14} aria-hidden />
           </button>
@@ -271,8 +283,8 @@ function Running({ stage }: { stage: string }) {
         </p>
       </div>
       <p className="mx-auto mt-3 max-w-xs text-[13px] text-muted-foreground">
-        Transcribing a full lecture takes a few minutes. You can leave this open
-        — closing it would cancel the run.
+        Transcribing a full lecture takes a few minutes. This keeps running if
+        you close the window — the Job Center has the rest.
       </p>
     </div>
   );
