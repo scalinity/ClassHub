@@ -241,19 +241,24 @@ impl JobManager {
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
-        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest" => {
-            // Worth scoping `lecture_digest` down to its output folder one day:
-            // its input is untrusted (whatever was said in the room, or whatever
-            // a downloaded caption file contains) and it needs one file in and
-            // two out, while the post-hoc contract check does not walk
-            // `Study Guides/` at all. Two things to know before trying again.
-            // `Write(<path>)` is inert — the CLI answers "not matched by file
-            // permission checks — only Edit(path) rules are", so `Edit(<path>)`
-            // is the form, and it covers every file-editing tool. And the
-            // pattern cannot contain a space, because `--allowedTools` splits on
-            // spaces as well as commas, which rules out naming `Study Guides`
-            // directly. Left unscoped until a real digest run can confirm the
-            // job still writes, since none has ever executed.
+        // A digest reads one transcript and writes two files into one folder,
+        // and its input is untrusted — whatever was said in the room, or
+        // whatever a downloaded caption file contains. Scoping the write means
+        // a transcript carrying something shaped like an instruction is refused
+        // by the CLI, rather than caught afterwards by a fingerprint diff that
+        // does not walk `Study Guides/` at all.
+        //
+        // `Edit(<path>)` and not `Write(<path>)`: a Write rule is inert as a
+        // path check — the CLI says so outright — while an Edit rule covers
+        // every file-editing tool, Write included. Verified both ways against
+        // the CLI: a write into the folder is allowed, one outside it refused.
+        //
+        // The pattern carries no space on purpose, since `--allowedTools`
+        // splits on spaces as well as commas and `Study Guides` would arrive as
+        // two broken specifiers. Matching the leaf folder avoids that, and the
+        // working directory is already the class.
+        "lecture_digest" => Some("Read,Glob,Grep,Edit(**/Sessions/**)"),
+        "extract" | "module_guide" | "master_guide" | "practice" => {
             Some("Read,Glob,Grep,Write")
         }
         "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),

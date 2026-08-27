@@ -380,7 +380,7 @@ pub fn enqueue_digest(
     date: &str,
 ) -> Result<i64> {
     let scope = session_scope(transcript_rel_path);
-    let (prompt, manifest) = with_conn(app, |conn| {
+    let (class_dir, prompt, manifest) = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let transcript = class_dir.join(transcript_rel_path);
         if !transcript.is_file() {
@@ -411,8 +411,16 @@ pub fn enqueue_digest(
         });
         let manifest =
             serde_json::to_string(&crate::extract::current_manifest(conn, class_id, &scope)?)?;
-        Ok((prompt, manifest))
+        Ok((class_dir, prompt, manifest))
     })?;
+
+    // Ahead of the run, as the guide and practice paths both do for their own
+    // output folders. The job's write tool is scoped to this directory, so
+    // leaving it to be created by the write itself puts the very first thing
+    // the job does at the mercy of how the pattern treats a path that is not
+    // there yet.
+    fs::create_dir_all(class_dir.join(SESSIONS_DIR))
+        .with_context(|| format!("creating {SESSIONS_DIR}"))?;
 
     let payload = serde_json::to_string(&DigestPayload {
         transcript_rel_path: transcript_rel_path.to_string(),
