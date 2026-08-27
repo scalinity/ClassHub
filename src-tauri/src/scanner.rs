@@ -110,6 +110,54 @@ pub fn scan_class(
     Ok(tree)
 }
 
+/// Cap on vocabulary entries in a prompt — the shared names are the point, and
+/// a long tail of one-off folders would drown them.
+const MAX_VOCABULARY: usize = 30;
+
+/// Folder names in use across every class, with how many classes use each.
+///
+/// This is the shared vocabulary, and it exists because a sorter otherwise sees
+/// only its own class's tree. With no sibling context the first sort in each
+/// class coins a name in isolation, which is how the four classes ended up
+/// holding the same kind of document under two different names. Sorted
+/// most-shared first: that is the order convergence should follow.
+///
+/// Read from the file index rather than the disk, so it costs a query rather
+/// than four directory walks. The one thing that misses is an empty folder —
+/// which is not a convention worth propagating anyway.
+pub fn folder_vocabulary(conn: &Connection) -> Result<Vec<(String, usize)>> {
+    let mut stmt = conn.prepare("SELECT class_id, rel_path FROM files")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut by_name: HashMap<String, HashSet<i64>> = HashMap::new();
+    for row in rows {
+        let (class_id, rel_path) = row?;
+        let mut segments: Vec<&str> = rel_path.split('/').collect();
+        // The last segment is the file itself, never a folder.
+        segments.pop();
+        for segment in segments {
+            if segment.is_empty() {
+                continue;
+            }
+            by_name
+                .entry(segment.to_string())
+                .or_default()
+                .insert(class_id);
+        }
+    }
+    let mut names: Vec<(String, usize)> = by_name
+        .into_iter()
+        .map(|(name, classes)| (name, classes.len()))
+        .collect();
+    names.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    names.truncate(MAX_VOCABULARY);
+    Ok(names)
+}
+
 /// Resolves a scanner-issued rel_path against the class folder, rejecting traversal.
 /// An empty rel_path resolves to the class folder itself.
 pub fn resolve_rel(conn: &Connection, class_id: i64, rel_path: &str) -> Result<PathBuf> {
@@ -420,8 +468,56 @@ pub fn hash_file(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_fingerprints, fingerprint_sources};
+    use super::{diff_fingerprints, fingerprint_sources, folder_vocabulary};
     use std::collections::HashMap;
+
+    /// The shared vocabulary, which is what stops each class being sorted in
+    /// isolation and coining its own word for the same kind of material.
+    #[test]
+    fn counts_folder_names_by_how_many_classes_use_them() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE files (class_id INTEGER, rel_path TEXT);
+             INSERT INTO files (class_id, rel_path) VALUES
+               (1, 'Syllabus/syllabus.pdf'),
+               (1, 'Module 1/Slides/week1.pptx'),
+               (1, 'Module 1/Reading Material/paper.pdf'),
+               (2, 'Syllabus/syllabus.pdf'),
+               (2, 'Slides/intro.pptx'),
+               (3, 'Course Info/syllabus.pdf'),
+               (3, 'loose-at-the-root.pdf');",
+        )
+        .expect("fixture");
+
+        let vocabulary = folder_vocabulary(&conn).expect("vocabulary");
+        let names: Vec<&str> = vocabulary.iter().map(|(n, _)| n.as_str()).collect();
+        let count = |name: &str| {
+            vocabulary
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or(0)
+        };
+
+        // Counted per class, not per file: the point is how widely a name is
+        // shared, and one class with fifty decks does not make "Slides" a
+        // convention.
+        assert_eq!(count("Syllabus"), 2);
+        assert_eq!(count("Slides"), 2);
+        assert_eq!(count("Reading Material"), 1);
+        assert_eq!(count("Course Info"), 1);
+
+        // Most-shared first — the order convergence should follow.
+        assert!(
+            names.iter().position(|n| *n == "Syllabus").unwrap()
+                < names.iter().position(|n| *n == "Course Info").unwrap(),
+            "{names:?}"
+        );
+        // A file at the class root contributes no folder name, and the file
+        // itself is never mistaken for one.
+        assert!(!names.contains(&"loose-at-the-root.pdf"), "{names:?}");
+        assert!(!names.contains(&"syllabus.pdf"), "{names:?}");
+    }
 
     fn sig(entries: &[(&str, u64, i64)]) -> HashMap<String, (u64, i64)> {
         entries

@@ -46,6 +46,12 @@ How to decide — divisions:
   impose a structure it does not state, and never pad the list to a round number.
 - `kind` is the word the course uses: week | module | part.
 - `ordinal` is its position in the course's own order, starting at 1.
+- **`name` must start with the course's own label for that division**, then its topic:
+  `Week 7 — Tree-Based Models`, `Module 3 — Regression`, `Part II: Alignment`. The label
+  is what makes the name identify one division rather than describe it, and courses do
+  repeat a topic — a term with four "Project Presentations" weeks has four divisions, and
+  the bare topic names only one of them. Where a row genuinely has no label, keep its
+  topic distinct some other way rather than emitting a name already used.
 - `starts_on` only when the material gives that division a date. Weekly schedules in
   some syllabi are dated and in others are not; an undated week is normal, and an
   invented date is not. Weeks are not evenly spaced — breaks move them — so never

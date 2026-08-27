@@ -13,11 +13,25 @@ Current folder tree (app-managed folders excluded):
 
 {tree}
 
+Folder names already in use across all of the semester's classes:
+
+{vocabulary}
+
 How to decide:
 
 - Filenames carry most of the signal — module/week numbers, "slides", "reading",
   "homework", file extensions. The existing tree shows this class's conventions;
   follow them rather than inventing a parallel scheme.
+- **Name folders from the shared vocabulary above.** These classes are one library and
+  should read like one: the same kind of material belongs under the same folder name in
+  every class, so that looking for readings means looking in the same place each time.
+  Reuse a name from that list rather than coining a synonym for it — "Readings" when the
+  list says "Reading Material", or "Lectures" when it says "Slides", is the thing to
+  avoid. Where two names on the list clearly mean the same thing, converge: prefer the
+  one more classes use, and on a tie prefer the one that names the material rather than
+  a vague container ("Syllabus" over "Course Info", "Slides" over "Files").
+- A genuinely new kind of material earns a new name. Coin it the way the list reads —
+  plain, descriptive, title case — and it becomes the name the other classes reuse.
 - You may Read a PDF or text file from the inbox (a bounded skim is enough to identify
   it). `.pptx` files are binary and cannot be read — judge those by name, size, and the
   tree.

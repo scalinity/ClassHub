@@ -292,11 +292,30 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
         tree_lines.join("\n")
     };
 
+    // Every class's names, not just this one's. Without it each class is sorted
+    // in isolation and coins its own word for the same kind of material.
+    let vocabulary = crate::scanner::folder_vocabulary(conn)?;
+    let vocabulary_block = if vocabulary.is_empty() {
+        "(no folders anywhere yet — you are naming the first one)".to_string()
+    } else {
+        vocabulary
+            .iter()
+            .map(|(name, classes)| {
+                format!(
+                    "- {name} — used by {classes} class{}",
+                    if *classes == 1 { "" } else { "es" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     Ok(Some(
         PROMPT_TEMPLATE
             .replace("{class}", &class_name)
             .replace("{inbox}", &inbox_block)
-            .replace("{tree}", &tree_block),
+            .replace("{tree}", &tree_block)
+            .replace("{vocabulary}", &vocabulary_block),
     ))
 }
 

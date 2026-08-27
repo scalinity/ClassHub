@@ -431,7 +431,12 @@ fn sync_files(
         .get_all(&format!("/api/v1/courses/{course_id}/folders"), on_stage)
         .unwrap_or_default();
 
-    let class_dir = with_conn(app, |conn| crate::scanner::class_dir(conn, class.id))?;
+    let (class_dir, vocabulary) = with_conn(app, |conn| {
+        Ok((
+            crate::scanner::class_dir(conn, class.id)?,
+            crate::scanner::folder_vocabulary(conn)?,
+        ))
+    })?;
     let inbox = class_dir.join(INBOX_DIR);
     std::fs::create_dir_all(&inbox).with_context(|| format!("creating {}", inbox.display()))?;
 
@@ -502,19 +507,21 @@ fn sync_files(
         // what moves a file (SPEC §10). Canvas keeping it loose in the root is
         // no signal at all, so those stay in the inbox for the sorter to read
         // by content instead of being given an invented home.
-        match canvas_folder_path(file, &folders) {
+        match canvas_folder_path(file, &folders, &vocabulary) {
             Some(folder) => {
                 let dest_rel = format!("{folder}/{name}");
                 let source_rel = format!("{INBOX_DIR}/{name}");
+                // Says both names when they differ, so a retargeted destination
+                // is legible rather than looking like a misread of Canvas.
+                let canvas_name = raw_canvas_folder(file, &folders);
+                let reasoning = match canvas_name {
+                    Some(ref original) if !original.eq_ignore_ascii_case(&folder) => format!(
+                        "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
+                    ),
+                    _ => format!("Canvas files it under \"{folder}\""),
+                };
                 let recorded = with_conn(app, |conn| {
-                    propose_move(
-                        conn,
-                        class.id,
-                        &class_dir,
-                        &source_rel,
-                        &dest_rel,
-                        &format!("Canvas files it under \"{folder}\""),
-                    )
+                    propose_move(conn, class.id, &class_dir, &source_rel, &dest_rel, &reasoning)
                 });
                 if let Err(e) = recorded {
                     outcome.notes.push(format!("{name}: {e:#}"));
@@ -597,7 +604,16 @@ fn indexed_files(conn: &Connection, class_id: i64) -> Result<HashSet<(String, i6
 /// which is a far better first guess than anything derivable from a filename.
 /// The root itself, and Canvas's "unfiled" bucket, mean *no* organization —
 /// those return None rather than a folder to invent.
-fn canvas_folder_path(file: &Value, folders: &[Value]) -> Option<String> {
+///
+/// Each segment is then mapped onto the vocabulary the tree already uses, so a
+/// sync does not undo the consistency the sorter is asked to keep: a course
+/// calling its deck folder "Lecture Slides" should not earn this class a second
+/// folder beside the "Slides" every other class has.
+fn canvas_folder_path(
+    file: &Value,
+    folders: &[Value],
+    vocabulary: &[(String, usize)],
+) -> Option<String> {
     let folder_id = file["folder_id"].as_i64()?;
     let full_name = folders
         .iter()
@@ -615,7 +631,50 @@ fn canvas_folder_path(file: &Value, folders: &[Value]) -> Option<String> {
     // segment that sanitizes to nothing drops the whole path rather than
     // silently reparenting the file one level up.
     let cleaned: Option<Vec<String>> = trimmed.split('/').map(|s| sanitize_name(s.trim())).collect();
-    Some(cleaned?.join("/"))
+    Some(
+        cleaned?
+            .iter()
+            .map(|segment| canonical_segment(segment, vocabulary))
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
+/// Canvas's own name for the folder, before the vocabulary is applied — only
+/// used to say so in the reasoning when the two differ.
+fn raw_canvas_folder(file: &Value, folders: &[Value]) -> Option<String> {
+    let folder_id = file["folder_id"].as_i64()?;
+    let full_name = folders
+        .iter()
+        .find(|f| f["id"].as_i64() == Some(folder_id))?["full_name"]
+        .as_str()?;
+    let trimmed = full_name
+        .trim()
+        .trim_start_matches("course files")
+        .trim_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A Canvas folder name in the tree's own words, where the tree has a word.
+///
+/// Two matches count, and nothing else: the same name in different casing, and
+/// a vocabulary name the Canvas one ends with on a word boundary ("Lecture
+/// Slides" → "Slides"). Anything looser starts renaming folders on a
+/// resemblance, which is worse than a second folder — the vocabulary is sorted
+/// most-shared first, so the first match is the most widely used name.
+fn canonical_segment(segment: &str, vocabulary: &[(String, usize)]) -> String {
+    for (name, _) in vocabulary {
+        if name.eq_ignore_ascii_case(segment) {
+            return name.clone();
+        }
+        let (lower_segment, lower_name) = (segment.to_lowercase(), name.to_lowercase());
+        if let Some(prefix) = lower_segment.strip_suffix(&lower_name) {
+            if prefix.ends_with(' ') {
+                return name.clone();
+            }
+        }
+    }
+    segment.to_string()
 }
 
 /// A path segment safe to write into the class tree.
@@ -781,17 +840,67 @@ mod tests {
             json!({"id": 4, "full_name": "course files/unfiled"}),
         ];
         let at = |id: i64| json!({"folder_id": id});
-        assert_eq!(canvas_folder_path(&at(2), &folders).as_deref(), Some("Lecture Slides"));
+        let none: Vec<(String, usize)> = Vec::new();
         assert_eq!(
-            canvas_folder_path(&at(3), &folders).as_deref(),
+            canvas_folder_path(&at(2), &folders, &none).as_deref(),
+            Some("Lecture Slides")
+        );
+        assert_eq!(
+            canvas_folder_path(&at(3), &folders, &none).as_deref(),
             Some("Coding Material/Week 2 Coding Material")
         );
         // No organization is not a folder to invent — these stay in the inbox
         // and the content-aware sorter proposes a home instead.
-        assert_eq!(canvas_folder_path(&at(1), &folders), None);
-        assert_eq!(canvas_folder_path(&at(4), &folders), None);
-        assert_eq!(canvas_folder_path(&at(99), &folders), None);
-        assert_eq!(canvas_folder_path(&json!({}), &folders), None);
+        assert_eq!(canvas_folder_path(&at(1), &folders, &none), None);
+        assert_eq!(canvas_folder_path(&at(4), &folders, &none), None);
+        assert_eq!(canvas_folder_path(&at(99), &folders, &none), None);
+        assert_eq!(canvas_folder_path(&json!({}), &folders, &none), None);
+    }
+
+    /// A sync must not undo the naming consistency the sorter is asked to keep:
+    /// one course calling its decks "Lecture Slides" should not earn that class
+    /// a second folder beside the "Slides" every other class has.
+    #[test]
+    fn files_land_under_the_name_the_library_already_uses() {
+        let vocabulary = vec![
+            ("Slides".to_string(), 3),
+            ("Reading Material".to_string(), 2),
+            ("Syllabus".to_string(), 2),
+        ];
+        let folders = vec![
+            json!({"id": 2, "full_name": "course files/Lecture Slides"}),
+            json!({"id": 5, "full_name": "course files/SYLLABUS"}),
+            json!({"id": 6, "full_name": "course files/Coding Material"}),
+        ];
+        let at = |id: i64| json!({"folder_id": id});
+        assert_eq!(
+            canvas_folder_path(&at(2), &folders, &vocabulary).as_deref(),
+            Some("Slides")
+        );
+        // Casing drift is the same folder, so it takes the library's casing.
+        assert_eq!(
+            canvas_folder_path(&at(5), &folders, &vocabulary).as_deref(),
+            Some("Syllabus")
+        );
+        // Nothing in the vocabulary means this — Canvas's own name stands, and
+        // becomes vocabulary itself once the file is filed.
+        assert_eq!(
+            canvas_folder_path(&at(6), &folders, &vocabulary).as_deref(),
+            Some("Coding Material")
+        );
+    }
+
+    /// The match has to stop at a word boundary. Renaming on a resemblance is
+    /// worse than a second folder: it files material somewhere it is not.
+    #[test]
+    fn a_resemblance_is_not_a_match() {
+        let vocabulary = vec![("Slides".to_string(), 3), ("Notes".to_string(), 1)];
+        let same = |s: &str| canonical_segment(s, &vocabulary) == s;
+        assert!(same("Preslides"), "matched mid-word");
+        assert!(same("Slides Archive"), "matched a prefix, not a suffix");
+        assert!(same("Footnotes"), "matched mid-word");
+        assert_eq!(canonical_segment("Week 1 Slides", &vocabulary), "Slides");
+        assert_eq!(canonical_segment("anything", &[]), "anything");
     }
 
     /// Canvas names are the professor's, not a path builder's.
