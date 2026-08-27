@@ -64,6 +64,9 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The same scan points each declared division at its folder, so the
       // Structure list is reading a join the scan just rewrote.
       void queryClient.invalidateQueries({ queryKey: ["units"] });
+      // A move can be a lecture refiled into a different week, which moves
+      // which division it feeds (SPEC §8.5).
+      void queryClient.invalidateQueries({ queryKey: ["contributions"] });
       break;
   }
 });

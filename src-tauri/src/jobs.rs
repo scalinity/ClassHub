@@ -241,23 +241,33 @@ impl JobManager {
 
 fn allowed_tools(kind: &str) -> Option<&'static str> {
     match kind {
-        // A digest reads one transcript and writes two files into one folder,
-        // and its input is untrusted — whatever was said in the room, or
-        // whatever a downloaded caption file contains. Scoping the write means
-        // a transcript carrying something shaped like an instruction is refused
-        // by the CLI, rather than caught afterwards by a fingerprint diff that
-        // does not walk `Study Guides/` at all.
+        // A digest reads one transcript and writes into two folders — the
+        // session documents and the corpus note (SPEC §8.5) — and its input is
+        // untrusted: whatever was said in the room, or whatever a downloaded
+        // caption file contains. Scoping the write means a transcript carrying
+        // something shaped like an instruction is refused by the CLI, rather
+        // than caught afterwards by a fingerprint diff that walks neither
+        // `Study Guides/` nor `.classhub/`.
         //
         // `Edit(<path>)` and not `Write(<path>)`: a Write rule is inert as a
         // path check — the CLI says so outright — while an Edit rule covers
         // every file-editing tool, Write included. Verified both ways against
         // the CLI: a write into the folder is allowed, one outside it refused.
         //
-        // The pattern carries no space on purpose, since `--allowedTools`
+        // The patterns carry no space on purpose, since `--allowedTools`
         // splits on spaces as well as commas and `Study Guides` would arrive as
         // two broken specifiers. Matching the leaf folder avoids that, and the
         // working directory is already the class.
-        "lecture_digest" => Some("Read,Glob,Grep,Edit(**/Sessions/**)"),
+        //
+        // The corpus folder is stated twice because it is hidden, and whether a
+        // leading `**` crosses a dot-directory is glob-implementation trivia
+        // this cannot afford to be wrong about: a pattern that fails to match
+        // does not fail loudly, it turns the write into a permission prompt no
+        // one is there to answer. Both spellings name the same folder, so the
+        // pair costs reach nothing.
+        "lecture_digest" => Some(
+            "Read,Glob,Grep,Edit(**/Sessions/**),Edit(**/corpus/**),Edit(.classhub/corpus/**)",
+        ),
         "extract" | "module_guide" | "master_guide" | "practice" => {
             Some("Read,Glob,Grep,Write")
         }

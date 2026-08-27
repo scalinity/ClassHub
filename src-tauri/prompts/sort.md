@@ -36,13 +36,18 @@ How to decide:
   it). `.pptx` files are binary and cannot be read — judge those by name, size, and the
   tree.
 - A file annotated `lecture transcript` is the exception to the filename rule: they are
-  all named for their date, so the name cannot tell you which module it belongs to.
+  all named for their date, so the name cannot tell you which week it belongs to. It
+  goes to `Weeks/<week folder>/`, and this course's weeks are:
+
+  {weeks}
+
   Route it by what the session was *about* — match the topics in the annotation (and in
-  the file itself, which is worth reading for one of these) against the material already
-  filed under each module. It belongs in a `Transcripts/` folder inside that module,
-  created if it does not exist yet. When the topics genuinely match no existing module,
-  say so and propose the most recent one at low confidence rather than inventing a
-  module the class has not reached.
+  the file itself, which is worth reading for one of these) against the week names above
+  and against the material already filed under each. Propose the week folder exactly as
+  written above, creating it if it does not exist yet; never coin a different name for a
+  week that is listed, because that name is what maps the lecture to the course's own
+  division. When the topics genuinely match no listed week, say so and propose the most
+  recent one at low confidence rather than inventing a week the class has not reached.
 - Propose new folders only when nothing existing fits and the conventions imply one
   (e.g. a "Module 2" sibling when a file is clearly from a later module). List every
   folder the destination needs that does not exist yet in `create_folders`, in order.

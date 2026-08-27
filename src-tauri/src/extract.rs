@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -487,7 +487,7 @@ fn soffice_bin() -> PathBuf {
 // Staleness (SPEC §7 step 5) — consumed by guide generation and the badges
 
 /// One `{rel_path, sha256}` pair of a guide's `source_manifest` (SPEC §5).
-#[derive(Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestEntry {
     pub rel_path: String,
@@ -526,6 +526,43 @@ pub fn current_manifest(
         return Ok(read(rows)?);
     }
 
+    // A unit's sources come from two places that share no path prefix: the
+    // folder holding its material, and the lectures the calendar mapped to it
+    // (SPEC §8.5). The union is what makes a unit guide go stale when its
+    // lecture changes — with the transcripts left out nothing visibly breaks,
+    // the guide just quietly stops updating.
+    if let Some(unit_name) = scope.strip_prefix(crate::db::UNIT_SCOPE_PREFIX) {
+        let unit: Option<(i64, Option<String>)> = conn
+            .query_row(
+                "SELECT id, rel_path FROM units WHERE class_id = ?1 AND name = ?2",
+                rusqlite::params![class_id, unit_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((unit_id, unit_folder)) = unit else {
+            return Ok(Vec::new());
+        };
+
+        let mut entries = match unit_folder {
+            Some(folder) => folder_manifest(conn, class_id, &folder)?,
+            None => Vec::new(),
+        };
+        let mut stmt = conn.prepare(
+            "SELECT f.rel_path, f.sha256 FROM files f
+             JOIN lecture_contributions lc
+               ON lc.class_id = f.class_id AND lc.rel_path = f.rel_path
+             WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'",
+        )?;
+        let rows = stmt.query(rusqlite::params![class_id, unit_id])?;
+        entries.extend(read(rows)?);
+        // A transcript filed inside the unit's own folder would otherwise be
+        // counted twice, and a manifest that holds a duplicate never equals the
+        // set it is compared against.
+        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        entries.dedup_by(|a, b| a.rel_path == b.rel_path);
+        return Ok(entries);
+    }
+
     let entries = if scope == crate::db::MASTER_SCOPE {
         let mut stmt = conn.prepare(
             "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 ORDER BY rel_path",
@@ -533,21 +570,33 @@ pub fn current_manifest(
         let rows = stmt.query([class_id])?;
         read(rows)?
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT rel_path, sha256 FROM files
-             WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
-             ORDER BY rel_path",
-        )?;
-        // The separator is appended before matching, so `Module 1` cannot
-        // capture `Module 10`; LIKE wildcards in a folder name are escaped.
-        let prefix = format!(
-            "{}/%",
-            scope.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-        );
-        let rows = stmt.query(rusqlite::params![class_id, scope, prefix])?;
-        read(rows)?
+        folder_manifest(conn, class_id, scope)?
     };
     Ok(entries)
+}
+
+/// Everything indexed at or under one folder.
+fn folder_manifest(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec<ManifestEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT rel_path, sha256 FROM files
+         WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
+         ORDER BY rel_path",
+    )?;
+    // The separator is appended before matching, so `Module 1` cannot capture
+    // `Module 10`; LIKE wildcards in a folder name are escaped.
+    let prefix = format!(
+        "{}/%",
+        folder.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
+    let rows = stmt.query(rusqlite::params![class_id, folder, prefix])?;
+    Ok(rows
+        .mapped(|row| {
+            Ok(ManifestEntry {
+                rel_path: row.get(0)?,
+                sha256: row.get(1)?,
+            })
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// SPEC §7 step 5: a guide is stale when its stored `source_manifest` differs
@@ -563,7 +612,74 @@ pub fn manifest_is_stale(stored_manifest_json: &str, current: &[ManifestEntry]) 
 
 #[cfg(test)]
 mod tests {
-    use super::strip_html;
+    use super::{current_manifest, strip_html};
+
+    /// SPEC §8.5's least visible requirement. A unit's sources come from a
+    /// folder and from lectures that share no path prefix with it, so a
+    /// prefix-only manifest holds the folder and misses every transcript — and
+    /// nothing breaks visibly: the guide just quietly stops going stale when
+    /// its lecture changes.
+    #[test]
+    fn a_unit_s_manifest_unions_its_folder_with_its_lectures() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, rel_path, source)
+             VALUES (7, 1, 3, 'week', 'Week 3 — Transformers', 'Module 1', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let transcript = "Weeks/Week 03 — Transformers/2026-09-10 — Lecture.md";
+        for (rel_path, sha) in [
+            ("Module 1/Slides/deck.pdf", "aaa"),
+            (transcript, "bbb"),
+            ("Module 2/Slides/other.pdf", "ccc"),
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+                 VALUES (1, ?1, ?2, 1, 1, 'pdf')",
+                rusqlite::params![rel_path, sha],
+            )
+            .expect("file");
+        }
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (1, 7, ?1, 0, 0, 1, 1, 'x.md', 's', 'high', 'applied', 0)",
+            [transcript],
+        )
+        .expect("contribution");
+
+        let scope = format!("{}Week 3 — Transformers", crate::db::UNIT_SCOPE_PREFIX);
+        let manifest = current_manifest(&conn, 1, &scope).expect("manifest");
+        let paths: Vec<&str> = manifest.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(paths, ["Module 1/Slides/deck.pdf", transcript]);
+
+        // Editing the transcript is what a regenerated guide has to notice.
+        let stored = serde_json::to_string(&manifest).expect("json");
+        conn.execute(
+            "UPDATE files SET sha256 = 'bbb2' WHERE rel_path = ?1",
+            [transcript],
+        )
+        .expect("edit");
+        let after = current_manifest(&conn, 1, &scope).expect("manifest");
+        assert!(super::manifest_is_stale(&stored, &after), "the union missed the lecture");
+    }
+
+    /// A division nothing declares any more has no sources, rather than
+    /// silently taking the whole class.
+    #[test]
+    fn a_unit_no_longer_declared_has_an_empty_manifest() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (1, 'Module 1/x.pdf', 'a', 1, 1, 'pdf')",
+            [],
+        )
+        .expect("file");
+        let scope = format!("{}Week 9", crate::db::UNIT_SCOPE_PREFIX);
+        assert!(current_manifest(&conn, 1, &scope).expect("manifest").is_empty());
+    }
 
     /// Class HTML notebooks are extracted locally, so this parser is what
     /// stands between their markup and the text the agent later searches.

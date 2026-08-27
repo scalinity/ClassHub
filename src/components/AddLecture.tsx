@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { AudioLines, Captions, Link2, X } from "lucide-react";
 
 import {
@@ -6,7 +7,7 @@ import {
   classifySource,
   clearLectureProgress,
   dateFromFileName,
-  moduleOptions,
+  lectureWeeks,
   useLectureProgress,
   type LectureProgress,
   type SourceKind,
@@ -14,7 +15,6 @@ import {
 import { todayIso } from "@/lib/schedule";
 import { setDropInterceptor } from "@/lib/sorter";
 import { inputBase, monoAction } from "@/lib/styles";
-import type { TreeNode } from "@/lib/materials";
 
 /** What each kind of source will actually do, said before it happens. */
 const SOURCE_HINT: Record<SourceKind, { icon: typeof Link2; text: string }> = {
@@ -43,19 +43,25 @@ const SOURCE_HINT: Record<SourceKind, { icon: typeof Link2; text: string }> = {
  * job is to say which one it is looking at and what that will cost before
  * anything starts: reading a file is instant, transcribing is minutes, and a
  * link means signing in to Zoom.
+ *
+ * It also settles the one decision with judgement in it: which week the session
+ * belongs to. That is what maps the lecture to a division of the course
+ * (SPEC §8.5), so the form resolves it from the course's own schedule, shows
+ * what it resolved to and what that division is, and lets it be changed.
  */
 export function AddLecture({
   classId,
-  tree,
   onClose,
 }: {
   classId: number;
-  tree: TreeNode[] | undefined;
   onClose: () => void;
 }) {
   const [source, setSource] = useState("");
   const [date, setDate] = useState<string | null>(null);
-  const [module, setModule] = useState<string>("");
+  // null until touched, so resolving the week from the date never fights an
+  // edit; "" is the deliberate "let the sorter decide", which is a different
+  // answer from not having answered.
+  const [week, setWeek] = useState<number | "" | null>(null);
   const [title, setTitle] = useState("");
   const [digest, setDigest] = useState(true);
   const [submitted, setSubmitted] = useState(false);
@@ -95,7 +101,16 @@ export function AddLecture({
   // Derived until touched, so picking a file fills the date but never fights
   // an edit.
   const resolvedDate = date ?? dateFromFileName(source) ?? todayIso();
-  const modules = moduleOptions(tree);
+  // Keyed on the date: the week follows from it, so changing the date
+  // re-resolves rather than leaving a stale answer standing.
+  const { data: weeks } = useQuery({
+    queryKey: ["lectureWeeks", classId, resolvedDate],
+    queryFn: () => lectureWeeks(classId, resolvedDate),
+    placeholderData: (prev) => prev,
+  });
+  const slots = weeks?.slots ?? [];
+  const resolvedWeek = week === null ? (weeks?.defaultWeek ?? null) : week;
+  const slot = slots.find((s) => s.week === resolvedWeek) ?? null;
 
   const submit = () => {
     setError(null);
@@ -103,7 +118,7 @@ export function AddLecture({
     addLecture({
       classId,
       source: source.trim(),
-      moduleRelPath: module === "" ? null : module,
+      week: slot?.week ?? null,
       date: resolvedDate,
       title: title.trim() === "" ? null : title.trim(),
       digest,
@@ -178,22 +193,47 @@ export function AddLecture({
                   className={`${inputBase} w-full`}
                 />
               </Field>
-              <Field label="FILE IT UNDER">
+              <Field label="WEEK">
                 <select
-                  value={module}
-                  onChange={(e) => setModule(e.target.value)}
-                  aria-label="Module"
-                  className={`${inputBase} w-full`}
+                  value={resolvedWeek ?? ""}
+                  onChange={(e) =>
+                    setWeek(e.target.value === "" ? "" : Number(e.target.value))
+                  }
+                  disabled={slots.length === 0}
+                  aria-label="Week"
+                  className={`${inputBase} w-full disabled:opacity-50`}
                 >
-                  <option value="">Let ClassHub decide</option>
-                  {modules.map((m) => (
-                    <option key={m.relPath} value={m.relPath}>
-                      {m.name}
+                  <option value="">
+                    {slots.length === 0
+                      ? "No schedule published"
+                      : "Sort it into a week"}
+                  </option>
+                  {slots.map((s) => (
+                    <option key={s.week} value={s.week}>
+                      {s.folder}
                     </option>
                   ))}
                 </select>
               </Field>
             </div>
+
+            <p className="-mt-3 text-[12px] leading-relaxed text-muted-foreground">
+              {slot ? (
+                <>
+                  Filed under{" "}
+                  <span className="font-mono text-[11px] text-foreground">
+                    Weeks/{slot.folder}
+                  </span>
+                  , feeding <span className="text-foreground">{slot.unitName}</span>
+                  . Wrong week? Change it here, or refile it later — the map
+                  follows the file.
+                </>
+              ) : slots.length === 0 ? (
+                "This course publishes no weekly schedule, so ClassHub can't place the session itself. It goes to the inbox and the sorter proposes a week from what the lecture covers."
+              ) : (
+                "Pick the week this session belongs to. It goes to the inbox until you do, and the sorter proposes one from what the lecture covers."
+              )}
+            </p>
 
             <Field label="TITLE — OPTIONAL">
               <input
@@ -210,16 +250,16 @@ export function AddLecture({
               <input
                 type="checkbox"
                 checked={digest}
-                disabled={module === ""}
+                disabled={slot === null}
                 onChange={(e) => setDigest(e.target.checked)}
                 className="mt-0.5 size-3.5 shrink-0 cursor-pointer accent-(--accent)"
               />
               <span className="text-[13px]">
                 Write a session document
                 <span className="mt-0.5 block text-[12px] text-muted-foreground">
-                  {module === ""
-                    ? "Available once you pick a module — ClassHub files it first, then you can distill it."
-                    : "Distills the transcript into a session summary, named for what the class covered."}
+                  {slot === null
+                    ? "Available once the session has a week — ClassHub files it first, then you can distill it."
+                    : "Distills the transcript into a session summary, plus the note this week's study guide is built from."}
                 </span>
               </span>
             </label>
@@ -309,10 +349,10 @@ function Outcome({
           <p className="mt-2 font-mono text-[12px] break-all">{result.relPath}</p>
           <p className="mt-3 text-[13px] text-muted-foreground">
             {result.routedToInbox
-              ? "It's in the inbox — ClassHub is proposing a module for it now, and the proposal appears above the materials list."
+              ? "It's in the inbox — ClassHub is proposing a week for it now, and the proposal appears above the materials list."
               : result.digestJobId !== null
-                ? "The session document is being written. Watch it in the Job Center."
-                : "It's filed with the module's material and will show up in the next guide you generate."}
+                ? `The session document and ${result.unitName ?? "this week"}'s study note are being written. Watch them in the Job Center.`
+                : `It feeds ${result.unitName ?? "no division yet"}. Distill it to write the note that guide is built from.`}
           </p>
           {result.digestError && (
             <p className="mt-3 font-mono text-[11px] text-destructive">

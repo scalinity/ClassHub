@@ -4,9 +4,35 @@ import { invoke } from "@tauri-apps/api/core";
 export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
 /** Mirrors `db.rs::SESSION_SCOPE_PREFIX` — a session scope names its transcript. */
 export const SESSION_SCOPE_PREFIX = "session:";
+/** Mirrors `db.rs::UNIT_SCOPE_PREFIX` — a unit scope names the division. */
+export const UNIT_SCOPE_PREFIX = "unit:";
+
+/** The `guides.scope` for one of the course's own divisions (SPEC §8.1). */
+export function unitScope(unitName: string): string {
+  return `${UNIT_SCOPE_PREFIX}${unitName}`;
+}
+
+/**
+ * What a scope is called on screen.
+ *
+ * A scope is a storage key, and two of the four shapes read as machinery: the
+ * app never shows the reader the word "unit" (SPEC §5), and a session names a
+ * file path rather than a session.
+ */
+export function scopeLabel(scope: string): string {
+  if (scope === "master") return "Semester master";
+  if (scope.startsWith(UNIT_SCOPE_PREFIX)) {
+    return scope.slice(UNIT_SCOPE_PREFIX.length);
+  }
+  if (scope.startsWith(SESSION_SCOPE_PREFIX)) {
+    const path = scope.slice(SESSION_SCOPE_PREFIX.length);
+    return (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+  }
+  return scope;
+}
 
 export interface GuideInfo {
-  scope: string; // module rel path | 'master' | 'session:<transcript rel path>'
+  scope: string; // folder rel path | 'master' | 'unit:<name>' | 'session:<path>'
   relPath: string; // e.g. "Study Guides/Module 1.html"
   generatedAt: number; // unix seconds, set when the job succeeded
   stale: boolean; // source manifest no longer matches the files on disk
@@ -50,6 +76,21 @@ export function synthesizeModule(
   return invoke<number>("synthesize_module", {
     classId,
     moduleRelPath,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/**
+ * Enqueues a guide for one of the course's own divisions (SPEC §8.1) — the
+ * guide a filed lecture reaches through its corpus note (SPEC §8.5).
+ */
+export function synthesizeUnit(
+  classId: number,
+  unitId: number,
+): Promise<number> {
+  return invoke<number>("synthesize_unit", {
+    classId,
+    unitId,
     generatedAtLabel: generatedAtLabel(),
   });
 }

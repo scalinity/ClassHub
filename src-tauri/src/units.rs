@@ -26,6 +26,7 @@
 //! (SPEC §7.2): a mid-semester reshuffle must not silently orphan a guide.
 
 use anyhow::{bail, Result};
+use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -331,6 +332,241 @@ pub fn attach_rel_path(conn: &Connection, class_id: i64, name: &str, rel_path: &
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Weeks (SPEC §8.5) — the calendar side of a division
+
+/// The widest a folder segment built from a course's own words gets. Nothing
+/// technical: a path that stays readable in Finder and in a prompt listing.
+const MAX_FOLDER_SEGMENT: usize = 90;
+
+/// One week a lecture can be filed into, and the division it feeds.
+///
+/// Built from `units`, never from arithmetic (SPEC §1): Fundamentals runs Week
+/// 13 on Nov 17 and Week 14 on Dec 1, so `(date − start) / 7` names the wrong
+/// week for the rest of the term.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WeekSlot {
+    pub week: i64,
+    /// The folder a transcript for this week is filed in (SPEC §4).
+    pub folder: String,
+    /// The division this week's lecture contributes to: the week's own unit
+    /// where the course numbers its weeks, or the Part whose range contains it.
+    pub unit_id: i64,
+    pub unit_name: String,
+    /// The date the course itself published for this week, where it published
+    /// one — what the Add lecture form's default is measured against.
+    pub meets_on: Option<String>,
+}
+
+/// Every week this course can file a lecture into.
+///
+/// A course that numbers its weeks supplies them directly. Applied Generative
+/// AI numbers none — it declares three Parts whose names carry the week ranges
+/// they span — so its weeks are read out of those ranges, and each maps to the
+/// Part that contains it. A course that declares neither gets no weeks, and a
+/// lecture for it routes through `_Inbox/` for the sorter to place (SPEC §7.1).
+pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ordinal, name, starts_on FROM units
+         WHERE class_id = ?1 AND kind = 'week' ORDER BY ordinal, id",
+    )?;
+    let weeks = stmt
+        .query_map([class_id], |row| {
+            let unit_id: i64 = row.get(0)?;
+            let week: i64 = row.get(1)?;
+            let unit_name: String = row.get(2)?;
+            Ok(WeekSlot {
+                week,
+                folder: week_folder(week, Some(&unit_name)),
+                unit_id,
+                unit_name,
+                meets_on: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !weeks.is_empty() {
+        return Ok(weeks);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name FROM units WHERE class_id = ?1 AND kind = 'part' ORDER BY ordinal, id",
+    )?;
+    let parts = stmt
+        .query_map([class_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut slots: Vec<WeekSlot> = Vec::new();
+    for (unit_id, unit_name) in parts {
+        let Some((first, last)) = parse_week_range(&unit_name) else {
+            continue;
+        };
+        for week in first..=last {
+            // Ranges should not overlap, but if a syllabus says they do, the
+            // earlier Part keeps the week rather than the later one silently
+            // taking it.
+            if slots.iter().any(|s| s.week == week) {
+                continue;
+            }
+            slots.push(WeekSlot {
+                week,
+                folder: week_folder(week, None),
+                unit_id,
+                unit_name: unit_name.clone(),
+                meets_on: None,
+            });
+        }
+    }
+    slots.sort_by_key(|s| s.week);
+    Ok(slots)
+}
+
+/// The division a lecture filed into `week` contributes to, if the course
+/// declares one for it.
+pub fn slot_for_week(conn: &Connection, class_id: i64, week: i64) -> Result<Option<WeekSlot>> {
+    Ok(week_slots(conn, class_id)?
+        .into_iter()
+        .find(|slot| slot.week == week))
+}
+
+/// The week whose published meeting date sits closest to `date` — the default
+/// the Add lecture form offers, and correctable there.
+///
+/// `None` where the course published no dates, in which case the week is asked
+/// for outright rather than guessed at.
+pub fn nearest_week(slots: &[WeekSlot], date: &str) -> Option<i64> {
+    let day = |iso: &str| NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok();
+    let target = day(date)?;
+    slots
+        .iter()
+        .filter_map(|slot| {
+            let meets = day(slot.meets_on.as_deref()?)?;
+            Some((slot.week, (meets - target).num_days().abs()))
+        })
+        // Ties go to the earlier week: a lecture equidistant between two
+        // meetings is the later of the two sessions, not the earlier one's
+        // sequel.
+        .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+        .map(|(week, _)| week)
+}
+
+/// `Part I: … (Weeks 1-8)` → `Some((1, 8))`.
+///
+/// The one non-trivial mapping in SPEC §8.5. Applied Generative AI declares no
+/// weeks of its own, only three Parts whose names carry the week ranges they
+/// span, so a lecture's week finds its division by reading that range back out.
+/// A name with no range is not an error — most unit names have none.
+pub fn parse_week_range(name: &str) -> Option<(i64, i64)> {
+    /// Past this, the digits are a year or a room number rather than a week.
+    const MAX_WEEK: i64 = 60;
+    let lower = name.to_lowercase();
+    let mut cursor = 0usize;
+    while let Some(at) = lower[cursor..].find("week") {
+        cursor += at + "week".len();
+        let rest = lower[cursor..].trim_start_matches('s').trim_start();
+        let Some((first, after)) = leading_number(rest) else {
+            continue;
+        };
+        if first < 1 || first > MAX_WEEK {
+            continue;
+        }
+        let after = after.trim_start();
+        // A bare "Week 5" stands for itself; a hyphen, en/em dash or "to"
+        // opens a range.
+        let tail = after
+            .strip_prefix(['-', '\u{2013}', '\u{2014}'])
+            .or_else(|| after.strip_prefix("to "))
+            .or_else(|| after.strip_prefix("through "));
+        let Some(tail) = tail else {
+            return Some((first, first));
+        };
+        let last = leading_number(tail.trim_start())
+            .map(|(n, _)| n)
+            .filter(|n| (1..=MAX_WEEK).contains(n))
+            .unwrap_or(first);
+        return Some((first.min(last), first.max(last)));
+    }
+    None
+}
+
+/// The number a string opens with, and what follows it.
+fn leading_number(s: &str) -> Option<(i64, &str)> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    // Long enough to be an id rather than a week; parse would also overflow.
+    if end == 0 || end > 4 {
+        return None;
+    }
+    s[..end].parse().ok().map(|n| (n, &s[end..]))
+}
+
+/// `Week 03 — Data Exploration`, the folder one week's material lives in.
+///
+/// The topic comes from the week unit's own name with that name's own "Week N"
+/// prefix removed, so the folder does not say it twice; a course that supplies
+/// no name for the week gets a bare `Week 03`.
+pub fn week_folder(week: i64, unit_name: Option<&str>) -> String {
+    let stem = format!("Week {week:02}");
+    let topic = unit_name.map(week_topic).unwrap_or_default();
+    let topic = folder_segment(&topic);
+    if topic.is_empty() {
+        stem
+    } else {
+        format!("{stem} — {topic}")
+    }
+}
+
+/// The week a filed transcript's path names — `Weeks/Week 05 — …/…md` → 5.
+///
+/// The sorter files a transcript by approving a move, which never passes
+/// through the Add lecture form, so the path is the only place the decision was
+/// recorded.
+pub fn week_from_rel_path(rel_path: &str) -> Option<i64> {
+    let rest = rel_path.strip_prefix(crate::db::WEEKS_DIR)?.strip_prefix('/')?;
+    let folder = rest.split('/').next()?;
+    parse_week_range(folder).map(|(first, _)| first)
+}
+
+/// What a unit's name says beyond its own week number.
+fn week_topic(name: &str) -> String {
+    let trimmed = name.trim();
+    // `get` returns None on a non-boundary, so a name opening with a multi-byte
+    // character cannot slice mid-char here.
+    let after_word = if trimmed.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("week")) {
+        4
+    } else if trimmed.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("wk")) {
+        2
+    } else {
+        return trimmed.to_string();
+    };
+    let rest = trimmed[after_word..].trim_start();
+    let Some((_, rest)) = leading_number(rest) else {
+        return trimmed.to_string();
+    };
+    rest.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '\u{2014}' | '\u{2013}' | '-' | ':' | '.' | '|')
+    })
+    .trim()
+    .to_string()
+}
+
+/// A folder name built from a course's own words. Slashes and colons would
+/// repoint a write, so they flatten to dashes rather than rejecting a name the
+/// course actually uses — the policy `lectures::transcript_file_name` applies
+/// to lecture titles.
+pub fn folder_segment(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|c| if c == '/' || c == ':' { '-' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    let mut out: String = cleaned.chars().take(MAX_FOLDER_SEGMENT).collect();
+    out.truncate(out.trim_end().len());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +804,196 @@ mod tests {
         .expect("insert");
         let units = list_units(&conn, 1).expect("list");
         assert!(units[0].name.chars().count() <= MAX_UNIT_NAME + 1, "{}", units[0].name);
+    }
+
+    // -----------------------------------------------------------------------
+    // Weeks (SPEC §8.5)
+
+    /// The one non-trivial mapping in M14: Applied Generative AI declares no
+    /// weeks, only Parts carrying the ranges they span.
+    #[test]
+    fn reads_the_week_range_out_of_a_part_s_name() {
+        assert_eq!(
+            parse_week_range("Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
+            Some((1, 8))
+        );
+        assert_eq!(
+            parse_week_range("Part II: Reinforcement Learning and Alignment (Weeks 9-12)"),
+            Some((9, 12))
+        );
+        assert_eq!(
+            parse_week_range("Part III: Agentic AI in Medicine (Weeks 13-16)"),
+            Some((13, 16))
+        );
+        // Dashes a syllabus actually uses, and a spelled-out range.
+        assert_eq!(parse_week_range("Part I (Weeks 1\u{2013}8)"), Some((1, 8)));
+        assert_eq!(parse_week_range("Part I (Weeks 1 \u{2014} 8)"), Some((1, 8)));
+        assert_eq!(parse_week_range("Part I (Weeks 1 to 8)"), Some((1, 8)));
+        // A single week stands for itself, which is what a week folder's own
+        // name parses as.
+        assert_eq!(parse_week_range("Week 03 \u{2014} Transformers"), Some((3, 3)));
+        assert_eq!(parse_week_range("Week 5"), Some((5, 5)));
+    }
+
+    /// Most unit names carry no range at all, and that is not an error — it is
+    /// how a course that groups its weeks some other way reads.
+    #[test]
+    fn a_name_with_no_week_range_maps_to_nothing() {
+        assert_eq!(parse_week_range("Part IV: Clinical Deployment"), None);
+        assert_eq!(parse_week_range("Module 1"), None);
+        assert_eq!(parse_week_range(""), None);
+        assert_eq!(parse_week_range("Weekly Readings"), None);
+        // A year is not a week number, and neither is a room.
+        assert_eq!(parse_week_range("Week of 2026"), None);
+        assert_eq!(parse_week_range("Week 0"), None);
+    }
+
+    /// The week comes from `units`, never from arithmetic (SPEC §1) — this is
+    /// the case that proves why: Fundamentals skips Thanksgiving, so Week 14 is
+    /// two weeks after Week 13 and `(date − start) / 7` is off by one from
+    /// there on.
+    #[test]
+    fn resolves_a_week_from_the_course_s_own_dates_across_a_break() {
+        let conn = db();
+        for (ordinal, name, starts_on) in [
+            (12, "Week 12 \u{2014} Clinical Evaluation", "2026-11-10"),
+            (13, "Week 13 \u{2014} Model Lifecycle", "2026-11-17"),
+            (14, "Week 14 \u{2014} Deep Learning", "2026-12-01"),
+        ] {
+            upsert(
+                &conn,
+                1,
+                &NewUnit {
+                    ordinal,
+                    kind: "week".into(),
+                    name: name.into(),
+                    canvas_id: None,
+                    rel_path: None,
+                    starts_on: Some(starts_on.into()),
+                    ends_on: None,
+                    source: "syllabus",
+                },
+            )
+            .expect("insert");
+        }
+        let slots = week_slots(&conn, 1).expect("slots");
+        assert_eq!(slots.len(), 3);
+
+        assert_eq!(nearest_week(&slots, "2026-11-17"), Some(13));
+        assert_eq!(nearest_week(&slots, "2026-12-01"), Some(14));
+        // The Thanksgiving gap: arithmetic from Week 12 would call this Week 14.
+        assert_eq!(nearest_week(&slots, "2026-11-24"), Some(13));
+        // Outside the published range, the nearest published week still wins.
+        assert_eq!(nearest_week(&slots, "2026-12-08"), Some(14));
+    }
+
+    /// A course with no weeks of its own still files lectures by week — each
+    /// one landing in the Part whose range contains it.
+    #[test]
+    fn a_part_numbered_course_gets_its_weeks_from_the_ranges() {
+        let conn = db();
+        for (ordinal, name) in [
+            (1, "Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
+            (2, "Part II: Reinforcement Learning and Alignment (Weeks 9-12)"),
+            (3, "Part III: Agentic AI in Medicine (Weeks 13-16)"),
+        ] {
+            upsert(
+                &conn,
+                1,
+                &NewUnit {
+                    ordinal,
+                    kind: "part".into(),
+                    name: name.into(),
+                    canvas_id: None,
+                    rel_path: None,
+                    starts_on: None,
+                    ends_on: None,
+                    source: "syllabus",
+                },
+            )
+            .expect("insert");
+        }
+        let slots = week_slots(&conn, 1).expect("slots");
+        assert_eq!(slots.len(), 16, "the three ranges cover weeks 1–16");
+        assert!(slot_for_week(&conn, 1, 1).unwrap().unwrap().unit_name.starts_with("Part I:"));
+        assert!(slot_for_week(&conn, 1, 9).unwrap().unwrap().unit_name.starts_with("Part II:"));
+        assert!(slot_for_week(&conn, 1, 16).unwrap().unwrap().unit_name.starts_with("Part III:"));
+        assert!(slot_for_week(&conn, 1, 17).unwrap().is_none(), "no Part covers week 17");
+        // No dates anywhere, so nothing is defaulted — the form asks.
+        assert_eq!(nearest_week(&slots, "2026-09-10"), None);
+        // The folder carries no topic, because the Part's name is not the
+        // week's name.
+        assert_eq!(slots[2].folder, "Week 03");
+    }
+
+    /// The week's own unit wins over any Part that also spans it: it is the
+    /// finer division, and a meeting sits inside exactly one.
+    #[test]
+    fn a_week_unit_outranks_a_part_that_spans_it() {
+        let conn = db();
+        upsert(
+            &conn,
+            1,
+            &NewUnit {
+                ordinal: 1,
+                kind: "part".into(),
+                name: "Part I (Weeks 1-8)".into(),
+                canvas_id: None,
+                rel_path: None,
+                starts_on: None,
+                ends_on: None,
+                source: "syllabus",
+            },
+        )
+        .expect("part");
+        upsert(
+            &conn,
+            1,
+            &NewUnit {
+                ordinal: 3,
+                kind: "week".into(),
+                name: "Week 3 \u{2014} Transformers".into(),
+                canvas_id: None,
+                rel_path: None,
+                starts_on: Some("2026-09-10".into()),
+                ends_on: None,
+                source: "syllabus",
+            },
+        )
+        .expect("week");
+
+        let slots = week_slots(&conn, 1).expect("slots");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].unit_name, "Week 3 \u{2014} Transformers");
+    }
+
+    /// The folder name is what joins a filed transcript back to its week, so
+    /// building it and reading it back have to agree.
+    #[test]
+    fn builds_a_week_folder_and_reads_it_back() {
+        assert_eq!(
+            week_folder(3, Some("Week 3 \u{2014} Data Exploration, Processing, and Quality")),
+            "Week 03 \u{2014} Data Exploration, Processing, and Quality"
+        );
+        // A week the course named without numbering it keeps its whole name.
+        assert_eq!(
+            week_folder(16, Some("Reading Days \u{2014} No Class")),
+            "Week 16 \u{2014} Reading Days \u{2014} No Class"
+        );
+        assert_eq!(week_folder(7, Some("Week 7")), "Week 07");
+        assert_eq!(week_folder(7, None), "Week 07");
+        // A name that would repoint a write flattens rather than being refused.
+        assert!(!week_folder(2, Some("Week 2 \u{2014} A/B: testing")).contains('/'));
+
+        for (week, name) in [(1, "Week 1 \u{2014} Intro"), (12, "Week 12"), (16, "Reading Days")] {
+            let folder = week_folder(week, Some(name));
+            assert_eq!(
+                week_from_rel_path(&format!("Weeks/{folder}/2026-09-10 \u{2014} Lecture.md")),
+                Some(week),
+                "{folder}"
+            );
+        }
+        assert_eq!(week_from_rel_path("Module 1/Slides/deck.pdf"), None);
+        assert_eq!(week_from_rel_path("Weeks/Loose Notes/x.md"), None);
     }
 }

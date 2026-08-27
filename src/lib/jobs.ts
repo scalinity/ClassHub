@@ -219,6 +219,11 @@ async function refreshJobs() {
       job.kind === "lecture_digest"
     ) {
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      // A finished digest wrote the corpus note behind a contribution, which
+      // is what turns "mapped" into "feeding a guide" on both listings.
+      if (job.kind === "lecture_digest") {
+        void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+      }
     } else if (job.kind === "practice") {
       void queryClient.invalidateQueries({ queryKey: ["practice"] });
     }
@@ -295,6 +300,10 @@ export function formatElapsed(startSec: number, nowSec: number): string {
 }
 
 export function jobKindLabel(kind: string): string {
+  // `module_guide` also builds a guide for a Week or a Part (SPEC §8.1) — the
+  // kind kept its original name, and the reader is never shown "module" for a
+  // division the course calls something else.
+  if (kind === "module_guide") return "STUDY GUIDE";
   return kind.replace(/_/g, " ").toUpperCase();
 }
 

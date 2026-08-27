@@ -120,6 +120,19 @@ fn synthesize_module(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// SPEC §8.1: synthesis for one of the course's own divisions — the guide a
+/// filed lecture actually reaches, through its corpus note (SPEC §8.5).
+#[tauri::command]
+fn synthesize_unit(
+    app: tauri::AppHandle,
+    class_id: i64,
+    unit_id: i64,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    guides::synthesize_unit(&app, class_id, unit_id, &generated_at_label)
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// SPEC §8.2: manual semester-master trigger (exclusive, long-running job).
 #[tauri::command]
 fn synthesize_master(
@@ -262,6 +275,43 @@ fn digest_lecture(
     date: String,
 ) -> Result<i64, String> {
     lectures::enqueue_digest(&app, class_id, &rel_path, &date).map_err(|e| format!("{e:#}"))
+}
+
+/// The weeks a lecture can be filed into, and which one this date lands on.
+///
+/// Both come from the course's own schedule, never from arithmetic (SPEC §8.5)
+/// — which is why the default is resolved here rather than in the form.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LectureWeeks {
+    slots: Vec<units::WeekSlot>,
+    /// The week nearest `date`, or `None` where the course published no dates
+    /// to measure against and the form has to ask outright.
+    default_week: Option<i64>,
+}
+
+#[tauri::command(async)]
+fn lecture_weeks(
+    state: tauri::State<Db>,
+    class_id: i64,
+    date: String,
+) -> Result<LectureWeeks, String> {
+    let conn = db::lock(&state.0);
+    let slots = units::week_slots(&conn, class_id).map_err(|e| format!("{e:#}"))?;
+    Ok(LectureWeeks {
+        default_week: units::nearest_week(&slots, &date),
+        slots,
+    })
+}
+
+/// Which division each filed lecture feeds (SPEC §8.5), for the Lectures list.
+#[tauri::command(async)]
+fn list_lecture_contributions(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<lectures::Contribution>, String> {
+    let conn = db::lock(&state.0);
+    lectures::list_contributions(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
@@ -601,10 +651,13 @@ pub fn run() {
             reveal_in_finder,
             open_in_default_app,
             synthesize_module,
+            synthesize_unit,
             synthesize_master,
             resume_master_guide,
             add_lecture,
             digest_lecture,
+            lecture_weeks,
+            list_lecture_contributions,
             list_guides,
             read_guide,
             read_class_file,

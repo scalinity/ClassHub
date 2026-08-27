@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 
 import {
   listUnits,
@@ -8,10 +9,21 @@ import {
   type ClassOutcome,
   type Unit,
 } from "@/lib/canvas";
+import { unitScope, type GuideInfo } from "@/lib/guides";
+import { listLectureContributions } from "@/lib/lectures";
 import { monoAction } from "@/lib/styles";
 
+/** What a division's guide needs from the workspace to be triggered and read. */
+export interface UnitGuideControls {
+  guides: ReadonlyMap<string, GuideInfo>;
+  activeScopes: ReadonlySet<string>;
+  onSynthesize: (unitId: number) => Promise<unknown>;
+  onView: (scope: string) => void;
+}
+
 /**
- * SPEC §5/§7.2 — how this course divides itself up.
+ * SPEC §5/§7.2 — how this course divides itself up, and §8.1 — the guide for
+ * each division.
  *
  * The four courses genuinely disagree about their own shape, so this lists
  * whatever each one actually declares rather than a structure the app imposes.
@@ -21,15 +33,41 @@ import { monoAction } from "@/lib/styles";
  * Only what a course declares appears. A folder is where material sits, which
  * the Materials tree above already shows; listing folders here put a second
  * numbering sequence under the course's own and labelled it as a guess.
+ *
+ * This is also where a lecture lands. A session filed under `Weeks/` feeds the
+ * division that week belongs to (SPEC §8.5), so the count of lectures behind a
+ * division is what says whether its guide has anything spoken to build from.
  */
-export function StructureSection({ classId }: { classId: number }) {
+export function StructureSection({
+  classId,
+  controls,
+}: {
+  classId: number;
+  controls: UnitGuideControls;
+}) {
   const { data: units, error } = useQuery({
     queryKey: ["units", classId],
     queryFn: () => listUnits(classId),
   });
+  const { data: contributions } = useQuery({
+    queryKey: ["contributions", classId],
+    queryFn: () => listLectureContributions(classId),
+    placeholderData: (prev) => prev,
+  });
+  const distilledPerUnit = new Map<number, number>();
+  for (const c of contributions ?? []) {
+    if (c.distilled) {
+      distilledPerUnit.set(c.unitId, (distilledPerUnit.get(c.unitId) ?? 0) + 1);
+    }
+  }
   const progress = useCanvasSync();
   const [refused, setRefused] = useState<string | null>(null);
+  const [synthError, setSynthError] = useState<string | null>(null);
   const running = progress !== null && !progress.done;
+  const synthesize = (unitId: number) => {
+    setSynthError(null);
+    controls.onSynthesize(unitId).catch((e) => setSynthError(String(e)));
+  };
   const outcome = progress?.done
     ? progress.results?.find((r) => r.classId === classId)
     : undefined;
@@ -88,6 +126,11 @@ export function StructureSection({ classId }: { classId: number }) {
           THIS CLASS DID NOT SYNC — {outcome.error}
         </p>
       )}
+      {synthError && (
+        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
+          NO GUIDE — {synthError}
+        </p>
+      )}
       <SyncNotes outcome={outcome} />
 
       <div className="mt-3">
@@ -108,12 +151,22 @@ export function StructureSection({ classId }: { classId: number }) {
           </p>
         ) : (
           <>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="max-w-xl text-[12px] leading-relaxed text-muted-foreground">
               {provenance(units)}
+              {/* Without this, seventeen rows with no action on any of them
+                  read as a list the app does nothing with. */}
+              {distilledPerUnit.size === 0 &&
+                " Each one can have its own study guide, built from the lectures filed under it — add a lecture and distill it to start one."}
             </p>
             <ol className="mt-2 space-y-0.5">
               {units.map((unit) => (
-                <UnitRow key={unit.id} unit={unit} />
+                <UnitRow
+                  key={unit.id}
+                  unit={unit}
+                  distilled={distilledPerUnit.get(unit.id) ?? 0}
+                  controls={controls}
+                  onSynthesize={synthesize}
+                />
               ))}
             </ol>
           </>
@@ -140,9 +193,26 @@ function SyncNotes({ outcome }: { outcome: ClassOutcome | undefined }) {
   );
 }
 
-function UnitRow({ unit }: { unit: Unit }) {
+function UnitRow({
+  unit,
+  distilled,
+  controls,
+  onSynthesize,
+}: {
+  unit: Unit;
+  distilled: number;
+  controls: UnitGuideControls;
+  onSynthesize: (unitId: number) => void;
+}) {
+  const scope = unitScope(unit.name);
+  const guide = controls.guides.get(scope);
+  // A division with no folder and no distilled lecture has nothing to build a
+  // guide from, so the action stays off the row rather than offering a button
+  // that can only refuse.
+  const buildable = distilled > 0 || unit.relPath !== null;
+
   return (
-    <li className="flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
+    <li className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
       <span
         aria-hidden
         className="w-5 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground/60"
@@ -150,12 +220,111 @@ function UnitRow({ unit }: { unit: Unit }) {
         {unit.ordinal}
       </span>
       <span className="min-w-0 flex-1 truncate text-[13px]">{unit.name}</span>
+      {distilled > 0 && (
+        <span
+          title={
+            distilled === 1
+              ? "One distilled lecture feeds this guide"
+              : `${distilled} distilled lectures feed this guide`
+          }
+          className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70"
+        >
+          {distilled === 1 ? "1 LECTURE" : `${distilled} LECTURES`}
+        </span>
+      )}
+      {buildable && (
+        <UnitGuideCluster
+          scope={scope}
+          unitId={unit.id}
+          unitName={unit.name}
+          guide={guide}
+          controls={controls}
+          onSynthesize={onSynthesize}
+        />
+      )}
       {unit.startsOn && (
         <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
           {formatUnitDate(unit.startsOn)}
         </span>
       )}
     </li>
+  );
+}
+
+/**
+ * SPEC §8.1 — a division's guide, in the same words the Materials tree uses for
+ * a folder's: synthesis is manual, staleness is always visible, and the
+ * token-costing action stays quiet until the guide has actually gone stale.
+ */
+function UnitGuideCluster({
+  scope,
+  unitId,
+  unitName,
+  guide,
+  controls,
+  onSynthesize,
+}: {
+  scope: string;
+  unitId: number;
+  unitName: string;
+  guide: GuideInfo | undefined;
+  controls: UnitGuideControls;
+  onSynthesize: (unitId: number) => void;
+}) {
+  if (controls.activeScopes.has(scope)) {
+    return (
+      <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+        <span
+          aria-hidden
+          className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+        />
+        SYNTHESIZING…
+      </span>
+    );
+  }
+
+  if (!guide) {
+    return (
+      <button
+        type="button"
+        onClick={() => onSynthesize(unitId)}
+        className={`${monoAction} text-muted-foreground opacity-0 transition-opacity hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+      >
+        SYNTHESIZE GUIDE
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex shrink-0 items-center gap-0.5">
+      {guide.stale ? (
+        <button
+          type="button"
+          title="Sources changed since this guide was generated"
+          onClick={() => onSynthesize(unitId)}
+          className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+        >
+          STALE — RESYNTHESIZE
+        </button>
+      ) : (
+        <button
+          type="button"
+          title="Resynthesize guide"
+          aria-label={`Resynthesize the ${unitName} guide`}
+          onClick={() => onSynthesize(unitId)}
+          className="cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent) group-focus-within:opacity-100 group-hover:opacity-100"
+        >
+          <RefreshCw size={12} aria-hidden />
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => controls.onView(scope)}
+        className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+      >
+        VIEW GUIDE
+      </button>
+    </span>
   );
 }
 

@@ -27,12 +27,14 @@ import {
   MASTER_OUTPUT_PATH,
   SESSION_SCOPE_PREFIX,
   synthesizeModule,
+  synthesizeUnit,
 } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import {
   collectTranscripts,
   dateFromFileName,
   digestLecture,
+  listLectureContributions,
 } from "@/lib/lectures";
 import {
   listNotes,
@@ -104,6 +106,17 @@ export function ClassWorkspace({
   const activeDigestPaths = new Set(activeDigests.map((j) => j.scope ?? ""));
   const pendingTranscripts = collectTranscripts(tree).filter(
     (t) => !digestedPaths.has(t.relPath) && !activeDigestPaths.has(t.relPath),
+  );
+  // Which division each lecture feeds (SPEC §8.5). Refetched on the same edges
+  // as the tree: filing a lecture writes the map, and approving a move rewrites
+  // it, both of which push a `files` hub change.
+  const { data: contributions } = useQuery({
+    queryKey: ["contributions", info.id],
+    queryFn: () => listLectureContributions(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const unitFor = new Map(
+    (contributions ?? []).map((c) => [c.relPath, c.unitName]),
   );
 
   // Practice exams and notes (M8): both chat-written, both listed from disk.
@@ -211,7 +224,15 @@ export function ClassWorkspace({
 
       <InboxQueue classId={info.id} tree={tree} />
 
-      <StructureSection classId={info.id} />
+      <StructureSection
+        classId={info.id}
+        controls={{
+          guides: guideMap,
+          activeScopes,
+          onSynthesize: (unitId) => synthesizeUnit(info.id, unitId),
+          onView: setViewScope,
+        }}
+      />
 
       <DeadlinesSection classId={info.id} tree={tree} />
 
@@ -315,10 +336,11 @@ export function ClassWorkspace({
           {sessions.length === 0 &&
             activeDigests.length === 0 &&
             pendingTranscripts.length === 0 && (
-              <p className="py-2 text-[13px] text-muted-foreground">
+              <p className="max-w-xl py-2 text-[13px] leading-relaxed text-muted-foreground">
                 Nothing recorded yet. Add a Zoom link or a recording and
-                ClassHub transcribes it, files it with the module's material,
-                and writes a summary of what the session covered.
+                ClassHub transcribes it, files it under the week it belongs to,
+                and writes both a summary of the session and the note that
+                week's study guide is built from.
               </p>
             )}
           {pendingTranscripts.map((transcript) => (
@@ -345,6 +367,7 @@ export function ClassWorkspace({
               >
                 {transcript.name.replace(/\.md$/i, "")}
               </button>
+              <FeedsUnit unitName={unitFor.get(transcript.relPath)} />
               <button
                 type="button"
                 onClick={() => {
@@ -387,6 +410,13 @@ export function ClassWorkspace({
               }}
               strippedExt=".html"
               stamp={formatGeneratedAt(session.generatedAt)}
+              badge={
+                <FeedsUnit
+                  unitName={unitFor.get(
+                    session.scope.slice(SESSION_SCOPE_PREFIX.length),
+                  )}
+                />
+              }
               // Digesting removes the transcript from the pending list, so a
               // session whose transcript has since changed had no way back.
               action={
@@ -542,7 +572,6 @@ export function ClassWorkspace({
       {addingLecture && (
         <AddLecture
           classId={info.id}
-          tree={tree}
           onClose={() => setAddingLecture(false)}
         />
       )}
@@ -556,6 +585,7 @@ function ManagedRow({
   file,
   strippedExt,
   stamp,
+  badge,
   action,
   onView,
 }: {
@@ -563,6 +593,8 @@ function ManagedRow({
   file: ManagedFile;
   strippedExt: string;
   stamp: string;
+  /** A quiet standing label, e.g. the division a lecture feeds. */
+  badge?: React.ReactNode;
   /** An optional second affordance, shown on hover the way DISTILL is. */
   action?: { label: string; onSelect: () => void };
   onView: (name: string) => void;
@@ -581,6 +613,7 @@ function ManagedRow({
       >
         {name}
       </button>
+      {badge}
       {action && (
         <button
           type="button"
@@ -594,6 +627,30 @@ function ManagedRow({
         {stamp}
       </span>
     </div>
+  );
+}
+
+/**
+ * SPEC §8.5 — which of the course's divisions this lecture feeds.
+ *
+ * Standing rather than on hover: it is the one thing about a filed lecture that
+ * is a decision rather than a fact, and the correction for a wrong one is to
+ * refile the transcript, which nobody thinks to do without seeing it.
+ */
+function FeedsUnit({ unitName }: { unitName: string | undefined }) {
+  return (
+    <span
+      title={
+        unitName
+          ? `Feeds the ${unitName} guide`
+          : "Not mapped to any of this course's divisions — refile it under a week to change that"
+      }
+      className={`hidden shrink-0 truncate font-mono text-[10px] tracking-[0.14em] sm:block sm:max-w-[16rem] ${
+        unitName ? "text-muted-foreground/70" : "text-muted-foreground/50"
+      }`}
+    >
+      {unitName ? unitName.toUpperCase() : "NO DIVISION"}
+    </span>
   );
 }
 

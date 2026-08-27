@@ -34,7 +34,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::db::{EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR, audit, emit_hub_change, now, truncate, with_conn};
+use crate::db::{
+    CORPUS_DIR, EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR, audit, emit_hub_change, now, truncate,
+    with_conn,
+};
 use crate::deadlines::{valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS};
 use crate::grades::{grades_line, trim_num, weighted_grade, weights_line};
 
@@ -145,7 +148,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "search_material",
-            "description": "Grep every extract, note and study guide, returning matching lines with file paths and line numbers. This is the primary way to find content: search before reading. The query is a regular expression, case-insensitive unless it contains an uppercase letter. Prefer short distinctive phrases; if a query comes back thin, try a synonym or a narrower term.",
+            "description": "Grep every extract, distilled lecture note, note and study guide, returning matching lines with file paths and line numbers. This is the primary way to find content: search before reading. The query is a regular expression, case-insensitive unless it contains an uppercase letter. Prefer short distinctive phrases; if a query comes back thin, try a synonym or a narrower term.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -572,11 +575,7 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
             let described = guides
                 .iter()
                 .map(|g| {
-                    let scope = if g.scope == "master" {
-                        "Semester Master".to_string()
-                    } else {
-                        g.scope.clone()
-                    };
+                    let scope = crate::guides::scope_label(&g.scope);
                     if detailed {
                         format!(
                             "{scope} — {} ({}, {})",
@@ -760,7 +759,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
 }
 
 // ---------------------------------------------------------------------------
-// search_material (ripgrep over extracts, notes and guides — SPEC §9)
+// search_material (ripgrep over extracts, corpus notes, notes and guides — SPEC §9)
 
 /// The lock is held only long enough to resolve the class folders; the grep
 /// itself runs without it. Spawning ripgrep and waiting for it under the app's
@@ -780,7 +779,10 @@ fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let mut dirs = Vec::new();
     for class in &classes {
         let base = root.join(&class.folder_name);
-        for sub in [EXTRACTS_DIR, NOTES_DIR, GUIDES_DIR] {
+        // The corpus joins the extract cache here (SPEC §8.5): a lecture's
+        // distilled content is the only searchable form of what was said out
+        // loud, and it is what a question about a session should find.
+        for sub in [EXTRACTS_DIR, CORPUS_DIR, NOTES_DIR, GUIDES_DIR] {
             let dir = base.join(sub);
             if dir.is_dir() {
                 dirs.push(dir);

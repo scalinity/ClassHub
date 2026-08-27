@@ -29,8 +29,8 @@ export function classifySource(source: string): SourceKind {
 export interface AddLectureRequest {
   classId: number;
   source: string;
-  /** Class-relative module folder; null routes through the inbox instead. */
-  moduleRelPath: string | null;
+  /** The week from the course's own schedule; null routes through the inbox. */
+  week: number | null;
   date: string;
   title: string | null;
   digest: boolean;
@@ -39,6 +39,8 @@ export interface AddLectureRequest {
 export interface AddResult {
   relPath: string;
   routedToInbox: boolean;
+  /** The course's own name for the division this lecture now feeds. */
+  unitName: string | null;
   speakers: string[];
   digestJobId: number | null;
   /** Present when a digest was asked for and did not start. */
@@ -76,10 +78,12 @@ function init() {
     next.set(e.payload.classId, e.payload);
     emit(next);
     if (e.payload.done && e.payload.result) {
-      // The transcript is on disk and indexed by the time this fires, so the
-      // material tree and any digest listing have something new to show.
+      // The transcript is on disk, indexed and mapped to its division by the
+      // time this fires, so the material tree, the digest listing and the
+      // lecture map all have something new to show.
       void queryClient.invalidateQueries({ queryKey: ["classTree"] });
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      void queryClient.invalidateQueries({ queryKey: ["contributions"] });
     }
   });
 }
@@ -134,18 +138,57 @@ export function dateFromFileName(source: string): string | null {
   return `${year}-${month}-${day}`;
 }
 
-/** Module folders a transcript can be filed into: top-level folders of the
- *  class tree, which is what the app treats as a module (SPEC §4). */
-export function moduleOptions(
-  nodes: { name: string; relPath: string; dir: boolean }[] | undefined,
-): { name: string; relPath: string }[] {
-  return (nodes ?? [])
-    .filter((n) => n.dir)
-    .map((n) => ({ name: n.name, relPath: n.relPath }));
+/** Mirrors db.rs WEEKS_DIR — where a lecture lives (SPEC §4). */
+export const WEEKS_DIR = "Weeks";
+
+/** One week a lecture can be filed into, and the division it would feed. */
+export interface WeekSlot {
+  week: number;
+  /** The folder it files into, as the backend builds it. */
+  folder: string;
+  unitId: number;
+  unitName: string;
+  /** The date the course published for this week, where it published one. */
+  meetsOn: string | null;
 }
 
-/** Mirrors db.rs TRANSCRIPTS_DIR — the per-module folder transcripts live in. */
-export const TRANSCRIPTS_DIR = "Transcripts";
+export interface LectureWeeks {
+  slots: WeekSlot[];
+  /** The week nearest the session date; null when the course published no
+   *  dates to measure against, and the form has to ask outright. */
+  defaultWeek: number | null;
+}
+
+/**
+ * The weeks this course declares, and which one a session on `date` lands on.
+ *
+ * Both are resolved backend-side from the course's own schedule rather than
+ * computed here: weeks are not uniformly spaced (SPEC §1), so nothing may
+ * divide a date by seven to get one.
+ */
+export function lectureWeeks(
+  classId: number,
+  date: string,
+): Promise<LectureWeeks> {
+  return invoke<LectureWeeks>("lecture_weeks", { classId, date });
+}
+
+/** One lecture's place in the course's structure (SPEC §8.5). */
+export interface Contribution {
+  relPath: string;
+  unitId: number;
+  unitName: string;
+  corpusRelPath: string;
+  /** Whether the distilled note behind the map has actually been written. */
+  distilled: boolean;
+  summary: string;
+}
+
+export function listLectureContributions(
+  classId: number,
+): Promise<Contribution[]> {
+  return invoke<Contribution[]>("list_lecture_contributions", { classId });
+}
 
 export interface FiledTranscript {
   name: string;
@@ -153,7 +196,7 @@ export interface FiledTranscript {
 }
 
 /**
- * Every transcript filed anywhere in the class tree.
+ * Every transcript filed under `Weeks/`.
  *
  * A transcript routed through the inbox is filed by approving a move, which
  * never goes near the ingestion flow — so without this, a sorted transcript
@@ -168,10 +211,7 @@ export function collectTranscripts(
       if (node.dir) {
         walk(node.children ?? []);
       } else if (
-        // By segment, not substring: a transcript the sorter moved to a
-        // `Transcripts/` folder at the class root has no parent folder before
-        // it, and would never have appeared in the Lectures list.
-        node.relPath.split("/").includes(TRANSCRIPTS_DIR) &&
+        node.relPath.startsWith(`${WEEKS_DIR}/`) &&
         node.relPath.toLowerCase().endsWith(".md")
       ) {
         found.push({ name: node.name, relPath: node.relPath });

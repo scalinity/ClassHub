@@ -9,12 +9,18 @@
 //!
 //! Filing it as source rather than as an app-managed artifact is the whole
 //! trick. From that point nothing else needed changing: the scanner indexes it,
-//! `extract::route` sends it down the zero-token text path, module guides pick
-//! it up through the same rel-path prefix match they use for slides, and chat
-//! searches it. The transcript joins the pipeline instead of sitting beside it.
+//! `extract::route` sends it down the zero-token text path, and chat searches
+//! it. The transcript joins the pipeline instead of sitting beside it.
+//!
+//! Where it is filed is the second half. A lecture goes under
+//! `Weeks/Week NN — <topic>/`, and because each of these courses meets once a
+//! week and divides itself no finer, the week it was filed under *is* the
+//! division it covers (SPEC §8.5). `lecture_contributions` records that join,
+//! which is how a lecture stored by date reaches a guide scoped by topic.
 //!
 //! The digest is the separate, token-spending half — a `claude -p` job over the
-//! transcript that writes the session document and names it.
+//! transcript that writes the session document, names it, and distils the
+//! session into the corpus note that guide is built from.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,8 +31,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::db::{
-    audit, emit_hub_change, lock, now, with_conn, INBOX_DIR, SESSIONS_DIR, SESSION_SCOPE_PREFIX,
-    TRANSCRIPTS_DIR,
+    audit, emit_hub_change, lock, now, with_conn, CORPUS_DIR, INBOX_DIR, SESSIONS_DIR,
+    SESSION_SCOPE_PREFIX, WEEKS_DIR,
 };
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/lecture_digest.md");
@@ -38,9 +44,11 @@ pub struct AddRequest {
     pub class_id: i64,
     /// An absolute path to a caption track or a recording, or a Zoom link.
     pub source: String,
-    /// Class-relative module folder. `None` routes through `_Inbox/` so the
-    /// sorter proposes a home instead.
-    pub module_rel_path: Option<String>,
+    /// The week this session belongs to, from the course's own schedule
+    /// (SPEC §8.5) — the form resolves and shows it, and it is correctable
+    /// there. `None` routes through `_Inbox/` so the sorter proposes a week
+    /// instead, which is what a course publishing no schedule gets.
+    pub week: Option<i64>,
     /// ISO `YYYY-MM-DD`. The UI always sends one, so this module never has to
     /// guess a session date from a file's mtime.
     pub date: String,
@@ -54,8 +62,11 @@ pub struct AddRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AddResult {
     pub rel_path: String,
-    /// True when no module was chosen and the sorter is proposing one.
+    /// True when no week was resolved and the sorter is proposing one.
     pub routed_to_inbox: bool,
+    /// The course's own name for the division this lecture now feeds, when it
+    /// declares one for that week.
+    pub unit_name: Option<String>,
     pub speakers: Vec<String>,
     pub digest_job_id: Option<i64>,
     /// Why no digest started, when one was asked for. The transcript is filed
@@ -92,19 +103,27 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         },
     );
 
-    // No module chosen means the sorter gets to propose one, which it can only
+    // A lecture is filed by when it happened, and for these four courses that
+    // also settles what it covers (SPEC §8.5). A week that resolved to none of
+    // the course's own means the sorter gets to propose one, which it can only
     // do from `_Inbox/` (SPEC §10).
-    let routed_to_inbox = req.module_rel_path.is_none();
-    let dir_rel = match &req.module_rel_path {
-        Some(module) => format!("{}/{TRANSCRIPTS_DIR}", validate_module(module)?),
-        None => INBOX_DIR.to_string(),
-    };
-
-    // Only the lookup needs the connection. Writing a multi-megabyte markdown
+    //
+    // Only the lookups need the connection. Writing a multi-megabyte markdown
     // with it held blocks every other command, the chat tools and the job
     // runner for the duration — the arrangement `scan_class` and
     // `search_material` were both restructured away from.
-    let class_dir = with_conn(app, |conn| crate::scanner::class_dir(conn, req.class_id))?;
+    let (class_dir, slot) = with_conn(app, |conn| {
+        let slot = match req.week {
+            Some(week) => crate::units::slot_for_week(conn, req.class_id, week)?,
+            None => None,
+        };
+        Ok((crate::scanner::class_dir(conn, req.class_id)?, slot))
+    })?;
+    let routed_to_inbox = slot.is_none();
+    let dir_rel = match &slot {
+        Some(slot) => format!("{WEEKS_DIR}/{}", slot.folder),
+        None => INBOX_DIR.to_string(),
+    };
     let dir = class_dir.join(&dir_rel);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -131,6 +150,19 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     });
     if let Err(e) = audited {
         eprintln!("lecture.added audit row failed for {rel_path}: {e:#}");
+    }
+
+    // SPEC §8.5: the filing decision is the join, so it is recorded here rather
+    // than inferred later. Bailing on failure the way the index does below —
+    // the transcript is on disk either way, and a lecture that silently feeds
+    // no guide is the failure this milestone exists to prevent.
+    if let Some(slot) = &slot {
+        with_conn(app, |conn| {
+            record_contribution(conn, req.class_id, slot, &rel_path, &markdown)
+        })
+        .with_context(|| {
+            format!("filed {rel_path}, but mapping it to {} failed", slot.unit_name)
+        })?;
     }
 
     // Index it before anything downstream looks for it: the digest job's
@@ -173,6 +205,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     Ok(AddResult {
         rel_path,
         routed_to_inbox,
+        unit_name: slot.map(|slot| slot.unit_name),
         speakers: crate::transcripts::speakers(&cues),
         digest_job_id,
         digest_error,
@@ -217,29 +250,6 @@ fn fetch(app: &AppHandle, source: &str, on_stage: &dyn Fn(&str)) -> Result<(Stri
     Ok((text, name))
 }
 
-/// A module must be a real folder inside the class and not an app-managed one —
-/// the transcript is source material and belongs in the material tree.
-///
-/// Returns the normalized path, so the check and the write agree on what was
-/// checked: validating a trimmed copy while building the destination from the
-/// caller's original let a leading slash through, and joining an absolute path
-/// discards the class directory entirely.
-fn validate_module(module: &str) -> Result<String> {
-    let module = module.trim().trim_matches('/');
-    if module.is_empty() {
-        bail!("choose a module folder");
-    }
-    let first = module.split('/').next().unwrap_or_default();
-    if module
-        .split('/')
-        .any(|seg| seg.trim().is_empty() || seg == ".." || seg.starts_with('.'))
-        || crate::scanner::APP_MANAGED_DIRS.contains(&first)
-    {
-        bail!("'{module}' is not a module folder");
-    }
-    Ok(module.to_string())
-}
-
 /// `2026-08-24 — Lecture.md`. Slashes and colons would repoint the write, so
 /// they flatten to dashes rather than rejecting a natural title (the same
 /// policy `notes::note_file_name` applies to note titles).
@@ -271,6 +281,275 @@ fn unique_rel_path(class_dir: &Path, dir_rel: &str, file_name: &str) -> String {
         n += 1;
     }
     rel
+}
+
+// ---------------------------------------------------------------------------
+// The lecture → unit join (SPEC §8.5)
+
+/// One lecture's contribution, for the workspace listing and for the guide
+/// that reads its corpus note.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Contribution {
+    /// The transcript, class-relative.
+    pub rel_path: String,
+    pub unit_id: i64,
+    /// The course's own name for the division this lecture feeds.
+    pub unit_name: String,
+    pub corpus_rel_path: String,
+    /// Whether the corpus note has actually been written yet — the distillation
+    /// is a separate, token-spending pass, so the map exists before the note.
+    pub distilled: bool,
+    pub summary: String,
+}
+
+/// Where one lecture's distilled note goes: under the unit it feeds, named for
+/// the transcript it was cut from.
+///
+/// Derived rather than chosen by the digest, the way an extract path mirrors
+/// its source (SPEC §4). That keeps the path knowable at filing time — which is
+/// when the contribution row is written — and makes "did the note get written"
+/// a question about one known path rather than about a name a model reported.
+fn corpus_rel_path(unit_name: &str, transcript_rel: &str) -> String {
+    let file_name = Path::new(transcript_rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| transcript_rel.to_string());
+    format!(
+        "{CORPUS_DIR}/{}/{file_name}",
+        crate::units::folder_segment(unit_name)
+    )
+}
+
+/// What one filed transcript covers, end to end: `(end_ms, lines)`.
+///
+/// Read back off the filed markdown rather than carried from the cues, so a
+/// transcript the sorter placed — which never passed through ingestion —
+/// describes itself the same way one added through the form does. The
+/// `## HH:MM` anchors are the only timing the artifact keeps; a transcript with
+/// none was transcribed without timings and reports a zero-length span rather
+/// than an invented one.
+fn span_of(markdown: &str) -> (i64, i64) {
+    let mut end_ms = 0i64;
+    let mut lines = 0i64;
+    for line in markdown.lines() {
+        lines += 1;
+        let Some((hours, minutes)) = line.strip_prefix("## ").and_then(|s| s.trim().split_once(':'))
+        else {
+            continue;
+        };
+        if let (Ok(hours), Ok(minutes)) = (hours.parse::<i64>(), minutes.parse::<i64>()) {
+            end_ms = end_ms.max((hours * 60 + minutes) * 60_000);
+        }
+    }
+    (end_ms, lines.max(1))
+}
+
+/// Records the join between a lecture stored by date and the division it
+/// covers, and returns where its corpus note goes.
+///
+/// One row per lecture, spanning its whole length, `applied` on sight: the
+/// filing decision it follows is the user's own rather than a model's reading,
+/// so there is nothing to confirm (SPEC §8.5). The delete before the insert is
+/// what makes refiling a lecture *move* its contribution and a re-run *replace*
+/// it, rather than either adding a second.
+fn record_contribution(
+    conn: &Connection,
+    class_id: i64,
+    slot: &crate::units::WeekSlot,
+    rel_path: &str,
+    markdown: &str,
+) -> Result<String> {
+    let corpus_rel = corpus_rel_path(&slot.unit_name, rel_path);
+    let (end_ms, lines) = span_of(markdown);
+    conn.execute(
+        "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+        rusqlite::params![class_id, rel_path],
+    )?;
+    conn.execute(
+        "INSERT INTO lecture_contributions
+         (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+          corpus_rel_path, summary, confidence, status, created_at)
+         VALUES (?1, ?2, ?3, 0, ?4, 1, ?5, ?6, ?7, 'high', 'applied', ?8)",
+        rusqlite::params![
+            class_id,
+            slot.unit_id,
+            rel_path,
+            end_ms,
+            lines,
+            corpus_rel,
+            format!("Whole session — {}", slot.unit_name),
+            now(),
+        ],
+    )?;
+    Ok(corpus_rel)
+}
+
+/// A markdown file sitting in a week folder is taken for a lecture — the same
+/// reading the Lectures listing applies to the tree. A slide deck the sorter
+/// filed under a week is not, and must not earn a contribution row.
+fn is_filed_transcript(rel_path: &str) -> bool {
+    rel_path.to_lowercase().ends_with(".md")
+        && crate::units::week_from_rel_path(rel_path).is_some()
+}
+
+/// The contribution for one transcript, recording it first when the path names
+/// a week the course declares and no row exists yet.
+///
+/// The second case is the sorter's: a transcript it filed reached its week by
+/// an approved move, which never passes through the Add lecture form, so the
+/// path is where that decision is written down.
+fn contribution_for(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    rel_path: &str,
+) -> Result<Option<(i64, String, String)>> {
+    let existing = conn
+        .query_row(
+            "SELECT lc.unit_id, u.name, lc.corpus_rel_path
+             FROM lecture_contributions lc JOIN units u ON u.id = lc.unit_id
+             WHERE lc.class_id = ?1 AND lc.rel_path = ?2",
+            rusqlite::params![class_id, rel_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if existing.is_some() {
+        return Ok(existing);
+    }
+
+    if !is_filed_transcript(rel_path) {
+        return Ok(None);
+    }
+    let Some(week) = crate::units::week_from_rel_path(rel_path) else {
+        return Ok(None);
+    };
+    let Some(slot) = crate::units::slot_for_week(conn, class_id, week)? else {
+        return Ok(None);
+    };
+    let markdown = fs::read_to_string(class_dir.join(rel_path))
+        .with_context(|| format!("reading {rel_path}"))?;
+    let corpus_rel = record_contribution(conn, class_id, &slot, rel_path, &markdown)?;
+    Ok(Some((slot.unit_id, slot.unit_name, corpus_rel)))
+}
+
+/// Moves a lecture's contribution with the lecture, for a transcript relocated
+/// through the §10 confirm queue. Called inside the move's own transaction.
+///
+/// Refiling to a different week is the correction affordance (SPEC §8.5), so
+/// this has to re-resolve the unit rather than only rewrite the path — and it
+/// clears the row outright when the new home is not a week, because a
+/// contribution naming a transcript that has left `Weeks/` maps a guide to
+/// something no longer there.
+pub fn refile_contribution(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    dest_rel: &str,
+) -> Result<()> {
+    let mapped: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+        rusqlite::params![class_id, source_rel],
+        |row| row.get(0),
+    )?;
+    if mapped == 0 && !is_filed_transcript(dest_rel) {
+        return Ok(());
+    }
+
+    let old_corpus: Option<String> = conn
+        .query_row(
+            "SELECT corpus_rel_path FROM lecture_contributions
+             WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    conn.execute(
+        "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+        rusqlite::params![class_id, source_rel],
+    )?;
+    let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
+
+    // The note under the old unit would otherwise stay in that unit's corpus
+    // and go on feeding its guide the lecture that left. Removed rather than
+    // relocated: it opens with the transcript's old path, and a redistill is
+    // what makes it true again.
+    if let Some(old) = old_corpus.filter(|old| moved.as_ref().is_none_or(|(_, _, new)| new != old)) {
+        let _ = fs::remove_file(class_dir.join(old));
+    }
+    Ok(())
+}
+
+/// Every lecture that feeds one of this class's divisions.
+pub fn list_contributions(conn: &Connection, class_id: i64) -> Result<Vec<Contribution>> {
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT lc.rel_path, lc.unit_id, u.name, lc.corpus_rel_path, lc.summary
+         FROM lecture_contributions lc JOIN units u ON u.id = lc.unit_id
+         WHERE lc.class_id = ?1 AND lc.status = 'applied'
+         ORDER BY lc.rel_path",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            let corpus_rel_path: String = row.get(3)?;
+            Ok(Contribution {
+                rel_path: row.get(0)?,
+                unit_id: row.get(1)?,
+                unit_name: row.get(2)?,
+                distilled: class_dir.join(&corpus_rel_path).is_file(),
+                corpus_rel_path,
+                summary: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// The transcripts mapped to one unit.
+pub fn contributing_paths(
+    conn: &Connection,
+    class_id: i64,
+    unit_id: i64,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT rel_path FROM lecture_contributions
+         WHERE class_id = ?1 AND unit_id = ?2 AND status = 'applied'",
+    )?;
+    let paths = stmt
+        .query_map(rusqlite::params![class_id, unit_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()?;
+    Ok(paths)
+}
+
+/// The corpus notes a unit's guide is built from, each listed with the
+/// transcript it came from so the job can open the professor's exact words when
+/// the distillation is not enough (SPEC §8.5).
+///
+/// Only notes that exist on disk: a lecture filed but not yet distilled has a
+/// row and no note, and naming a file that is not there sends the job looking
+/// for it.
+pub fn corpus_block(conn: &Connection, class_id: i64, unit_id: i64) -> Result<String> {
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT corpus_rel_path, rel_path FROM lecture_contributions
+         WHERE class_id = ?1 AND unit_id = ?2 AND status = 'applied'
+         ORDER BY rel_path",
+    )?;
+    let lines: Vec<String> = stmt
+        .query_map(rusqlite::params![class_id, unit_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(corpus, _)| class_dir.join(corpus).is_file())
+        .map(|(corpus, transcript)| format!("- {corpus}\n  transcript: {transcript}"))
+        .collect();
+    Ok(if lines.is_empty() {
+        "(none — no lecture for this division has been distilled yet)".into()
+    } else {
+        lines.join("\n")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +649,10 @@ struct DigestPayload {
     /// `guides.rs` does: a transcript edited while the job runs leaves the
     /// digest stale afterwards rather than recording as fresh.
     source_manifest: String,
+    /// Where this lecture's distilled note goes (SPEC §8.5), when the lecture
+    /// maps to one of the course's divisions. `None` when it maps to none — the
+    /// session documents are still worth writing, they just feed no unit guide.
+    corpus_rel_path: Option<String>,
 }
 
 /// Queues the distillation of one filed transcript.
@@ -380,7 +663,7 @@ pub fn enqueue_digest(
     date: &str,
 ) -> Result<i64> {
     let scope = session_scope(transcript_rel_path);
-    let (class_dir, prompt, manifest) = with_conn(app, |conn| {
+    let (class_dir, prompt, manifest, corpus_rel) = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let transcript = class_dir.join(transcript_rel_path);
         if !transcript.is_file() {
@@ -400,6 +683,10 @@ pub fn enqueue_digest(
         // lecture runs past a single read, and a digest of the first fraction
         // would come back looking like a complete one.
         let lines = fs::read_to_string(&transcript).map(|t| t.lines().count()).unwrap_or(0);
+        // Recorded at filing, but resolved here too: a transcript the sorter
+        // placed reached its week through an approved move, and this is the
+        // first moment anything asks what that move decided.
+        let mapped = contribution_for(conn, class_id, &class_dir, transcript_rel_path)?;
         let prompt = render_prompt(&DigestPromptVars {
             class: &class_name,
             date,
@@ -407,27 +694,70 @@ pub fn enqueue_digest(
             transcript_lines: lines,
             accent_light,
             accent_dark,
-            context: &module_context(conn, class_id, transcript_rel_path)?,
+            context: &lecture_context(
+                conn,
+                class_id,
+                transcript_rel_path,
+                mapped.as_ref().map(|(unit_id, ..)| *unit_id),
+            )?,
+            corpus: &corpus_instruction(mapped.as_ref()),
         });
         let manifest =
             serde_json::to_string(&crate::extract::current_manifest(conn, class_id, &scope)?)?;
-        Ok((class_dir, prompt, manifest))
+        let corpus_rel = mapped.map(|(_, _, corpus_rel)| corpus_rel);
+        Ok((class_dir, prompt, manifest, corpus_rel))
     })?;
 
     // Ahead of the run, as the guide and practice paths both do for their own
-    // output folders. The job's write tool is scoped to this directory, so
-    // leaving it to be created by the write itself puts the very first thing
+    // output folders. The job's write tool is scoped to these directories, so
+    // leaving them to be created by the write itself puts the very first thing
     // the job does at the mercy of how the pattern treats a path that is not
     // there yet.
     fs::create_dir_all(class_dir.join(SESSIONS_DIR))
         .with_context(|| format!("creating {SESSIONS_DIR}"))?;
+    if let Some(corpus_rel) = &corpus_rel {
+        if let Some(parent) = class_dir.join(corpus_rel).parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
 
     let payload = serde_json::to_string(&DigestPayload {
         transcript_rel_path: transcript_rel_path.to_string(),
         date: date.to_string(),
         source_manifest: manifest,
+        corpus_rel_path: corpus_rel,
     })?;
     crate::jobs::enqueue_lecture_digest(app, class_id, transcript_rel_path, &prompt, payload)
+}
+
+/// The corpus half of the digest prompt: an exact path and what belongs in it,
+/// or the reason there is none.
+///
+/// The path is stated rather than chosen because it is already recorded on the
+/// contribution row — the guide reads it from there, so a differently-named
+/// file would be one nothing points at.
+fn corpus_instruction(mapped: Option<&(i64, String, String)>) -> String {
+    match mapped {
+        Some((_, unit_name, corpus_rel)) => format!(
+            "This session belongs to **{unit_name}**, and its guide is built from the note you \
+             write here rather than from the transcript itself — so this file is what that guide \
+             will actually read.\n\n\
+             Write it to exactly `{corpus_rel}` (that path, not one of your own choosing).\n\n\
+             It holds the high-yield content of this session in plain markdown: the substance a \
+             study guide would want, dense, with every point carrying its `HH:MM` anchor back to \
+             the transcript. Open with one line naming what the session covered. This is not a \
+             third copy of the session document — the session document is written for reading, \
+             and this is written to be built from, so drop the logistics, the narrative of how \
+             the class went, and anything an exam could not touch. Where the session covered a \
+             topic only partially, say so: a guide reading this must not present a fragment as a \
+             treatment."
+        ),
+        None => "None for this session. It is not mapped to one of the course's own divisions \
+                 — a transcript filed outside `Weeks/`, or a course that publishes no schedule \
+                 — so write only the two documents above."
+            .into(),
+    }
 }
 
 /// Everything `lecture_digest.md` expects to be given.
@@ -444,6 +774,7 @@ struct DigestPromptVars<'a> {
     accent_light: &'a str,
     accent_dark: &'a str,
     context: &'a str,
+    corpus: &'a str,
 }
 
 fn render_prompt(vars: &DigestPromptVars<'_>) -> String {
@@ -456,40 +787,72 @@ fn render_prompt(vars: &DigestPromptVars<'_>) -> String {
         .replace("{accent_light}", vars.accent_light)
         .replace("{accent_dark}", vars.accent_dark)
         .replace("{context}", vars.context)
+        .replace("{corpus}", vars.corpus)
 }
 
-/// The rest of the module the transcript sits in, so the digest can tie what
-/// was said to the slides and readings it was said about.
-fn module_context(conn: &Connection, class_id: i64, transcript_rel: &str) -> Result<String> {
-    let module = transcript_rel
-        .rsplit_once(&format!("/{TRANSCRIPTS_DIR}/"))
-        .map(|(module, _)| module.to_string());
-    let Some(module) = module else {
-        return Ok("(none — this transcript is not filed inside a module)".into());
-    };
+/// The material this session was about, so the digest can tie what was said to
+/// the slides and readings it was said about.
+///
+/// Two folders, because a lecture is stored by when it happened and its
+/// material by what it is about (SPEC §8.5): the week folder holds anything
+/// filed specifically for that session, and the division's own folder — where
+/// the course has one — holds the rest.
+fn lecture_context(
+    conn: &Connection,
+    class_id: i64,
+    transcript_rel: &str,
+    unit_id: Option<i64>,
+) -> Result<String> {
+    let mut folders: Vec<String> = Vec::new();
+    if let Some(week_folder) = transcript_rel.rsplit_once('/').map(|(dir, _)| dir.to_string()) {
+        folders.push(week_folder);
+    }
+    if let Some(unit_id) = unit_id {
+        let unit_folder: Option<String> = conn
+            .query_row("SELECT rel_path FROM units WHERE id = ?1", [unit_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
+        if let Some(folder) = unit_folder.filter(|f| !folders.contains(f)) {
+            folders.push(folder);
+        }
+    }
 
     let mut stmt = conn.prepare(
         "SELECT rel_path, extract_rel_path FROM files
-         WHERE class_id = ?1 AND rel_path LIKE ?2 ESCAPE '\\' AND rel_path != ?3
+         WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
+           AND rel_path != ?4
          ORDER BY rel_path",
     )?;
-    let prefix = format!(
-        "{}/%",
-        module.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-    );
-    let lines: Vec<String> = stmt
-        .query_map(rusqlite::params![class_id, prefix, transcript_rel], |row| {
-            let rel: String = row.get(0)?;
-            let extract: Option<String> = row.get(1)?;
-            Ok(match extract {
-                Some(e) => format!("- {rel}\n  extract: {e}"),
-                None => format!("- {rel}"),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut lines: Vec<String> = Vec::new();
+    for folder in &folders {
+        let prefix = format!(
+            "{}/%",
+            folder.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        );
+        let found = stmt
+            .query_map(
+                rusqlite::params![class_id, folder, prefix, transcript_rel],
+                |row| {
+                    let rel: String = row.get(0)?;
+                    let extract: Option<String> = row.get(1)?;
+                    Ok(match extract {
+                        Some(e) => format!("- {rel}\n  extract: {e}"),
+                        None => format!("- {rel}"),
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for line in found {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        }
+    }
 
     Ok(if lines.is_empty() {
-        format!("(no other material in {module} yet)")
+        "(none filed alongside this session yet)".into()
     } else {
         lines.join("\n")
     })
@@ -596,6 +959,18 @@ fn record_session(
             bail!("no session document written at {rel}");
         }
     }
+    // The corpus note is checked on the same terms, and for the sharper reason:
+    // a contribution row names it, so a missing note is a unit guide quietly
+    // built without the lecture it was supposed to be built from. The job asks
+    // for it by an exact path, so there is nothing to interpret here.
+    if let Some(corpus_rel) = &payload.corpus_rel_path {
+        let written = fs::metadata(class_dir.join(corpus_rel))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false);
+        if !written {
+            bail!("no corpus note written at {corpus_rel}");
+        }
+    }
 
     let scope = session_scope(&payload.transcript_rel_path);
     let superseded: Option<String> = conn
@@ -632,6 +1007,21 @@ fn record_session(
             }
         }
     }
+
+    // The row's summary was a placeholder from filing time. Now that the
+    // session has been read, it carries what the session was about — which is
+    // what the Lectures listing shows beside the division it feeds.
+    if payload.corpus_rel_path.is_some() {
+        conn.execute(
+            "UPDATE lecture_contributions SET summary = ?1
+             WHERE class_id = ?2 AND rel_path = ?3",
+            rusqlite::params![
+                crate::db::truncate(result.title.trim(), 120),
+                class_id,
+                payload.transcript_rel_path
+            ],
+        )?;
+    }
     Ok(format!("{} · {}", result.title, payload.date))
 }
 
@@ -662,48 +1052,50 @@ mod tests {
         assert!(transcript_file_name("2026-08-24", &"x".repeat(81)).is_err());
     }
 
-    #[test]
-    fn rejects_app_managed_and_escaping_module_paths() {
-        assert_eq!(validate_module("Module 1").unwrap(), "Module 1");
-        assert_eq!(validate_module("Module 1/Week 2").unwrap(), "Module 1/Week 2");
-        assert!(validate_module("").is_err());
-        assert!(validate_module("Study Guides").is_err());
-        assert!(validate_module("Notes").is_err());
-        assert!(validate_module("_Inbox").is_err());
-        assert!(validate_module("../../etc").is_err());
-        assert!(validate_module(".classhub/extracts").is_err());
-    }
-
-    /// The check normalizes and the write must use what was checked. An
-    /// absolute path joined onto the class directory discards it outright, so
-    /// "passes validation" and "writes inside the class" have to be the same
-    /// question about the same string.
-    #[test]
-    fn normalizes_what_it_validates() {
-        assert_eq!(validate_module("/Module 1/").unwrap(), "Module 1");
-        assert_eq!(validate_module("  Module 1  ").unwrap(), "Module 1");
-        assert!(validate_module("Module 1//Week 2").is_err());
-        assert!(validate_module("/").is_err());
-
-        // Whatever it returns is relative, so joining it onto the class
-        // directory cannot land anywhere else — an absolute path would have
-        // discarded the class directory outright.
-        for candidate in ["/Users/danny/elsewhere", "/etc/passwd", "//tmp/x"] {
-            if let Ok(module) = validate_module(candidate) {
-                assert!(!Path::new(&module).is_absolute(), "{candidate} → {module}");
-                assert!(!module.contains(".."), "{candidate} → {module}");
-            }
-        }
-    }
-
     /// The digest job writes through the ordinary job write-contract. If
     /// `SESSIONS_DIR` ever moved out from under `GUIDES_DIR`, every digest run
     /// would be demoted as an out-of-contract write — with nothing else in the
-    /// codebase to say why.
+    /// codebase to say why. The corpus note is the second destination, and
+    /// hidden rather than app-managed, which is what keeps it out of the
+    /// fingerprint diff.
     #[test]
     fn keeps_the_digest_inside_the_contracted_write_scope() {
         assert!(SESSIONS_DIR.starts_with(crate::db::GUIDES_DIR), "{SESSIONS_DIR}");
         assert!(crate::db::JOB_WRITABLE.contains(&crate::db::GUIDES_DIR));
+        assert!(crate::db::JOB_WRITABLE.contains(&CORPUS_DIR));
+        assert!(CORPUS_DIR.starts_with('.'), "{CORPUS_DIR}");
+    }
+
+    /// A guide reads the corpus note by the path on the contribution row, so
+    /// the two have to be derived the same way from the same transcript.
+    #[test]
+    fn keys_a_corpus_note_by_its_unit_and_its_transcript() {
+        assert_eq!(
+            corpus_rel_path(
+                "Week 2 \u{2014} Study Designs",
+                "Weeks/Week 02 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md"
+            ),
+            ".classhub/corpus/Week 2 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md"
+        );
+        // A unit name is the course's own words, and a course may well punctuate
+        // one with a colon — which would repoint the write.
+        let path = corpus_rel_path("Part I: LLMs", "Weeks/Week 01/2026-08-25 \u{2014} Lecture.md");
+        assert_eq!(
+            path,
+            ".classhub/corpus/Part I- LLMs/2026-08-25 \u{2014} Lecture.md"
+        );
+        assert!(!Path::new(&path).is_absolute() && !path.contains(".."), "{path}");
+    }
+
+    /// The span columns describe the artifact on disk, so they read back off it.
+    #[test]
+    fn reads_a_lecture_s_span_off_the_filed_markdown() {
+        let timed = "# Lecture\n\nRecorded 2026-08-27\n\n## 00:00\n\nHello.\n\n## 01:05\n\nBye.\n";
+        assert_eq!(span_of(timed), (65 * 60_000, 11));
+        // Transcribed without timings: a zero-length span, never an invented one.
+        let untimed = "# Lecture\n\nsource: x.txt\n\nHello.\n";
+        assert_eq!(span_of(untimed).0, 0);
+        assert_eq!(span_of("").1, 1, "an empty file still spans one line");
     }
 
     /// The digest job has an output contract, and the prompt is the only place
@@ -712,14 +1104,20 @@ mod tests {
     /// asked for a colour nothing ever substituted, and no test could see it.
     #[test]
     fn fills_every_placeholder_in_the_digest_prompt() {
+        let corpus = corpus_instruction(Some(&(
+            7,
+            "Week 2 — Study Designs".into(),
+            ".classhub/corpus/Week 2 — Study Designs/2026-08-24 — Lecture.md".into(),
+        )));
         let rendered = render_prompt(&DigestPromptVars {
             class: "Biostatistics for AI",
             date: "2026-08-24",
-            transcript: "Module 1/Transcripts/2026-08-24 — Lecture.md",
+            transcript: "Weeks/Week 02 — Study Designs/2026-08-24 — Lecture.md",
             transcript_lines: 4_210,
             accent_light: "oklch(0.578 0.135 158)",
             accent_dark: "oklch(0.732 0.13 158)",
             context: "- Module 1/slides.pdf",
+            corpus: &corpus,
         });
 
         // A leftover reads as `{lower_snake}`; the JSON contract's own braces
@@ -759,9 +1157,29 @@ mod tests {
             "4210 lines",
             "oklch(0.578 0.135 158)",
             SESSIONS_DIR,
+            ".classhub/corpus/Week 2 — Study Designs/2026-08-24 — Lecture.md",
         ] {
             assert!(rendered.contains(expected), "missing {expected:?}");
         }
+
+        // A lecture that maps to no division still gets its session documents,
+        // and the prompt has to say there is no note rather than leaving the
+        // instruction half-filled.
+        let unmapped = render_prompt(&DigestPromptVars {
+            corpus: &corpus_instruction(None),
+            ..DigestPromptVars {
+                class: "AI in Health Design Studio I",
+                date: "2026-08-26",
+                transcript: "_Inbox/2026-08-26 — Lecture.md",
+                transcript_lines: 12,
+                accent_light: "oklch(0.646 0.175 45)",
+                accent_dark: "oklch(0.748 0.145 50)",
+                context: "(none filed alongside this session yet)",
+                corpus: "",
+            }
+        });
+        assert!(placeholders(&unmapped).is_empty(), "{:?}", placeholders(&unmapped));
+        assert!(!unmapped.contains(CORPUS_DIR), "asked for a note it has no path for");
     }
 
     /// The one check standing between a model-chosen string and a write path.
@@ -791,9 +1209,10 @@ mod tests {
 
         let conn = Connection::open_in_memory().expect("conn");
         let payload = DigestPayload {
-            transcript_rel_path: "Module 1/Transcripts/2026-08-24 — Lecture.md".into(),
+            transcript_rel_path: "Weeks/Week 02 — Study Designs/2026-08-24 — Lecture.md".into(),
             date: "2026-08-24".into(),
             source_manifest: "[]".into(),
+            corpus_rel_path: None,
         };
         let same = DigestResult {
             title: "Attention".into(),
@@ -814,9 +1233,141 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The quiet failure M14 exists to prevent: both session documents land, so
+    /// the run looks complete, while the unit guide is left built from a
+    /// contribution row whose note was never written.
+    #[test]
+    fn rejects_a_digest_that_skipped_the_corpus_note() {
+        let dir = std::env::temp_dir().join("classhub-digest-corpus");
+        fs::create_dir_all(dir.join(SESSIONS_DIR)).expect("sessions dir");
+        let html = "Study Guides/Sessions/2026-08-24 — Study Designs.html";
+        let md = "Study Guides/Sessions/2026-08-24 — Study Designs.md";
+        fs::write(dir.join(html), "<html></html>").expect("html");
+        fs::write(dir.join(md), "# Study Designs").expect("md");
+
+        let corpus_rel = ".classhub/corpus/Week 2 — Study Designs/2026-08-24 — Lecture.md";
+        let conn = crate::db::memory_db();
+        let payload = DigestPayload {
+            transcript_rel_path: "Weeks/Week 02 — Study Designs/2026-08-24 — Lecture.md".into(),
+            date: "2026-08-24".into(),
+            source_manifest: "[]".into(),
+            corpus_rel_path: Some(corpus_rel.into()),
+        };
+        let result = DigestResult {
+            title: "Study Designs".into(),
+            rel_path_html: html.into(),
+            rel_path_md: md.into(),
+        };
+        let err = record_session(&conn, 1, &dir, &payload, &result).expect_err("no note");
+        assert!(format!("{err:#}").contains("no corpus note"), "{err:#}");
+
+        // With the note on disk it records, and the row's placeholder summary
+        // is replaced by what the session turned out to be about.
+        fs::create_dir_all(dir.join(corpus_rel).parent().expect("parent")).expect("corpus dir");
+        fs::write(dir.join(corpus_rel), "# Study Designs\n").expect("note");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, source)
+             VALUES (1, 2, 'week', 'Week 2 — Study Designs', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        record_contribution(
+            &conn,
+            1,
+            &crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot"),
+            &payload.transcript_rel_path,
+            "# Lecture\n\n## 00:00\n\nHello.\n",
+        )
+        .expect("contribution");
+        record_session(&conn, 1, &dir, &payload, &result).expect("records");
+        let summary: String = conn
+            .query_row(
+                "SELECT summary FROM lecture_contributions WHERE class_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("summary");
+        assert_eq!(summary, "Study Designs");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Refiling is the correction affordance for a wrong week (SPEC §8.5), so
+    /// the map has to move with the file — and move, not multiply.
+    #[test]
+    fn refiling_a_lecture_moves_its_contribution_rather_than_adding_one() {
+        let root = std::env::temp_dir().join("classhub-refile");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        // `list_contributions` resolves the class folder to test whether each
+        // note is on disk, so the fixture has to be where the settings say.
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 1", [], |row| row.get(0))
+            .expect("class");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join(folder);
+        for (ordinal, name) in [(2, "Week 2 — Study Designs"), (3, "Week 3 — Data Exploration")] {
+            conn.execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, source)
+                 VALUES (1, ?1, 'week', ?2, 'syllabus')",
+                rusqlite::params![ordinal, name],
+            )
+            .expect("unit");
+        }
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let file = |week: &str| format!("Weeks/{week}/2026-08-27 — Lecture.md");
+        let from = file("Week 02 — Study Designs");
+        let to = file("Week 03 — Data Exploration");
+        for rel in [&from, &to] {
+            fs::create_dir_all(dir.join(rel).parent().expect("parent")).expect("week dir");
+        }
+        fs::write(dir.join(&from), markdown).expect("transcript");
+
+        let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
+        let corpus = record_contribution(&conn, 1, &slot, &from, markdown).expect("record");
+        fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
+        fs::write(dir.join(&corpus), "# note").expect("note");
+
+        // The move itself, then the map catching up with it.
+        fs::rename(dir.join(&from), dir.join(&to)).expect("move");
+        refile_contribution(&conn, 1, &dir, &from, &to).expect("refile");
+
+        let rows = list_contributions(&conn, 1).expect("list");
+        assert_eq!(rows.len(), 1, "the refile duplicated the contribution");
+        assert_eq!(rows[0].rel_path, to);
+        assert_eq!(rows[0].unit_name, "Week 3 — Data Exploration");
+        assert!(rows[0].corpus_rel_path.contains("Week 3 — Data Exploration"));
+        assert!(
+            !dir.join(&corpus).exists(),
+            "the old unit kept a note for a lecture that left it"
+        );
+
+        // And moving it out of Weeks/ entirely leaves nothing mapping a guide
+        // to a transcript that is no longer there.
+        let out = "Module 1/2026-08-27 — Lecture.md".to_string();
+        fs::create_dir_all(dir.join("Module 1")).expect("module dir");
+        fs::rename(dir.join(&to), dir.join(&out)).expect("move out");
+        refile_contribution(&conn, 1, &dir, &to, &out).expect("refile out");
+        assert!(list_contributions(&conn, 1).expect("list").is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A slide deck the sorter files under a week is not a lecture, and a
+    /// contribution row for one would put a PDF in a guide's corpus listing.
+    #[test]
+    fn only_markdown_in_a_week_folder_counts_as_a_lecture() {
+        assert!(is_filed_transcript("Weeks/Week 03 — Transformers/2026-09-10 — Lecture.md"));
+        assert!(!is_filed_transcript("Weeks/Week 03 — Transformers/Slides/deck.pdf"));
+        assert!(!is_filed_transcript("Module 1/2026-09-10 — Lecture.md"));
+        assert!(!is_filed_transcript("Weeks/Loose/2026-09-10 — Lecture.md"));
+    }
+
     #[test]
     fn recognises_a_session_scope() {
-        assert!(crate::db::is_session_scope("session:Module 1/Transcripts/2026-08-24 — Lecture.md"));
+        assert!(crate::db::is_session_scope(
+            "session:Weeks/Week 02 — Study Designs/2026-08-24 — Lecture.md"
+        ));
         assert!(!crate::db::is_session_scope("Module 1"));
         assert!(!crate::db::is_session_scope("master"));
     }

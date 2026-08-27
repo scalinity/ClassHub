@@ -22,16 +22,28 @@ pub const PRACTICE_DIR: &str = "Study Guides/Practice";
 /// chat's search scope, so a session digest needs neither widened.
 pub const SESSIONS_DIR: &str = "Study Guides/Sessions";
 pub const EXTRACTS_DIR: &str = ".classhub/extracts";
-/// Per-module folder holding lecture transcripts. Ordinary *source* material,
-/// not app-managed: the scanner indexes it, extraction routes it through the
-/// zero-token text path, and module guides pick it up by rel-path prefix.
-pub const TRANSCRIPTS_DIR: &str = "Transcripts";
+/// SPEC §8.5 — the distilled lecture notes a unit guide is actually built from,
+/// keyed by unit. App-managed and hidden, like the extract cache beside it, and
+/// in `search_material`'s scope so chat retrieves it.
+pub const CORPUS_DIR: &str = ".classhub/corpus";
+/// SPEC §4 — where a lecture lives: `Weeks/Week NN — <topic>/`. Ordinary
+/// *source* material, not app-managed: the scanner indexes it, extraction
+/// routes it through the zero-token text path, and chat searches it. Storing it
+/// by date is also what settles its unit (SPEC §8.5), since no course here
+/// divides itself finer than its meetings.
+pub const WEEKS_DIR: &str = "Weeks";
 pub const MASTER_SCOPE: &str = "master";
 /// `guides.scope` prefix for a session digest, followed by the transcript's
 /// class-relative path. Naming the source file rather than the date makes the
 /// scope unique per transcript, so `UNIQUE(class_id, scope)` turns a re-run
 /// into an update, and staleness has something real to hash.
 pub const SESSION_SCOPE_PREFIX: &str = "session:";
+/// `guides.scope` prefix for a guide over one of the course's own divisions
+/// (SPEC §8.1), followed by the unit's name. A prefix rather than a bare name
+/// because every other scope value is a folder rel path, and a unit need not be
+/// a folder — `UNIQUE(class_id, name)` on `units` is what makes the name enough
+/// to identify one.
+pub const UNIT_SCOPE_PREFIX: &str = "unit:";
 
 /// Session digests live in the `guides` table so they inherit the viewer and
 /// staleness, but they are not module guides — the Study Guides list tells them
@@ -43,7 +55,7 @@ pub fn is_session_scope(scope: &str) -> bool {
 
 /// The only paths a synthesis job is contracted to write. Everything else in a
 /// class folder is source material, and SPEC §4 says the app never destroys it.
-pub const JOB_WRITABLE: &[&str] = &[GUIDES_DIR, EXTRACTS_DIR];
+pub const JOB_WRITABLE: &[&str] = &[GUIDES_DIR, EXTRACTS_DIR, CORPUS_DIR];
 
 /// Unix seconds.
 pub fn now() -> i64 {

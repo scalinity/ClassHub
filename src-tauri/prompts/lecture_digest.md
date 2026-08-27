@@ -31,7 +31,7 @@ at one are not the same evidence — never flatten them together. If the transcr
 no speaker labels at all it was machine-transcribed, so attribute nothing and say so in
 the header rather than inventing who spoke.
 
-Other material in this module, for tying spoken content to what it was about:
+Material filed alongside this session, for tying spoken content to what it was about:
 
 {context}
 
@@ -41,6 +41,9 @@ TWO documents, same content, same base name, differing only in format:
 
 1. `{sessions_dir}/<basename>.html` — self-contained, for reading
 2. `{sessions_dir}/<basename>.md` — the same substance in markdown, for search
+
+…and, where this session belongs to one of the course's own divisions, a third file
+serving a different purpose entirely — see **The corpus note** below.
 
 You choose `<basename>`, and it is the naming decision that matters most here:
 `{date} — <topic>`, where `<topic>` is what this session was actually about, in three
@@ -80,6 +83,10 @@ Keep the `HH:MM` anchors visible as small mono chips.
 The same sections and the same substance — not a stub pointing at the HTML. This is the
 copy chat retrieves, so it must stand alone. Plain markdown, no HTML embedded in it.
 
+### The corpus note
+
+{corpus}
+
 ## What not to do
 
 - Do not teach the topic from outside knowledge. If the session covered attention badly
@@ -88,16 +95,18 @@ copy chat retrieves, so it must stand alone. Plain markdown, no HTML embedded in
   is reported as one.
 - Do not smooth over disagreement or confusion in the room; where the class got stuck is
   study-relevant.
-- Do not edit, move, or delete anything. Write only the two files named above, and
-  nothing anywhere outside `{sessions_dir}/`.
+- Do not edit, move, or delete anything. Write only the files named above: the two under
+  `{sessions_dir}/`, and the corpus note at exactly the path given for it, if one was.
 
 ## Output contract
 
-After both files are written, your final message must be ONLY this JSON object — no
+After every file is written, your final message must be ONLY this JSON object — no
 prose, no code fences:
 
 {"title": "<topic, without the date>", "relPathHtml": "{sessions_dir}/<basename>.html", "relPathMd": "{sessions_dir}/<basename>.md"}
 
 Both paths are relative to the working directory, exactly as written above — not
 absolute, and not prefixed with `./`. They must be two different files, one `.html` and
-one `.md`. The app verifies both exist, and deletes them and fails the run otherwise.
+one `.md`. The corpus note is not reported here: the app already knows its path, having
+given it to you, and checks it there. The app verifies all of them, and deletes the
+session documents and fails the run if any is missing.

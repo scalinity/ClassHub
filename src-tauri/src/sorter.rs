@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{EXTRACTS_DIR, INBOX_DIR, emit_hub_change, now, with_conn};
+use crate::db::{EXTRACTS_DIR, INBOX_DIR, WEEKS_DIR, emit_hub_change, now, with_conn};
 use crate::scanner::APP_MANAGED_DIRS;
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
@@ -322,11 +322,36 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
             .join("\n")
     };
 
+    // The week folders a transcript can be routed to. Named exactly as the app
+    // builds them (SPEC §4), because that name is what joins the lecture back to
+    // the course's own division — a folder the sorter coined itself would file
+    // the transcript somewhere real and map it to nothing.
+    let slots = crate::units::week_slots(conn, class_id)?;
+    let weeks_block = if slots.is_empty() {
+        "  (this course publishes no schedule — leave a transcript in the inbox and say \
+         so, rather than inventing a week for it)"
+            .to_string()
+    } else {
+        slots
+            .iter()
+            .map(|slot| {
+                let meets = slot
+                    .meets_on
+                    .as_deref()
+                    .map(|d| format!(" — meets {d}"))
+                    .unwrap_or_default();
+                format!("  - {WEEKS_DIR}/{}{meets}", slot.folder)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     Ok(Some(
         PROMPT_TEMPLATE
             .replace("{class}", &class_name)
             .replace("{inbox}", &inbox_block)
             .replace("{tree}", &tree_block)
+            .replace("{weeks}", &weeks_block)
             .replace("{vocabulary}", &vocabulary_block),
     ))
 }
@@ -838,6 +863,10 @@ fn record_move(
         params![class_id, dest_rel],
     )?;
     update_index(&tx, class_id, class_dir, source_rel, dest_rel)?;
+    // SPEC §8.5: refiling a lecture into a different week is how a wrong unit
+    // is corrected, so the map has to travel with the file rather than being
+    // left naming a path nothing is at.
+    crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
     tx.execute(
         "INSERT INTO audit_log (action, payload, created_at)
          VALUES ('sort.move', ?1, ?2)",

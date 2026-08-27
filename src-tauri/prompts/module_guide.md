@@ -19,6 +19,19 @@ distinguish what the class provided from what Daniel wrote.
 
 {files}
 
+### What was said in the room
+
+The lectures for this division have each been distilled once into a corpus note: the
+high-yield content of that session, every point carrying an `HH:MM` anchor back to the
+transcript it came from. Read every note in full — this is where the professor's own
+framing, emphasis and exam hints live, and none of it is on a slide.
+
+Work from the note. The transcript beside it is a three-hour verbatim record; open it
+only where the distillation is not enough and you need the exact wording, and read the
+stretch the anchor points at rather than the whole file.
+
+{corpus}
+
 ## Required content — the guide anatomy
 
 Write ONE complete, self-contained HTML document to {output} containing exactly these

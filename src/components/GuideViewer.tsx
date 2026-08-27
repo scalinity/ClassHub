@@ -2,7 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
 import { withDocumentCsp } from "@/lib/document";
-import { formatGeneratedAt, readGuide, type GuideInfo } from "@/lib/guides";
+import {
+  formatGeneratedAt,
+  readGuide,
+  scopeLabel,
+  type GuideInfo,
+} from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
 import { dragWindow } from "@/lib/window";
 import { headerAction } from "@/lib/styles";
@@ -35,7 +40,7 @@ export function GuideViewer({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`${guide.scope} study guide`}
+      aria-label={`${scopeLabel(guide.scope)} study guide`}
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
@@ -48,7 +53,7 @@ export function GuideViewer({
       >
         <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
           STUDY GUIDE ·{" "}
-          {guide.scope === "master" ? "SEMESTER MASTER" : guide.scope.toUpperCase()}
+          {scopeLabel(guide.scope).toUpperCase()}
         </p>
         {guide.stale && (
           <span
@@ -99,7 +104,7 @@ export function GuideViewer({
           <iframe
             sandbox="allow-scripts"
             srcDoc={withDocumentCsp(html)}
-            title={`${guide.scope} study guide`}
+            title={`${scopeLabel(guide.scope)} study guide`}
             className="block h-full w-full border-0"
           />
         )}

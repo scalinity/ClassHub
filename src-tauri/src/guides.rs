@@ -16,8 +16,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::db::{GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, lock, now};
-use crate::extract::{current_manifest, manifest_is_stale};
+use crate::db::{GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, UNIT_SCOPE_PREFIX, lock, now};
+use crate::extract::{current_manifest, manifest_is_stale, ManifestEntry};
 
 /// SPEC §8.3: practice exams are dated files, several per scope — no staleness,
 /// no `guides` row, the directory listing is the record.
@@ -96,6 +96,11 @@ fn synthesis_context(
     conn: &Connection,
     class_id: i64,
     scope: &str,
+    // Set for a unit scope: its contributing lectures are listed with their
+    // corpus notes instead, so naming them again under the file listing would
+    // invite the job to read every transcript in full — the read the corpus
+    // note exists to have paid for once.
+    unit_id: Option<i64>,
     empty_message: &str,
 ) -> Result<SynthesisContext> {
     let (class_name, color): (String, String) = conn.query_row(
@@ -115,13 +120,17 @@ fn synthesis_context(
         .collect::<Vec<_>>()
         .join("\n");
     let (accent_light, accent_dark) = accent_values(&color);
+    let listed_apart = match unit_id {
+        Some(unit_id) => crate::lectures::contributing_paths(conn, class_id, unit_id)?,
+        None => BTreeSet::new(),
+    };
     Ok(SynthesisContext {
         class_name,
         accent_light,
         accent_dark,
+        files_block: files_block(conn, class_id, &manifest, &listed_apart)?,
         manifest,
         manifest_block,
-        files_block: files_block(conn, class_id, scope)?,
         class_dir: crate::scanner::class_dir(conn, class_id)?,
     })
 }
@@ -158,17 +167,19 @@ pub fn synthesize_module(
             &conn,
             class_id,
             module_rel,
+            None,
             &format!("no indexed files in {module_rel} — rescan the class first"),
         )?;
-        let prompt = PROMPT_TEMPLATE
-            .replace("{class}", &ctx.class_name)
-            .replace("{module}", &module_name)
-            .replace("{output}", &output_rel)
-            .replace("{accent_light}", ctx.accent_light)
-            .replace("{accent_dark}", ctx.accent_dark)
-            .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &ctx.files_block)
-            .replace("{manifest}", &ctx.manifest_block);
+        let prompt = render_guide_prompt(
+            &ctx,
+            &module_name,
+            &output_rel,
+            generated_at_label,
+            // A folder is not one of the course's divisions, so nothing is
+            // mapped to it — a lecture reaches a guide through its unit.
+            "(none — this guide is scoped to a folder rather than to one of the \
+             course's divisions, so no lecture is mapped to it)",
+        );
         let payload = serde_json::to_string(&GuidePayload {
             scope: module_rel.to_string(),
             rel_path: output_rel.clone(),
@@ -179,6 +190,112 @@ pub fn synthesize_module(
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
     crate::jobs::enqueue_module_guide(app, class_id, module_rel, &prompt, payload)
+}
+
+/// SPEC §8.1: synthesis for one of the course's own divisions — a Module, a
+/// Week or a Part, whatever that course calls it (SPEC §5).
+///
+/// Its sources are the three of SPEC §8.5: files under the unit's folder where
+/// it has one, files Canvas attributed to it, and its corpus notes — which is
+/// how a lecture stored under `Weeks/` reaches a guide scoped by topic. Today
+/// no unit of these four courses has a folder, so the corpus notes are usually
+/// all of it, and a division with no distilled lecture has nothing to build
+/// from and says so rather than producing a guide out of nothing.
+pub fn synthesize_unit(
+    app: &AppHandle,
+    class_id: i64,
+    unit_id: i64,
+    generated_at_label: &str,
+) -> Result<i64> {
+    let (class_dir, prompt, payload, scope) = {
+        let db = app.state::<crate::Db>();
+        let conn = lock(&db.0);
+
+        let unit_name: String = conn
+            .query_row(
+                "SELECT name FROM units WHERE id = ?1 AND class_id = ?2",
+                params![unit_id, class_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("that division is no longer in this course's structure")?;
+        let scope = unit_scope(&unit_name);
+        if has_active_job(&conn, class_id, "module_guide", &scope)? {
+            bail!("a synthesis for {unit_name} is already queued or running");
+        }
+
+        let corpus = crate::lectures::corpus_block(&conn, class_id, unit_id)?;
+        let ctx = synthesis_context(
+            &conn,
+            class_id,
+            &scope,
+            Some(unit_id),
+            &format!(
+                "nothing to build {unit_name} from yet — it has no folder of its own and no \
+                 lecture mapped to it has been distilled. Add a lecture for one of its weeks, \
+                 or distil one already filed."
+            ),
+        )?;
+        let output_rel = format!("{GUIDES_DIR}/{}.html", crate::units::folder_segment(&unit_name));
+        let prompt =
+            render_guide_prompt(&ctx, &unit_name, &output_rel, generated_at_label, &corpus);
+        let payload = serde_json::to_string(&GuidePayload {
+            scope: scope.clone(),
+            rel_path: output_rel,
+            source_manifest: serde_json::to_string(&ctx.manifest)?,
+        })?;
+        (ctx.class_dir, prompt, payload, scope)
+    };
+
+    fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
+    crate::jobs::enqueue_module_guide(app, class_id, &scope, &prompt, payload)
+}
+
+/// `guides.scope` and `jobs.scope` for one of the course's own divisions.
+pub(crate) fn unit_scope(unit_name: &str) -> String {
+    format!("{UNIT_SCOPE_PREFIX}{unit_name}")
+}
+
+/// What a scope is called when it is shown or told to someone.
+///
+/// A scope is a storage key, and two of its four shapes read as machinery: the
+/// app never shows the word "unit" (SPEC §5), and a session names a file path
+/// rather than a session. Mirrored by `scopeLabel` in src/lib/guides.ts.
+pub fn scope_label(scope: &str) -> String {
+    if scope == MASTER_SCOPE {
+        return "Semester Master".into();
+    }
+    if let Some(name) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
+        return name.to_string();
+    }
+    match scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
+        Some(path) => path
+            .rsplit('/')
+            .next()
+            .unwrap_or(path)
+            .trim_end_matches(".md")
+            .to_string(),
+        None => scope.to_string(),
+    }
+}
+
+fn render_guide_prompt(
+    ctx: &SynthesisContext,
+    unit_name: &str,
+    output_rel: &str,
+    generated_at_label: &str,
+    corpus_block: &str,
+) -> String {
+    PROMPT_TEMPLATE
+        .replace("{class}", &ctx.class_name)
+        .replace("{module}", unit_name)
+        .replace("{output}", output_rel)
+        .replace("{accent_light}", ctx.accent_light)
+        .replace("{accent_dark}", ctx.accent_dark)
+        .replace("{generated_at}", generated_at_label)
+        .replace("{files}", &ctx.files_block)
+        .replace("{corpus}", corpus_block)
+        .replace("{manifest}", &ctx.manifest_block)
 }
 
 /// SPEC §8.2: semester master synthesis — full raw re-synthesis from every
@@ -200,6 +317,7 @@ pub fn synthesize_master(
             &conn,
             class_id,
             MASTER_SCOPE,
+            None,
             "no indexed files in this class — rescan first",
         )?;
         // Module roster = distinct depth-0 folders holding indexed files.
@@ -278,6 +396,7 @@ pub fn generate_practice(
             &conn,
             class_id,
             scope,
+            None,
             "no indexed files in that scope — rescan the class first",
         )?;
 
@@ -391,9 +510,18 @@ pub fn resume_master(app: &AppHandle, job_id: i64) -> Result<i64> {
 /// SPEC §8.1/§8.2 inputs listing: extracts are primary; PDFs (and converted
 /// PPTX PDFs) are offered for figure re-inspection; Daniel's classwork is
 /// marked as learner work. The only layout signal for learner work is the
-/// `Edited Files` folder convention from SPEC §4's example tree. Scope
-/// 'master' lists every indexed file in the class.
-fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> {
+/// `Edited Files` folder convention from SPEC §4's example tree.
+///
+/// Driven by the manifest rather than by re-deriving the scope, so what the
+/// prompt lists and what staleness is measured against are the same set by
+/// construction. That matters most for a unit scope, whose sources come from
+/// two places sharing no path prefix (SPEC §8.5).
+fn files_block(
+    conn: &Connection,
+    class_id: i64,
+    manifest: &[ManifestEntry],
+    listed_apart: &BTreeSet<String>,
+) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT rel_path, kind, extract_rel_path FROM files
          WHERE class_id = ?1 ORDER BY rel_path",
@@ -408,10 +536,10 @@ fn files_block(conn: &Connection, class_id: i64, scope: &str) -> Result<String> 
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let prefix = format!("{scope}/");
+    let in_scope: BTreeSet<&str> = manifest.iter().map(|e| e.rel_path.as_str()).collect();
     let mut lines = Vec::new();
     for (rel_path, kind, extract) in rows {
-        if scope != MASTER_SCOPE && rel_path != scope && !rel_path.starts_with(&prefix) {
+        if !in_scope.contains(rel_path.as_str()) || listed_apart.contains(&rel_path) {
             continue;
         }
         let learner = Path::new(&rel_path)

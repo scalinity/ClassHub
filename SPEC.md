@@ -603,13 +603,19 @@ sequence under the course's own and labelled it a guess. What the folder does kn
 the declared unit's own row: each scan fills `units.rel_path` from the top-level folder whose
 name matches the unit's, which is what gives §8.1's guide something to read.
 
-**That match does not currently fire for any of the four courses**, and the join is the open
-problem M14 inherits. A division is named the way the course names it — `Week 1 — Introduction
-to Biostatistics for Artificial Intelligence in Medicine` — and the folders beside it are
-`Module 1` and `Syllabus`, so name equality never holds. Every unit's `rel_path` is NULL, and a
-unit guide's file sources are empty until a real mapping exists. Matching on the ordinal rather
-than the name is the obvious candidate; it is not built, because M14 has to decide how a lecture
-attaches to a unit anyway and the two questions are the same question.
+**That match does not currently fire for any of the four courses.** A division is named the way
+the course names it — `Week 1 — Introduction to Biostatistics for Artificial Intelligence in
+Medicine` — and the folders beside it are `Module 1` and `Syllabus`, so name equality never
+holds. Every unit's `rel_path` is NULL, and a unit guide has no file sources; what it is built
+from is its corpus notes (§8.5), which reach it without a folder.
+
+Nothing looser is built, and matching on the ordinal is the candidate that was considered and
+declined. Across all four classes there is exactly one top-level content folder — `Biostatistics
+for AI/Module 1` — against 49 declared divisions; the rest of the tree is `_Inbox`, `Syllabus`,
+`Notes` and `Study Guides`. Mapping seventeen weeks onto one folder is not an ordinal problem,
+and a matcher that fires once is one whose only real behaviour is its wrong answers. It earns
+its place when the tree grows per-division folders, or when Canvas file attribution supplies the
+join instead.
 
 **Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
 inserted and existing ones updated in place; units whose name no longer appears in Canvas are
@@ -736,11 +742,15 @@ segment a lecture across units would buy nothing — no division is finer than a
 every span it produced beyond the first would be an error — and a wrong boundary is the one
 mistake in this pipeline that quietly corrupts study material rather than failing visibly.
 
-**Each lecture is distilled once**, into `.classhub/corpus/<unit>/<date> — <topic>.md`: the
-high-yield content of the transcript, every point carrying its `HH:MM` anchor back to the
-source. This is what makes the cost sane — the expensive read happens once per lecture rather
-than once per guide per lecture — and it makes the corpus inspectable, so what a guide drew on
-can be read directly rather than inferred from the guide. A long lecture covers many topics;
+**Each lecture is distilled once**, into `.classhub/corpus/<unit>/<the transcript's own name>`:
+the high-yield content of the transcript, every point carrying its `HH:MM` anchor back to the
+source. The path is derived rather than chosen by the digest, the way an extract path mirrors
+its source (§4) — which is what lets the contribution row name it at filing time, before the
+distillation has run, and makes "did the note get written" a question about one known path
+rather than about a name a model reported. This is what makes the cost sane — the expensive read
+happens once per lecture rather than once per guide per lecture — and it makes the corpus
+inspectable, so what a guide drew on can be read directly rather than inferred from the guide.
+A long lecture covers many topics;
 the anchors are what let a guide cite the right stretch of one, which is a different problem
 from splitting it across units and is already solved by §8.4's anchored key points.
 
@@ -980,7 +990,7 @@ Mark the checkbox when the acceptance criteria pass.
   (§1) — a Canvas assignment appears as a deadline card carrying its true due date, and a course
   file reaches the tree through an approved move.
 
-- [ ] **M14 — Lectures into weeks, and the unit corpus.** (`milestones/M14-lecture-mapping.md`)
+- [x] **M14 — Lectures into weeks, and the unit corpus.** (`milestones/M14-lecture-mapping.md`)
   Transcripts file into `Weeks/` (§4), which is what maps them to units; week → Part resolution
   for the one course declaring Parts; distilled corpus notes; unit-scoped guide sources and the
   manifest union that keeps a unit guide stale-aware (§8.5).
