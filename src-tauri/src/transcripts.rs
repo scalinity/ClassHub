@@ -68,12 +68,21 @@ pub fn parse(source: &str) -> Vec<Cue> {
     }
     let seen = attribution(&raw);
 
-    raw.into_iter()
+    let mut cues: Vec<Cue> = raw
+        .into_iter()
         .filter_map(|(start_ms, end_ms, payload)| {
             let (speaker, text) = split_speaker(&payload, &seen);
             (!text.is_empty()).then_some(Cue { start_ms, end_ms, speaker, text })
         })
-        .collect()
+        .collect();
+    // Merging measures the gap between one cue and the last, and anchors assume
+    // the clock only moves forward. Two concatenated tracks or an unsorted
+    // player list break both — a backwards gap is negative so the pause rule
+    // never fires, and the section anchors come out non-monotonic.
+    if cues.iter().any(|c| c.end_ms > 0) {
+        cues.sort_by_key(|c| c.start_ms);
+    }
+    cues
 }
 
 /// A transcript with no timing grid at all: Zoom's plain-text save, text pasted
@@ -81,12 +90,26 @@ pub fn parse(source: &str) -> Vec<Cue> {
 /// Blank lines separate turns, so each block is its own cue — collapsing the
 /// whole file into one would throw away every speaker change in it.
 fn untimed_blocks(source: &str) -> Vec<(i64, i64, String)> {
-    source
-        .split("\n\n")
-        .map(collapse_ws)
-        .filter(|block| !block.is_empty())
-        .map(|block| (0, 0, block))
-        .collect()
+    // Split on blank lines via `lines()` rather than on a literal "\n\n": a
+    // CRLF file contains no "\n\n" at all, so the whole transcript would come
+    // back as one block with every speaker change in it thrown away.
+    let mut out = Vec::new();
+    let mut block = String::new();
+    for line in source.lines() {
+        if line.trim().is_empty() {
+            if !block.trim().is_empty() {
+                out.push((0, 0, collapse_ws(&block)));
+            }
+            block.clear();
+        } else {
+            block.push(' ');
+            block.push_str(line);
+        }
+    }
+    if !block.trim().is_empty() {
+        out.push((0, 0, collapse_ws(&block)));
+    }
+    out
 }
 
 /// Raw `(start, end, payload)` triples, before any speaker interpretation.
@@ -282,18 +305,54 @@ fn strip_parentheticals(text: &str) -> String {
 }
 
 /// Drops VTT inline markup (`<i>`, `<c.colorE5E5E5>`, `</v>`) and leaves text.
+///
+/// A lone `<` is *not* markup. "if n < 30 we use the t distribution, but if
+/// n > 30" is a sentence a statistics lecturer says out loud, and treating the
+/// span between the two as a tag deletes forty characters of it silently. So a
+/// tag has to look like one: a letter or `/` immediately after the `<`, and a
+/// closing `>` within the length any VTT cue setting actually runs to.
 fn strip_tags(text: &str) -> String {
+    /// `<c.colorE5E5E5.bg_black>` is about as long as these legitimately get.
+    const MAX_TAG_LEN: usize = 64;
+
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        match rest[open..].find('>') {
-            Some(close) => rest = &rest[open + close + 1..],
-            None => return out, // truncated tag at EOF
+        let after = &rest[open + 1..];
+        let tag_like = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+        match after.find('>').filter(|end| tag_like && *end <= MAX_TAG_LEN) {
+            Some(end) => {
+                out.push_str(&rest[..open]);
+                rest = &after[end + 1..];
+            }
+            // Not markup — keep the `<` and carry on past it.
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = after;
+            }
         }
     }
     out.push_str(rest);
-    out
+    decode_entities(&out)
+}
+
+/// The escapes a spec-conformant VTT uses. Zoom rarely emits them; a caption
+/// track converted by anything else routinely does, and `&amp;` reaching the
+/// filed markdown verbatim is the kind of wrong nothing downstream can undo.
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        // Last, so `&amp;lt;` decodes to `&lt;` rather than to `<`.
+        .replace("&amp;", "&")
 }
 
 fn collapse_ws(text: &str) -> String {
@@ -307,6 +366,11 @@ fn collapse_ws(text: &str) -> String {
 /// the speaker changes, when the pause runs long, or when a paragraph has grown
 /// past the soft cap and the previous cue landed on a sentence boundary.
 pub fn merge(cues: &[Cue]) -> Vec<Paragraph> {
+    // Without timings there is no gap to measure and no length worth capping —
+    // the blank-line turns `untimed_blocks` preserved are the only structure
+    // the file has, so each stays its own paragraph instead of running back
+    // together into one.
+    let timed = cues.iter().any(|c| c.end_ms > 0);
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     let mut last_end = 0i64;
 
@@ -314,9 +378,16 @@ pub fn merge(cues: &[Cue]) -> Vec<Paragraph> {
         let split = match paragraphs.last() {
             None => true,
             Some(current) => {
-                current.speaker != cue.speaker
+                !timed
+                    || current.speaker != cue.speaker
                     || cue.start_ms - last_end > GAP_BREAK_MS
-                    || (current.text.len() >= MAX_PARAGRAPH_CHARS && ends_sentence(&current.text))
+                    // Crossing a section boundary, so every section that has
+                    // speech in it starts a paragraph and therefore gets an
+                    // anchor. Without this a speaker on a long unbroken run
+                    // takes ninety minutes of lecture into one paragraph under
+                    // a single `## 00:00`.
+                    || current.start_ms / SECTION_MS != cue.start_ms / SECTION_MS
+                    || over_length(&current.text)
             }
         };
         if split {
@@ -332,6 +403,14 @@ pub fn merge(cues: &[Cue]) -> Vec<Paragraph> {
         last_end = cue.end_ms.max(cue.start_ms);
     }
     paragraphs
+}
+
+/// Past the soft cap at a sentence boundary, or past a hard ceiling regardless.
+/// Auto-captions routinely carry no sentence-final punctuation at all, and
+/// waiting for one that never comes produces a single unreadable block.
+fn over_length(text: &str) -> bool {
+    let len = text.len();
+    len >= MAX_PARAGRAPH_CHARS && (ends_sentence(text) || len >= 2 * MAX_PARAGRAPH_CHARS)
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -382,7 +461,10 @@ pub fn to_markdown(cues: &[Cue], meta: &Meta<'_>) -> String {
             let current = paragraph.start_ms / SECTION_MS;
             if current != section {
                 section = current;
-                let _ = writeln!(out, "## {}\n", clock(current * SECTION_MS));
+                // The paragraph's own start, not the section boundary it falls
+                // in. A digest citing an anchor is telling the reader where to
+                // scrub to, and the boundary can be five minutes early.
+                let _ = writeln!(out, "## {}\n", clock(paragraph.start_ms));
             }
         }
         match paragraph.speaker.as_deref() {
@@ -741,9 +823,12 @@ mod tests {
             "{md}"
         );
         // Anchors track the recording's own clock, so a digest can cite a time
-        // that scrubs to the right moment.
+        // that scrubs to the right moment — the paragraph's own start, not the
+        // five-minute boundary it happens to fall inside, which would send the
+        // reader up to five minutes early.
         assert!(md.contains("## 00:00"), "{md}");
-        assert!(md.contains("## 00:05"), "{md}");
+        assert!(md.contains("## 00:06"), "{md}");
+        assert!(!md.contains("## 00:05"), "anchored to the bucket, not the speech: {md}");
         assert!(
             md.contains(
                 "Recorded 2026-08-20 · 6m · source: GMT20260820-114500_Recording.transcript.vtt"
@@ -780,6 +865,91 @@ mod tests {
         assert_eq!(describe(""), None);
         assert_eq!(describe("Just notes, no heading."), None);
         assert_eq!(describe("# A note\n\nSome content about the reading."), None);
+    }
+
+    /// A lone `<` in speech is not markup, and treating it as such deletes
+    /// everything up to the next `>` — a whole clause of a statistics lecture.
+    #[test]
+    fn keeps_comparisons_and_decodes_escapes() {
+        let vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\n\
+                   <i>So if n &lt; 30 we use the t distribution, but if n > 30 the z applies.</i>\n";
+        let cues = parse(vtt);
+        assert_eq!(
+            cues[0].text,
+            "So if n < 30 we use the t distribution, but if n > 30 the z applies."
+        );
+        // Real markup still goes, and the ampersand escape decodes once.
+        let vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n\
+                   <c.colorE5E5E5>AT&amp;T</c> and <v Esra>Bayes</v>\n";
+        assert_eq!(parse(vtt)[0].text, "AT&T and Bayes");
+    }
+
+    /// A speaker who never lands a full stop — routine for auto-captions —
+    /// would otherwise take the whole lecture into one paragraph under one
+    /// anchor, which M14 then resolves to a single span covering everything.
+    #[test]
+    fn breaks_a_long_unpunctuated_monologue_and_anchors_each_section() {
+        let mut vtt = String::from("WEBVTT\n\n");
+        for i in 0..400i64 {
+            let s = i * 3_000;
+            vtt.push_str(&format!(
+                "{}\nEsra Adiyeke: and then we keep going without ever stopping properly\n\n",
+                timing(s, s + 3_000)
+            ));
+        }
+        let cues = parse(&vtt);
+        let merged = merge(&cues);
+        // Bounded despite never meeting a sentence boundary. Before the hard
+        // ceiling this was one paragraph of twenty-five thousand characters.
+        assert!(merged.len() > 1, "one speaker ran together: {} paragraphs", merged.len());
+        for paragraph in &merged {
+            assert!(
+                paragraph.text.len() < 3 * MAX_PARAGRAPH_CHARS,
+                "unbounded paragraph: {} chars",
+                paragraph.text.len()
+            );
+        }
+
+        let md = to_markdown(
+            &cues,
+            &Meta { title: "Long", date: "2026-08-20", source_name: "long.vtt" },
+        );
+        // Twenty minutes of speech is four five-minute sections, each anchored.
+        for anchor in ["## 00:00", "## 00:05", "## 00:10", "## 00:15"] {
+            assert!(md.contains(anchor), "missing {anchor}");
+        }
+    }
+
+    /// Untimed turns are the only structure an untimed file has; the gap and
+    /// length rules cannot see them, so they must not be merged away.
+    #[test]
+    fn keeps_untimed_turns_apart() {
+        let cues = parse("First thing said.\n\nSecond thing said.\n\nThird thing said.");
+        assert_eq!(merge(&cues).len(), 3, "{cues:?}");
+        // And the same file with CRLF line endings, which has no "\n\n" in it.
+        let cues = parse("First thing said.\r\n\r\nSecond thing said.\r\n\r\nThird thing said.");
+        assert_eq!(cues.len(), 3, "{cues:?}");
+        assert_eq!(cues[1].text, "Second thing said.");
+    }
+
+    /// Two tracks concatenated, or a player list handed back unsorted. A
+    /// backwards jump makes the gap negative, so the pause rule never fires and
+    /// the anchors come out non-monotonic.
+    #[test]
+    fn orders_cues_before_merging() {
+        let vtt = "WEBVTT\n\n\
+            00:10:00.000 --> 00:10:02.000\nLater.\n\n\
+            00:00:00.000 --> 00:00:02.000\nEarlier.\n";
+        let cues = parse(vtt);
+        assert_eq!(cues[0].text, "Earlier.", "{cues:?}");
+
+        let md = to_markdown(
+            &cues,
+            &Meta { title: "T", date: "2026-08-20", source_name: "t.vtt" },
+        );
+        let first = md.find("## 00:00").expect("first anchor");
+        let second = md.find("## 00:10").expect("second anchor");
+        assert!(first < second, "anchors run backwards: {md}");
     }
 
     #[test]
