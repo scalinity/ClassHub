@@ -258,9 +258,10 @@ function CanvasSection() {
       title="CANVAS"
       lead="Canvas holds the authoritative version of each course — its own
         structure, its files, and its assignments with real due dates. ClassHub
-        reads it through a Canvas window you sign in to, and keeps no
-        credential: its reach ends when that session does. Syncing runs when you
-        ask, never on a schedule."
+        reads it through a Canvas window you sign in to, and keeps that
+        session's own cookie in your Keychain so relaunching the app does not
+        mean signing in again. Nothing is minted, and Canvas decides when the
+        session ends. Syncing runs when you ask, never on a schedule."
     >
       <dl className="mt-4 space-y-1.5 font-mono text-[11px]">
         <div className="flex gap-3">
@@ -310,7 +311,8 @@ function CanvasSection() {
       <SyncReport progress={progress} />
 
       <p className="mt-3 max-w-xl text-[11.5px] leading-relaxed text-muted-foreground">
-        Expect to sign in most times. Assignments arrive as deadline cards and
+        You will be asked to sign in when Canvas ends the session, not every
+        time you open the app. Assignments arrive as deadline cards and
         files land in each class's inbox — both wait for your approval, the same
         as everything else that moves material.
       </p>

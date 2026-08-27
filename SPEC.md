@@ -175,7 +175,7 @@ flowchart LR
     LO[LibreOffice headless]
     PK[Parakeet MLX - on-device ASR]
     ZM[Zoom capture window - user signs in]
-    CV[Canvas sign-in window - reads /api/v1 in-page, stores nothing]
+    CV[Canvas sign-in window - reads /api/v1 in-page, keeps the session cookie]
 
     ui <--> Cmds
     Cmds --> Jobs
@@ -188,6 +188,7 @@ flowchart LR
     Lectures --> Jobs
     Cmds --> Canvas
     Canvas --> CV
+    Canvas -->|session cookie| Keychain
     Canvas -->|units, deadlines| DB
     Canvas -->|course files| AIBHS
     Jobs --> CLI
@@ -570,8 +571,10 @@ No credential is minted. What is stored is the cookie Canvas already issued to t
 the app's reach stays the reach the sign-in granted, and `POST /api/v1/users/:id/tokens` remains
 off-limits (§1). Canvas sets the lifetime: a refusal deletes the stored copy and opens the
 sign-in window, which is what a password change, an admin revoke and Canvas's own timeout each
-look like from here. A copy no sync has used for 30 days is deleted regardless — that being the
-window Duo's device-trust cookie keeps, past which the full sign-in was coming anyway.
+look like from here. A copy no sync has used for 30 days is refused and deleted the next time a
+sync asks for it — that being the window Duo's device-trust cookie keeps, past which the full
+sign-in was coming anyway. The check is made on use rather than on a timer, because sync is
+manual and nothing here should introduce a scheduler.
 
 A window that has not navigated anywhere yet is not a Canvas asking for a sign-in. The initial
 empty document reports no host at all, and reading that as "somewhere other than Canvas" would
@@ -837,8 +840,9 @@ and apply it. Non-negotiable per project owner.
 - Rust: `anyhow` for errors in commands, typed event payloads (serde), no `unwrap()` outside
   tests/startup.
 - Commits: small, per-milestone; no AI attribution lines; existing git config untouched.
-- Secrets: API key only in Keychain. `.gitignore`: `node_modules`, `target`, app-data,
-  any `.env`.
+- Secrets: credentials only in the Keychain — the Anthropic API key and the Canvas session
+  cookies (§7.2) — never in the database, never in a file. `.gitignore`: `node_modules`,
+  `target`, app-data, any `.env`.
 - **Model output never reaches the DOM unfiltered.** Answers render into the app document
   itself, which holds the IPC bridge, so `src/lib/answer.ts` is the single place markdown
   becomes markup: raw HTML is escaped and link/image URLs outside `http(s)`/`mailto`/

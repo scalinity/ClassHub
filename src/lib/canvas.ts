@@ -9,9 +9,10 @@ import { queryClient } from "@/lib/query";
  *
  * There is deliberately no "connected" state here and no key to manage. UF has
  * closed both credentialed paths, so the app reads through a signed-in Canvas
- * window and stores nothing; its reach expires with that session. A sync
- * therefore either finds the session still open or asks for a sign-in, and the
- * second is an ordinary step rather than an error to recover from.
+ * window and keeps that session's cookie in the Keychain, which is what lets a
+ * relaunch skip the sign-in. Holding it is not the same as Canvas still
+ * honouring it, so a sync either finds the session live or asks for a sign-in,
+ * and the second is an ordinary step rather than an error to recover from.
  */
 
 /** The course's own division, in the course's own words (SPEC §5). */
