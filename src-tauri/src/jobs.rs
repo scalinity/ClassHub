@@ -1578,8 +1578,8 @@ fn first_json(text: &str, open: char, opens: &[u8], want: fn(&Value) -> bool) ->
     None
 }
 
-/// Parses the proposal-shaped jobs' output contract (sort_proposal,
-/// syllabus_scan): a bare JSON array as the final message.
+/// Parses the bare-array output contract: `sort_proposal`, and the older shape
+/// `syllabus_scan` still answers with often enough to keep accepting.
 pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
     match first_json(text, '[', b"{]", Value::is_array) {
         Some(Value::Array(entries)) => Ok(entries),
@@ -1588,7 +1588,8 @@ pub(crate) fn parse_entries(text: &str) -> Result<Vec<Value>> {
 }
 
 /// The single-object sibling of `parse_entries`, for jobs whose contract is one
-/// record rather than a list (lecture_digest). A candidate `{` counts only when
+/// record rather than a list (`lecture_digest`, and `syllabus_scan`'s two-part
+/// answer). A candidate `{` counts only when
 /// a quoted key follows — an empty pair parses perfectly well, and admitting it
 /// let one anywhere in the prose shadow the real record.
 pub(crate) fn parse_object(text: &str) -> Result<Value> {

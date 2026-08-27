@@ -42,13 +42,15 @@ pub struct InboxFile {
 #[serde(rename_all = "camelCase")]
 pub struct Proposal {
     pub id: i64,
-    /// Class-relative, `_Inbox/...` for sort-job rows; anywhere for chat rows.
+    /// Class-relative, `_Inbox/...` for sort-job and Canvas rows; anywhere for
+    /// chat rows.
     pub source_rel_path: String,
     pub dest_rel_path: String,
     pub reasoning: String,
-    /// high|medium|low from sort jobs; NULL on chat proposals.
+    /// high|medium|low from sort jobs; NULL on chat and Canvas proposals —
+    /// neither is a model rating its own guess.
     pub confidence: Option<String>,
-    /// chat | sort_job
+    /// chat | sort_job | canvas
     pub source: String,
     pub created_at: i64,
 }
@@ -251,13 +253,20 @@ fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {
 fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option<String>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let (pending, dismissed) = proposal_sources(conn, class_id)?;
+    let placed = canvas_placed(conn, class_id)?;
     let inbox: Vec<InboxFile> = list_inbox(&class_dir)
         .into_iter()
         .filter(|f| {
+            let key = format!("{INBOX_DIR}/{}", f.name);
+            // Out of scope even for a manual run: Canvas already said where
+            // this one belongs, and "Change destination" on the card is the way
+            // to disagree with that.
+            if placed.contains(&key) {
+                return false;
+            }
             if manual {
                 return true;
             }
-            let key = format!("{INBOX_DIR}/{}", f.name);
             !pending.contains(&key) && !dismissed.contains(&key)
         })
         .collect();
@@ -406,6 +415,21 @@ fn proposal_sources(
     Ok((pending, dismissed))
 }
 
+/// Inbox files Canvas has already placed and that are still awaiting approval.
+///
+/// These are out of scope for a sort job however it was started. Canvas's
+/// destination is where the professor filed the material, so asking a model to
+/// name a folder for it spends a job to produce a guess that `upsert_proposal`
+/// would then have to ignore.
+fn canvas_placed(conn: &Connection, class_id: i64) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_rel_path FROM move_proposals
+         WHERE class_id = ?1 AND status = 'pending' AND source = 'canvas'",
+    )?;
+    let rows = stmt.query_map([class_id], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
+}
+
 pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let (_, dismissed) = proposal_sources(conn, class_id)?;
@@ -488,7 +512,15 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
             };
             match validate_entry(&class_dir, &entry) {
                 Ok(valid) => {
-                    upsert_proposal(conn, class_id, &valid)?;
+                    upsert_proposal(
+                        conn,
+                        class_id,
+                        "sort_job",
+                        &valid.source_rel,
+                        &valid.dest_rel,
+                        &valid.reasoning,
+                        valid.confidence.as_deref(),
+                    )?;
                     recorded += 1;
                 }
                 Err(e) => skipped.push(format!("{} ({e:#})", entry.file)),
@@ -622,25 +654,60 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 }
 
 /// One pending proposal per source file — a re-proposal replaces the pending
-/// row instead of stacking (same rule as chat's propose_file_moves).
-fn upsert_proposal(conn: &Connection, class_id: i64, v: &ValidEntry) -> Result<()> {
-    let updated = conn.execute(
-        "UPDATE move_proposals
-         SET dest_rel_path = ?1, reasoning = ?2, confidence = ?3,
-             source = 'sort_job', created_at = ?4
-         WHERE class_id = ?5 AND source_rel_path = ?6 AND status = 'pending'",
-        params![v.dest_rel, v.reasoning, v.confidence, now(), class_id, v.source_rel],
-    )?;
-    if updated == 0 {
-        conn.execute(
-            "INSERT INTO move_proposals
-             (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
-              source, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'sort_job', 'pending', ?6)",
-            params![class_id, v.source_rel, v.dest_rel, v.reasoning, v.confidence, now()],
-        )?;
+/// row instead of stacking. The one path all three producers take, so the rule
+/// cannot drift between them.
+///
+/// Canvas is the exception the sort job defers to. Where Canvas filed a file is
+/// an *observation* — the professor put it in that folder — while a sort job's
+/// destination is an *inference* from a filename and a tree. Letting the guess
+/// replace the record is how a slide deck Canvas had placed under `Slides/`
+/// ended up proposed for a `Week 1/Slides/` that nobody had said existed.
+///
+/// Chat is not that exception: a chat move is the user asking for one, which is
+/// a decision rather than a guess. Either way the card's own "Change
+/// destination" remains the way to retarget.
+pub(crate) fn upsert_proposal(
+    conn: &Connection,
+    class_id: i64,
+    source: &str,
+    source_rel: &str,
+    dest_rel: &str,
+    reasoning: &str,
+    confidence: Option<&str>,
+) -> Result<()> {
+    let held: Option<String> = conn
+        .query_row(
+            "SELECT source FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
+            params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match held.as_deref() {
+        Some("canvas") if source == "sort_job" => Ok(()),
+        Some(_) => {
+            // source and confidence reset too: replacing a sort job's pending
+            // row must not leave its HIGH chip attributed to a chat destination.
+            conn.execute(
+                "UPDATE move_proposals
+                 SET dest_rel_path = ?1, reasoning = ?2, confidence = ?3,
+                     source = ?4, created_at = ?5
+                 WHERE class_id = ?6 AND source_rel_path = ?7 AND status = 'pending'",
+                params![dest_rel, reasoning, confidence, source, now(), class_id, source_rel],
+            )?;
+            Ok(())
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO move_proposals
+                 (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
+                  source, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+                params![class_id, source_rel, dest_rel, reasoning, confidence, source, now()],
+            )?;
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -898,3 +965,75 @@ fn update_index(
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn propose(conn: &Connection, source: &str, dest: &str) {
+        upsert_proposal(
+            conn,
+            1,
+            source,
+            &format!("{INBOX_DIR}/deck.pdf"),
+            dest,
+            "because",
+            None,
+        )
+        .expect("propose");
+    }
+
+    fn held(conn: &Connection) -> (String, String, i64) {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM move_proposals", [], |r| r.get(0))
+            .expect("count");
+        let (dest, source) = conn
+            .query_row(
+                "SELECT dest_rel_path, source FROM move_proposals WHERE class_id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("one row");
+        (dest, source, count)
+    }
+
+    /// Canvas's destination is an observation — the professor filed it there.
+    /// A sort job's is an inference from a filename and a tree, and a guess
+    /// must not overwrite the record.
+    #[test]
+    fn a_sort_job_does_not_replace_what_canvas_placed() {
+        let conn = crate::db::memory_db();
+        propose(&conn, "canvas", "Slides/deck.pdf");
+        propose(&conn, "sort_job", "Week 1/Slides/deck.pdf");
+        assert_eq!(
+            held(&conn),
+            ("Slides/deck.pdf".into(), "canvas".into(), 1),
+            "a sort job overwrote Canvas, or stacked a second card"
+        );
+    }
+
+    /// A chat move is the user asking for one, which is a decision rather than
+    /// a guess — so it retargets, and the card stops claiming Canvas said so.
+    #[test]
+    fn a_chat_move_retargets_a_canvas_placement() {
+        let conn = crate::db::memory_db();
+        propose(&conn, "canvas", "Slides/deck.pdf");
+        propose(&conn, "chat", "Readings/deck.pdf");
+        assert_eq!(
+            held(&conn),
+            ("Readings/deck.pdf".into(), "chat".into(), 1)
+        );
+    }
+
+    /// One pending proposal per source file, whichever producer re-proposes it.
+    #[test]
+    fn a_re_proposal_replaces_rather_than_stacks() {
+        let conn = crate::db::memory_db();
+        propose(&conn, "sort_job", "Slides/deck.pdf");
+        propose(&conn, "sort_job", "Readings/deck.pdf");
+        assert_eq!(
+            held(&conn),
+            ("Readings/deck.pdf".into(), "sort_job".into(), 1)
+        );
+    }
+}

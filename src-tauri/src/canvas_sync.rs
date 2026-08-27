@@ -835,25 +835,11 @@ fn propose_move(
     reasoning: &str,
 ) -> Result<()> {
     crate::sorter::validate_dest(class_dir, source_rel, dest_rel)?;
-    // One pending proposal per source file, the same rule the other two
-    // proposal paths keep.
-    let updated = conn.execute(
-        "UPDATE move_proposals
-         SET dest_rel_path = ?1, reasoning = ?2, confidence = 'high',
-             source = 'canvas', created_at = ?3
-         WHERE class_id = ?4 AND source_rel_path = ?5 AND status = 'pending'",
-        params![dest_rel, reasoning, now(), class_id, source_rel],
-    )?;
-    if updated == 0 {
-        conn.execute(
-            "INSERT INTO move_proposals
-             (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
-              source, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'high', 'canvas', 'pending', ?5)",
-            params![class_id, source_rel, dest_rel, reasoning, now()],
-        )?;
-    }
-    Ok(())
+    // No confidence: the queue's confidence ladder rates how sure a model is of
+    // a guess, and this is not one. The card says VIA CANVAS instead, and
+    // storing `high` here would make a later read of the table look as though
+    // something had rated it.
+    crate::sorter::upsert_proposal(conn, class_id, "canvas", source_rel, dest_rel, reasoning, None)
 }
 
 // ---------------------------------------------------------------------------

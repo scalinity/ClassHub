@@ -107,7 +107,9 @@ pub struct DeadlineInfo {
     pub notes: Option<String>,
     /// open | done
     pub status: String,
-    /// manual | agent | syllabus
+    /// manual | agent | syllabus | canvas — stamped from the proposal that was
+    /// approved, so a due date that turns out wrong can be traced to the reader
+    /// that produced it.
     pub source: String,
 }
 
