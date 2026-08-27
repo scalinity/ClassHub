@@ -290,8 +290,9 @@ fn sync_units(
         return Ok(());
     }
 
-    let added = with_conn(app, |conn| {
+    let (added, skipped) = with_conn(app, |conn| {
         let mut added = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
         for (index, module) in modules.iter().enumerate() {
             let Some(name) = module["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -312,12 +313,25 @@ fn sync_units(
             match units::upsert(conn, class.id, &unit) {
                 Ok(true) => added += 1,
                 Ok(false) => {}
-                Err(e) => eprintln!("canvas: skipping module '{name}': {e:#}"),
+                // Counted rather than only printed: a module that did not land
+                // shows up as a lower total, which is indistinguishable from
+                // Canvas having published less.
+                Err(e) => {
+                    eprintln!("canvas: skipping module '{name}': {e:#}");
+                    skipped.push(format!("{name} ({e})"));
+                }
             }
         }
-        Ok(added)
+        Ok((added, skipped))
     })?;
     outcome.units_added = added;
+    if !skipped.is_empty() {
+        outcome.notes.push(format!(
+            "{} module(s) could not be recorded: {}",
+            skipped.len(),
+            skipped.join("; ")
+        ));
+    }
     Ok(())
 }
 

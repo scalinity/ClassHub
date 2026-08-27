@@ -640,14 +640,26 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
 fn split_output(result_text: &str) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
     if let Ok(record) = crate::jobs::parse_object(result_text) {
         if record.get("deadlines").is_some() || record.get("units").is_some() {
-            let array = |key: &str| {
-                record
-                    .get(key)
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default()
+            // An absent key is a real answer — a syllabus may hold no dated
+            // items, or no structure. A key that is present and not a list is
+            // not: collapsing that to an empty vec reported "no date-bearing
+            // items found", the same words a genuinely dateless syllabus earns,
+            // and the scan's whole deadline half vanished without a trace.
+            let array = |key: &str| -> Result<Vec<serde_json::Value>> {
+                match record.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+                    Some(serde_json::Value::Array(items)) => Ok(items.clone()),
+                    Some(other) => bail!(
+                        "the scan's `{key}` came back as {} rather than a list",
+                        match other {
+                            serde_json::Value::Object(_) => "an object",
+                            serde_json::Value::String(_) => "a string",
+                            _ => "a value",
+                        }
+                    ),
+                }
             };
-            return Ok((array("deadlines"), array("units")));
+            return Ok((array("deadlines")?, array("units")?));
         }
     }
     Ok((crate::jobs::parse_entries(result_text)?, Vec::new()))
@@ -665,6 +677,14 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
     let recorded = with_conn(app, |conn| {
         let mut added = 0usize;
         let mut seen = 0usize;
+        // Names claimed by this scan. `units` holds one row per (class, name),
+        // and courses do repeat a topic — Design Studio runs four separate
+        // "AI Design Project Presentations" weeks. Two entries under one name
+        // become one row and `upsert` reports `Ok(false)`, which reads exactly
+        // like "already recorded": a schedule that quietly lost four of its
+        // fifteen weeks. Counted so the summary can say so.
+        let mut claimed: Vec<String> = Vec::new();
+        let mut collapsed: Vec<String> = Vec::new();
         for (index, value) in raw.iter().enumerate() {
             let Ok(entry) = serde_json::from_value::<RawUnit>(value.clone()) else {
                 continue;
@@ -674,6 +694,12 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 continue;
             }
             seen += 1;
+            let lowered = name.to_lowercase();
+            if claimed.contains(&lowered) {
+                collapsed.push(name.to_string());
+                continue;
+            }
+            claimed.push(lowered);
             let unit = crate::units::NewUnit {
                 ordinal: entry.ordinal.unwrap_or(index as i64 + 1),
                 kind: entry
@@ -687,9 +713,12 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 rel_path: None,
                 // A syllabus week without a date is ordinary — two of the four
                 // courses number their weeks and never date them — so an
-                // unparseable date drops the date, not the unit.
-                starts_on: entry.starts_on.filter(|d| valid_due_at(d)),
-                ends_on: entry.ends_on.filter(|d| valid_due_at(d)),
+                // unparseable date drops the date, not the unit. Truncated to
+                // the day because that is what the column holds: `valid_due_at`
+                // also accepts a time, and a `starts_on` carrying one renders
+                // as nothing at all in the workspace.
+                starts_on: entry.starts_on.filter(|d| valid_due_at(d)).map(day_of),
+                ends_on: entry.ends_on.filter(|d| valid_due_at(d)).map(day_of),
                 source: "syllabus",
             };
             match crate::units::upsert(conn, class_id, &unit) {
@@ -698,20 +727,39 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 Err(e) => eprintln!("syllabus: skipping unit '{name}': {e:#}"),
             }
         }
-        Ok((added, seen))
+        Ok((added, seen, collapsed))
     });
     match recorded {
-        Ok((_, 0)) => None,
-        Ok((added, seen)) if added == 0 => Some(format!("{seen} division(s) already recorded")),
-        Ok((added, seen)) => {
-            crate::db::emit_hub_change(app, "units");
-            Some(format!("{added} of {seen} division(s) recorded"))
+        Ok((_, 0, _)) => None,
+        Ok((added, seen, collapsed)) => {
+            if added > 0 {
+                crate::db::emit_hub_change(app, "units");
+            }
+            let mut summary = if added == 0 {
+                format!("{seen} division(s) already recorded")
+            } else {
+                format!("{added} of {seen} division(s) recorded")
+            };
+            if !collapsed.is_empty() {
+                summary.push_str(&format!(
+                    " · {} share a name with an earlier one and were not recorded separately: {}",
+                    collapsed.len(),
+                    collapsed.join(", ")
+                ));
+            }
+            Some(summary)
         }
         Err(e) => {
             eprintln!("syllabus: units not recorded for class {class_id}: {e:#}");
             Some("divisions could not be recorded".to_string())
         }
     }
+}
+
+/// The day half of a validated ISO timestamp. `valid_due_at` guarantees at
+/// least ten ASCII characters, so the slice is safe.
+fn day_of(iso: String) -> String {
+    iso[..10].to_string()
 }
 
 /// What recording a proposal did, so a caller can say so rather than report a
@@ -730,6 +778,18 @@ pub(crate) enum Recorded {
     /// re-scan or a re-sync must not put it back; adding it by hand is the way
     /// back.
     DismissedBefore,
+}
+
+/// canvas > syllabus, for a card both readers can propose.
+///
+/// Canvas returns the assignment's own `due_at`; a syllabus scan returns a
+/// model's reading of prose about it, which routinely has the day and rarely
+/// the hour. Where they disagree the first is what the course committed to.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "canvas" => 2,
+        _ => 1,
+    }
 }
 
 /// The one path a proposed deadline takes into the queue, whatever proposed it.
@@ -781,14 +841,31 @@ pub(crate) fn record_proposal(
     if dismissed_before > 0 {
         return Ok(Recorded::DismissedBefore);
     }
-    let updated = conn.execute(
-        "UPDATE deadline_proposals
-         SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4, source = ?5
-         WHERE class_id = ?6 AND LOWER(title) = LOWER(?7)
-           AND substr(due_at, 1, 10) = substr(?8, 1, 10) AND status = 'pending'",
-        params![kind, due_at, notes, now(), source, class_id, title, due_at],
-    )?;
-    if updated > 0 {
+    let pending: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, source FROM deadline_proposals
+             WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+               AND substr(due_at, 1, 10) = substr(?3, 1, 10) AND status = 'pending'",
+            params![class_id, title, due_at],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, held)) = pending {
+        // The card is already waiting; the only question is whether this reader
+        // knows better than the one that put it there. Canvas reads the
+        // assignment's own due date and a syllabus scan reads prose about it,
+        // so a rescan must not overwrite a stated time with a bare date, or
+        // relabel a card as something a PDF said. Same rule `units::rank`
+        // keeps, for the same reason.
+        if source_rank(source) < source_rank(&held) {
+            return Ok(Recorded::Refreshed);
+        }
+        conn.execute(
+            "UPDATE deadline_proposals
+             SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4, source = ?5
+             WHERE id = ?6",
+            params![kind, due_at, notes, now(), source, id],
+        )?;
         return Ok(Recorded::Refreshed);
     }
     conn.execute(
@@ -923,6 +1000,118 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The real schema, classes included — `0001_init.sql` seeds them.
+    fn db() -> rusqlite::Connection {
+        crate::db::memory_db()
+    }
+
+    fn propose(conn: &rusqlite::Connection, due_at: &str, source: &str) -> Recorded {
+        record_proposal(conn, 1, "Problem Set 2", "assignment", due_at, None, source)
+            .expect("record")
+    }
+
+    fn stored(conn: &rusqlite::Connection) -> (String, String) {
+        conn.query_row(
+            "SELECT due_at, source FROM deadline_proposals WHERE class_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("one row")
+    }
+
+    /// Both readers land in one queue, so the same item proposed from both is
+    /// one card rather than two.
+    #[test]
+    fn a_second_reading_of_the_same_item_refreshes_one_card() {
+        let conn = db();
+        assert!(matches!(propose(&conn, "2026-09-03", "syllabus"), Recorded::Proposed));
+        assert!(matches!(
+            propose(&conn, "2026-09-03T23:59", "canvas"),
+            Recorded::Refreshed
+        ));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deadline_proposals", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "the queue stacked a duplicate card");
+    }
+
+    /// Canvas reads the assignment's own due date; a syllabus scan reads prose
+    /// about it. A rescan must not replace a stated time with a bare day, nor
+    /// relabel the card as something a PDF said.
+    #[test]
+    fn a_syllabus_rescan_does_not_overwrite_what_canvas_said() {
+        let conn = db();
+        propose(&conn, "2026-09-03T23:59", "canvas");
+        assert!(matches!(
+            propose(&conn, "2026-09-03", "syllabus"),
+            Recorded::Refreshed
+        ));
+        assert_eq!(
+            stored(&conn),
+            ("2026-09-03T23:59".to_string(), "canvas".to_string())
+        );
+        // Canvas correcting its own earlier reading still lands — identity is
+        // (title, calendar day), so this is the same card with a new time.
+        propose(&conn, "2026-09-03T09:00", "canvas");
+        assert_eq!(
+            stored(&conn),
+            ("2026-09-03T09:00".to_string(), "canvas".to_string())
+        );
+    }
+
+    /// A decision already made. A re-scan or a re-sync must not put a declined
+    /// card back; adding it by hand is the way back.
+    #[test]
+    fn a_declined_card_is_not_proposed_again() {
+        let conn = db();
+        propose(&conn, "2026-09-03", "syllabus");
+        conn.execute(
+            "UPDATE deadline_proposals SET status = 'dismissed' WHERE class_id = 1",
+            [],
+        )
+        .expect("dismiss");
+        assert!(matches!(
+            propose(&conn, "2026-09-03", "canvas"),
+            Recorded::DismissedBefore
+        ));
+    }
+
+    #[test]
+    fn an_item_already_on_the_list_is_not_proposed() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, status, source)
+             VALUES (1, 'Problem Set 2', 'assignment', '2026-09-03T23:59', 'open', 'manual')",
+            [],
+        )
+        .expect("deadline");
+        assert!(matches!(
+            propose(&conn, "2026-09-03", "syllabus"),
+            Recorded::AlreadyDeadline
+        ));
+    }
+
+    /// An absent key is a real answer; a key that is present and not a list is
+    /// a malformed scan. Collapsing the second to an empty vec reported "no
+    /// date-bearing items found" and lost the scan's whole deadline half.
+    #[test]
+    fn a_malformed_half_fails_the_scan_rather_than_reading_as_empty() {
+        let (deadlines, units) =
+            split_output(r#"{"deadlines": [{"title": "x"}]}"#).expect("valid shape");
+        assert_eq!(deadlines.len(), 1);
+        assert!(units.is_empty(), "an absent key is an empty list");
+
+        assert!(split_output(r#"{"deadlines": {"title": "x"}, "units": []}"#).is_err());
+        assert!(split_output(r#"{"units": "Week 1"}"#).is_err());
+        // A bare array is still the deadline list alone.
+        assert_eq!(
+            split_output(r#"[{"title": "x"}]"#).expect("bare array").0.len(),
+            1
+        );
+    }
+
     use super::valid_due_at;
 
     /// The one gate between model-invented dates and storage: a date that is

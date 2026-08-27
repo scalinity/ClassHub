@@ -208,6 +208,18 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> 
             // Within one source there is nothing to preserve: the incoming row
             // simply is the current state, and carrying an old value forward
             // would make a date the course removed impossible to clear.
+            // Fell through to the name lookup and found a row belonging to a
+            // different Canvas module. Two divisions really can share a topic
+            // name — a term with four "Project Presentations" weeks has four —
+            // and `UNIQUE(class_id, name)` holds only one of them. Refused
+            // loudly rather than letting the second quietly overwrite the
+            // first and counting it as "already recorded".
+            if let (Some(incoming), Some(held)) = (unit.canvas_id.as_deref(), canvas_id.as_deref())
+            {
+                if incoming != held {
+                    bail!("another division of this course is already called '{name}'");
+                }
+            }
             let takeover = rank(unit.source) > rank(&current);
             let keep = |incoming: &Option<String>, held: &Option<String>| match (takeover, incoming)
             {

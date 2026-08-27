@@ -147,6 +147,20 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_folder_units.sql"),
 ];
 
+/// An in-memory database with every migration applied.
+///
+/// Tests that touch storage run against the real schema rather than a
+/// hand-copied subset of it, so a migration and the code that reads it cannot
+/// drift apart unnoticed.
+#[cfg(test)]
+pub(crate) fn memory_db() -> Connection {
+    let conn = Connection::open_in_memory().expect("opening an in-memory database");
+    for migration in MIGRATIONS {
+        conn.execute_batch(migration).expect("applying a migration");
+    }
+    conn
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meeting {
