@@ -38,6 +38,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_500);
 /// One probe round-trip. Generous: the page is busy while the player loads.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const WINDOW_LABEL: &str = "zoom-capture";
+/// A lecture recording runs to gigabytes over whatever connection is to hand,
+/// so this is sized for a slow one rather than a fast one.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Reads the transcript for a Zoom recording link, returning the caption text
 /// and a display name for where it came from.
@@ -51,8 +54,8 @@ pub fn fetch_caption(
         .as_ref()
         .and_then(|u| u.host_str())
         .unwrap_or_default()
-        .to_string();
-    if !(host.ends_with("zoom.us") || host.ends_with("zoom.com")) {
+        .to_ascii_lowercase();
+    if !is_zoom_host(&host) {
         bail!("{url} is not a Zoom recording link");
     }
 
@@ -133,11 +136,18 @@ pub fn fetch_caption(
         }
         Outcome::Media(media_url) => {
             on_stage("No transcript published — downloading the recording…");
-            let cookies = cookie_header(&window, url);
+            // Both origins: Zoom serves recordings off a media host of its own,
+            // so the page's cookies alone leave the request unauthenticated.
+            let cookies = cookie_header(&window, &[url, &media_url]);
+            let referer = origin_of(url);
             let _ = window.close();
-            let media = download(app, &media_url, &cookies, on_stage)?;
+            let media = download(app, &media_url, &cookies, &referer, on_stage)?;
             let vtt = crate::transcribe::to_vtt(app, &media, on_stage);
-            let _ = std::fs::remove_file(&media);
+            // Kept when transcription fails: re-fetching gigabytes because
+            // Parakeet was misconfigured is a long way to go for a retry.
+            if vtt.is_ok() {
+                let _ = std::fs::remove_file(&media);
+            }
             Ok((vtt?, name))
         }
     }
@@ -146,6 +156,15 @@ pub fn fetch_caption(
 enum Outcome {
     Caption(String),
     Media(String),
+}
+
+/// Zoom, and not merely a host whose name ends in it — `notzoom.us` is
+/// registrable, and a window opened on it would have the probe injected and its
+/// answer written into the class tree as a transcript.
+fn is_zoom_host(host: &str) -> bool {
+    ["zoom.us", "zoom.com"]
+        .iter()
+        .any(|z| host == *z || host.ends_with(&format!(".{z}")))
 }
 
 fn stage_label(state: &str) -> &'static str {
@@ -191,22 +210,32 @@ fn probe(window: &WebviewWindow, js: &str) -> Result<Value> {
     serde_json::from_str(&raw).with_context(|| format!("probe returned {raw:?}"))
 }
 
-/// `name=value; …` for the recording's origin, so Rust's own request carries
-/// the session the user just established in the window.
-fn cookie_header(window: &WebviewWindow, url: &str) -> String {
-    let Ok(parsed) = tauri::Url::parse(url) else {
-        return String::new();
-    };
-    window
-        .cookies_for_url(parsed)
-        .map(|cookies| {
-            cookies
-                .iter()
-                .map(|c| format!("{}={}", c.name(), c.value()))
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
-        .unwrap_or_default()
+/// `name=value; …` across the given URLs, so Rust's own request carries the
+/// session the user just established in the window. Deduplicated by name, first
+/// URL winning, since the page's own origin is the one that holds the session.
+fn cookie_header(window: &WebviewWindow, urls: &[&str]) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut pairs: Vec<String> = Vec::new();
+    for url in urls {
+        let Ok(parsed) = tauri::Url::parse(url) else {
+            continue;
+        };
+        for cookie in window.cookies_for_url(parsed).unwrap_or_default() {
+            if !seen.iter().any(|n| n == cookie.name()) {
+                seen.push(cookie.name().to_string());
+                pairs.push(format!("{}={}", cookie.name(), cookie.value()));
+            }
+        }
+    }
+    pairs.join("; ")
+}
+
+/// The recording page's own origin, for the `Referer` a media host expects.
+fn origin_of(url: &str) -> String {
+    tauri::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| format!("{}://{h}/", u.scheme())))
+        .unwrap_or_else(|| "https://zoom.us/".into())
 }
 
 /// Streams the recording to a scratch file. Lecture media runs to gigabytes, so
@@ -215,21 +244,41 @@ fn download(
     app: &AppHandle,
     url: &str,
     cookies: &str,
+    referer: &str,
     on_stage: &dyn Fn(&str),
 ) -> Result<PathBuf> {
+    // The page hands back this URL, so it is checked against the same allowlist
+    // the pasted link was — cookies and a session referer are not attached to
+    // wherever a page asks.
+    let host = tauri::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if !is_zoom_host(&host) {
+        bail!("the recording page pointed at {host}, which is not Zoom");
+    }
+
     let dir = app
         .path()
         .app_data_dir()
         .context("resolving app data dir")?
         .join("zoom");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("recording.mp4");
+    // Per-run, so two captures cannot truncate one another's download — and so
+    // transcribe::workspace, which keys its scratch dir off this name, keeps
+    // them apart too.
+    let path = dir.join(format!("recording-{}.mp4", crate::db::now()));
 
+    // Bounded, because a stalled socket — a dropped VPN, sleep/wake, a captive
+    // portal — otherwise parks this thread forever with the dialog stuck on
+    // "Downloading". The blocking client offers no per-read bound, so this is
+    // whole-request and correspondingly generous: a backstop, not a budget.
     let client = reqwest::blocking::Client::builder()
-        .timeout(None)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .context("building the download client")?;
-    let mut request = client.get(url).header("Referer", "https://zoom.us/");
+    let mut request = client.get(url).header("Referer", referer);
     if !cookies.is_empty() {
         request = request.header("Cookie", cookies);
     }
@@ -241,9 +290,11 @@ fn download(
     on_stage("Downloading the recording…");
     let mut file = std::fs::File::create(&path)
         .with_context(|| format!("creating {}", path.display()))?;
-    response
-        .copy_to(&mut file)
-        .context("saving the recording")?;
+    if let Err(e) = response.copy_to(&mut file) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(anyhow::Error::new(e).context("saving the recording"));
+    }
     Ok(path)
 }
 
@@ -415,6 +466,25 @@ const PROBE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_zoom_and_its_subdomains_only() {
+        assert!(is_zoom_host("zoom.us"));
+        assert!(is_zoom_host("ufl.zoom.us"));
+        assert!(is_zoom_host("ssrweb.zoom.us"));
+        assert!(is_zoom_host("zoom.com"));
+        // Registrable lookalikes, which a suffix match would have accepted.
+        assert!(!is_zoom_host("notzoom.us"));
+        assert!(!is_zoom_host("evilzoom.com"));
+        assert!(!is_zoom_host("zoom.us.example.com"));
+        assert!(!is_zoom_host(""));
+    }
+
+    #[test]
+    fn derives_the_referer_from_the_page() {
+        assert_eq!(origin_of("https://ufl.zoom.us/rec/share/abc"), "https://ufl.zoom.us/");
+        assert_eq!(origin_of("not a url"), "https://zoom.us/");
+    }
 
     /// The probe lives in a raw string, so a `"` immediately followed by a `#`
     /// anywhere in the JS would close it early and truncate the script into
