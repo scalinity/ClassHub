@@ -423,11 +423,7 @@ fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str)
     fs::create_dir_all(out_dir)?;
     // A dedicated user profile keeps headless runs independent of any open
     // LibreOffice GUI instance (they otherwise refuse to start concurrently).
-    let profile = app
-        .path()
-        .app_data_dir()
-        .context("resolving app data dir")?
-        .join("soffice-profile");
+    let profile = crate::data_dir(app)?.join("soffice-profile");
     // UNO requires a valid URL; the app-data path contains a space
     // ("Application Support"), which unencoded aborts soffice with a
     // RuntimeException.

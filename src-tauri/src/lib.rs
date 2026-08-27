@@ -20,10 +20,21 @@ mod zoom;
 
 use std::sync::Mutex;
 
+use anyhow::Context;
 use rusqlite::Connection;
 use tauri::Manager;
 
 pub(crate) struct Db(pub(crate) Mutex<Connection>);
+
+/// `~/Library/Application Support/ClassHub`. Tauri's own `app_data_dir()` keys
+/// off the bundle identifier, which would name the folder `com.danny.classhub`.
+pub(crate) fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    Ok(app
+        .path()
+        .data_dir()
+        .context("resolving app data dir")?
+        .join("ClassHub"))
+}
 
 #[tauri::command(async)]
 fn list_classes(state: tauri::State<Db>) -> Result<Vec<db::ClassCard>, String> {
@@ -555,7 +566,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = crate::data_dir(app.handle())?;
             std::fs::create_dir_all(&data_dir)?;
             let conn = match db::open(&data_dir.join("classhub.db")) {
                 Ok(conn) => conn,

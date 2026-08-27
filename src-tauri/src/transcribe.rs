@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::db::{setting, with_conn};
 
@@ -190,12 +190,7 @@ fn workspace(app: &AppHandle, media: &Path) -> Result<PathBuf> {
         .file_name()
         .map(|n| n.to_string_lossy().replace(['/', '\\', ':'], "_"))
         .unwrap_or_else(|| "recording".into());
-    Ok(app
-        .path()
-        .app_data_dir()
-        .context("resolving app data dir")?
-        .join("transcribe")
-        .join(name))
+    Ok(crate::data_dir(app)?.join("transcribe").join(name))
 }
 
 #[cfg(test)]

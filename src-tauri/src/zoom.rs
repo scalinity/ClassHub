@@ -281,11 +281,7 @@ fn download(
         bail!("the recording page pointed at {host}, which is not Zoom");
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .context("resolving app data dir")?
-        .join("zoom");
+    let dir = crate::data_dir(app)?.join("zoom");
     std::fs::create_dir_all(&dir)?;
     // Per-run, so two captures cannot truncate one another's download — and so
     // transcribe::workspace, which keys its scratch dir off this name, keeps

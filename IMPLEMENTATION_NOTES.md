@@ -10,7 +10,7 @@ doesn't cover.
 
 - Tauri v2 + React 19 + Vite + TypeScript strict + Tailwind v4 + shadcn (new CLI v4.19,
   radix base, nova preset).
-- SQLite at `~/Library/Application Support/com.danny.classhub/classhub.db`. Migration
+- SQLite at `~/Library/Application Support/ClassHub/classhub.db`. Migration
   `src-tauri/migrations/0001_init.sql` embeds the full SPEC §5 schema plus class/meeting
   seed data. Migrations are tracked via `PRAGMA user_version` and each runs in its own
   transaction (`src-tauri/src/db.rs`).

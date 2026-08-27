@@ -1012,7 +1012,7 @@ fn execute_job(
         }
     }
 
-    let data_dir = app.path().app_data_dir().context("resolving app data dir")?;
+    let data_dir = crate::data_dir(app)?;
     let log_dir = data_dir.join("logs");
     fs::create_dir_all(&log_dir)?;
     let log_path = log_dir.join(format!("job-{}.jsonl", job.id));
