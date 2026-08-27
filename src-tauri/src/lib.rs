@@ -1,3 +1,5 @@
+mod canvas;
+mod canvas_sync;
 mod chat;
 mod db;
 mod deadlines;
@@ -13,6 +15,7 @@ mod sorter;
 mod tools;
 mod transcribe;
 mod transcripts;
+mod units;
 mod zoom;
 
 use std::sync::Mutex;
@@ -347,6 +350,33 @@ fn approve_syllabus_proposals(
     deadlines::approve_proposals(&app, &proposal_ids).map_err(|e| format!("{e:#}"))
 }
 
+// --- Canvas sync (SPEC §7.2) --------------------------------------------------
+
+/// The course's own divisions for the workspace listing (SPEC §5).
+#[tauri::command(async)]
+fn list_units(state: tauri::State<Db>, class_id: i64) -> Result<Vec<units::UnitInfo>, String> {
+    let conn = db::lock(&state.0);
+    units::list_units(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// When Canvas data last came across, and how many classes are linked.
+///
+/// Deliberately not a "connected" state: no credential is stored, so there is
+/// nothing whose health could be reported. A session either still exists in the
+/// webview or it does not, and the only way to find out is to sync.
+#[tauri::command(async)]
+fn canvas_status(state: tauri::State<Db>) -> Result<canvas_sync::CanvasStatus, String> {
+    let conn = db::lock(&state.0);
+    canvas_sync::status(&conn).map_err(|e| format!("{e:#}"))
+}
+
+/// Starts a sync and returns immediately; progress and results arrive on
+/// `canvas_sync::PROGRESS_EVENT`. An empty `class_ids` syncs every class.
+#[tauri::command]
+fn sync_canvas(app: tauri::AppHandle, class_ids: Vec<i64>) {
+    canvas_sync::spawn(&app, class_ids);
+}
+
 // --- Drop-to-sort (SPEC §10) --------------------------------------------------
 
 /// Step 1: files dropped onto a class workspace are COPIED into
@@ -581,6 +611,9 @@ pub fn run() {
             run_syllabus_scan,
             resolve_syllabus_proposal,
             approve_syllabus_proposals,
+            list_units,
+            canvas_status,
+            sync_canvas,
             stage_inbox_files,
             get_sort_state,
             run_sort_job,

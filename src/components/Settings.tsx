@@ -2,6 +2,14 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft } from "lucide-react";
 
+import {
+  formatSyncedAt,
+  getCanvasStatus,
+  outcomeSummary,
+  syncCanvas,
+  useCanvasSync,
+  type SyncProgress,
+} from "@/lib/canvas";
 import { openChatSettings, useChat, EFFORT_LEVELS } from "@/lib/chat";
 import { queryClient } from "@/lib/query";
 import {
@@ -209,10 +217,146 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
             </div>
           </Section>
 
+          <CanvasSection />
+
           <ChatSection />
         </>
       )}
     </main>
+  );
+}
+
+/**
+ * SPEC §7.2 — Canvas.
+ *
+ * The section shows when data last came across and nothing more, because
+ * nothing more is true: no credential is stored, so there is no connection
+ * whose health could be reported. A green "connected" chip would stay green
+ * long after the session behind it had expired.
+ */
+function CanvasSection() {
+  const { data: status } = useQuery({
+    queryKey: ["canvasStatus"],
+    queryFn: getCanvasStatus,
+  });
+  const progress = useCanvasSync();
+  const running = progress !== null && !progress.done;
+
+  return (
+    <Section
+      title="CANVAS"
+      lead="Canvas holds the authoritative version of each course — its own
+        structure, its files, and its assignments with real due dates. ClassHub
+        reads it through a Canvas window you sign in to, and keeps no
+        credential: its reach ends when that session does. Syncing runs when you
+        ask, never on a schedule."
+    >
+      <dl className="mt-4 space-y-1.5 font-mono text-[11px]">
+        <div className="flex gap-3">
+          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
+            LAST SYNC
+          </dt>
+          <dd>{formatSyncedAt(status?.lastSyncedAt ?? null)}</dd>
+        </div>
+        <div className="flex gap-3">
+          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
+            CLASSES
+          </dt>
+          <dd>
+            {status === undefined
+              ? "—"
+              : status.classesLinked === 0
+                ? "NONE MATCHED YET"
+                : `${status.classesLinked} MATCHED TO A COURSE`}
+          </dd>
+        </div>
+        <div className="flex gap-3">
+          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
+            READS
+          </dt>
+          <dd className="min-w-0 truncate text-muted-foreground">
+            {status?.host ?? "ufl.instructure.com"} · never writes
+          </dd>
+        </div>
+      </dl>
+
+      <button
+        type="button"
+        disabled={running}
+        onClick={() => void syncCanvas()}
+        className={`${monoActionNeutral} mt-4 bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-40`}
+      >
+        {running ? "SYNCING…" : "SYNC ALL CLASSES"}
+      </button>
+
+      <SyncReport progress={progress} />
+
+      <p className="mt-3 max-w-xl text-[11.5px] leading-relaxed text-muted-foreground">
+        Expect to sign in most times. Assignments arrive as deadline cards and
+        files land in each class's inbox — both wait for your approval, the same
+        as everything else that moves material.
+      </p>
+    </Section>
+  );
+}
+
+/** What a sync is doing, and what it brought across when it finishes. */
+function SyncReport({ progress }: { progress: SyncProgress | null }) {
+  if (progress === null) return null;
+
+  if (!progress.done) {
+    return (
+      <p className="mt-3 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] text-muted-foreground">
+        <span
+          aria-hidden
+          className="size-1.5 shrink-0 rounded-full bg-foreground animate-pulse motion-reduce:animate-none"
+        />
+        {progress.stage.toUpperCase()}
+      </p>
+    );
+  }
+
+  if (progress.error) {
+    return (
+      <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-destructive">
+        SYNC STOPPED — {progress.error}
+      </p>
+    );
+  }
+
+  return (
+    <dl className="mt-4 max-w-xl space-y-2.5">
+      {(progress.results ?? []).map((outcome) => (
+        <div key={outcome.classId}>
+          <dt className="flex items-baseline gap-2">
+            <span className="text-[12.5px] font-medium">
+              {outcome.className}
+            </span>
+            {outcome.canvasCourse && (
+              <span className="min-w-0 truncate font-mono text-[10px] tracking-[0.12em] text-muted-foreground/70">
+                {outcome.canvasCourse}
+              </span>
+            )}
+          </dt>
+          <dd
+            className={
+              "text-[11.5px] leading-snug " +
+              (outcome.error ? "text-destructive" : "text-muted-foreground")
+            }
+          >
+            {outcomeSummary(outcome)}
+          </dd>
+          {outcome.notes.map((note) => (
+            <dd
+              key={note}
+              className="text-[11.5px] leading-snug text-muted-foreground/70"
+            >
+              {note}
+            </dd>
+          ))}
+        </div>
+      ))}
+    </dl>
   );
 }
 

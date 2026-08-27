@@ -6,7 +6,14 @@ export const queryClient = new QueryClient();
 
 interface HubChange {
   /** What changed backend-side (tools.rs, sorter.rs, deadlines.rs). */
-  area: "deadlines" | "grades" | "notes" | "proposals" | "files" | "syllabus";
+  area:
+    | "deadlines"
+    | "grades"
+    | "notes"
+    | "proposals"
+    | "files"
+    | "syllabus"
+    | "units";
 }
 
 // Backend writes (chat tools, drop-to-sort, deadline CRUD) change hub data;
@@ -42,6 +49,12 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The workspace inbox queue and the card badges.
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      break;
+    case "units":
+      // A Canvas sync or a syllabus scan changed the course's divisions, and
+      // the sync also stamps when each class last read from Canvas.
+      void queryClient.invalidateQueries({ queryKey: ["units"] });
+      void queryClient.invalidateQueries({ queryKey: ["canvasStatus"] });
       break;
     case "files":
       // An approved move changed the tree on disk; the rescan also refreshes

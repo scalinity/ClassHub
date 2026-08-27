@@ -94,6 +94,18 @@ pub fn scan_class(
             }
         }
     }
+    // SPEC §7.2's last-resort structure source: the top-level folders, which is
+    // all the app had before `units` existed. Recorded on every scan so it
+    // stays current without a second thing to press — and marked `source =
+    // 'folder'` so a hand-made folder is never mistaken for a division the
+    // course actually declared. Precedence (units.rs) is what keeps this from
+    // overwriting Canvas or the syllabus.
+    let folders: Vec<String> = tree
+        .iter()
+        .filter(|node| node.dir)
+        .map(|node| node.name.clone())
+        .collect();
+    crate::units::record_folder_units(&tx, class_id, &folders)?;
     tx.commit()?;
     Ok(tree)
 }

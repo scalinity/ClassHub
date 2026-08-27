@@ -23,8 +23,23 @@ export interface Deadline {
   dueAt: string;
   notes: string | null;
   status: "open" | "done";
-  source: "manual" | "agent" | "syllabus";
+  source: DeadlineSource;
 }
+
+/** Who put this on the list: added by hand, by chat, by a syllabus scan, or
+ *  read from Canvas. Approval stamps a proposal's own source onto the
+ *  deadline, so a due date that turns out wrong can be traced back. */
+export type DeadlineSource = "manual" | "agent" | "syllabus" | "canvas";
+
+/** The badge a non-manual deadline or proposal carries. */
+export const DEADLINE_SOURCE_COPY: Record<
+  Exclude<DeadlineSource, "manual">,
+  { label: string; title: string }
+> = {
+  syllabus: { label: "VIA SYLLABUS", title: "Read from a syllabus scan" },
+  canvas: { label: "VIA CANVAS", title: "Read from Canvas, with its own due date" },
+  agent: { label: "VIA CHAT", title: "Added in chat" },
+};
 
 /** Every deadline across every class, due-soonest first — one query for the
  * dashboard strip, the class list, and anything else that filters it. */
@@ -71,6 +86,9 @@ export interface SyllabusProposal {
   dueAt: string;
   notes: string | null;
   createdAt: number;
+  /** Which reader proposed it — the card says so, because "Canvas says this is
+   *  due then" and "a PDF seemed to say so" deserve different scrutiny. */
+  source: "syllabus" | "canvas";
 }
 
 export function getSyllabusProposals(

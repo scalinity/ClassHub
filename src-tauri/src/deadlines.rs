@@ -298,11 +298,15 @@ pub struct DeadlineProposal {
     pub due_at: String,
     pub notes: Option<String>,
     pub created_at: i64,
+    /// syllabus | canvas — the card says where the date came from, because
+    /// "Canvas says this is due then" and "a PDF seemed to say so" warrant
+    /// different amounts of scrutiny before approving.
+    pub source: String,
 }
 
 pub fn syllabus_proposals(conn: &Connection, class_id: i64) -> Result<Vec<DeadlineProposal>> {
     let mut stmt = conn.prepare(
-        "SELECT id, class_id, title, kind, due_at, notes, created_at
+        "SELECT id, class_id, title, kind, due_at, notes, created_at, source
          FROM deadline_proposals WHERE class_id = ?1 AND status = 'pending'
          ORDER BY due_at, id",
     )?;
@@ -316,6 +320,7 @@ pub fn syllabus_proposals(conn: &Connection, class_id: i64) -> Result<Vec<Deadli
                 due_at: row.get(4)?,
                 notes: row.get(5)?,
                 created_at: row.get(6)?,
+                source: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -475,12 +480,28 @@ struct RawDeadline {
     notes: Option<String>,
 }
 
+/// One entry of the scan's `units` array — the course's own divisions, read
+/// out of the same document in the same pass (SPEC §7.2).
+#[derive(Deserialize)]
+struct RawUnit {
+    name: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    ordinal: Option<i64>,
+    #[serde(default)]
+    starts_on: Option<String>,
+    #[serde(default)]
+    ends_on: Option<String>,
+}
+
 /// Parses and records the scan's proposals. Unlike the sort job, an empty
 /// array is a legitimate success (the material may hold no dated items) —
 /// only unparseable output or an all-invalid batch is an error the caller
 /// demotes to job failure.
 pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
-    let entries = crate::jobs::parse_entries(result_text)?;
+    let (entries, raw_units) = split_output(result_text)?;
+    let unit_summary = record_units(app, class_id, &raw_units);
     let summary = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut duplicates = 0usize;
@@ -549,48 +570,21 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                     slot.insert(has_time);
                 }
             }
-            let existing: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM deadlines
-                 WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-                   AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
-                params![class_id, title, due_at],
-                |row| row.get(0),
-            )?;
-            if existing > 0 {
-                duplicates += 1;
-                continue;
+            match record_proposal(
+                conn,
+                class_id,
+                &title,
+                &kind,
+                due_at,
+                notes.as_deref(),
+                "syllabus",
+            )? {
+                // A re-proposal of something still waiting counts as recorded
+                // here: the scan did find it, and the card is in the queue.
+                Recorded::Proposed | Recorded::Refreshed => recorded += 1,
+                Recorded::AlreadyDeadline => duplicates += 1,
+                Recorded::DismissedBefore => dismissed_skips += 1,
             }
-            // A dismissed proposal for the same item is a decision already
-            // made — a rescan must not resurface the card. Adding the
-            // deadline by hand remains the way back.
-            let dismissed_before: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM deadline_proposals
-                 WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-                   AND substr(due_at, 1, 10) = substr(?3, 1, 10)
-                   AND status = 'dismissed'",
-                params![class_id, title, due_at],
-                |row| row.get(0),
-            )?;
-            if dismissed_before > 0 {
-                dismissed_skips += 1;
-                continue;
-            }
-            let updated = conn.execute(
-                "UPDATE deadline_proposals
-                 SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4
-                 WHERE class_id = ?5 AND LOWER(title) = LOWER(?6)
-                   AND substr(due_at, 1, 10) = substr(?7, 1, 10) AND status = 'pending'",
-                params![kind, due_at, notes, now(), class_id, title, due_at],
-            )?;
-            if updated == 0 {
-                conn.execute(
-                    "INSERT INTO deadline_proposals
-                     (class_id, title, kind, due_at, notes, status, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
-                    params![class_id, title, kind, due_at, notes, now()],
-                )?;
-            }
-            recorded += 1;
         }
 
         if recorded == 0 && duplicates == 0 && dismissed_skips == 0 && !skipped.is_empty() {
@@ -628,7 +622,182 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         Ok(summary)
     })?;
     emit_hub_change(app, "syllabus");
+    let summary = match unit_summary {
+        Some(units) => format!("{summary} · {units}"),
+        None => summary,
+    };
     Ok(summary)
+}
+
+/// Splits the scan's output into its two halves.
+///
+/// The contract is one object holding `deadlines` and `units`, because the
+/// weekly schedule and the due dates live in the same document and cost one
+/// read between them. A bare array is still accepted as the deadline list
+/// alone: the model does occasionally answer the older shape, and dropping a
+/// whole scan's findings over the wrapper would be an expensive way to be
+/// strict about punctuation.
+fn split_output(result_text: &str) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    if let Ok(record) = crate::jobs::parse_object(result_text) {
+        if record.get("deadlines").is_some() || record.get("units").is_some() {
+            let array = |key: &str| {
+                record
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            return Ok((array("deadlines"), array("units")));
+        }
+    }
+    Ok((crate::jobs::parse_entries(result_text)?, Vec::new()))
+}
+
+/// Records the divisions the syllabus declared, as SPEC §7.2's middle source.
+///
+/// Failures here are reported, never propagated: the deadlines half of the
+/// scan has already succeeded by this point, and losing it because a week
+/// entry was malformed would be the wrong trade.
+fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    let recorded = with_conn(app, |conn| {
+        let mut added = 0usize;
+        let mut seen = 0usize;
+        for (index, value) in raw.iter().enumerate() {
+            let Ok(entry) = serde_json::from_value::<RawUnit>(value.clone()) else {
+                continue;
+            };
+            let name = entry.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            seen += 1;
+            let unit = crate::units::NewUnit {
+                ordinal: entry.ordinal.unwrap_or(index as i64 + 1),
+                kind: entry
+                    .kind
+                    .as_deref()
+                    .map(str::to_lowercase)
+                    .filter(|k| crate::units::UNIT_KINDS.contains(&k.as_str()))
+                    .unwrap_or_else(|| crate::units::kind_for_name(name).to_string()),
+                name: name.to_string(),
+                canvas_id: None,
+                rel_path: None,
+                // A syllabus week without a date is ordinary — two of the four
+                // courses number their weeks and never date them — so an
+                // unparseable date drops the date, not the unit.
+                starts_on: entry.starts_on.filter(|d| valid_due_at(d)),
+                ends_on: entry.ends_on.filter(|d| valid_due_at(d)),
+                source: "syllabus",
+            };
+            match crate::units::upsert(conn, class_id, &unit) {
+                Ok(true) => added += 1,
+                Ok(false) => {}
+                Err(e) => eprintln!("syllabus: skipping unit '{name}': {e:#}"),
+            }
+        }
+        Ok((added, seen))
+    });
+    match recorded {
+        Ok((_, 0)) => None,
+        Ok((added, seen)) if added == 0 => Some(format!("{seen} division(s) already recorded")),
+        Ok((added, seen)) => {
+            crate::db::emit_hub_change(app, "units");
+            Some(format!("{added} of {seen} division(s) recorded"))
+        }
+        Err(e) => {
+            eprintln!("syllabus: units not recorded for class {class_id}: {e:#}");
+            Some("divisions could not be recorded".to_string())
+        }
+    }
+}
+
+/// What recording a proposal did, so a caller can say so rather than report a
+/// count that hides three different outcomes.
+pub(crate) enum Recorded {
+    /// A card that was not in the queue before.
+    Proposed,
+    /// A card already waiting, refreshed in place rather than stacked. A
+    /// re-sync of unchanged Canvas assignments is all of these, which is why
+    /// it is worth telling apart from a fresh proposal.
+    Refreshed,
+    /// This deadline is already on the list — added by hand, by chat, or by an
+    /// earlier approval.
+    AlreadyDeadline,
+    /// The card was declined before. That is a decision already made, and a
+    /// re-scan or a re-sync must not put it back; adding it by hand is the way
+    /// back.
+    DismissedBefore,
+}
+
+/// The one path a proposed deadline takes into the queue, whatever proposed it.
+///
+/// Both producers — the syllabus scan reading a PDF and the Canvas sync reading
+/// assignments — land here, so the deduplication rules cannot drift apart
+/// between them. Identity is (title, calendar day): the same item proposed from
+/// both sources is one card, not two.
+pub(crate) fn record_proposal(
+    conn: &Connection,
+    class_id: i64,
+    title: &str,
+    kind: &str,
+    due_at: &str,
+    notes: Option<&str>,
+    source: &str,
+) -> Result<Recorded> {
+    // The untrusted boundary for both producers: a Canvas assignment title is
+    // as unbounded as a model-written one, and a stored title feeds the next
+    // scan's prompt.
+    let title = &truncate(title.trim(), MAX_TITLE_CHARS);
+    let notes = notes.map(|n| truncate(n.trim(), MAX_NOTES_CHARS));
+    let notes = notes.as_deref().filter(|n| !n.is_empty());
+    if title.is_empty() {
+        bail!("a proposed deadline needs a title");
+    }
+    if !valid_due_at(due_at) {
+        bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
+    }
+
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM deadlines
+         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+           AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
+        params![class_id, title, due_at],
+        |row| row.get(0),
+    )?;
+    if existing > 0 {
+        return Ok(Recorded::AlreadyDeadline);
+    }
+    let dismissed_before: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM deadline_proposals
+         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+           AND substr(due_at, 1, 10) = substr(?3, 1, 10)
+           AND status = 'dismissed'",
+        params![class_id, title, due_at],
+        |row| row.get(0),
+    )?;
+    if dismissed_before > 0 {
+        return Ok(Recorded::DismissedBefore);
+    }
+    let updated = conn.execute(
+        "UPDATE deadline_proposals
+         SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4, source = ?5
+         WHERE class_id = ?6 AND LOWER(title) = LOWER(?7)
+           AND substr(due_at, 1, 10) = substr(?8, 1, 10) AND status = 'pending'",
+        params![kind, due_at, notes, now(), source, class_id, title, due_at],
+    )?;
+    if updated > 0 {
+        return Ok(Recorded::Refreshed);
+    }
+    conn.execute(
+        "INSERT INTO deadline_proposals
+         (class_id, title, kind, due_at, notes, status, created_at, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
+        params![class_id, title, kind, due_at, notes, now(), source],
+    )?;
+    Ok(Recorded::Proposed)
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +852,7 @@ pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchO
 fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result<String> {
     let row = conn
         .query_row(
-            "SELECT class_id, title, kind, due_at, notes, status
+            "SELECT class_id, title, kind, due_at, notes, status, source
              FROM deadline_proposals WHERE id = ?1",
             [proposal_id],
             |r| {
@@ -694,12 +863,13 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
                     r.get::<_, String>(3)?,
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             },
         )
         .optional()?
         .context("proposal not found")?;
-    let (class_id, title, kind, due_at, notes, status) = row;
+    let (class_id, title, kind, due_at, notes, status, source) = row;
     if status != "pending" {
         bail!("this proposal was already resolved");
     }
@@ -728,14 +898,16 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
     if existing > 0 {
         bail!("'{title}' is already recorded for that date — skip this card instead");
     }
+    // The deadline records which reader proposed it, so a due date that turns
+    // out to be wrong can be traced to the syllabus PDF or to Canvas.
     tx.execute(
         "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'syllabus')",
-        params![class_id, title, kind, due_at, notes],
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)",
+        params![class_id, title, kind, due_at, notes, source],
     )?;
     audit(
         &tx,
-        "syllabus.insert_deadline",
+        &format!("{source}.insert_deadline"),
         json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
                 "classId": class_id, "title": title, "kind": kind,
                 "dueAt": due_at, "notes": notes }),

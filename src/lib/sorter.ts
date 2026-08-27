@@ -24,9 +24,11 @@ export interface MoveProposal {
   /** Class-relative target including the file name. */
   destRelPath: string;
   reasoning: string;
-  /** null on chat proposals — sort jobs always fill it in. */
+  /** null on chat proposals — sort jobs and Canvas always fill it in. */
   confidence: Confidence | null;
-  source: "chat" | "sort_job";
+  /** Where the proposal came from: chat, a sort job reading the file's
+   *  contents, or Canvas telling the app which folder it filed the file in. */
+  source: "chat" | "sort_job" | "canvas";
   createdAt: number;
 }
 

@@ -19,6 +19,7 @@ import { GuideViewer } from "@/components/GuideViewer";
 import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
+import { StructureSection } from "@/components/Structure";
 import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
 import {
   formatGeneratedAt,
@@ -209,6 +210,8 @@ export function ClassWorkspace({
       )}
 
       <InboxQueue classId={info.id} tree={tree} />
+
+      <StructureSection classId={info.id} className={info.displayName} />
 
       <DeadlinesSection classId={info.id} tree={tree} />
 

@@ -5,6 +5,7 @@ import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 import {
   approveAllProposals,
   DEADLINE_KINDS,
+  DEADLINE_SOURCE_COPY,
   deleteDeadline,
   getSyllabusProposals,
   listDeadlines,
@@ -397,14 +398,10 @@ function DeadlineRow({
       )}
       {deadline.source !== "manual" && (
         <span
-          title={
-            deadline.source === "syllabus"
-              ? "Added from a syllabus scan"
-              : "Added in chat"
-          }
+          title={DEADLINE_SOURCE_COPY[deadline.source].title}
           className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
         >
-          {deadline.source === "syllabus" ? "VIA SYLLABUS" : "VIA CHAT"}
+          {DEADLINE_SOURCE_COPY[deadline.source].label}
         </span>
       )}
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
@@ -583,8 +580,14 @@ function ProposalCard({
           {proposal.kind.toUpperCase()}
         </span>
       </div>
-      <p className="mt-1 font-mono text-[11px] font-medium text-(--accent)">
+      <p className="mt-1 flex items-baseline gap-2 font-mono text-[11px] font-medium text-(--accent)">
         {dueDayLabel(proposal.dueAt)}
+        <span
+          title={DEADLINE_SOURCE_COPY[proposal.source].title}
+          className="font-normal tracking-[0.12em] text-[9px] text-muted-foreground/60"
+        >
+          {DEADLINE_SOURCE_COPY[proposal.source].label}
+        </span>
       </p>
       {proposal.notes && (
         <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">

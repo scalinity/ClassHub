@@ -395,7 +395,10 @@ function RouteLine({
   );
 }
 
-/** Confidence from sort jobs; chat proposals carry none (NULL) by design. */
+/** Confidence from sort jobs; chat proposals carry none (NULL) by design.
+ *  Canvas says which folder it filed the file in, which is a different kind of
+ *  claim from a job's read of the contents — so it says so rather than
+ *  borrowing the confidence ladder's vocabulary. */
 function ProposalChip({ proposal }: { proposal: MoveProposal }) {
   if (proposal.source === "chat") {
     return (
@@ -404,6 +407,16 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
         className={`${chipBase} bg-muted text-muted-foreground`}
       >
         VIA CHAT
+      </span>
+    );
+  }
+  if (proposal.source === "canvas") {
+    return (
+      <span
+        title="Downloaded from Canvas, into the folder Canvas keeps it in"
+        className={`${chipBase} bg-(--accent)/12 text-(--accent)`}
+      >
+        VIA CANVAS
       </span>
     );
   }

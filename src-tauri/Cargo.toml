@@ -25,4 +25,13 @@ dirs = "6.0.0"
 sha2 = "0.11.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "native-tls"] }
 keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
+# Canvas returns due dates in UTC and the app stores local wall-clock time
+# (SPEC §5). A fixed offset cannot do that conversion: this semester's
+# assignments straddle the DST change, and for a 23:59 deadline an hour's
+# error is a whole day. Already in the tree via tauri, so this costs no
+# additional crate.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Canvas refuses a file download issued outside its own page, so the bytes come
+# back base64 from an in-page fetch (SPEC §7.2). Already in the tree via tauri.
+base64 = "0.22"
 

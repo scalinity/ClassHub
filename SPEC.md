@@ -88,16 +88,38 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   OAuth2 works for them and cannot for us. Regenerating one would break the real iOS app and
   would file ClassHub's traffic under Instructure's key in UF's audit logs.
 
-  What works is **session reads**: `/api/v1` honours the browser's own session cookie for
-  same-origin GETs, which is how in-Canvas theme JavaScript queries it. The constraint is
-  strict — the request must originate from a page Canvas served, so it has to be issued *inside*
-  the signed-in page, not by a native HTTP client holding copied cookies (§7.2). Verified
-  2026-08-26 against Instructure's developer docs: session and cookie authentication appear
-  **nowhere** in the OAuth2 or access-token references. It is an undocumented side effect, not a
+  What works is **session reads**, verified end to end on 2026-08-26: UF SSO (Shibboleth and
+  Duo) completes inside an embedded `WKWebView`, and `/api/v1` then honours that window's own
+  session cookie for same-origin GETs — `/users/self` returns the real user and
+  `/courses?enrollment_state=active` the enrolled courses. This is how in-Canvas theme
+  JavaScript queries it. The constraint is strict: the request must originate from a page
+  Canvas served, so it is issued *inside* the signed-in page and never by a native HTTP client
+  holding copied cookies (§7.2). Session and cookie authentication appear **nowhere** in
+  Instructure's OAuth2 or access-token references — an undocumented side effect, not a
   supported integration, and nothing should assume it is contractual.
 
   The line this app holds: reading through the user's own session automates their own browsing;
   minting a credential through it does not. Only the first is done.
+
+  Two properties of that session were measured rather than assumed:
+
+  - **It does not survive a relaunch.** The webview's cookie store starts empty each time the
+    app opens, so the first sync of a session signs in. That is the flow's normal state, not a
+    failure (§7.2), and it is also why the window opens hidden and is shown only when Canvas
+    asks for something.
+  - **The in-page rule covers file bytes too.** `/files/:id/download` refused every request
+    issued from `reqwest` with cookies read out of the webview (403, all files) — the session
+    lives in cookies the webview does not hand out. Fetched from inside the page it serves
+    normally, so a downloaded file comes back base64 through the same channel as everything
+    else.
+
+- **No course publishes Canvas Modules.** Read from all four courses on 2026-08-26:
+  `/courses/:id/modules` returns an empty list for every one of them. Canvas therefore supplies
+  no course structure today, and the syllabus is the operative source for `units` (§7.2). What
+  Canvas does hold is worth having on its own: assignments with true due dates, and course
+  files organized into the professor's own folders. Assignment due dates arrive as UTC
+  instants, and the semester straddles the DST change — a fixed offset puts one of this term's
+  two assignments on the wrong day — so they are converted through the machine's real timezone.
 
   Canvas also exposes **GraphQL** at `POST /api/graphql`, whose permissions mirror REST. It
   would collapse a whole sync into one round trip, but being a POST it needs the `X-CSRF-Token`
@@ -144,7 +166,7 @@ flowchart LR
     LO[LibreOffice headless]
     PK[Parakeet MLX - on-device ASR]
     ZM[Zoom capture window - user signs in]
-    CV[Canvas REST API - ufl.instructure.com]
+    CV[Canvas sign-in window - reads /api/v1 in-page, stores nothing]
 
     ui <--> Cmds
     Cmds --> Jobs
@@ -159,7 +181,6 @@ flowchart LR
     Canvas --> CV
     Canvas -->|units, deadlines| DB
     Canvas -->|course files| AIBHS
-    Canvas --> Keychain
     Jobs --> CLI
     Jobs --> LO
     ChatLoop --> API
@@ -237,7 +258,11 @@ Migrations run at startup (numbered SQL files embedded in the Rust binary). Sche
 ```sql
 classes(id INTEGER PK, folder_name TEXT UNIQUE, display_name TEXT, code TEXT,
         color TEXT, room TEXT, instructors TEXT, credits INTEGER,
-        grading_basis TEXT, final_exam_start TEXT NULL, final_exam_end TEXT NULL);
+        grading_basis TEXT, final_exam_start TEXT NULL, final_exam_end TEXT NULL,
+        -- Which Canvas course this matched, and when it last synced. Neither is
+        -- a credential: the mapping is how a sync shows it read the right course
+        -- rather than asserting it, and the stamp is what Settings displays.
+        canvas_course_id TEXT NULL, canvas_synced_at INTEGER NULL);
 
 meetings(id INTEGER PK, class_id INTEGER FK, weekday INTEGER,  -- 1=Mon .. 7=Sun
          start_time TEXT, end_time TEXT, periods TEXT);
@@ -295,7 +320,7 @@ guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- module rel path | 'ma
 
 deadlines(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,  -- assignment|exam|quiz|project|other
           due_at TEXT, notes TEXT NULL, status TEXT,  -- open|done
-          source TEXT);                    -- manual|agent|syllabus
+          source TEXT);                    -- manual|agent|syllabus|canvas
 
 grade_categories(id INTEGER PK, class_id INTEGER FK, name TEXT,
                  weight REAL CHECK (weight >= 0 AND weight <= 100));
@@ -310,16 +335,18 @@ move_proposals(id INTEGER PK, class_id INTEGER FK,
                dest_rel_path TEXT,         -- class-relative target incl. filename
                reasoning TEXT,
                confidence TEXT NULL,       -- high|medium|low from sort jobs; NULL from chat
-               source TEXT,                -- chat|sort_job
+               source TEXT,                -- chat|sort_job|canvas
                status TEXT,                -- pending|approved|dismissed
                created_at INTEGER, resolved_at INTEGER NULL);
 
--- The syllabus-scan confirm queue (§11), so proposals survive an app restart
--- between job completion and confirmation. Approval inserts into deadlines
--- with source='syllabus'; nothing here has created a deadline.
+-- The proposed-deadline confirm queue (§11), so proposals survive an app restart
+-- between proposal and confirmation. Both readers land here — the syllabus scan
+-- and the Canvas sync — and approval carries the row's own `source` onto the
+-- deadline. Nothing here has created a deadline.
 deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
                    due_at TEXT, notes TEXT NULL,
                    status TEXT,            -- pending|approved|dismissed
+                   source TEXT,            -- syllabus|canvas
                    created_at INTEGER, resolved_at INTEGER NULL);
 
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
@@ -499,30 +526,50 @@ the user completes UF SSO in, after which the app reads `/api/v1/…` on that se
 posture as the Zoom capture — reads only, no IPC grant to the remote origin, and the response
 is parsed in Rust.
 
-One detail is load-bearing rather than incidental: **the request must be issued from inside the
+One detail is load-bearing rather than incidental: **every request is issued from inside the
 Canvas page**, via `eval_with_callback` running
-`fetch('/api/v1/…', {credentials: 'same-origin'})`. Canvas honours the session cookie for
-same-origin GETs only, so a native HTTP client replaying copied cookies is the wrong shape and
-invites a referer or CSRF refusal. Issued in-page, the request *is* the Canvas web UI's own.
+`fetch('…', {credentials: 'same-origin'})`. Canvas honours the session cookie for same-origin
+requests only, and a native HTTP client replaying cookies read out of the webview is refused —
+verified, 403 on every file (§1). Issued in-page, the request *is* the Canvas web UI's own.
+`fetch` is asynchronous and `eval_with_callback` is not, so each request parks its result on the
+window under an id and Rust polls for it — the same start-then-poll shape `zoom.rs` uses.
+
+That applies to file bytes as much as to JSON: a download comes back base64-encoded through the
+same channel, which is why file size is capped rather than streamed. Anything past the cap is
+named and left for Canvas's own download button.
 
 GETs need no CSRF token; ClassHub never writes to Canvas, so the `X-CSRF-Token` dance for
-mutating verbs never arises.
+mutating verbs never arises. Pagination follows the `Link` header's `rel="next"`, since Canvas
+serves 10 items per page by default and a truncated collection looks exactly like a complete one.
 
 No durable credential is ever minted or stored — there is nothing to leak, and the app's reach
 expires with the session, which is a narrower exposure than the token the administrators
 disabled. It is nonetheless undocumented (§1): if it stops working, it stops, and the fallback
 is the syllabus path below rather than anything cleverer.
 
-**Structure precedence is canvas > syllabus > folder.** Canvas is ground truth when connected.
-Without it, a syllabus scan supplies units — the weekly schedules in Fundamentals and
-Biostatistics are explicit enough to parse, including their dates. With neither, the top-level
-folders stand in, which is where the app started. A unit's `source` column records which, so a
-folder-derived unit is never mistaken for something the course actually declared.
+**Structure precedence is canvas > syllabus > folder.** Canvas is ground truth when it has
+anything to say, which today it does not — no course publishes modules (§1) — so the syllabus
+scan is what actually supplies `units`: it reads the weekly schedule out of the same document,
+in the same pass that reads the due dates, and returns it beside them. Where a course groups its
+weeks under named Parts or Modules, those are the divisions and the weeks are the schedule
+filling them in; where nothing groups them, the weeks are the divisions. With neither Canvas nor
+a scanned syllabus, the top-level folders stand in. A unit's `source` column records which, so a
+folder-derived unit is never mistaken for something the course actually declared, and the
+workspace marks those as inferred.
 
 **Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
-inserted; units whose name no longer appears in Canvas are kept, not deleted — a mid-semester
-Canvas reshuffle must not silently orphan a guide. Downloaded files land through the §10
-confirm queue like anything else that moves material.
+inserted and existing ones updated in place; units whose name no longer appears in Canvas are
+kept, not deleted — a mid-semester Canvas reshuffle must not silently orphan a guide. A
+higher-precedence source fills a unit's fields in rather than replacing the row, because only
+the folder source ever learns where the material sits on disk.
+
+Assignments become `deadline_proposals` with `source='canvas'`, and their UTC due dates are
+converted through the machine's real timezone (§1). Files download into `_Inbox/` and are
+proposed through the §10 confirm queue, destination taken from the folder Canvas keeps them in;
+where Canvas keeps a file loose, no destination is invented and the file waits for the
+content-aware sorter. Re-syncing is a no-op: files are matched by name and size against
+everything the class already holds, and a proposal already waiting is refreshed rather than
+stacked.
 
 ## 8. Study guide synthesis
 
@@ -845,7 +892,7 @@ Mark the checkbox when the acceptance criteria pass.
   question about that session citing the markdown twin, and a regenerated module guide cites
   the transcript — the proof it joined the pipeline rather than sitting beside it.
 
-- [ ] **M13 — Canvas as ground truth.** (`milestones/M13-canvas-ground-truth.md`)
+- [x] **M13 — Canvas as ground truth.** (`milestones/M13-canvas-ground-truth.md`)
   Settle the auth path first (token or signed-in window, §7.2), then `units` from Canvas
   modules with a syllabus fallback, course-file sync into the tree, and assignments → deadlines.
   *Accepted when:* all four classes' real divisions land in `units` from Canvas with nothing
@@ -879,10 +926,17 @@ Mark the checkbox when the acceptance criteria pass.
 - **Digests are not cheap**: even merged, a long lecture is a large prompt against the shared
   subscription limits. Like every other synthesis job, it stays manually triggered — never
   automatic on ingest.
-- **Canvas access may have no supported path**: UF restricts API tokens (§1), and session auth
-  for `/api/v1` is unproven. If both fail, §7.2 falls back to syllabus-derived units and the
-  human stays in the loop for course files. M14 does not depend on Canvas — it needs *a* unit
-  list, not Canvas's.
+- **Canvas session auth is undocumented and unowned**: UF restricts API tokens (§1), so the
+  app reads through a signed-in webview. That works today and is not a supported integration —
+  Instructure can change the page or the endpoint without notice, and there is no version to
+  pin. Written to fail legibly for that reason, and the fallback is the syllabus source, which
+  is already what supplies `units` in practice. M14 does not depend on Canvas — it needs *a*
+  unit list, not Canvas's.
+- **Course structure comes from a model reading a PDF**: with no Canvas modules published, the
+  syllabus scan is the source, and it can misread a schedule. Mitigated by it being cheap to
+  re-run, by units being visible and labelled with where they came from, and by nothing
+  downstream deleting on a re-read. A wrong division is visible on the workspace rather than
+  buried in a guide.
 - **Span mapping is a judgement call**: where one unit ends and the next begins inside a lecture
   is genuinely fuzzy, and the model will sometimes place the boundary wrong. Mitigated rather
   than solved: spans snap outward so nothing is severed, low-confidence splits are queued for
