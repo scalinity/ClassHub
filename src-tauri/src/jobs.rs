@@ -356,11 +356,16 @@ fn recover_orphans(
     Ok(orphaned)
 }
 
-/// Whether an active row belongs to no one. `None` is a row from a build that
-/// predates `owner_pid`; nothing can vouch for it, so it is orphaned — the old
-/// behaviour, confined to the old build's rows. An owner equal to this
-/// process's own id is orphaned too: at startup this process has enqueued
-/// nothing, so the pid was reused from one that died.
+/// Whether an active row belongs to no one. Startup recovery and the cancel
+/// fall-through both ask this, so a row is never judged by its status alone.
+///
+/// `None` is a row from a build that predates `owner_pid`, and a negative or
+/// out-of-range owner is a value no process ever had; nothing can vouch for
+/// either, so both are orphaned — the old behaviour, confined to rows the old
+/// build made. An owner equal to this process's own id is orphaned too: at
+/// startup this process has enqueued nothing, so the pid was reused from one
+/// that died, and from the cancel path it is a row this process has no handle
+/// on.
 fn is_orphan(owner: Option<i64>, self_pid: u32, alive: &impl Fn(u32) -> bool) -> bool {
     match owner.and_then(|pid| u32::try_from(pid).ok()) {
         None => true,
@@ -594,19 +599,34 @@ pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
             )
             .optional()?)
     })?;
-    let self_pid = i64::from(std::process::id());
-    match row {
-        Some((status, owner))
-            if matches!(status.as_str(), "queued" | "running") && owner != Some(self_pid) =>
-        {
-            let who = owner.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
-            bail!(
-                "job {job_id} is {status} in another ClassHub process{who} — \
-                 cancel it from there"
-            )
-        }
-        _ => bail!("job {job_id} is not queued or running"),
+    let Some((status, owner)) =
+        row.filter(|(status, _)| matches!(status.as_str(), "queued" | "running"))
+    else {
+        bail!("job {job_id} is not queued or running");
+    };
+    // A live owner elsewhere holds the child handle, so only it can stop the
+    // run. Any other active row is a ghost nobody will settle: its owner quit
+    // before the worker wrote a final status, it came from a build before
+    // `owner_pid`, or it is this process's own row whose worker unwound.
+    // Recovery runs only at launch, and the duplicate-active guards read this
+    // row until then — so cancelling it here is the way out without a relaunch.
+    let self_pid = std::process::id();
+    if let Some(pid) = owner.filter(|_| !is_orphan(owner, self_pid, &process_alive)) {
+        bail!(
+            "job {job_id} is {status} in another ClassHub process (pid {pid}) — \
+             cancel it from there"
+        );
     }
+    with_conn(app, |conn| {
+        conn.execute(
+            "UPDATE jobs SET status = 'cancelled', finished_at = ?1
+             WHERE id = ?2 AND status IN ('queued', 'running')",
+            params![now(), job_id],
+        )?;
+        Ok(())
+    })?;
+    let _ = app.emit("jobs-changed", ());
+    Ok(())
 }
 
 pub fn list_jobs(conn: &Connection) -> Result<Vec<JobInfo>> {
