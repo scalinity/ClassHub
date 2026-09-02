@@ -431,13 +431,16 @@ claude -p <prompt>
 - **Two processes, one table.** The installed app and a dev build share the database (§13), so
   every row records the process that enqueued it (`owner_pid`). Startup recovery fails only
   rows whose owner is gone — a live process's job is left alone, and a row from a build that
-  predates the column counts as orphaned. The duplicate-active guards (one extract per class,
-  one sort per class, and so on) read the table, so they hold across processes. Cancel stays
-  per-process, because the child handle lives where it was spawned; cancelling a row another
-  process owns says so rather than doing nothing.
-- **The self-check runs once a day**, not once a launch: a `self_check` that succeeded within
-  the last 24 hours stands, and its verdict is restored at launch. The manual re-run behind the
-  auth warning is unconditional.
+  predates the column counts as orphaned. The automatic extract enqueue checks for an active
+  job and inserts in one transaction, so two launches in the same minute yield one job; the
+  user-triggered guards (one sort, one scan, one guide per scope) read the table before
+  enqueuing. Cancel stays per-process, because the child handle lives where it was spawned:
+  cancelling a row a live process elsewhere owns says so, and a row whose owner is gone is
+  settled in place, since recovery runs only at launch.
+- **The self-check runs once a day**, not once a launch: when the latest self-check verdict is
+  a success within the last 24 hours it stands and is restored at launch; anything else — a
+  failure, or no check at all — runs it. The manual re-run behind the auth warning is
+  unconditional.
 - Prompts are Rust-side templates (askama or `format!` with named sections) versioned in
   `src-tauri/prompts/`. Each prompt states: role, exact output path(s), output contract,
   and what NOT to do (no source edits, no files outside the contract).

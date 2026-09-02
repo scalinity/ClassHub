@@ -1361,3 +1361,56 @@ so a file using it without an import resolved to `lib.dom` instead of failing.
 - `kill(pid, 0)` cannot tell a reused pid from the original process. The self-pid case is
   handled; a pid reused by some unrelated process would keep a dead job's row `running` until
   that process exits. Acceptable at n-of-1, and the row is visible in the Job Center.
+
+## Post-M15 — Review fixes (2026-09-02)
+
+A two-agent review of the M15 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 5 warnings and
+8 suggestions once the orchestrator had downgraded a second critical; all were
+addressed as individual commits. What future sessions should know:
+
+- **The duplicate-active guard was check-then-act across processes.**
+  `extract::run_pipeline` read the guard, released the lock, converted decks for
+  up to minutes, then enqueued — so two launches in the same minute both passed
+  it and both enqueued the same batch. `jobs::enqueue_unique` (over
+  `insert_unique_job`) now does the check and the insert in one
+  `BEGIN IMMEDIATE` transaction, making SQLite's write lock the cross-process
+  mutex; `enqueue_extract` returns `None` when it yielded and the pipeline logs
+  that. The pre-flight guard stays as an early-out. The user-triggered guards
+  (sort, scan, guide) keep their read-then-enqueue shape: the window is
+  milliseconds and needs a human in two windows, and SPEC §6 now says that
+  rather than "hold across processes". Tested on `memory_db`.
+- **Cancel settles ghost rows.** `shutdown` writes no final status and the
+  process exits before a worker's terminal write lands, so a peer that recovered
+  while the quitting process was still alive kept the rows, and nothing re-ran
+  recovery until a relaunch — meanwhile the guards refused that class's work
+  and cancel referred the user to a dead pid. The fall-through asks `is_orphan`,
+  the same predicate recovery uses: a live owner elsewhere still gets the
+  referral; an exited owner, a NULL owner, or this process's own handle-less row
+  is settled as `cancelled`. It is the one place besides recovery that writes a
+  status without holding a child handle, and it asks who owns the row first.
+- **The self-check gate reads the latest verdict.** It had selected the latest
+  *success* inside the window, so a failed manual re-run after a morning success
+  was hidden at the next launch. `standing_self_check(conn, now)` returns the
+  latest settled self-check only when it succeeded within the interval; tested
+  with a lapsed success, a fresh one, an in-flight row and a later failure.
+  `startup_self_check` returns `Result<()>`, and `SELF_CHECK_INTERVAL` sits
+  with the other constants.
+- **The install script confirms the bundle exists before `rm -rf`**, quits the
+  installed instance by pid through `NSRunningApplication` (`terminate`, the
+  Dock's graceful quit, so the job runner still reaps its children), and matches
+  the executable path whole with its dots escaped. In JXA a zero-argument
+  Objective-C method is a property access: `app.terminate` sends the quit, and
+  `app.terminate()` throws *after* the quit has already gone out. Verified
+  against throwaway dev binaries; the script itself has still not been run.
+- **rusqlite installs a 5 s busy timeout on every connection it opens**
+  (`inner_connection.rs`: `sqlite3_busy_timeout(db, 5000)`), which is why two
+  processes writing already waited rather than failing; the review's "no busy
+  timeout" critical assumed SQLite's zero default and was downgraded. `db::open`
+  now sets 10 s explicitly, says why, and reads back `PRAGMA journal_mode`,
+  failing startup if the answer is not `wal`.
+- WAL sidecar files: no change. The backup guidance already sits in the M15
+  brief and the Post-M14 notes.
+- The auditor's report was cut off after its third suggestion when the review
+  agents were stopped; anything that followed is not reflected here.
+- The repo still has no git remote; review fixes are local commits only.
