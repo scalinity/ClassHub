@@ -58,6 +58,14 @@ const STALL_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// every time; without a sweep the folder only ever grows.
 const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
+/// How long a successful self-check stands for. What it verifies (SPEC §1: the
+/// subscription, never the API key) is a property of the environment, which
+/// does not change between launches on the same day — and two builds on one
+/// database, each launched several times a day, had run it over two hundred
+/// times. Seconds rather than a `Duration`, because it is compared against
+/// `finished_at` in the table.
+const SELF_CHECK_INTERVAL: i64 = 24 * 60 * 60;
+
 /// Says once, in the run's own progress stream, that the raw log is short —
 /// the job itself is unaffected and keeps going.
 fn log_write_failed(app: &AppHandle, job: &QueuedJob, reported: &mut bool, e: &std::io::Error) {
@@ -515,33 +523,17 @@ pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None, None)
 }
 
-/// How long a successful self-check stands for. What it verifies (SPEC §1: the
-/// subscription, never the API key) is a property of the environment, which
-/// does not change between launches on the same day — and two builds on one
-/// database, each launched several times a day, had run it over two hundred
-/// times.
-const SELF_CHECK_INTERVAL: i64 = 24 * 60 * 60;
-
-/// The launch-time self-check. Skipped when one succeeded within
-/// `SELF_CHECK_INTERVAL`, in which case that verdict is restored so the UI
-/// reports it rather than "pending"; otherwise enqueued. Returns the job id
-/// when one was enqueued.
-pub fn startup_self_check(app: &AppHandle) -> Result<Option<i64>> {
-    let recent: Option<(i64, Option<String>)> = with_conn(app, |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT finished_at, summary FROM jobs
-                 WHERE kind = 'self_check' AND status = 'succeeded' AND finished_at >= ?1
-                 ORDER BY finished_at DESC LIMIT 1",
-                [now() - SELF_CHECK_INTERVAL],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?)
-    })?;
-    let Some((finished_at, summary)) = recent else {
-        return enqueue_self_check(app).map(Some);
+/// The launch-time self-check. Skipped when the standing verdict is a success
+/// within `SELF_CHECK_INTERVAL`, in which case it is restored so the UI reports
+/// it rather than "pending"; otherwise enqueued.
+pub fn startup_self_check(app: &AppHandle) -> Result<()> {
+    let now = now();
+    let standing = with_conn(app, |conn| standing_self_check(conn, now))?;
+    let Some((finished_at, summary)) = standing else {
+        enqueue_self_check(app)?;
+        return Ok(());
     };
-    let ago = match (now() - finished_at).max(0) / 60 {
+    let ago = match (now - finished_at).max(0) / 60 {
         m if m < 60 => format!("{m} min ago"),
         m => format!("{} h ago", m / 60),
     };
@@ -553,7 +545,28 @@ pub fn startup_self_check(app: &AppHandle) -> Result<Option<i64>> {
         "ok",
         &format!("{summary} Checked {ago}; the check runs once a day."),
     );
-    Ok(None)
+    Ok(())
+}
+
+/// The latest self-check verdict, when it is a success within the interval.
+/// The *latest* verdict and not the latest success: a failure after a success
+/// is what stands, and restoring an older "ok" over it would report auth as
+/// working when the last word was that it is not. A row still in flight has
+/// no `finished_at` and is not a verdict yet.
+fn standing_self_check(conn: &Connection, now: i64) -> Result<Option<(i64, Option<String>)>> {
+    let latest: Option<(String, i64, Option<String>)> = conn
+        .query_row(
+            "SELECT status, finished_at, summary FROM jobs
+             WHERE kind = 'self_check' AND finished_at IS NOT NULL
+             ORDER BY finished_at DESC, id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(latest.and_then(|(status, finished_at, summary)| {
+        (status == "succeeded" && finished_at >= now - SELF_CHECK_INTERVAL)
+            .then_some((finished_at, summary))
+    }))
 }
 
 /// Re-runs the scheduler outside any queue transition — the concurrency
@@ -1849,7 +1862,7 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 mod tests {
     use super::{
         insert_unique_job, is_orphan, parse_entries, parse_object, process_alive, recover_orphans,
-        unescape_fragment, wait_bounded,
+        standing_self_check, unescape_fragment, wait_bounded,
     };
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -2114,5 +2127,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 4, "the refused insert left no row behind");
+    }
+
+    /// The launch gate stands on the latest verdict, not the latest success: a
+    /// day-old success has lapsed, a fresh one stands, a row still in flight is
+    /// not a verdict, and a failure after a success is the verdict.
+    #[test]
+    fn the_self_check_gate_stands_on_the_latest_verdict_only() {
+        let conn = crate::db::memory_db();
+        let now = 1_000_000_i64;
+        let insert = |id: i64, status: &str, finished_at: Option<i64>| {
+            conn.execute(
+                "INSERT INTO jobs (id, kind, status, created_at, finished_at, summary)
+                 VALUES (?1, 'self_check', ?2, 0, ?3, 'verified')",
+                rusqlite::params![id, status, finished_at],
+            )
+            .unwrap();
+        };
+        assert!(standing_self_check(&conn, now).unwrap().is_none(), "no check yet");
+        insert(1, "succeeded", Some(now - 25 * 3600));
+        assert!(
+            standing_self_check(&conn, now).unwrap().is_none(),
+            "a day-old success has lapsed"
+        );
+        insert(2, "succeeded", Some(now - 3600));
+        assert_eq!(
+            standing_self_check(&conn, now).unwrap().map(|(at, _)| at),
+            Some(now - 3600),
+            "a fresh success stands"
+        );
+        insert(3, "running", None);
+        assert!(
+            standing_self_check(&conn, now).unwrap().is_some(),
+            "a check in flight is not a verdict"
+        );
+        insert(4, "failed", Some(now - 60));
+        assert!(
+            standing_self_check(&conn, now).unwrap().is_none(),
+            "a later failure is the verdict, and the check re-runs"
+        );
     }
 }
