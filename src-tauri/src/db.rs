@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
@@ -224,11 +224,23 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Two processes share this file (SPEC §13), and writers still take turns
+    // under WAL: the second one waits for the first's commit only because a
+    // busy timeout says so. rusqlite installs five seconds on every connection;
+    // stating a longer one here makes the reliance explicit rather than a
+    // library default, and covers two launches migrating and scanning at once.
+    conn.busy_timeout(Duration::from_secs(10))?;
     // WAL, so the installed app and a dev build can hold this database open at
-    // once: a reader no longer blocks the writer, and a write waits out the
-    // other process's transaction instead of failing. The mode persists in the
-    // file, so a build that never sets it still runs under it.
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // once: a reader no longer blocks the writer. The mode persists in the file,
+    // so a build that never sets it still runs under it. The pragma answers
+    // with the mode actually in force — the old one, when the switch could not
+    // be made — and a database quietly left in rollback mode would look exactly
+    // like a healthy one, so the answer is checked rather than discarded.
+    let mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        bail!("the database is in {mode} journal mode, not WAL — two processes cannot share it");
+    }
     run_migrations(&mut conn)?;
     seed_default_settings(&conn)?;
     Ok(conn)
