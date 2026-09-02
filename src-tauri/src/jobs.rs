@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
@@ -310,14 +310,80 @@ fn record_contract_breach(app: &AppHandle, job: &QueuedJob, touched: &[String]) 
 // ---------------------------------------------------------------------------
 // Public API
 
-/// Marks jobs left queued/running by a previous app process as failed.
+/// Fails the queued/running rows whose owner process is gone.
+///
+/// Two processes share this table (SPEC §13), so an active row is not evidence
+/// of a crash: the installed app may be running that job right now, and failing
+/// it here would leave the row lying while the run continues — and let the
+/// extract guard enqueue the same batch a second time. Only a row nobody can
+/// vouch for is failed; `is_orphan` says which.
 pub fn startup_recovery(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "UPDATE jobs SET status = 'failed', error = 'interrupted by app restart',
-         finished_at = ?1 WHERE status IN ('queued', 'running')",
-        [now()],
-    )?;
+    let failed = recover_orphans(conn, std::process::id(), process_alive)?;
+    if !failed.is_empty() {
+        eprintln!("startup recovery failed orphaned job(s) {failed:?}");
+    }
     Ok(())
+}
+
+/// The ids failed, for the log. `alive` is a parameter so the predicate can be
+/// tested without arranging real processes.
+fn recover_orphans(
+    conn: &Connection,
+    self_pid: u32,
+    alive: impl Fn(u32) -> bool,
+) -> Result<Vec<i64>> {
+    let mut stmt =
+        conn.prepare("SELECT id, owner_pid FROM jobs WHERE status IN ('queued', 'running')")?;
+    let active = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let orphaned: Vec<i64> = active
+        .into_iter()
+        .filter(|(_, owner)| is_orphan(*owner, self_pid, &alive))
+        .map(|(id, _)| id)
+        .collect();
+    for id in &orphaned {
+        conn.execute(
+            "UPDATE jobs SET status = 'failed',
+                    error = 'interrupted — the process running it exited',
+                    finished_at = ?1
+             WHERE id = ?2",
+            params![now(), id],
+        )?;
+    }
+    Ok(orphaned)
+}
+
+/// Whether an active row belongs to no one. `None` is a row from a build that
+/// predates `owner_pid`; nothing can vouch for it, so it is orphaned — the old
+/// behaviour, confined to the old build's rows. An owner equal to this
+/// process's own id is orphaned too: at startup this process has enqueued
+/// nothing, so the pid was reused from one that died.
+fn is_orphan(owner: Option<i64>, self_pid: u32, alive: &impl Fn(u32) -> bool) -> bool {
+    match owner.and_then(|pid| u32::try_from(pid).ok()) {
+        None => true,
+        Some(pid) if pid == self_pid => true,
+        Some(pid) => !alive(pid),
+    }
+}
+
+/// Whether `pid` names a live process. Signal 0 delivers nothing and only
+/// reports whether it could have; EPERM means the process exists under another
+/// user, which still counts as alive. Pid 0 addresses the caller's own process
+/// group and would always answer yes, and no job row can legitimately carry it.
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` with signal 0 performs the existence and permission checks
+    // without delivering a signal; it has no other effect on any process.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Drops raw job logs past `LOG_RETENTION`. Best effort throughout: a log that
@@ -434,10 +500,52 @@ pub fn enqueue_syllabus(
     enqueue(app, "syllabus_scan", Some(class_id), scope, prompt, None, None)
 }
 
-/// SPEC §6: startup self-check asserting the active auth is the subscription.
+/// SPEC §6: self-check asserting the active auth is the subscription. This is
+/// the manual re-run behind the auth warning, and it always runs.
 pub fn enqueue_self_check(app: &AppHandle) -> Result<i64> {
     set_auth(app, "pending", "Self-check running…");
     enqueue(app, "self_check", None, None, SELF_CHECK_PROMPT, None, None)
+}
+
+/// How long a successful self-check stands for. What it verifies (SPEC §1: the
+/// subscription, never the API key) is a property of the environment, which
+/// does not change between launches on the same day — and two builds on one
+/// database, each launched several times a day, had run it over two hundred
+/// times.
+const SELF_CHECK_INTERVAL: i64 = 24 * 60 * 60;
+
+/// The launch-time self-check. Skipped when one succeeded within
+/// `SELF_CHECK_INTERVAL`, in which case that verdict is restored so the UI
+/// reports it rather than "pending"; otherwise enqueued. Returns the job id
+/// when one was enqueued.
+pub fn startup_self_check(app: &AppHandle) -> Result<Option<i64>> {
+    let recent: Option<(i64, Option<String>)> = with_conn(app, |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT finished_at, summary FROM jobs
+                 WHERE kind = 'self_check' AND status = 'succeeded' AND finished_at >= ?1
+                 ORDER BY finished_at DESC LIMIT 1",
+                [now() - SELF_CHECK_INTERVAL],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    })?;
+    let Some((finished_at, summary)) = recent else {
+        return enqueue_self_check(app).map(Some);
+    };
+    let ago = match (now() - finished_at).max(0) / 60 {
+        m if m < 60 => format!("{m} min ago"),
+        m => format!("{} h ago", m / 60),
+    };
+    let summary = summary
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Subscription auth verified.".to_string());
+    set_auth(
+        app,
+        "ok",
+        &format!("{summary} Checked {ago}; the check runs once a day."),
+    );
+    Ok(None)
 }
 
 /// Re-runs the scheduler outside any queue transition — the concurrency
@@ -470,7 +578,32 @@ pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
         let _ = app.emit("jobs-changed", ());
         return Ok(());
     }
-    bail!("job {job_id} is not queued or running")
+    drop(inner);
+    // Not this process's job. A child handle lives only in the process that
+    // spawned it, so a row another build owns can be cancelled only from
+    // there — and the table is what says whether that is the case here.
+    let row: Option<(String, Option<i64>)> = with_conn(app, |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT status, owner_pid FROM jobs WHERE id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    })?;
+    let self_pid = i64::from(std::process::id());
+    match row {
+        Some((status, owner))
+            if matches!(status.as_str(), "queued" | "running") && owner != Some(self_pid) =>
+        {
+            let who = owner.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
+            bail!(
+                "job {job_id} is {status} in another ClassHub process{who} — \
+                 cancel it from there"
+            )
+        }
+        _ => bail!("job {job_id} is not queued or running"),
+    }
 }
 
 pub fn list_jobs(conn: &Connection) -> Result<Vec<JobInfo>> {
@@ -518,9 +651,16 @@ fn enqueue(
 ) -> Result<i64> {
     let id = with_conn(app, |conn| {
         conn.execute(
-            "INSERT INTO jobs (kind, class_id, scope, status, created_at, payload)
-             VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
-            params![kind, class_id, scope, now(), payload],
+            "INSERT INTO jobs (kind, class_id, scope, status, created_at, payload, owner_pid)
+             VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
+            params![
+                kind,
+                class_id,
+                scope,
+                now(),
+                payload,
+                i64::from(std::process::id())
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     })?;
@@ -1609,7 +1749,10 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_entries, parse_object, unescape_fragment, wait_bounded};
+    use super::{
+        is_orphan, parse_entries, parse_object, process_alive, recover_orphans,
+        unescape_fragment, wait_bounded,
+    };
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -1769,5 +1912,75 @@ mod tests {
     #[test]
     fn errors_when_there_is_no_array() {
         assert!(parse_entries("I could not find anything.").is_err());
+    }
+
+    /// The recovery predicate (SPEC §13). Two processes share the table, so an
+    /// active row is failed only when nobody can vouch for it: an owner that
+    /// has exited, no owner at all (a build before the column), or this
+    /// process's own pid, which at startup can only be a reused one.
+    #[test]
+    fn recovery_fails_only_the_rows_nobody_owns() {
+        let conn = crate::db::memory_db();
+        let self_pid = 4242u32;
+        let other_live = 5000u32;
+        let dead = 6000u32;
+        let rows: [(i64, Option<i64>, &str); 5] = [
+            (1, Some(other_live.into()), "running"), // another process, alive: kept
+            (2, Some(dead.into()), "running"),       // its process exited: failed
+            (3, None, "queued"),                     // pre-column build: failed
+            (4, Some(self_pid.into()), "running"),   // this pid, reused: failed
+            (5, Some(dead.into()), "succeeded"),     // already settled: untouched
+        ];
+        for (id, owner, status) in rows {
+            conn.execute(
+                "INSERT INTO jobs (id, kind, status, created_at, owner_pid)
+                 VALUES (?1, 'extract', ?2, 0, ?3)",
+                rusqlite::params![id, status, owner],
+            )
+            .unwrap();
+        }
+
+        let failed = recover_orphans(&conn, self_pid, |pid| {
+            pid == other_live || pid == self_pid
+        })
+        .unwrap();
+        assert_eq!(failed, vec![2, 3, 4]);
+
+        let status = |id: i64| -> String {
+            conn.query_row("SELECT status FROM jobs WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(status(1), "running", "a live process's job was failed");
+        assert_eq!(status(2), "failed");
+        assert_eq!(status(3), "failed");
+        assert_eq!(status(4), "failed");
+        assert_eq!(status(5), "succeeded");
+        let error: Option<String> = conn
+            .query_row("SELECT error FROM jobs WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(error.is_none(), "a kept row must not carry an error");
+    }
+
+    /// `is_orphan` on its own, so the boundary cases read as a table.
+    #[test]
+    fn the_orphan_predicate_reads_owner_and_liveness() {
+        let alive = |pid: u32| pid == 10;
+        assert!(is_orphan(None, 1, &alive), "no owner");
+        assert!(is_orphan(Some(1), 1, &alive), "own pid at startup is a reused pid");
+        assert!(is_orphan(Some(11), 1, &alive), "owner exited");
+        assert!(is_orphan(Some(-3), 1, &alive), "garbage owner");
+        assert!(!is_orphan(Some(10), 1, &alive), "owner alive");
+    }
+
+    /// The liveness probe against the kernel: this process is alive, a reaped
+    /// child is not, and pid 0 (the process group) never counts.
+    #[test]
+    fn process_alive_answers_for_real_processes() {
+        assert!(process_alive(std::process::id()));
+        let mut child = Command::new("/usr/bin/true").spawn().expect("spawn");
+        let pid = child.id();
+        child.wait().expect("wait");
+        assert!(!process_alive(pid), "a reaped child is not alive");
+        assert!(!process_alive(0));
     }
 }

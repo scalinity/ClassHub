@@ -289,6 +289,8 @@ jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|
      status TEXT,                          -- queued|running|succeeded|failed|cancelled
      session_id TEXT NULL,                 -- claude session id (for --resume)
      payload TEXT NULL,                    -- kind-specific completion data; survives a restart for --resume
+     owner_pid INTEGER NULL,               -- the process running it (§6); NULL is a row from a
+                                           -- build before the column, treated as orphaned
      created_at INTEGER, started_at INTEGER NULL, finished_at INTEGER NULL,
      log_path TEXT NULL, error TEXT NULL, summary TEXT NULL);
 
@@ -426,6 +428,16 @@ claude -p <prompt>
   Jobs are cancellable (kill child process, mark `cancelled`).
 - **Resumability**: store the claude `session_id` from the init event; failed/interrupted
   `master_guide` jobs offer "Resume" which re-invokes with `--resume <session_id>`.
+- **Two processes, one table.** The installed app and a dev build share the database (§13), so
+  every row records the process that enqueued it (`owner_pid`). Startup recovery fails only
+  rows whose owner is gone — a live process's job is left alone, and a row from a build that
+  predates the column counts as orphaned. The duplicate-active guards (one extract per class,
+  one sort per class, and so on) read the table, so they hold across processes. Cancel stays
+  per-process, because the child handle lives where it was spawned; cancelling a row another
+  process owns says so rather than doing nothing.
+- **The self-check runs once a day**, not once a launch: a `self_check` that succeeded within
+  the last 24 hours stands, and its verdict is restored at launch. The manual re-run behind the
+  auth warning is unconditional.
 - Prompts are Rust-side templates (askama or `format!` with named sections) versioned in
   `src-tauri/prompts/`. Each prompt states: role, exact output path(s), output contract,
   and what NOT to do (no source edits, no files outside the contract).
@@ -854,6 +866,9 @@ and apply it. Non-negotiable per project owner.
   of the tool, not of this stack: file in, file out, no shared runtime. The rule is about what
   this project is written in, and it stays absolute there.
 - Dev loop only: `npm run tauri dev`. Never run production builds (`tauri build`) in sessions.
+  The one production build is `npm run install-app` (`scripts/install-app.sh`), which the owner
+  runs after a milestone lands: it quits the installed app, builds the bundle, replaces
+  `/Applications/ClassHub.app` and relaunches it on the current commit.
 - Rust: `anyhow` for errors in commands, typed event payloads (serde), no `unwrap()` outside
   tests/startup.
 - Commits: small, per-milestone; no AI attribution lines; existing git config untouched.
@@ -870,6 +885,12 @@ and apply it. Non-negotiable per project owner.
   policy must keep `script-src 'unsafe-inline'` or those frames go inert. The window CSP
   is therefore an anti-exfiltration control (no external script origin, no external
   connect-src, no object/base/form), not the thing that blocks `javascript:` URLs.
+- **One database for every build.** The data directory is Tauri's own `app_data_dir()`
+  (`~/Library/Application Support/com.danny.classhub`), resolved by `lib.rs::data_dir` for
+  every caller — the database, job logs, the LibreOffice profile, Zoom downloads and the
+  transcription scratch space. The installed app and a dev build therefore open the same
+  `classhub.db`, which runs in WAL mode so two processes can hold it open at once. Nothing
+  renames that folder: a hand-picked name is not worth a second database.
 - Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
   the streamed-escape decoder, the job-output array and object parsers, the HTML stripper,
   the source fingerprint diff, and the caption parser and cue merger (§7.1 — a transcript
@@ -887,6 +908,8 @@ Mark the checkbox when the acceptance criteria pass.
 2. Read the frontend-design skill if the milestone touches UI (all except M4).
 3. Implement only that milestone. Verify with `npm run tauri dev` against the real AIBHS folder.
 4. Tick the milestone checkbox in §14 (the only permitted SPEC.md edit) and commit.
+5. Run `npm run install-app` (owner). The installed app is the one the semester runs on, and a
+   milestone that only exists in `target/debug` has not shipped.
 
 ---
 
@@ -997,6 +1020,67 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a filed lecture reaches its unit's guide through a corpus note, the guide goes
   stale when the transcript changes, chat retrieves the note, and refiling the lecture to another
   week moves its contribution with it.
+
+- [x] **M15 — One database for every build.** (`milestones/M15-one-database.md`)
+  The data-directory merge of 2026-09-02 is done; this makes two processes on that database
+  safe (job rows own their process, so recovery fails only orphans and the extract pipeline is
+  never run twice), adds the one-command reinstall the installed app is kept current with, and
+  runs the auth self-check once a day instead of every launch.
+  *Accepted when:* a dev build launched beside the installed app leaves its running job alone,
+  one changed file yields one extract job across both, `npm run install-app` leaves
+  `/Applications/ClassHub.app` on the current commit opening the same database, and two launches
+  in a day produce one self-check.
+
+- [ ] **M16 — The first real lecture.** (`milestones/M16-first-real-lecture.md`)
+  M14 was accepted on fixtures. One real recording goes through the Zoom, transcription,
+  filing, digest, corpus and unit-guide path, everything that breaks is fixed, and what was
+  measured lands in §1 and §7.1.
+  *Accepted when:* a real session is in the tree, the corpus, a session document and its unit's
+  guide with nothing hand-edited, chat cites it, and refiling it moves its contribution.
+
+- [ ] **M17 — Proposals that tell the truth.** (`milestones/M17-proposals-tell-the-truth.md`)
+  Pending deadline proposals counted on the class card; past-dated proposals marked and skipped
+  by ADD ALL; move proposals whose file has left the inbox resolved; the write-scope check
+  excludes the app's own audited moves; SORT BY CONTENT on a Canvas card.
+  *Accepted when:* the card badge matches the queue, approving a move during a running job no
+  longer demotes it, a vanished inbox file leaves no card behind, and a Canvas placement can be
+  overridden by an explicit content sort.
+
+- [ ] **M18 — This week.** (`milestones/M18-this-week.md`)
+  The current division per class, resolved from `units` and never from arithmetic, on the card,
+  the workspace header, the Structure list and the chat overview.
+  *Accepted when:* the dashboard names each dated course's current week for today's date, a
+  "No Class" week reads as the syllabus wrote it, and Applied Generative AI, which publishes no
+  dates, shows nothing.
+
+- [ ] **M19 — Chat knows what the app knows.** (`milestones/M19-chat-parity.md`)
+  The overview carries divisions, lectures, corpus notes, unit guides and pending proposals;
+  synthesis and practice triggers accept a division; the open class rides with each question;
+  practice exams get their button in the workspace.
+  *Accepted when:* a question asked from a workspace needs no class name, "make a practice exam
+  for Week 3" queues a unit-scoped job, and the same exam can be started from the row's button.
+
+- [ ] **M20 — Every format in the tree.** (`milestones/M20-every-format.md`)
+  `docx` through LibreOffice to the HTML stripper, `ipynb` flattened locally, `py` and `csv` on
+  the text route, all zero-token; PDFs and converted decks viewable in the app through the asset
+  protocol scoped to the AIBHS root.
+  *Accepted when:* the Biostatistics `.docx` is searchable in chat, a fixture notebook extracts
+  with code fences and outputs, a slide PDF opens inline, and no extract job was spawned.
+
+- [ ] **M21 — Grades from Canvas.** (`milestones/M21-grades-from-canvas.md`)
+  Assignment groups become categories, graded-and-posted submissions become items, a submitted
+  assignment closes its deadline, all keyed on Canvas ids so a re-sync updates in place.
+  *Accepted when:* a graded quiz appears under its category with the right score after one sync,
+  its deadline is done with an audit row, and a second sync changes nothing.
+
+- [ ] **M22 — What the professor said.** (`milestones/M22-what-the-professor-said.md`)
+  A probe of announcements, Pages and the Canvas syllabus body per course; announcements as a
+  workspace section and chat context; Pages and the syllabus body into the extract cache so
+  search and the syllabus scan reach them; the sync's age on the dashboard, and a sync on launch
+  when the stored session is live and the last one is a day old.
+  *Accepted when:* an announcement appears in its workspace after a sync, a Page is cited by
+  chat, the Applied Generative AI scan can read the Canvas syllabus, and the dashboard names the
+  sync age.
 
 ## 15. Risks & trade-offs (accepted)
 

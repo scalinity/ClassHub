@@ -157,6 +157,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0006_indexes.sql"),
     include_str!("../migrations/0007_units.sql"),
     include_str!("../migrations/0008_folder_units.sql"),
+    include_str!("../migrations/0009_job_owner.sql"),
 ];
 
 /// An in-memory database with every migration applied.
@@ -223,6 +224,11 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // WAL, so the installed app and a dev build can hold this database open at
+    // once: a reader no longer blocks the writer, and a write waits out the
+    // other process's transaction instead of failing. The mode persists in the
+    // file, so a build that never sets it still runs under it.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     run_migrations(&mut conn)?;
     seed_default_settings(&conn)?;
     Ok(conn)

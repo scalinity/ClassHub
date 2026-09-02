@@ -1245,3 +1245,119 @@ so a file using it without an import resolved to `lib.dom` instead of failing.
 - The CSP values are reasoned but unverified — nothing here launched the app.
   First run after this pass should watch the devtools console for a CSP
   violation, especially around KaTeX styles and the iframe shells.
+
+## Post-M14 — One database for every build (2026-09-02)
+
+### What happened
+
+- `/Applications/ClassHub.app` is a release build from 2026-08-25 (before M13, M14 and the
+  data-directory refactor `f6a035a`), and it is the app the semester runs on. `f6a035a` renamed
+  the data folder from Tauri's default `com.danny.classhub` to `ClassHub`; the installed build,
+  still resolving the default name, found an empty folder there and created a second database
+  in it (schema 6). Between 2026-08-27 and 2026-09-02 the two diverged: 11 deadlines, three
+  sort moves and an extract in the installed build's database; 49 units, 29 deadlines, the
+  Canvas mapping and the grade categories in the dev database.
+- One consequence was visible as an app bug: the three files the installed build sorted into
+  the tree on 2026-09-01 were the same three the dev build's Canvas sync had staged into
+  `_Inbox/`, so the dev database held three pending Canvas proposals for files no longer in the
+  inbox. Another was a false demotion: those three moves were approved while extract job 4 was
+  running, and the write-scope fingerprint counted the app's own renames as the job's writes
+  (`job.out_of_contract`, six paths). M17 fixes both mechanisms.
+
+### What was done
+
+- The dev database (schema 8) is canonical. Imported from the other: the three `files` rows it
+  alone indexed (with their extract state, so nothing re-extracts), one fresher `files` row for
+  an edited `.R` file, its three approved `move_proposals`, and all 15 `audit_log` rows tagged
+  `fromDatabase: aug25-build`. The three stale Canvas proposals (ids 9–11) were dismissed. One
+  `library.merge_databases` audit row records the counts. `jobs.log_path` values were rewritten
+  to the new directory.
+- The canonical directory was renamed to Tauri's default, `com.danny.classhub`, and
+  `lib.rs::data_dir` now resolves `app_data_dir()` for every build. Both originals are under
+  `~/Library/Application Support/ClassHub-merge-backup-2026-09-02/` (`aug25-build-data/` is the
+  installed build's whole directory; `dev-before-merge.db` is the canonical database before the
+  merge).
+- `db::open` sets `journal_mode = WAL` so the installed app and a dev build can hold the file
+  open together. The mode persists in the file; the Aug 25 build honours it without knowing.
+- The installed build was relaunched on the merged database and verified: it opened
+  `com.danny.classhub/classhub.db`, left `user_version` at 8 (its migration runner skips past
+  entries it does not have and never lowers the version), ran its self-check as job 285 in the
+  shared sequence, and its launch scan found every extract current — no job, no tokens.
+
+### Gotchas
+
+- **The installed build stays two milestones behind until it is rebuilt.** It opens the shared
+  database fine, but it has no Canvas, no Structure section and no `Weeks/` filing, and its
+  startup recovery still fails every active job row on launch (M15 Phase 1). Reinstall from the
+  current commit before relying on it.
+- Two builds on one database is now the normal state, not an accident. Any code that infers
+  "no other process" — recovery, queue guards, cleanup — has to ask the table who owns a row.
+- A bare copy of `classhub.db` under WAL can miss the last transactions; back up with
+  `sqlite3 classhub.db ".backup out.db"` or copy the `-wal` and `-shm` files with it.
+
+## M15 — One database for every build (2026-09-02)
+
+### What exists now
+
+- **Job rows own their process.** Migration `0009_job_owner.sql` adds `jobs.owner_pid`, and
+  `enqueue` stamps `std::process::id()`. `startup_recovery` is `recover_orphans(conn, self_pid,
+  alive)` over the predicate `is_orphan`: an active row is failed only when its owner is NULL (a
+  row from the Aug 25 build, whose inserts name their columns and never set it), equal to this
+  process's own pid (at startup nothing has been enqueued, so that is a reused pid), or not
+  alive by `kill(pid, 0)` — EPERM counts as alive, and pid 0 is refused outright because it
+  names the process group and always answers yes. The error text is `interrupted — the process
+  running it exited`. The duplicate-active guards (`guides::has_active_job`,
+  `sorter::has_active_sort`, `deadlines::run_scan`, `extract::has_active_extract_job`) were not
+  touched: they read status from the table and are correct once the rows are.
+- **Cancel is per-process, and says so.** `cancel_job` falls through the in-memory `running`
+  map and queue to the table: an active row with a different owner returns "job N is running
+  in another ClassHub process (pid X) — cancel it from there", which the Job Center's error line
+  shows. The manager guard is dropped before the Db lock is taken, keeping the existing order.
+- **The self-check runs once a day.** `jobs::startup_self_check` looks for a `self_check` that
+  succeeded within `SELF_CHECK_INTERVAL` (24 h). Found, it restores the verdict through
+  `set_auth("ok", …)` with the stored summary and its age, so `get_auth_check` reports the truth
+  rather than the default "pending"; not found, it enqueues. `run_auth_check`, the manual re-run
+  behind the auth warning, still calls `enqueue_self_check` unconditionally. Before this, 242 of
+  the 285 job rows were self-checks.
+- **`scripts/install-app.sh`, as `npm run install-app`.** Finds the installed instance by
+  executable path (`pgrep -f "^/Applications/ClassHub.app/Contents/MacOS/classhub"`, which does
+  not match a dev build), quits it by bundle path through `osascript` so the job runner's
+  shutdown still reaps its children, waits up to 30 s, runs `tauri build --bundles app`, removes
+  the old bundle, `ditto`s the new one in and relaunches with `open`. It warns when the working
+  tree is dirty and prints the commit it built. The build precedes the removal, so a failed
+  build leaves the installed app in place. SPEC §13 names it as the one production build, and
+  §14's session protocol gained it as step 5.
+- `libc` is a direct dependency now (already in the lock through tauri).
+
+### Verified
+
+- `cargo test`: 130 pass, three new in `jobs::tests` — the predicate as a table, recovery over
+  `memory_db` (live-owned kept, dead / NULL / self-pid failed, a settled row untouched), and
+  `process_alive` against this process, a reaped child and pid 0. `npx tsc --noEmit` is clean.
+- Two debug processes on the shared database beside the Aug 25 app (pid 8598): `npm run tauri
+  dev` (pid 11074) and `target/debug/classhub` launched directly (pid 11179), both on the one
+  Vite server. With rows seeded as `running`/11074, `running`/99999 (a free pid) and
+  `queued`/NULL, the second launch left the first `running` and failed the other two; its stderr
+  named `[287, 288]`, and its launch scan skipped class 1's pipeline (the live-owned extract row)
+  while running classes 2 and 4 — the cross-process form of "one changed file, one extract job".
+  SIGKILL of 11074 holding a row of its own beside a row owned by 11179, then a relaunch: only
+  11074's row failed. Three launches in the day added no `self_check` row; job 285, from the
+  installed build's own launch that morning, stood. The seeded rows were deleted afterwards and
+  the max id is 285 again.
+- Migration 0009 ran under the installed app's open connection without incident
+  (`user_version` 8 → 9). The Aug 25 build's rows carry `owner_pid NULL` and any newer build's
+  recovery fails them — the intended reading until it is reinstalled.
+- The install script's process match returns only 8598, `zsh -n` passes, and AppleScript's
+  path-addressed `quit` was checked against TextEdit. The script itself was not run.
+
+### Gotchas
+
+- **Reinstall first.** Until `npm run install-app` runs, the Aug 25 build still fails every
+  active row when *it* launches, and none of its own rows say who owns them.
+- Concurrency is per process: two builds can each run `max_concurrent` jobs, and master-guide
+  exclusivity is per process too. Nothing here makes either global.
+- The cross-process cancel message was exercised in review only; nothing scripted can press the
+  Job Center's cancel.
+- `kill(pid, 0)` cannot tell a reused pid from the original process. The self-pid case is
+  handled; a pid reused by some unrelated process would keep a dead job's row `running` until
+  that process exits. Acceptable at n-of-1, and the row is visible in the Job Center.

@@ -32,14 +32,14 @@ use tauri::Manager;
 
 pub(crate) struct Db(pub(crate) Mutex<Connection>);
 
-/// `~/Library/Application Support/ClassHub`. Tauri's own `app_data_dir()` keys
-/// off the bundle identifier, which would name the folder `com.danny.classhub`.
+/// Tauri's own app data directory: `~/Library/Application Support/com.danny.classhub`.
+///
+/// Every build resolves it the same way, so the installed app and a dev build
+/// open one database. A hand-picked folder name is how they once stopped doing
+/// so: the installed build kept resolving the default name and started a second
+/// database in the empty folder it found there.
 pub(crate) fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<std::path::PathBuf> {
-    Ok(app
-        .path()
-        .data_dir()
-        .context("resolving app data dir")?
-        .join("ClassHub"))
+    app.path().app_data_dir().context("resolving app data dir")
 }
 
 #[tauri::command(async)]
@@ -635,7 +635,7 @@ pub fn run() {
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
             app.manage(chat::ChatState::default());
-            if let Err(e) = jobs::enqueue_self_check(app.handle()) {
+            if let Err(e) = jobs::startup_self_check(app.handle()) {
                 eprintln!("startup self-check failed to enqueue: {e:#}");
             }
             // Off the main thread: this walks every class folder and hashes

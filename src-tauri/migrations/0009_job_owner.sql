@@ -1,0 +1,14 @@
+-- SPEC §6/§13 — which process a job row belongs to.
+--
+-- The installed app and a dev build share one database, so a row that says
+-- `running` may belong to a process that is still running it. Startup recovery
+-- used to fail every active row on the theory that the previous process had
+-- died; with two processes that marks a live job failed in the table while it
+-- keeps running, and the extract guard then enqueues the same batch a second
+-- time. `enqueue` stamps the process id, and recovery asks the kernel whether
+-- that process is still there before failing anything.
+--
+-- NULL means a build that predates the column wrote the row. Nothing can vouch
+-- for it, so it is treated as orphaned — the old behaviour, confined to rows
+-- the old build made.
+ALTER TABLE jobs ADD COLUMN owner_pid INTEGER;

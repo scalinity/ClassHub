@@ -533,6 +533,7 @@ dependencies = [
  "chrono",
  "dirs",
  "keyring",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",
