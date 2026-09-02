@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
@@ -405,14 +405,17 @@ pub fn prune_logs(data_dir: &std::path::Path) {
 }
 
 /// SPEC §7 step 3: one batched extract job per class per run. `payload` is the
-/// JSON batch manifest that extract::finalize_job records on success.
+/// JSON batch manifest that extract::finalize_job records on success. `None`
+/// when an extract for this class is already active — decided in the same
+/// transaction as the insert, because the other process on this database may
+/// be enqueuing the same batch at the same moment.
 pub fn enqueue_extract(
     app: &AppHandle,
     class_id: i64,
     prompt: &str,
     payload: String,
-) -> Result<i64> {
-    enqueue(app, "extract", Some(class_id), None, prompt, Some(payload), None)
+) -> Result<Option<i64>> {
+    enqueue_unique(app, "extract", Some(class_id), None, prompt, Some(payload))
 }
 
 /// SPEC §8.1: module guide synthesis (manual trigger only). `payload` carries
@@ -649,35 +652,110 @@ fn enqueue(
     payload: Option<String>,
     resume_session: Option<String>,
 ) -> Result<i64> {
-    let id = with_conn(app, |conn| {
-        conn.execute(
-            "INSERT INTO jobs (kind, class_id, scope, status, created_at, payload, owner_pid)
-             VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
-            params![
-                kind,
-                class_id,
-                scope,
-                now(),
-                payload,
-                i64::from(std::process::id())
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
-    })?;
-    {
-        let mgr = app.state::<JobManager>();
-        mgr.lock_inner().queue.push_back(QueuedJob {
+    let id = with_conn(app, |conn| insert_job(conn, kind, class_id, scope, payload.as_deref()))?;
+    queue_job(
+        app,
+        QueuedJob {
             id,
             kind: kind.to_string(),
             class_id,
             prompt: prompt.to_string(),
             payload,
             resume_session,
-        });
+        },
+    );
+    Ok(id)
+}
+
+/// `enqueue` for a kind that may have one active row per class. The check and
+/// the insert share one IMMEDIATE transaction, so SQLite's write lock is the
+/// mutex between this process and the other one on the same database (SPEC
+/// §13). A guard the caller ran before its conversions proves nothing by the
+/// time they finish: two builds launching in the same minute both pass it, and
+/// without this both enqueue the same batch.
+fn enqueue_unique(
+    app: &AppHandle,
+    kind: &str,
+    class_id: Option<i64>,
+    scope: Option<&str>,
+    prompt: &str,
+    payload: Option<String>,
+) -> Result<Option<i64>> {
+    let id = with_conn(app, |conn| {
+        insert_unique_job(conn, kind, class_id, scope, payload.as_deref())
+    })?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    queue_job(
+        app,
+        QueuedJob {
+            id,
+            kind: kind.to_string(),
+            class_id,
+            prompt: prompt.to_string(),
+            payload,
+            resume_session: None,
+        },
+    );
+    Ok(Some(id))
+}
+
+fn insert_job(
+    conn: &Connection,
+    kind: &str,
+    class_id: Option<i64>,
+    scope: Option<&str>,
+    payload: Option<&str>,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO jobs (kind, class_id, scope, status, created_at, payload, owner_pid)
+         VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
+        params![
+            kind,
+            class_id,
+            scope,
+            now(),
+            payload,
+            i64::from(std::process::id())
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Inserts unless a row of this kind is already queued or running for the
+/// class. IMMEDIATE takes the write lock before the read, so another process's
+/// identical transaction waits behind this one and then sees its row.
+fn insert_unique_job(
+    conn: &Connection,
+    kind: &str,
+    class_id: Option<i64>,
+    scope: Option<&str>,
+    payload: Option<&str>,
+) -> Result<Option<i64>> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let active: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM jobs
+         WHERE kind = ?1 AND class_id IS ?2 AND status IN ('queued', 'running')",
+        params![kind, class_id],
+        |row| row.get(0),
+    )?;
+    if active > 0 {
+        return Ok(None); // the transaction rolls back on drop
+    }
+    let id = insert_job(&tx, kind, class_id, scope, payload)?;
+    tx.commit()?;
+    Ok(Some(id))
+}
+
+/// The in-memory half of an enqueue, once the row exists.
+fn queue_job(app: &AppHandle, job: QueuedJob) {
+    {
+        let mgr = app.state::<JobManager>();
+        mgr.lock_inner().queue.push_back(job);
     }
     let _ = app.emit("jobs-changed", ());
     pump(app);
-    Ok(id)
 }
 
 /// Starts queued jobs while free slots remain. SPEC §8.2 exclusivity: a
@@ -1750,7 +1828,7 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_orphan, parse_entries, parse_object, process_alive, recover_orphans,
+        insert_unique_job, is_orphan, parse_entries, parse_object, process_alive, recover_orphans,
         unescape_fragment, wait_bounded,
     };
     use std::process::{Command, Stdio};
@@ -1982,5 +2060,39 @@ mod tests {
         child.wait().expect("wait");
         assert!(!process_alive(pid), "a reaped child is not alive");
         assert!(!process_alive(0));
+    }
+
+    /// The guard the extract pipeline relies on across processes: an active row
+    /// of the same kind for the same class refuses a second insert, while other
+    /// classes, other kinds and settled rows are unaffected.
+    #[test]
+    fn a_unique_insert_yields_to_an_active_row_of_its_kind() {
+        let conn = crate::db::memory_db();
+        let first = insert_unique_job(&conn, "extract", Some(1), None, Some("{}"))
+            .unwrap()
+            .expect("the first extract is inserted");
+        assert!(
+            insert_unique_job(&conn, "extract", Some(1), None, Some("{}"))
+                .unwrap()
+                .is_none(),
+            "a second extract for the class while one is active"
+        );
+        assert!(insert_unique_job(&conn, "extract", Some(2), None, None).unwrap().is_some());
+        assert!(insert_unique_job(&conn, "sort_proposal", Some(1), None, None).unwrap().is_some());
+
+        conn.execute("UPDATE jobs SET status = 'failed' WHERE id = ?1", [first]).unwrap();
+        assert!(
+            insert_unique_job(&conn, "extract", Some(1), None, None).unwrap().is_some(),
+            "a settled row no longer blocks"
+        );
+
+        let owner: i64 = conn
+            .query_row("SELECT owner_pid FROM jobs WHERE id = ?1", [first], |r| r.get(0))
+            .unwrap();
+        assert_eq!(owner, i64::from(std::process::id()), "the row is stamped with this process");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 4, "the refused insert left no row behind");
     }
 }

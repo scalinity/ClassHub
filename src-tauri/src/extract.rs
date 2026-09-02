@@ -104,7 +104,10 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
         let conn = lock(&db.0);
         if has_active_extract_job(&conn, class_id)? {
             // The running job's record keeping lands on completion; the next
-            // scan picks up anything it left stale.
+            // scan picks up anything it left stale. This is an early-out, not
+            // the guard: the conversions below take long enough for the other
+            // process to enqueue meanwhile, so the enqueue re-checks inside its
+            // own transaction.
             return Ok(());
         }
         (crate::scanner::class_dir(&conn, class_id)?, stale_files(&conn, class_id)?)
@@ -163,7 +166,12 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
         .join("\n");
     let prompt = PROMPT_TEMPLATE.replace("{files}", &files_list);
     let payload = serde_json::to_string(&batch)?;
-    let job_id = crate::jobs::enqueue_extract(app, class_id, &prompt, payload)?;
+    let Some(job_id) = crate::jobs::enqueue_extract(app, class_id, &prompt, payload)? else {
+        // The other process enqueued this class's batch while this one was
+        // converting; its run records the results.
+        eprintln!("extract pipeline class {class_id}: an extract job is already active — not enqueuing a second");
+        return Ok(());
+    };
     eprintln!(
         "extract pipeline class {class_id}: enqueued extract job {job_id} for {} PDF(s)",
         batch.len()
