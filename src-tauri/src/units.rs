@@ -131,8 +131,12 @@ pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
     let mut rows = stmt
         .query_map([class_id], read_unit)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The slots and the `Weeks/` listing are the same for every row, so they
+    // are read once here rather than once per division.
+    let slots = week_slots(conn, class_id)?;
+    let filed = crate::extract::filed_under_weeks(conn, class_id)?;
     for unit in &mut rows {
-        unit.materials = materials(conn, class_id, unit.id)?;
+        unit.materials = materials(conn, class_id, unit, &slots, &filed)?;
     }
     Ok(rows)
 }
@@ -141,9 +145,22 @@ pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
 /// lectures (SPEC §8.5): its manifest less the transcripts on its
 /// contribution rows, which reach a guide through their notes rather than as
 /// files — the count the workspace row and the backend's own refusal agree on.
-fn materials(conn: &Connection, class_id: i64, unit_id: i64) -> Result<i64> {
-    let manifest = crate::extract::current_manifest(conn, class_id, &crate::db::unit_scope(unit_id))?;
-    let transcripts = crate::lectures::contributing_paths(conn, class_id, unit_id)?;
+fn materials(
+    conn: &Connection,
+    class_id: i64,
+    unit: &UnitInfo,
+    slots: &[WeekSlot],
+    filed: &[crate::extract::ManifestEntry],
+) -> Result<i64> {
+    let manifest = crate::extract::unit_manifest(
+        conn,
+        class_id,
+        unit.id,
+        unit.rel_path.as_deref(),
+        slots,
+        filed,
+    )?;
+    let transcripts = crate::lectures::contributing_paths(conn, class_id, unit.id)?;
     Ok(manifest
         .iter()
         .filter(|entry| !transcripts.contains(&entry.rel_path))

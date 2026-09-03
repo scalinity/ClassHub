@@ -759,43 +759,9 @@ pub fn current_manifest(
         let Some((unit_id, unit_folder)) = unit else {
             return Ok(Vec::new());
         };
-
-        let mut entries = match unit_folder {
-            Some(folder) => folder_manifest(conn, class_id, &folder)?,
-            None => Vec::new(),
-        };
-        // What is filed under a week folder is that week's material, and the
-        // week feeds this division (SPEC §4) — the join a transcript makes,
-        // made for the deck and the notebook filed beside it. Read off the
-        // folder's number the way `week_from_rel_path` reads a transcript's,
-        // so a week the syllabus renames still counts the folder it was filed
-        // under.
-        let weeks: std::collections::BTreeSet<i64> = crate::units::week_slots(conn, class_id)?
-            .into_iter()
-            .filter(|slot| slot.unit_id == unit_id)
-            .map(|slot| slot.week)
-            .collect();
-        if !weeks.is_empty() {
-            let filed = folder_manifest(conn, class_id, crate::db::WEEKS_DIR)?;
-            entries.extend(filed.into_iter().filter(|entry| {
-                crate::units::week_from_rel_path(&entry.rel_path)
-                    .is_some_and(|week| weeks.contains(&week))
-            }));
-        }
-        let mut stmt = conn.prepare(
-            "SELECT f.rel_path, f.sha256 FROM files f
-             JOIN lecture_contributions lc
-               ON lc.class_id = f.class_id AND lc.rel_path = f.rel_path
-             WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'",
-        )?;
-        let rows = stmt.query(rusqlite::params![class_id, unit_id])?;
-        entries.extend(read(rows)?);
-        // A transcript is under its week folder and on a contribution row, so
-        // it arrives twice, and a manifest that holds a duplicate never equals
-        // the set it is compared against.
-        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        entries.dedup_by(|a, b| a.rel_path == b.rel_path);
-        return Ok(entries);
+        let slots = crate::units::week_slots(conn, class_id)?;
+        let filed = filed_under_weeks(conn, class_id)?;
+        return unit_manifest(conn, class_id, unit_id, unit_folder.as_deref(), &slots, &filed);
     }
 
     let entries = if scope == crate::db::MASTER_SCOPE {
@@ -832,6 +798,71 @@ fn folder_manifest(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec
             })
         })
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Everything indexed under `Weeks/`, read once for a listing that asks about
+/// every division of a class.
+pub fn filed_under_weeks(conn: &Connection, class_id: i64) -> Result<Vec<ManifestEntry>> {
+    folder_manifest(conn, class_id, crate::db::WEEKS_DIR)
+}
+
+/// A division's manifest (SPEC §8.5): its folder, the week folders its weeks
+/// name, and the lectures mapped to it. What is filed under a week folder is
+/// that week's material, and the week feeds the division (SPEC §4) — the join
+/// a transcript makes, made for the deck and the notebook filed beside it,
+/// read off the folder's number the way `week_from_rel_path` reads a
+/// transcript's, so a week the syllabus renames still counts the folder it
+/// was filed under. The slots and the `Weeks/` listing come from the caller,
+/// so a listing of fifteen divisions reads them once rather than once per row.
+pub fn unit_manifest(
+    conn: &Connection,
+    class_id: i64,
+    unit_id: i64,
+    unit_folder: Option<&str>,
+    slots: &[crate::units::WeekSlot],
+    filed: &[ManifestEntry],
+) -> Result<Vec<ManifestEntry>> {
+    let mut entries = match unit_folder {
+        Some(folder) => folder_manifest(conn, class_id, folder)?,
+        None => Vec::new(),
+    };
+    let weeks: std::collections::BTreeSet<i64> = slots
+        .iter()
+        .filter(|slot| slot.unit_id == unit_id)
+        .map(|slot| slot.week)
+        .collect();
+    if !weeks.is_empty() {
+        entries.extend(
+            filed
+                .iter()
+                .filter(|entry| {
+                    crate::units::week_from_rel_path(&entry.rel_path)
+                        .is_some_and(|week| weeks.contains(&week))
+                })
+                .cloned(),
+        );
+    }
+    let mut stmt = conn.prepare(
+        "SELECT f.rel_path, f.sha256 FROM files f
+         JOIN lecture_contributions lc
+           ON lc.class_id = f.class_id AND lc.rel_path = f.rel_path
+         WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'",
+    )?;
+    let mapped = stmt
+        .query_map(rusqlite::params![class_id, unit_id], |row| {
+            Ok(ManifestEntry {
+                rel_path: row.get(0)?,
+                sha256: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    entries.extend(mapped);
+    // A transcript is under its week folder and on a contribution row, so it
+    // arrives twice, and a manifest that holds a duplicate never equals the
+    // set it is compared against.
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    entries.dedup_by(|a, b| a.rel_path == b.rel_path);
+    Ok(entries)
 }
 
 /// SPEC §7 step 5: a guide is stale when its stored `source_manifest` differs
