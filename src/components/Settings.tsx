@@ -261,7 +261,9 @@ function CanvasSection() {
         reads it through a Canvas window you sign in to, and keeps that
         session's own cookie in your Keychain so relaunching the app does not
         mean signing in again. Nothing is minted, and Canvas decides when the
-        session ends. Syncing runs when you ask, never on a schedule."
+        session ends. Syncing runs when you ask, and once on launch when the
+        saved session is still live and the last sync is a day old — never on
+        a schedule."
     >
       <dl className="mt-4 space-y-1.5 font-mono text-[11px]">
         <div className="flex gap-3">
@@ -312,9 +314,11 @@ function CanvasSection() {
 
       <p className="mt-3 max-w-xl text-[11.5px] leading-relaxed text-muted-foreground">
         You will be asked to sign in when Canvas ends the session, not every
-        time you open the app. Assignments arrive as deadline cards and
-        files land in each class's inbox — both wait for your approval, the same
-        as everything else that moves material.
+        time you open the app, and never by the launch's own sync. Assignments
+        arrive as deadline cards and files land in each class's inbox — both
+        wait for your approval, the same as everything else that moves
+        material. Announcements go straight to the class's NOTICES, and its
+        Canvas Pages into the extract cache, where chat searches them.
       </p>
     </Section>
   );
@@ -336,6 +340,16 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
     );
   }
 
+  // The launch's sync giving up is the quiet outcome it exists to allow —
+  // Canvas turned the saved session down, and the next press will ask for a
+  // sign-in. A note, not a stopped sync.
+  if (progress.error && progress.launch) {
+    return (
+      <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-muted-foreground">
+        NOT SYNCED ON LAUNCH — {progress.error}
+      </p>
+    );
+  }
   if (progress.error) {
     return (
       <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-destructive">
@@ -346,6 +360,11 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
 
   return (
     <dl className="mt-4 max-w-xl space-y-2.5">
+      {progress.launch && (
+        <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+          SYNCED ON LAUNCH
+        </p>
+      )}
       {(progress.results ?? []).map((outcome) => (
         <div key={outcome.classId}>
           <dt className="flex items-baseline gap-2">

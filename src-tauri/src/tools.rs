@@ -120,7 +120,7 @@ pub fn definitions() -> Value {
     json!([
         {
             "name": "get_overview",
-            "description": "Snapshot of the hub, in full: every class, when it meets, how the course divides itself (its weeks, modules or parts, with dates and which one is current), the lectures filed under each division and whether they have been distilled or have a session document, what material is indexed and extracted per folder, which study guides exist and whether they are stale, every deadline or file-move proposal waiting for approval (with ids), and open deadlines. Use it for questions about the schedule, this week, deadlines, what exists, what is waiting, or what has been synthesized — not to find content inside material.",
+            "description": "Snapshot of the hub, in full: every class, when it meets, how the course divides itself (its weeks, modules or parts, with dates and which one is current), the professor's latest Canvas announcements with their text, the lectures filed under each division and whether they have been distilled or have a session document, what material is indexed and extracted per folder, which study guides exist and whether they are stale, every deadline or file-move proposal waiting for approval (with ids), and open deadlines. Use it for questions about the schedule, this week, what the professor announced, deadlines, what exists, what is waiting, or what has been synthesized — not to find content inside material.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
@@ -626,6 +626,7 @@ fn class_block(
     if detailed {
         out.push_str(&division_rows(&units, current.as_ref(), &contributions, &guides));
     }
+    out.push_str(&notices_block(conn, class.id, detailed)?);
     if let (Some(start), Some(end)) = (&exam_start, &exam_end) {
         out.push_str(&format!("Final exam: {start} to {end}\n"));
     }
@@ -637,6 +638,46 @@ fn class_block(
         out.push_str(&grades_line(conn, class.id)?);
     }
     Ok(())
+}
+
+/// How many of the professor's announcements the overview carries per class,
+/// and how much of each body the detailed form quotes.
+const NOTICES_SHOWN: usize = 3;
+const NOTICE_BODY_CHARS: usize = 600;
+
+/// `Notices:` — the professor's latest announcements (SPEC §7.2), newest
+/// first and three at most: titles alone in the compact form, since it rides
+/// every turn; the detailed form quotes each body, capped. Nothing when the
+/// course has none.
+fn notices_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<String> {
+    let all = crate::canvas_sync::list_announcements(conn, class_id)?;
+    if all.is_empty() {
+        return Ok(String::new());
+    }
+    let day = |posted_at: &str| posted_at[..posted_at.len().min(10)].to_string();
+    let latest = all.iter().take(NOTICES_SHOWN);
+    if !detailed {
+        let titles = latest
+            .map(|a| format!("\"{}\" ({})", a.title, day(&a.posted_at)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Ok(format!("Notices: {titles}\n"));
+    }
+    let mut out = format!(
+        "Notices (latest {} of {}):\n",
+        all.len().min(NOTICES_SHOWN),
+        plural(all.len(), "announcement")
+    );
+    for a in latest {
+        let body = a.body.split_whitespace().collect::<Vec<_>>().join(" ");
+        out.push_str(&format!(
+            "- {} · {}\n  {}\n",
+            day(&a.posted_at),
+            a.title,
+            truncate(&body, NOTICE_BODY_CHARS)
+        ));
+    }
+    Ok(out)
 }
 
 /// The detailed form's row per division: its date, `NOW`, its folder, its
@@ -2192,6 +2233,53 @@ mod tests {
             ),
             "{detailed}"
         );
+    }
+
+    /// The professor's latest announcements ride the compact form as titles
+    /// alone, and the detailed form quotes their text; a course with none
+    /// gets no line.
+    #[test]
+    fn the_overview_carries_the_latest_notices() {
+        let conn = fixture();
+        for (canvas_id, title, body, posted_at) in [
+            ("1", "Welcome", "Slides are under Module 1.", "2026-08-20T00:00"),
+            ("2", "Office hours moved", "Thursday at <b>6 PM</b> this week.\n\nBen", "2026-09-02T15:03"),
+            ("3", "Quiz 1 posted", "Due Friday.", "2026-08-28T09:00"),
+            ("4", "Reading for week 2", "Chapter 3.", "2026-08-25T09:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO announcements (class_id, canvas_id, title, body, posted_at)
+                 VALUES (3, ?1, ?2, ?3, ?4)",
+                rusqlite::params![canvas_id, title, body, posted_at],
+            )
+            .expect("announcement");
+        }
+        let compact = block(
+            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(
+            compact.contains(
+                "\nNotices: \"Office hours moved\" (2026-09-02); \"Quiz 1 posted\" (2026-08-28); \"Reading for week 2\" (2026-08-25)\n"
+            ),
+            "{compact}"
+        );
+        assert!(!compact.contains("Thursday"), "bodies belong to the detailed form: {compact}");
+        let detailed = block(
+            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(detailed.contains("\nNotices (latest 3 of 4 announcements):\n"), "{detailed}");
+        assert!(
+            detailed.contains("\n- 2026-09-02 · Office hours moved\n  Thursday at <b>6 PM</b> this week. Ben\n"),
+            "{detailed}"
+        );
+        assert!(!detailed.contains("Welcome"), "only the latest three: {detailed}");
+        let applied = block(
+            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            "Applied Generative AI in Medicine",
+        );
+        assert!(!applied.contains("Notices"), "{applied}");
     }
 
     /// The scope both triggers share: a division by its number, its topic or

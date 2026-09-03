@@ -389,14 +389,16 @@ const BLOCK_TAGS: &[&str] = &[
 ];
 
 /// Minimal tag-strip for R-rendered notebook HTML and LibreOffice's DOCX
-/// export (SPEC §7 step 3): drops tags plus script/style payloads, decodes
+/// export (SPEC §7 step 3), and for what Canvas serves as HTML — announcement
+/// bodies, Pages and the syllabus page (SPEC §7.2), none of which is ever
+/// rendered in the app: drops tags plus script/style payloads, decodes
 /// common entities, keeps `<pre>` text intact, and collapses runs of blank
 /// lines. Outside `<pre>` a newline in the text is source formatting — HTML
 /// renders it as a space — and it is folded into one, because LibreOffice
 /// hard-wraps every paragraph at about seventy characters and a phrase that
 /// crossed the wrap would be unfindable by a line-based search. Zero tokens,
 /// zero dependencies.
-fn strip_html(html: &str) -> String {
+pub(crate) fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 4);
     let mut rest = html;
     let mut pre_depth = 0usize;

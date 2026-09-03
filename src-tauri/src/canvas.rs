@@ -114,6 +114,11 @@ pub struct Session {
     window: WebviewWindow,
     shown: AtomicBool,
     counter: AtomicU64,
+    /// Never show the window. A sync on launch (SPEC §7.2) reads a live
+    /// session or gives up: a sign-in prompt nobody asked for, or a window
+    /// revealed over a stall, is exactly what an unattended launch must not
+    /// produce. What a manual sync would show, this reports as an error.
+    quiet: bool,
 }
 
 impl Drop for Session {
@@ -164,6 +169,20 @@ impl std::fmt::Display for Refused {
 }
 
 impl std::error::Error for Refused {}
+
+/// A quiet session (see `Session::open_quiet`) finding that Canvas wants a
+/// sign-in — the one thing it is not allowed to ask for. Typed so the launch
+/// sync can say what happened in its own words rather than as a failure.
+#[derive(Debug)]
+pub struct SignInNeeded;
+
+impl std::fmt::Display for SignInNeeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Canvas did not accept the saved session — the next sync will ask you to sign in")
+    }
+}
+
+impl std::error::Error for SignInNeeded {}
 
 /// What a page that is not on Canvas's origin actually means.
 #[derive(Debug, PartialEq)]
@@ -227,6 +246,18 @@ impl Session {
     /// which, with the last session's cookies put back first, means Canvas has
     /// ended it rather than merely that the app was restarted.
     pub fn open(app: &AppHandle, on_stage: &dyn Fn(&str)) -> Result<Session> {
+        Self::open_with(app, on_stage, false)
+    }
+
+    /// `open` for a sync nobody is watching: the window stays hidden whatever
+    /// happens, and Canvas wanting a sign-in is a `SignInNeeded` error rather
+    /// than a prompt. A conclusive refusal still discards the stored copy, on
+    /// the same evidence a manual sync would act on.
+    pub fn open_quiet(app: &AppHandle, on_stage: &dyn Fn(&str)) -> Result<Session> {
+        Self::open_with(app, on_stage, true)
+    }
+
+    fn open_with(app: &AppHandle, on_stage: &dyn Fn(&str), quiet: bool) -> Result<Session> {
         close_existing(app)?;
         restore(app, on_stage);
         let url = tauri::Url::parse(CANVAS_ORIGIN).context("parsing the Canvas origin")?;
@@ -242,6 +273,7 @@ impl Session {
             window,
             shown: AtomicBool::new(false),
             counter: AtomicU64::new(0),
+            quiet,
         };
         // Built before the probe, so a refusal here drops `session` and its
         // `Drop` closes the window. Returning the error without that would
@@ -346,11 +378,11 @@ impl Session {
                 // session perfectly alive — its rate limiter answers 403, and
                 // `Refused` further down exists because a course can too. Only
                 // the first is allowed to throw the stored copy away.
-                Outcome::Unauthorized(status) => self.ask(&mut asked, status == 401, on_stage),
+                Outcome::Unauthorized(status) => self.ask(&mut asked, status == 401, on_stage)?,
                 Outcome::Offsite(host) => match read_offsite(&host, started.elapsed()) {
                     Offsite::Loading => {}
-                    Offsite::Stalled => self.ask(&mut asked, false, on_stage),
-                    Offsite::Bounced => self.ask(&mut asked, true, on_stage),
+                    Offsite::Stalled => self.ask(&mut asked, false, on_stage)?,
+                    Offsite::Bounced => self.ask(&mut asked, true, on_stage)?,
                 },
             }
             if Instant::now() >= deadline {
@@ -495,7 +527,7 @@ impl Session {
             }
             // A read taking this long is not a live session behaving normally,
             // so stop hiding what is happening.
-            if mode != Mode::SignIn && started.elapsed() >= HIDDEN_GRACE {
+            if mode != Mode::SignIn && !self.quiet && started.elapsed() >= HIDDEN_GRACE {
                 self.reveal();
             }
             std::thread::sleep(REQUEST_POLL);
@@ -545,16 +577,26 @@ impl Session {
     /// — so only a conclusive refusal does the second. A window that has not
     /// navigated anywhere yet has refused nothing, and the copy it may be about
     /// to prove has no business being thrown away first.
-    fn ask(&self, asked: &mut bool, refused: bool, on_stage: &dyn Fn(&str)) {
+    ///
+    /// A quiet session never asks: a refusal ends it with `SignInNeeded`, and
+    /// a window that never navigated ends it with that said plainly.
+    fn ask(&self, asked: &mut bool, refused: bool, on_stage: &dyn Fn(&str)) -> Result<()> {
         if *asked {
-            return;
+            return Ok(());
         }
         *asked = true;
         if refused {
             forget();
         }
+        if self.quiet {
+            if refused {
+                return Err(SignInNeeded.into());
+            }
+            bail!("the Canvas window never finished loading");
+        }
         self.reveal();
         on_stage("Waiting for you to sign in to Canvas…");
+        Ok(())
     }
 
     /// Stores the cookies Canvas has set for its own host, so the next launch
@@ -862,6 +904,13 @@ fn stored_session() -> Option<Remembered> {
         return None;
     }
     Some(session)
+}
+
+/// Whether a session worth replaying is stored — what decides if a launch
+/// tries Canvas at all (SPEC §7.2). The read applies the age rule, so a copy
+/// past `REMEMBERED_FOR` answers no and is gone.
+pub fn has_remembered_session() -> bool {
+    stored_session().is_some()
 }
 
 /// Drops the stored cookies.

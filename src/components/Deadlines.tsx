@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 
+import { canvasSyllabus } from "@/lib/canvas";
 import {
   approveDeadlineProposals,
   DEADLINE_KINDS,
@@ -55,6 +56,12 @@ export function DeadlinesSection({
     queryKey: ["deadlineProposals", classId],
     queryFn: () => getDeadlineProposals(classId),
     placeholderData: (prev) => prev,
+  });
+  // The Canvas syllabus page a sync mirrored, when there is one — the tree
+  // never lists it, since the extract cache is hidden from the scan.
+  const { data: canvasSyllabusPath } = useQuery({
+    queryKey: ["canvasSyllabus", classId],
+    queryFn: () => canvasSyllabus(classId),
   });
   const { jobs } = useJobs();
 
@@ -218,6 +225,17 @@ export function DeadlinesSection({
           >
             WHOLE CLASS FOLDER
           </button>
+          {canvasSyllabusPath && (
+            <button
+              type="button"
+              title={canvasSyllabusPath}
+              onClick={() => startScan(canvasSyllabusPath)}
+              disabled={scanStarting}
+              className="block w-full cursor-pointer rounded px-2 py-1 text-left font-mono text-[11px] font-medium text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+            >
+              CANVAS SYLLABUS PAGE
+            </button>
+          )}
           {tree === undefined ? (
             <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
               Files are still loading…

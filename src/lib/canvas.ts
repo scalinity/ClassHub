@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
 import { queryClient } from "@/lib/query";
+import { daysUntil, todayIso } from "@/lib/schedule";
 
 /**
  * SPEC §7.2 — reading course structure, files and assignments from Canvas.
@@ -49,6 +50,10 @@ export interface ClassOutcome {
   filesStaged: number;
   /** Grade items written or updated from graded, posted submissions. */
   gradesRecorded: number;
+  /** Announcements recorded or updated — what NOTICES gained. */
+  announcementsRecorded: number;
+  /** Canvas Pages and the syllabus page written into the extract cache. */
+  pagesWritten: number;
   notes: string[];
   error: string | null;
 }
@@ -56,8 +61,22 @@ export interface ClassOutcome {
 export interface SyncProgress {
   stage: string;
   done: boolean;
+  /** Started by the launch rather than by a press (SPEC §7.2): Canvas turning
+   *  the saved session down is then a note, not a stopped sync. */
+  launch: boolean;
   results?: ClassOutcome[];
   error?: string;
+}
+
+/** One Canvas announcement — what the professor said, stripped to text.
+ *  A record rather than a queue: nothing here is unread or waiting. */
+export interface Announcement {
+  id: number;
+  canvasId: string;
+  title: string;
+  body: string;
+  /** Local ISO, YYYY-MM-DDTHH:MM — the deadline shape, so the same labels apply. */
+  postedAt: string;
 }
 
 export function listUnits(classId: number): Promise<Unit[]> {
@@ -66,6 +85,17 @@ export function listUnits(classId: number): Promise<Unit[]> {
 
 export function getCanvasStatus(): Promise<CanvasStatus> {
   return invoke<CanvasStatus>("canvas_status");
+}
+
+/** The class's announcements, newest first. */
+export function listAnnouncements(classId: number): Promise<Announcement[]> {
+  return invoke<Announcement[]>("list_announcements", { classId });
+}
+
+/** The class-relative path of the mirrored Canvas syllabus page, or null
+ *  until a sync has written one. */
+export function canvasSyllabus(classId: number): Promise<string | null> {
+  return invoke<string | null>("canvas_syllabus", { classId });
 }
 
 /** Starts a sync. Rejects only when one could not be started — one already
@@ -83,7 +113,7 @@ export function syncCanvas(classIds: number[] = []): Promise<void> {
   if (snapshot !== null && !snapshot.done) {
     return invoke<void>("sync_canvas", { classIds });
   }
-  publish({ stage: "Starting…", done: false });
+  publish({ stage: "Starting…", done: false, launch: false });
   return invoke<void>("sync_canvas", { classIds }).catch((e: unknown) => {
     publish(null);
     throw e;
@@ -120,6 +150,8 @@ function init() {
       void queryClient.invalidateQueries({ queryKey: ["grades"] });
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      void queryClient.invalidateQueries({ queryKey: ["announcements"] });
+      void queryClient.invalidateQueries({ queryKey: ["canvasSyllabus"] });
     }
     // Registration failing is not something a screen can recover from — every
     // later sync would appear to hang with nothing said anywhere — so it is at
@@ -152,6 +184,26 @@ export function formatSyncedAt(seconds: number | null): string {
     .toUpperCase();
 }
 
+/** Past this many calendar days the dashboard's sync line turns destructive. */
+export const SYNC_STALE_DAYS = 7;
+
+/** Whole calendar days since the sync, the way deadlines count days: a sync
+ *  late last night is a day ago this morning. */
+export function daysSinceSync(seconds: number): number {
+  return -daysUntil(todayIso(new Date(seconds * 1000)));
+}
+
+/** The dashboard's line (SPEC §12): `SYNCED 6 DAYS AGO`, `SYNCED TODAY`,
+ *  `NEVER SYNCED`, or `SYNCING…` while one runs. */
+export function syncAgeLabel(seconds: number | null, running: boolean): string {
+  if (running) return "SYNCING…";
+  if (seconds === null) return "NEVER SYNCED";
+  const days = daysSinceSync(seconds);
+  if (days <= 0) return "SYNCED TODAY";
+  if (days === 1) return "SYNCED YESTERDAY";
+  return `SYNCED ${days} DAYS AGO`;
+}
+
 /** One line summarizing what a class's sync brought across. */
 export function outcomeSummary(outcome: ClassOutcome): string {
   if (outcome.error) return outcome.error;
@@ -174,6 +226,16 @@ export function outcomeSummary(outcome: ClassOutcome): string {
   if (outcome.gradesRecorded > 0) {
     parts.push(
       `${outcome.gradesRecorded} grade${outcome.gradesRecorded === 1 ? "" : "s"} recorded`,
+    );
+  }
+  if (outcome.announcementsRecorded > 0) {
+    parts.push(
+      `${outcome.announcementsRecorded} notice${outcome.announcementsRecorded === 1 ? "" : "s"}`,
+    );
+  }
+  if (outcome.pagesWritten > 0) {
+    parts.push(
+      `${outcome.pagesWritten} Canvas page${outcome.pagesWritten === 1 ? "" : "s"} mirrored`,
     );
   }
   if (outcome.filesStaged > 0) {

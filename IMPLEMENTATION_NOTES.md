@@ -2588,3 +2588,147 @@ addressed as individual commits. What future sessions should know:
   then 37717) while no job was running; `cargo test` waits on the target
   directory lock while `tauri dev` compiles, so a test run after an edit
   can take a minute.
+
+## M22 — What the professor said (2026-09-03)
+
+### What was built
+
+- **Phase 0.** A temporary env-guarded dump in `sync_class` (removed before
+  the commit) wrote what Canvas answered for six reads per course during one
+  sync from the dev build; the findings are in SPEC §1. Every course has
+  announcements (1 / 4 / 2 / 2) and Pages (6 / 5 / 5 / 1, all published);
+  the bare `/announcements?context_codes[]=` call and one widened with
+  `start_date` returned the same sets today, but the endpoint's window is
+  fourteen days by default, so the sync reads the course's
+  `discussion_topics?only_announcements=true`, which returned the identical
+  objects. `include[]=body` on the Pages listing carried every body. Every
+  `syllabus_body` is a one-line link to the syllabus PDF already in the
+  tree, so the sync takes it off the course listing with
+  `include[]=syllabus_body` rather than spending a request per course.
+- **Schema.** Migration `0011_announcements.sql` adds
+  `announcements(id, class_id, canvas_id UNIQUE, title, body, posted_at)`;
+  the live database went to `user_version` 11 when the dev build opened it,
+  and the installed Aug 25 build kept running beside the new table.
+- **Announcements.** `canvas_sync::sync_announcements` strips each message
+  through `extract::strip_html` (now `pub(crate)`), converts `posted_at`
+  through `local_iso`, skips delayed announcements that carry none, and
+  `record_announcement` inserts or updates on the Canvas id — refusing a row
+  another class holds, the M21 rule for grade items. `list_announcements`
+  answers the `list_announcements` command newest first. The sync emits
+  `hub-changed` for `announcements` when a row was written.
+- **Pages and the syllabus page.** `sync_pages` reads
+  `/pages?include[]=body`, skips unpublished or hidden pages and empty
+  bodies, names each file by `page_file_stem` (the title as a path segment,
+  Canvas's URL slug appended on a collision, `Syllabus` reserved) and writes
+  `page_markdown` — a title line, one line saying what it is and where it
+  lives, the stripped text — through `write_if_changed`, so an unchanged page
+  is not rewritten. The syllabus body lands as
+  `.classhub/extracts/Canvas/Syllabus.md`; `canvas_syllabus_path` answers the
+  `canvas_syllabus` command with its rel path when the file exists, and the
+  Deadlines picker offers it as `CANVAS SYLLABUS PAGE`. The scan reaches it
+  through `resolve_rel`, which accepts any regular file under the class.
+- **Quiet sessions.** `Session` carries `quiet`; `Session::open_quiet` opens
+  a window that never reveals itself — `ask` returns `SignInNeeded` on a
+  conclusive refusal (still discarding the stored copy) and a plain error on a
+  stall, and `poll` skips the `HIDDEN_GRACE` reveal. `has_remembered_session`
+  exposes the Keychain check.
+- **Sync on launch.** `canvas_sync::sync_on_launch` runs after the launch
+  scan on the same thread: `launch_sync_due` (no sync ever, or a day old),
+  then the Keychain check, then `spawn_with(…, launch: true)`. `Progress`
+  carries `launch`; a `SignInNeeded` failure is emitted as `Not synced` and
+  the Settings report renders it as `NOT SYNCED ON LAUNCH — …` in muted
+  text, a success as `SYNCED ON LAUNCH` above the per-class lines.
+- **Sync age.** `App.tsx`'s `CanvasLine` sits under the date in the
+  dashboard header: `CANVAS · SYNCED 6 DAYS AGO` from `syncAgeLabel` and
+  `daysSinceSync` (calendar days, the deadline rule), destructive from
+  `SYNC_STALE_DAYS` = 7, `SYNCING…` while a sync runs, opening Settings.
+- **Workspace and chat.** `Notices.tsx` renders the `NOTICES` section after
+  the inbox queue, newest first, each row a Megaphone, the title, the
+  posting time through `formatDueDate`, and the body clamped to three lines
+  until the row is opened; absent while there are none. `tools::notices_block`
+  puts the latest three in the overview — titles and dates in the compact
+  form, bodies capped at 600 characters in the detailed form — and
+  `chat_system.md` names `Notices:` and the `Canvas/` extracts. `ClassOutcome`
+  gains `announcements_recorded` and `pages_written`; `outcomeSummary` says
+  `N notices` and `N Canvas pages mirrored`.
+
+### Verified
+
+- `cargo test`: 195 pass, 5 new — the announcement upsert (inserted once,
+  unchanged on a repeat, updated in place, refused for another class, listed
+  newest first), page file stems (a repeated title, a page titled Syllabus,
+  a title with a slash, a title that sanitizes away), the mirrored markdown
+  and the rewrite-only-when-changed rule on disk, the launch rule at the
+  day boundary, and the overview's compact and detailed notices.
+  `npx tsc --noEmit` clean.
+- Live on the dev build beside the installed app (pid 8598, no job of its
+  own), driven through the accessibility driver:
+  - **Sync 1** (pid 41145, from Settings, 15 s, the stored session live):
+    `1 notice · 7 Canvas pages mirrored`, `4 notices · 6 …`, `2 notices ·
+    6 …`, `2 notices · 2 …`, each with "the Canvas syllabus page was
+    mirrored — SCAN SYLLABUS can read it". Nine rows in `announcements`, 21
+    files under the four `Canvas/` folders; Fundamentals' `Lecture Slides.md`
+    is the three deck names, its `Module 2.md` the module's objectives.
+  - **Sync 2**: `nothing new` for every class, no `Canvas/` file's mtime
+    changed, announcements still 9, audit log at 134, jobs at 294.
+  - Design Studio's workspace shows `NOTICES · 4 FROM CANVAS` with "Today's
+    Office Hours Postponed · SEP 2 3:03 PM" opening to its full text.
+  - **One chat turn** from the Fundamentals workspace ("What does the Module
+    2 Canvas page say students should be able to do by the end of the
+    module?"): 15 s, `search_material` then `read_material` on
+    `Biostatistics for AI/.classhub/extracts/Canvas/Module 2: Study
+    Designs.md`, cited as a link. The model chose Biostatistics's Module 2
+    over the open class's; its call, and the citation is what the criterion
+    asks for.
+  - **Syllabus scan** of `.classhub/extracts/Canvas/Syllabus.md` for Applied
+    Generative AI (job 295, 21 s, Opus, $0.44 list-equivalent on the
+    subscription): `no date-bearing items found · 3 of 3 division(s)
+    recorded`. The page is a link to the PDF, so no dates was the right
+    answer. See the first item under "Left as it is" for what the
+    divisions did.
+  - **Launch sync**: with every `canvas_synced_at` set two days back and
+    the dev build relaunched (pid 41858), the sync ran on its own inside the
+    first eighty seconds, the stamps read the launch time, the dashboard
+    read `CANVAS · SYNCED TODAY` and Settings `SYNCED ON LAUNCH` over four
+    `nothing new` lines. The launch a minute earlier, inside the day, ran
+    none.
+  - **Stale line**: stamps set eight days back and the page reloaded gave
+    `CANVAS · SYNCED 8 DAYS AGO` in the destructive colour; the stamps were
+    restored to the second.
+- Not exercised live: `SignInNeeded` — the stored session was live all
+  session, and lapsing it deliberately would cost a Duo round on the next
+  sync. A test announcement: a student account cannot post one, so the nine
+  real announcements were the data.
+
+### Left as it is
+
+- **A rescan can fork the divisions.** The scan of the Canvas syllabus page
+  followed the link to the syllabus PDF and reported the three Parts without
+  their `(Weeks 1-8)` suffixes; `units::upsert` matches a syllabus row by
+  name, so three new rows landed beside the three that carry the week
+  ranges M14's week-to-Part resolution reads. The three were deleted by hand
+  (ids 55–57, no contribution or guide referenced them). The rule is the
+  scan's, not this milestone's, and a matcher on (source, kind, ordinal)
+  is the candidate.
+- A launch sync that stages loose Canvas files enqueues the follow-up sort
+  job the sync always has, so a launch can now start a subscription job
+  with nobody pressing anything. Cheap, and the same job a manual sync
+  would run.
+- Two builds launched on the same stale day could each sync on launch;
+  both are no-ops against the tables, and a new course file could land in
+  the inbox twice under a `(2)` name.
+- A Page Canvas has removed keeps its file; the sync deletes nothing.
+- Link targets are dropped with the tags, so a page that is a list of file
+  links mirrors as the file names, which is what a search wants.
+- The announcement's author is not stored; the brief's columns were kept.
+
+### Gotchas
+
+- In zsh, `echo ====X====` fails with "=X=== not found": a leading `=` is
+  command-path expansion. Quote such markers.
+- The `/announcements` endpoint's silent fourteen-day window would have
+  looked complete today and dropped the welcome posts by mid-September.
+- `cd src-tauri` persists across Bash calls; a later `sed` on
+  `src/components/…` failed on the relative path.
+- The dev window's `DASHBOARD` button was reported NOT FOUND straight after
+  a `touch index.html` reload; the reload had already put the dashboard up.

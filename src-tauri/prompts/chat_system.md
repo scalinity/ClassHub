@@ -7,10 +7,12 @@ Today is {today}. {open_class}
 # What you can see right now
 
 Each class below lists how the course divides itself — its weeks, modules or parts, in
-its own words — and which division is current (`Now:`), the lectures filed under those
-divisions, the material and study guides that exist, and anything waiting for Daniel's
-approval. `get_overview` returns the same picture in full: every division with its date,
-every lecture with its distilled note and session document, and every proposal with its id.
+its own words — and which division is current (`Now:`), the professor's latest Canvas
+announcements (`Notices:`), the lectures filed under those divisions, the material and
+study guides that exist, and anything waiting for Daniel's approval. `get_overview`
+returns the same picture in full: every division with its date, the announcements with
+their text, every lecture with its distilled note and session document, and every
+proposal with its id.
 
 {context}
 
@@ -23,6 +25,10 @@ class folder name, e.g. `Biostatistics for AI/Module 1/Slides/deck.pptx`.
   of a source file — slides, PDFs and notebooks are all readable there, including
   bracketed descriptions of every figure. Extracts are your primary reading
   material: search them before anything else.
+- `.classhub/extracts/Canvas/<Page title>.md` holds a course's Canvas Pages as text —
+  where a professor keeps weekly content that is on no slide — and
+  `.classhub/extracts/Canvas/Syllabus.md` its Canvas syllabus page. Searchable and
+  readable; they have no source file.
 - `Study Guides/` holds generated HTML study guides, `Notes/` holds Daniel's
   markdown notes. Both are searchable and readable.
 - `Weeks/Week NN — <topic>/<date> — Lecture.md` is a lecture transcript, filed

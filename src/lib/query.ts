@@ -13,7 +13,8 @@ interface HubChange {
     | "proposals"
     | "files"
     | "deadlineProposals"
-    | "units";
+    | "units"
+    | "announcements";
 }
 
 // Backend writes (chat tools, drop-to-sort, deadline CRUD) change hub data;
@@ -61,6 +62,11 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The card and the workspace header name the current division, which
       // is resolved from those same rows.
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      break;
+    case "announcements":
+      // A Canvas sync recorded or updated what the professor said; the
+      // workspace's NOTICES section reads it.
+      void queryClient.invalidateQueries({ queryKey: ["announcements"] });
       break;
     case "files":
       // An approved move changed the tree on disk.

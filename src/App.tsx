@@ -9,6 +9,13 @@ import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { SettingsScreen } from "@/components/Settings";
 import { WeekSchedule } from "@/components/WeekSchedule";
+import {
+  daysSinceSync,
+  getCanvasStatus,
+  SYNC_STALE_DAYS,
+  syncAgeLabel,
+  useCanvasSync,
+} from "@/lib/canvas";
 import { classesQuery, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
 import { setDropTarget } from "@/lib/sorter";
@@ -42,19 +49,22 @@ function Dashboard({
           <h1 className="text-[28px] font-semibold tracking-tight">
             ClassHub
           </h1>
-          <div className="flex items-center gap-2.5">
-            <p className="font-mono text-xs text-muted-foreground">
-              {dateLabel}
-            </p>
-            <button
-              type="button"
-              aria-label="Open settings"
-              title="Settings"
-              onClick={onSettings}
-              className="cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
-            >
-              <Settings2 size={14} aria-hidden />
-            </button>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-2.5">
+              <p className="font-mono text-xs text-muted-foreground">
+                {dateLabel}
+              </p>
+              <button
+                type="button"
+                aria-label="Open settings"
+                title="Settings"
+                onClick={onSettings}
+                className="cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <Settings2 size={14} aria-hidden />
+              </button>
+            </div>
+            <CanvasLine onSettings={onSettings} />
           </div>
         </div>
       </header>
@@ -82,6 +92,37 @@ function Dashboard({
         </>
       )}
     </main>
+  );
+}
+
+/**
+ * SPEC §12 — when Canvas data last came across, on the dashboard where it is
+ * read every day: `CANVAS · SYNCED 6 DAYS AGO`, destructive past a week. On
+ * 2026-09-02 the answer was six days and nothing on screen said so. Opens
+ * Settings, where the sync lives.
+ */
+function CanvasLine({ onSettings }: { onSettings: () => void }) {
+  const { data: status } = useQuery({
+    queryKey: ["canvasStatus"],
+    queryFn: getCanvasStatus,
+  });
+  const progress = useCanvasSync();
+  if (status === undefined) return null;
+  const running = progress !== null && !progress.done;
+  const seconds = status.lastSyncedAt;
+  const stale =
+    !running && seconds !== null && daysSinceSync(seconds) >= SYNC_STALE_DAYS;
+  return (
+    <button
+      type="button"
+      onClick={onSettings}
+      title={running ? "A Canvas sync is running" : "Sync from Settings"}
+      className={`cursor-pointer rounded font-mono text-[10px] tracking-[0.14em] transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring ${
+        stale ? "text-destructive" : "text-muted-foreground/70"
+      }`}
+    >
+      CANVAS · {syncAgeLabel(seconds, running)}
+    </button>
   );
 }
 

@@ -15,7 +15,14 @@
 //! 3. **Grades** (SPEC §11) → assignment groups become `grade_categories` and
 //!    graded, posted submissions become `grade_items`, written directly with
 //!    audit rows because a grade is reversible in the Grades section.
-//! 4. **Course files** → downloaded into `_Inbox/` and proposed through the
+//! 4. **Announcements** → `announcements` (SPEC §5), what the professor said
+//!    between lectures: a quiz moved, slides posted. Stripped to text, never
+//!    rendered as Canvas's HTML; a record, not a queue.
+//! 5. **Pages and the syllabus page** → markdown under
+//!    `.classhub/extracts/Canvas/`, where `search_material` already looks and
+//!    the syllabus scan's picker can offer them. Not `files` rows: nothing on
+//!    disk is their source, so they take no part in a guide's manifest.
+//! 6. **Course files** → downloaded into `_Inbox/` and proposed through the
 //!    §10 move queue, because approval is what places a file, here as
 //!    everywhere.
 //!
@@ -23,8 +30,14 @@
 //! mid-semester reshuffle must not orphan a guide), and a re-sync updates in
 //! place rather than duplicating — every row Canvas wrote carries the Canvas
 //! id it came from, which is what makes the second sync a no-op.
+//!
+//! Never on a timer, but once on launch (SPEC §7.2): when a session is stored
+//! and the last sync is a day old, the launch reads Canvas through a window
+//! that stays hidden and never asks for a sign-in — Canvas refusing the stored
+//! session is a line in the report, and the next manual sync asks.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -32,8 +45,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
-use crate::canvas::Session;
-use crate::db::{audit, emit_hub_change, lock, now, with_conn, INBOX_DIR};
+use crate::canvas::{Session, SignInNeeded};
+use crate::db::{audit, emit_hub_change, lock, now, with_conn, write_atomic, EXTRACTS_DIR, INBOX_DIR};
+use crate::extract::strip_html;
 use crate::deadlines::{CanvasAssignment, Recorded};
 use crate::grades::{CanvasGroup, CanvasScore, CanvasWrite};
 use crate::units::{self, NewUnit};
@@ -57,6 +71,11 @@ pub struct ClassOutcome {
     pub files_staged: usize,
     /// Grade items written or updated from graded, posted submissions.
     pub grades_recorded: usize,
+    /// Announcements recorded or updated — what the workspace's NOTICES gained.
+    pub announcements_recorded: usize,
+    /// Canvas Pages and the syllabus page written or rewritten into the
+    /// extract cache.
+    pub pages_written: usize,
     /// Plain lines about what Canvas did and did not have. A course that
     /// publishes no modules is the normal case right now, and silence about it
     /// would read as "synced, nothing to do".
@@ -69,6 +88,9 @@ pub struct ClassOutcome {
 struct Progress {
     stage: String,
     done: bool,
+    /// Started by the launch rather than by a press. The Settings report
+    /// renders a refused session as a note rather than a stopped sync.
+    launch: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     results: Option<Vec<ClassOutcome>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,12 +101,56 @@ struct Progress {
 /// would fight over it and over the inbox destination names.
 static SYNCING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
+/// How stale the last sync has to be for a launch to run one.
+const LAUNCH_SYNC_AFTER: i64 = 24 * 60 * 60;
+
+/// Whether a launch should sync (SPEC §7.2): nothing has ever synced, or the
+/// last sync is a day old. Pure, since the wrong answer is silent either way
+/// — a sync on every launch, or never one.
+fn launch_sync_due(last_synced_at: Option<i64>, now: i64) -> bool {
+    match last_synced_at {
+        None => true,
+        Some(then) => now - then >= LAUNCH_SYNC_AFTER,
+    }
+}
+
+/// The sync a launch runs on its own, when it should: a stored session and a
+/// day-old last sync. Quiet throughout — the window stays hidden, nothing
+/// asks for a sign-in, and a refusal is a line in the Settings report. Not a
+/// timer: this runs once, here, and nothing schedules a second one.
+pub fn sync_on_launch(app: &AppHandle) {
+    let last_synced_at = match with_conn(app, |conn| status(conn)) {
+        Ok(status) => status.last_synced_at,
+        Err(e) => {
+            eprintln!("canvas: launch sync skipped — {e:#}");
+            return;
+        }
+    };
+    if !launch_sync_due(last_synced_at, now()) {
+        return;
+    }
+    // The Keychain read comes second, so a launch inside the day never
+    // touches the Keychain at all.
+    if !crate::canvas::has_remembered_session() {
+        return;
+    }
+    if let Err(e) = spawn_with(app, Vec::new(), true) {
+        eprintln!("canvas: launch sync not started — {e:#}");
+    }
+}
+
 /// Runs a sync on its own thread, reporting over `PROGRESS_EVENT`.
 ///
 /// A plain thread rather than an async command, for the same reason
 /// `lectures::spawn_add` uses one: this waits on a human completing SSO and
 /// then on blocking HTTP, neither of which belongs on the async runtime.
 pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
+    spawn_with(app, class_ids, false)
+}
+
+/// `launch` is the sync nobody pressed: the window stays hidden and Canvas
+/// wanting a sign-in ends it rather than asking.
+fn spawn_with(app: &AppHandle, class_ids: Vec<i64>, launch: bool) -> Result<()> {
     // Refused here rather than reported over the progress channel. That channel
     // carries one snapshot, so a "already running" terminal event would
     // overwrite the running sync's own progress and render as SYNC STOPPED for
@@ -101,7 +167,7 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
         let emit = |stage: &str, done: bool, results: Option<Vec<ClassOutcome>>, error: Option<String>| {
             let _ = app.emit(
                 PROGRESS_EVENT,
-                Progress { stage: stage.to_string(), done, results, error },
+                Progress { stage: stage.to_string(), done, launch, results, error },
             );
         };
         // Claimed above, released here however this thread ends.
@@ -115,12 +181,17 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
 
         let on_stage = |stage: &str| emit(stage, false, None, None);
         let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run(&app, &class_ids, &on_stage)
+            run(&app, &class_ids, &on_stage, launch)
         }));
         match finished {
             Ok(Ok(results)) => {
                 emit("Synced", true, Some(results), None);
                 emit_hub_change(&app, "units");
+            }
+            // The one outcome a launch sync expects: the stored session was
+            // turned down. Its own words, so the report can say so quietly.
+            Ok(Err(e)) if e.chain().any(|cause| cause.is::<SignInNeeded>()) => {
+                emit("Not synced", true, None, Some(format!("{SignInNeeded}")))
             }
             Ok(Err(e)) => emit("Failed", true, None, Some(format!("{e:#}"))),
             // The claim releases during the unwind, so the backend recovers —
@@ -138,11 +209,13 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
     Ok(())
 }
 
-/// The sync proper. `class_ids` empty means every class.
+/// The sync proper. `class_ids` empty means every class; `quiet` is the
+/// launch's sync, which never shows the window.
 fn run(
     app: &AppHandle,
     class_ids: &[i64],
     on_stage: &dyn Fn(&str),
+    quiet: bool,
 ) -> Result<Vec<ClassOutcome>> {
     let classes = with_conn(app, |conn| load_classes(conn, class_ids))?;
     if classes.is_empty() {
@@ -154,10 +227,20 @@ fn run(
     // scope: it *is* the app's reach, so leaving it open would leave the reach
     // open. `Session`'s own `Drop` is what guarantees that on every path,
     // including the ones where opening it is what failed.
-    let session = Session::open(app, on_stage)?;
+    let session = if quiet {
+        Session::open_quiet(app, on_stage)?
+    } else {
+        Session::open(app, on_stage)?
+    };
 
     on_stage("Reading your courses…");
-    let courses = session.get_all("/api/v1/courses?enrollment_state=active", on_stage)?;
+    // The syllabus page rides on the course listing: `include[]=syllabus_body`
+    // puts each course's syllabus HTML on its own object, which costs no
+    // request per course.
+    let courses = session.get_all(
+        "/api/v1/courses?enrollment_state=active&include[]=syllabus_body",
+        on_stage,
+    )?;
 
     let mut results = Vec::new();
     for class in classes {
@@ -171,6 +254,8 @@ fn run(
             deadlines_completed: 0,
             files_staged: 0,
             grades_recorded: 0,
+            announcements_recorded: 0,
+            pages_written: 0,
             notes: Vec::new(),
             error: None,
         };
@@ -255,6 +340,14 @@ fn sync_class(
             }
         }
         Err(e) => note_or_fail(outcome, e, "assignments")?,
+    }
+    // Before the files, which are the slow read and the one that downloads:
+    // a deck that will not come across must not cost the notices.
+    if let Err(e) = sync_announcements(app, session, class, course_id, outcome, on_stage) {
+        note_or_fail(outcome, e, "announcements")?;
+    }
+    if let Err(e) = sync_pages(app, session, class, course, outcome, on_stage) {
+        note_or_fail(outcome, e, "pages")?;
     }
     if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "files")?;
@@ -1196,6 +1289,304 @@ fn propose_move(
 }
 
 // ---------------------------------------------------------------------------
+// Announcements → `announcements` (SPEC §5): what the professor said
+
+/// One announcement as the sync records it, the body already stripped to text.
+pub(crate) struct CanvasAnnouncement<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    /// Local wall-clock ISO, the shape `deadlines.due_at` uses.
+    pub posted_at: &'a str,
+}
+
+fn sync_announcements(
+    app: &AppHandle,
+    session: &Session,
+    class: &ClassRow,
+    course_id: i64,
+    outcome: &mut ClassOutcome,
+    on_stage: &dyn Fn(&str),
+) -> Result<()> {
+    // `/announcements?context_codes[]=course_N` answers only a fortnight back
+    // unless told otherwise, and the semester is longer than that; the
+    // course's discussion topics filtered to announcements are the same
+    // objects with no window on them.
+    let path = format!("/api/v1/courses/{course_id}/discussion_topics?only_announcements=true");
+    let topics = session.get_all(&path, on_stage)?;
+    let recorded = with_conn(app, |conn| {
+        let mut recorded = 0usize;
+        for topic in &topics {
+            let Some(id) = topic["id"].as_i64().map(|id| id.to_string()) else {
+                continue;
+            };
+            let Some(title) = topic["title"].as_str().map(str::trim).filter(|t| !t.is_empty())
+            else {
+                continue;
+            };
+            // A delayed announcement has no `posted_at` yet, and a student
+            // does not see it either.
+            let Some(posted_at) = topic["posted_at"].as_str().and_then(local_iso) else {
+                continue;
+            };
+            let body = strip_html(topic["message"].as_str().unwrap_or_default());
+            let announcement = CanvasAnnouncement {
+                id: &id,
+                title,
+                body: body.trim(),
+                posted_at: &posted_at,
+            };
+            match record_announcement(conn, class.id, &announcement) {
+                Ok(true) => recorded += 1,
+                Ok(false) => {}
+                Err(e) => eprintln!("canvas: skipping announcement '{title}': {e:#}"),
+            }
+        }
+        Ok(recorded)
+    })?;
+    outcome.announcements_recorded = recorded;
+    if recorded > 0 {
+        emit_hub_change(app, "announcements");
+    }
+    Ok(())
+}
+
+/// Inserts an announcement, or updates the row its Canvas id already names
+/// when the title, body or posting time moved — an edited announcement is the
+/// same notice. `true` when a row was written; a re-sync of an unchanged
+/// course writes nothing. A row another class holds is refused rather than
+/// moved: the id is global, and two classes matched to one course would
+/// otherwise pass the row back and forth each sync.
+pub(crate) fn record_announcement(
+    conn: &Connection,
+    class_id: i64,
+    announcement: &CanvasAnnouncement<'_>,
+) -> Result<bool> {
+    let existing: Option<(i64, i64, String, String, String)> = conn
+        .query_row(
+            "SELECT id, class_id, title, body, posted_at FROM announcements WHERE canvas_id = ?1",
+            [announcement.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()?;
+    match existing {
+        Some((_, other, ..)) if other != class_id => {
+            bail!("announcement {} is recorded under another class", announcement.id)
+        }
+        Some((_, _, title, body, posted_at))
+            if title == announcement.title
+                && body == announcement.body
+                && posted_at == announcement.posted_at =>
+        {
+            Ok(false)
+        }
+        Some((id, ..)) => {
+            conn.execute(
+                "UPDATE announcements SET title = ?1, body = ?2, posted_at = ?3 WHERE id = ?4",
+                params![announcement.title, announcement.body, announcement.posted_at, id],
+            )?;
+            Ok(true)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO announcements (class_id, canvas_id, title, body, posted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    class_id,
+                    announcement.id,
+                    announcement.title,
+                    announcement.body,
+                    announcement.posted_at
+                ],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+/// One announcement for the workspace's NOTICES section and the chat overview.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnouncementInfo {
+    pub id: i64,
+    pub canvas_id: String,
+    pub title: String,
+    pub body: String,
+    pub posted_at: String,
+}
+
+/// The class's announcements, newest first.
+pub fn list_announcements(conn: &Connection, class_id: i64) -> Result<Vec<AnnouncementInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, canvas_id, title, body, posted_at FROM announcements
+         WHERE class_id = ?1 ORDER BY posted_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            Ok(AnnouncementInfo {
+                id: row.get(0)?,
+                canvas_id: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+                posted_at: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Pages and the syllabus page → the extract cache (SPEC §7.2)
+
+/// The folder inside the extract cache that holds the course's Canvas texts.
+/// Inside `.classhub/extracts/` so `search_material` covers them without a
+/// new root; a folder of their own so they never share a name with a source
+/// file's extract.
+const CANVAS_TEXTS_DIR: &str = "Canvas";
+/// The syllabus page's file stem, reserved so a Page titled "Syllabus" lands
+/// beside it rather than on it.
+const SYLLABUS_STEM: &str = "Syllabus";
+
+fn canvas_texts_dir() -> String {
+    format!("{EXTRACTS_DIR}/{CANVAS_TEXTS_DIR}")
+}
+
+/// The mirrored syllabus page's class-relative path.
+pub fn canvas_syllabus_rel() -> String {
+    format!("{}/{SYLLABUS_STEM}.md", canvas_texts_dir())
+}
+
+/// The mirrored syllabus page, when a sync has written one — what the
+/// syllabus scan's picker offers (SPEC §11).
+pub fn canvas_syllabus_path(conn: &Connection, class_id: i64) -> Result<Option<String>> {
+    let rel = canvas_syllabus_rel();
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    Ok(class_dir.join(&rel).is_file().then_some(rel))
+}
+
+fn sync_pages(
+    app: &AppHandle,
+    session: &Session,
+    class: &ClassRow,
+    course: &Value,
+    outcome: &mut ClassOutcome,
+    on_stage: &dyn Fn(&str),
+) -> Result<()> {
+    let course_id = course["id"].as_i64().context("the Canvas course has no id")?;
+    // `include[]=body` puts each page's HTML on the listing, so a course's
+    // Pages cost one request however many there are (the rate limit is
+    // 700 / 10 min, and a per-page loop is the one shape that could reach it).
+    let pages = session.get_all(
+        &format!("/api/v1/courses/{course_id}/pages?include[]=body"),
+        on_stage,
+    )?;
+    let class_dir = with_conn(app, |conn| crate::scanner::class_dir(conn, class.id))?;
+    let dir = class_dir.join(canvas_texts_dir());
+
+    let mut written = 0usize;
+    let mut taken: HashSet<String> = HashSet::new();
+    taken.insert(SYLLABUS_STEM.to_lowercase());
+    for page in &pages {
+        // The API answers with what the reader may see, but both flags are
+        // cheap to honour and a hidden page is not course content.
+        if !page["published"].as_bool().unwrap_or(true)
+            || page["hide_from_students"].as_bool().unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(title) = page["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let text = strip_html(page["body"].as_str().unwrap_or_default());
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Some(stem) = page_file_stem(title, page["url"].as_str().unwrap_or_default(), &mut taken)
+        else {
+            outcome.notes.push(format!("the Canvas page \"{title}\" could not be given a file name"));
+            continue;
+        };
+        let content = page_markdown(
+            title,
+            "Canvas page",
+            page["updated_at"].as_str().and_then(local_iso).as_deref(),
+            page["html_url"].as_str(),
+            &text,
+        );
+        if write_if_changed(&dir.join(format!("{stem}.md")), &content)? {
+            written += 1;
+        }
+    }
+
+    // The syllabus page, from the course object the listing carried it on.
+    let syllabus = strip_html(course["syllabus_body"].as_str().unwrap_or_default());
+    if !syllabus.trim().is_empty() {
+        let url = format!(
+            "https://{}/courses/{course_id}/assignments/syllabus",
+            crate::canvas::CANVAS_HOST
+        );
+        let content =
+            page_markdown(SYLLABUS_STEM, "Canvas syllabus page", None, Some(&url), &syllabus);
+        if write_if_changed(&dir.join(format!("{SYLLABUS_STEM}.md")), &content)? {
+            written += 1;
+            outcome
+                .notes
+                .push("the Canvas syllabus page was mirrored — SCAN SYLLABUS can read it".into());
+        }
+    }
+
+    outcome.pages_written = written;
+    Ok(())
+}
+
+/// A file stem for a Page, unique within the course: its title as a path
+/// segment, with Canvas's own URL slug appended when another page already
+/// took that name. Names are compared case-insensitively, since the disk is.
+fn page_file_stem(title: &str, url: &str, taken: &mut HashSet<String>) -> Option<String> {
+    let base = sanitize_name(title)?;
+    let candidates = [base.clone(), format!("{base} ({url})")];
+    for stem in candidates {
+        if taken.insert(stem.to_lowercase()) {
+            return Some(stem);
+        }
+    }
+    None
+}
+
+/// The markdown a Canvas text is mirrored as: its title, one line saying
+/// what it is and where it lives on Canvas, then the text.
+fn page_markdown(
+    title: &str,
+    kind: &str,
+    updated_at: Option<&str>,
+    url: Option<&str>,
+    text: &str,
+) -> String {
+    let mut line = kind.to_string();
+    if let Some(updated) = updated_at {
+        line.push_str(&format!(", last edited {}", &updated[..updated.len().min(10)]));
+    }
+    if let Some(url) = url {
+        line.push_str(&format!(" · {url}"));
+    }
+    format!("# {title}\n\n{line}\n\n{}\n", text.trim())
+}
+
+/// Writes `content` unless the file already holds exactly that, so a re-sync
+/// of an unchanged course touches nothing on disk.
+fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    write_atomic(path, content)?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
 // What the UI reads between syncs
 
 #[derive(Serialize)]
@@ -1540,5 +1931,105 @@ mod tests {
         assert!(applies_group_weights(&json!({"apply_assignment_group_weights": true})));
         assert!(!applies_group_weights(&json!({"apply_assignment_group_weights": false})));
         assert!(!applies_group_weights(&json!({})));
+    }
+
+    /// An announcement lands once, is updated in place when the professor
+    /// edits it, and is left alone otherwise — the second sync writes nothing.
+    /// A row another class holds is refused rather than moved.
+    #[test]
+    fn an_announcement_is_recorded_once_and_updated_in_place() {
+        let conn = crate::db::memory_db();
+        let notice = |body: &'static str, posted_at: &'static str| CanvasAnnouncement {
+            id: "5352500",
+            title: "Today's Office Hours Postponed",
+            body,
+            posted_at,
+        };
+        assert!(record_announcement(&conn, 2, &notice("until 6 PM", "2026-09-02T15:03")).expect("insert"));
+        assert!(!record_announcement(&conn, 2, &notice("until 6 PM", "2026-09-02T15:03")).expect("same"));
+        assert!(record_announcement(&conn, 2, &notice("until 7 PM", "2026-09-02T15:03")).expect("edited"));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcements", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 1);
+        assert_eq!(list_announcements(&conn, 2).expect("list")[0].body, "until 7 PM");
+        assert!(record_announcement(&conn, 3, &notice("until 7 PM", "2026-09-02T15:03")).is_err());
+
+        // Newest first, whatever order Canvas listed them in.
+        let older = CanvasAnnouncement {
+            id: "5343925",
+            title: "Welcome",
+            body: "Hi",
+            posted_at: "2026-08-26T13:58",
+        };
+        record_announcement(&conn, 2, &older).expect("older");
+        let titles: Vec<String> = list_announcements(&conn, 2)
+            .expect("list")
+            .into_iter()
+            .map(|a| a.title)
+            .collect();
+        assert_eq!(titles, ["Today's Office Hours Postponed", "Welcome"]);
+        assert!(list_announcements(&conn, 3).expect("other class").is_empty());
+    }
+
+    /// Two pages with one title get two files, a page titled like the
+    /// syllabus lands beside it, and a title that is not a path segment is
+    /// made one.
+    #[test]
+    fn page_file_stems_stay_unique_within_a_course() {
+        let mut taken: HashSet<String> = HashSet::new();
+        taken.insert(SYLLABUS_STEM.to_lowercase());
+        assert_eq!(page_file_stem("Home", "home-2", &mut taken).as_deref(), Some("Home"));
+        assert_eq!(page_file_stem("home", "home-3", &mut taken).as_deref(), Some("home (home-3)"));
+        assert_eq!(
+            page_file_stem("Syllabus", "syllabus", &mut taken).as_deref(),
+            Some("Syllabus (syllabus)")
+        );
+        assert_eq!(
+            page_file_stem("Module 1/2: Intro", "module-1-2", &mut taken).as_deref(),
+            Some("Module 1-2: Intro")
+        );
+        assert_eq!(page_file_stem("..", "dots", &mut taken), None);
+    }
+
+    /// The mirrored file is text with a header, and an unchanged page is not
+    /// rewritten — the re-sync no-op, measured on disk.
+    #[test]
+    fn a_page_is_mirrored_as_markdown_and_rewritten_only_when_it_changed() {
+        let text = strip_html(
+            "<h2><span>Responsible AI</span></h2><p>By the end of this <b>module</b>, PHI&nbsp;&amp; HIPAA.</p><img src=\"x.png\">",
+        );
+        let content = page_markdown(
+            "Module 2",
+            "Canvas page",
+            Some("2026-09-01T02:41"),
+            Some("https://ufl.instructure.com/courses/576174/pages/module-2-2"),
+            &text,
+        );
+        assert!(content.starts_with("# Module 2\n\nCanvas page, last edited 2026-09-01 · https://"), "{content}");
+        assert!(
+            content.contains("\nResponsible AI\n\nBy the end of this module, PHI & HIPAA.\n"),
+            "{content}"
+        );
+        assert!(!content.contains('<'), "{content}");
+
+        let dir = std::env::temp_dir().join(format!("classhub-pages-{}", std::process::id()));
+        let path = dir.join("Canvas").join("Module 2.md");
+        assert!(write_if_changed(&path, &content).expect("first write"));
+        assert!(!write_if_changed(&path, &content).expect("same content"));
+        assert!(write_if_changed(&path, "# Module 2\n\nchanged\n").expect("changed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launch syncs when nothing ever has or the last sync is a day old,
+    /// and never inside the day.
+    #[test]
+    fn a_launch_syncs_only_when_the_last_sync_is_a_day_old() {
+        let now = 1_788_000_000;
+        assert!(launch_sync_due(None, now));
+        assert!(launch_sync_due(Some(now - LAUNCH_SYNC_AFTER), now));
+        assert!(launch_sync_due(Some(now - 3 * LAUNCH_SYNC_AFTER), now));
+        assert!(!launch_sync_due(Some(now - LAUNCH_SYNC_AFTER + 1), now));
+        assert!(!launch_sync_due(Some(now), now));
     }
 }

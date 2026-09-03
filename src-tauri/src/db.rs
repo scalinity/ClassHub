@@ -159,6 +159,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_folder_units.sql"),
     include_str!("../migrations/0009_job_owner.sql"),
     include_str!("../migrations/0010_canvas_grades.sql"),
+    include_str!("../migrations/0011_announcements.sql"),
 ];
 
 /// An in-memory database with every migration applied.

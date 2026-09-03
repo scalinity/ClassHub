@@ -492,6 +492,25 @@ fn sync_canvas(app: tauri::AppHandle, class_ids: Vec<i64>) -> Result<(), String>
     canvas_sync::spawn(&app, class_ids).map_err(|e| format!("{e:#}"))
 }
 
+/// The class's Canvas announcements, newest first — the workspace's NOTICES
+/// section (SPEC §7.2).
+#[tauri::command(async)]
+fn list_announcements(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<canvas_sync::AnnouncementInfo>, String> {
+    let conn = db::lock(&state.0);
+    canvas_sync::list_announcements(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// The mirrored Canvas syllabus page's class-relative path, once a sync has
+/// written one — what the syllabus scan's picker offers (SPEC §11).
+#[tauri::command(async)]
+fn canvas_syllabus(state: tauri::State<Db>, class_id: i64) -> Result<Option<String>, String> {
+    let conn = db::lock(&state.0);
+    canvas_sync::canvas_syllabus_path(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
 // --- Drop-to-sort (SPEC §10) --------------------------------------------------
 
 /// Step 1: files dropped onto a class workspace are COPIED into
@@ -700,8 +719,13 @@ pub fn run() {
             // Off the main thread: this walks every class folder and hashes
             // whatever changed, and the window should not wait behind it. The
             // `hub-changed` pushes each class emits bring the UI up to date.
+            // The launch's Canvas sync (SPEC §7.2) follows the scan on the
+            // same thread, so its duplicate check reads a fresh index.
             let handle = app.handle().clone();
-            std::thread::spawn(move || scan_and_extract_all(&handle));
+            std::thread::spawn(move || {
+                scan_and_extract_all(&handle);
+                canvas_sync::sync_on_launch(&handle);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -747,6 +771,8 @@ pub fn run() {
             list_units,
             canvas_status,
             sync_canvas,
+            list_announcements,
+            canvas_syllabus,
             stage_inbox_files,
             get_sort_state,
             run_sort_job,

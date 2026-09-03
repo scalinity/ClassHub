@@ -161,6 +161,23 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   Both submissions on record (Fundamentals' live coding session, Design Studio's Python
   introduction) carried `submitted_at` and nothing else.
 
+- **What the professor writes on Canvas.** Read from all four courses on 2026-09-03:
+  - **Every course posts announcements** — Fundamentals 1, Design Studio 4, Biostatistics 2,
+    Applied Generative AI 2, all since Aug 20, each a `DiscussionTopic` with an HTML `message`
+    and a `posted_at`. `/announcements?context_codes[]=course_<id>` answers only the last
+    fourteen days unless `start_date` says otherwise, which after mid-September would drop the
+    welcome posts; the course's `discussion_topics?only_announcements=true` returns the same
+    objects with no window, and is what the sync reads (§7.2).
+  - **Every course keeps Pages** — 6, 5, 5 and 1, all published — and the courses whose Modules
+    are empty keep their weekly content there: Fundamentals' `Module 1`–`Module 4` and `Lecture
+    Slides`, Biostatistics' `Module 1`–`Module 3` and `Resources`, Design Studio's two modules
+    and `AI Design Project`; Applied Generative AI has only `Home`. `include[]=body` puts each
+    page's HTML on the listing, so a course's Pages cost one request. A `Home` page is 15 KB of
+    Canvas markup that strips to about 1 KB of text.
+  - **Every `syllabus_body` is a one-line stub** linking the syllabus PDF the tree already holds
+    — Applied Generative AI's included, so its missing dates are on no Canvas surface either.
+    Read off the course listing with `include[]=syllabus_body`, which costs no request.
+
   Canvas also exposes **GraphQL** at `POST /api/graphql`, whose permissions mirror REST. It
   would collapse a whole sync into one round trip, but being a POST it needs the `X-CSRF-Token`
   header read from the `_csrf_token` cookie. REST GETs need no CSRF and the rate limit is 700
@@ -220,8 +237,8 @@ flowchart LR
     Cmds --> Canvas
     Canvas --> CV
     Canvas -->|session cookie| Keychain
-    Canvas -->|units, deadlines, grades| DB
-    Canvas -->|course files| AIBHS
+    Canvas -->|units, deadlines, grades, announcements| DB
+    Canvas -->|course files, Pages as text| AIBHS
     Jobs --> CLI
     Jobs --> LO
     ChatLoop --> API
@@ -268,7 +285,10 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   ├── _Inbox/                            ← APP-MANAGED: drop-to-sort staging
 │   └── .classhub/
 │       ├── extracts/                      ← APP-MANAGED: hidden extraction cache,
-│       │   └── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
+│       │   ├── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
+│       │   └── Canvas/                    ← the course's Canvas Pages and syllabus page as
+│       │       ├── Module 2: Study Designs.md   text (§7.2); no source file, so not
+│       │       └── Syllabus.md                  `files` rows and in no guide manifest
 │       └── corpus/                        ← APP-MANAGED: distilled lecture contributions,
 │           └── Week 02 — Study Designs/2026-08-27 — Lecture.md   keyed by unit (§8.5)
 └── ... (3 more class folders)
@@ -412,6 +432,16 @@ deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
                    source TEXT,            -- syllabus|canvas
                    canvas_assignment_id TEXT NULL,
                    created_at INTEGER, resolved_at INTEGER NULL);
+
+-- What the professor said (§7.2): the course's Canvas announcements, read on
+-- every sync and kept as a record — the workspace lists them newest first
+-- and the chat overview carries the latest few. No unread state, nothing
+-- waiting on a decision. The body is Canvas's HTML stripped to text; the app
+-- never renders Canvas HTML. Keyed on the Canvas id, which is global, so a
+-- re-sync updates an edited announcement in place.
+announcements(id INTEGER PK, class_id INTEGER FK, canvas_id TEXT UNIQUE,
+              title TEXT, body TEXT,
+              posted_at TEXT);             -- local wall-clock ISO, YYYY-MM-DDTHH:MM
 
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
 chat_messages(id INTEGER PK, session_id INTEGER FK, role TEXT,
@@ -625,6 +655,9 @@ passes through a human loses something. This section removes that hop.
 | `/courses/:id/folders` | where the professor filed each file — the destination a move proposal takes |
 | `/courses/:id/assignments?include[]=submission` | deadlines with real due dates — no syllabus guesswork — and, per assignment, the reader's own submission: whether it was handed in, and the score once it is graded and posted |
 | `/courses/:id/assignment_groups` | the course's grading scheme → `grade_categories` (§11), with each group's weight where the course applies them |
+| `/courses/:id/discussion_topics?only_announcements=true` | what the professor said between lectures → `announcements` (§5); the same objects `/announcements` serves, without its fourteen-day window (§1) |
+| `/courses/:id/pages?include[]=body` | the course's Pages, where a course with empty Modules keeps its weekly content → `.classhub/extracts/Canvas/<Page title>.md` |
+| `/courses?…&include[]=syllabus_body` | the syllabus page, on the course listing itself → `.classhub/extracts/Canvas/Syllabus.md` |
 
 The course code is the only field worth matching on. The account is enrolled in a dozen
 "active" courses, orientation shells and years-old org sites among them, and a name match would
@@ -674,8 +707,8 @@ off-limits (§1). Canvas sets the lifetime: a refusal deletes the stored copy an
 sign-in window, which is what a password change, an admin revoke and Canvas's own timeout each
 look like from here. A copy no sync has used for 30 days is refused and deleted the next time a
 sync asks for it — that being the window Duo's device-trust cookie keeps, past which the full
-sign-in was coming anyway. The check is made on use rather than on a timer, because sync is
-manual and nothing here should introduce a scheduler.
+sign-in was coming anyway. The check is made on use rather than on a timer, because a sync runs
+when asked or once at launch, and nothing here should introduce a scheduler.
 
 A window that has not navigated anywhere yet is not a Canvas asking for a sign-in. The initial
 empty document reports no host at all, and reading that as "somewhere other than Canvas" would
@@ -716,7 +749,16 @@ and a matcher that fires once is one whose only real behaviour is its wrong answ
 its place when the tree grows per-division folders, or when Canvas file attribution supplies the
 join instead.
 
-**Sync is manual and non-destructive.** It runs when asked, never on a timer. New units are
+**Sync runs when asked, and once on launch — never on a timer.** A launch syncs on its own when
+a session is stored in the Keychain and the last sync is a day old or there has never been one,
+through a window that stays hidden whatever happens: Canvas wanting a sign-in ends the sync
+rather than prompting for one, and a conclusive refusal discards the stored copy on the same
+evidence a manual sync acts on, so the next press asks. The Settings report says `SYNCED ON
+LAUNCH`, or `NOT SYNCED ON LAUNCH` with the reason as a quiet line rather than a stopped sync.
+It follows the launch scan on the same thread, so its duplicate check reads a fresh index, and
+nothing schedules a second one. The dashboard header names the sync's age (§12).
+
+**Sync is non-destructive.** New units are
 inserted and existing ones updated in place; units whose name no longer appears in Canvas are
 kept, not deleted — a mid-semester Canvas reshuffle must not silently orphan a guide. A unit
 Canvas has an id for is matched on that id, so renaming a published module updates it rather
@@ -767,6 +809,26 @@ directly with audit rows, because a grade is reversible in the Grades section an
 app's rule for skipping a confirm step; a second sync of an unchanged course writes nothing
 and leaves no row. The sync report counts grades recorded and deadlines completed beside what
 it proposed, and a failed grades read is a line in it rather than the class's failure.
+
+**Announcements are a record, not a queue.** Every sync reads the course's announcements and
+upserts them on the Canvas id, the body stripped to text through the extractor's stripper —
+Canvas HTML is never rendered in the app, and its images and links are dropped with the tags. A
+delayed announcement carries no `posted_at` and is skipped, as a student would not see it; an
+edited one is the same row, updated. The workspace shows them as a `NOTICES` section, newest
+first and absent while there are none, with no unread state; the chat overview carries the
+latest three (§9). A re-sync of an unchanged course writes no row.
+
+**Pages and the syllabus page become text in the extract cache.** Each published Page is
+written as markdown to `.classhub/extracts/Canvas/<Page title>.md` — a title line, one line
+saying what it is and where it lives on Canvas, then the stripped text — and the course's
+`syllabus_body` to `.classhub/extracts/Canvas/Syllabus.md`, so `search_material` covers them
+without a new root and chat cites them by path. A page's file name is its title as a path
+segment, with Canvas's URL slug appended when another page already holds that name, and
+`Syllabus` is reserved for the syllabus page. They are not `files` rows: nothing on disk is
+their source, so they take no part in a guide's manifest. A file is rewritten only when its
+content changed, and a page Canvas has since removed keeps its file, since the sync deletes
+nothing. The syllabus scan's picker offers the mirrored syllabus page as a source when it
+exists (§11).
 
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
@@ -957,19 +1019,21 @@ its meetings.
     draw from that class too, and from any class on the dashboard.
   - **The overview** is the per-class picture the app itself has: how the course divides
     itself (count and kind, the current division, and in the detailed form every division
-    with its date), the lectures filed under those divisions and which are distilled or have
-    a session document, material by folder — a folder is named as a folder, never as a
-    module — every guide scope with its staleness, and the proposals of both kinds waiting
-    for approval. The compact form rides every turn as cached system context and stays one
-    line per topic; the detailed form, behind `get_overview`, is where the lists and the
-    proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
+    with its date), the professor's three latest announcements (§7.2) — titles and dates in
+    the compact form, each body in the detailed form, capped — the lectures filed under those
+    divisions and which are distilled or have a session document, material by folder — a
+    folder is named as a folder, never as a module — every guide scope with its staleness,
+    and the proposals of both kinds waiting for approval. The compact form rides every turn
+    as cached system context and stays one line per topic; the detailed form, behind
+    `get_overview`, is where the lists and the proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
     6.4 KB of text (6.0 KB before M19), and the whole system block — template and overview —
     cached at about 5,000 tokens beside about 3,600 for the tool schemas.
 - **Read tools** (Milestone 7):
   - `get_overview()` — classes, schedule, divisions with dates, lectures with their notes and
     session documents, guides with freshness, waiting proposals with ids, open deadlines
   - `list_material(class, subpath?)` — tree listing
-  - `search_material(query, class?)` — ripgrep over extracts, corpus notes, notes, and guides
+  - `search_material(query, class?)` — ripgrep over extracts (the mirrored Canvas Pages and
+    syllabus page among them, §7.2), corpus notes, notes, and guides
   - `read_material(path, offset?, limit?)` — bounded file reads (extracts/notes/guides/text
     sources; never binaries)
 - **Write tools** (Milestone 8):
@@ -1016,6 +1080,9 @@ its meetings.
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
   chat tools. **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
   class folder) and proposes deadlines as JSON → confirm cards → insert with `source='syllabus'`.
+  The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `CANVAS SYLLABUS PAGE`
+  when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
+  so a scan of it finds no dates and says so.
   Proposals still waiting, from either reader, are counted on the class card (`N PROPOSED`) and
   in the chat overview, since the queue itself lives inside the workspace. A proposal dated
   before today is tagged `PAST` and left out of ADD ALL: a past date may be a real deadline
@@ -1049,9 +1116,14 @@ and apply it. Non-negotiable per project owner.
   exactly as the syllabus wrote it — staleness, inbox and proposal badges, current grade,
   nearest deadline. The division line truncates rather than wraps, so the deadline under it
   keeps its space; a course with no current division shows no line.
-- **Views**: Dashboard (4 class cards + deadlines strip + exam countdowns + job status pill)
+- **Views**: Dashboard (4 class cards + deadlines strip + exam countdowns + job status pill,
+  and under the date one mono line naming the Canvas sync's age — `CANVAS · SYNCED 6 DAYS
+  AGO`, `SYNCED TODAY`, `NEVER SYNCED`, `SYNCING…` — in the destructive colour from seven
+  days, opening Settings where the sync lives)
   · Class Workspace (accent header whose eyebrow names the current division after the
-  meeting time; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
+  meeting time; a `NOTICES` section of the professor's Canvas announcements, newest first,
+  each row a title and posting time with the text clamped beneath it until opened, absent
+  while there are none; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in Browser / Show in Finder)
   · Material viewer (the same reading room for a class file: markdown, R and Python
   scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
@@ -1303,7 +1375,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a graded quiz appears under its category with the right score after one sync,
   its deadline is done with an audit row, and a second sync changes nothing.
 
-- [ ] **M22 — What the professor said.** (`milestones/M22-what-the-professor-said.md`)
+- [x] **M22 — What the professor said.** (`milestones/M22-what-the-professor-said.md`)
   A probe of announcements, Pages and the Canvas syllabus body per course; announcements as a
   workspace section and chat context; Pages and the syllabus body into the extract cache so
   search and the syllabus scan reach them; the sync's age on the dashboard, and a sync on launch

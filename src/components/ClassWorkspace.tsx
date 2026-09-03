@@ -19,6 +19,7 @@ import { GuideViewer } from "@/components/GuideViewer";
 import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
+import { NoticesSection } from "@/components/Notices";
 import { StructureSection } from "@/components/Structure";
 import {
   CLASS_ACCENTS,
@@ -290,6 +291,8 @@ export function ClassWorkspace({
       )}
 
       <InboxQueue classId={info.id} tree={tree} />
+
+      <NoticesSection classId={info.id} />
 
       <StructureSection
         classId={info.id}
