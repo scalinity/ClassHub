@@ -172,13 +172,15 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_job_owner.sql"),
     include_str!("../migrations/0010_canvas_grades.sql"),
     include_str!("../migrations/0011_announcements.sql"),
-    include_str!("../migrations/0012_unit_identity.sql"),
+    UNIT_LABELS_MIGRATION,
 ];
 
-/// The migration after which `units::backfill_labels` runs, inside its
-/// transaction: 0012 adds the label columns, and the rows that predate them
-/// get theirs from their names.
-const UNIT_LABELS_MIGRATION: usize = 12;
+/// The migration that adds the label columns; `units::backfill_labels` runs
+/// inside its transaction, so the rows that predate them get theirs from
+/// their names. Keyed on the migration itself rather than on its position,
+/// so a migration slotted in ahead of it cannot move the backfill onto the
+/// wrong one.
+const UNIT_LABELS_MIGRATION: &str = include_str!("../migrations/0012_unit_identity.sql");
 
 /// An in-memory database with every migration applied.
 ///
@@ -290,7 +292,7 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)
             .with_context(|| format!("running migration {:04}", index + 1))?;
-        if index + 1 == UNIT_LABELS_MIGRATION {
+        if *sql == UNIT_LABELS_MIGRATION {
             crate::units::backfill_labels(&tx).context("backfilling unit labels")?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
