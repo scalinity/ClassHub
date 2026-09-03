@@ -138,28 +138,39 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     // has since left the inbox (free_slot suffixes the name while the old
     // file is still there, so a match means the old file is gone) — a new
     // drop is a new decision, and the sort job must see it.
+    //
+    // The inbox sits inside the write-scope guard's walk (SPEC §6), so a drop
+    // during a running job is a change the guard would pin on the job; the
+    // `sort.staged` row is how it tells the app's own writes apart. Both
+    // writes land as one transaction, and a failure is logged rather than
+    // propagated: the files are on disk by now, and failing the drop over a
+    // finished copy would earn a duplicate on the retry (the same reasoning
+    // `lectures::add` states for its own row).
     if !staged.is_empty() {
-        with_conn(app, |conn| {
+        let recorded = with_conn(app, |conn| {
             let rel_paths: Vec<String> = staged
                 .iter()
                 .map(|name| format!("{INBOX_DIR}/{name}"))
                 .collect();
+            let tx = conn.unchecked_transaction()?;
             for rel_path in &rel_paths {
-                conn.execute(
+                tx.execute(
                     "DELETE FROM move_proposals
                      WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'dismissed'",
                     params![class_id, rel_path],
                 )?;
             }
-            // The inbox sits inside the write-scope guard's walk (SPEC §6), so
-            // a drop during a running job is a change the guard would pin on
-            // the job. The audit log is how it tells the app's own writes apart.
             crate::db::audit(
-                conn,
+                &tx,
                 "sort.staged",
                 json!({ "classId": class_id, "staged": rel_paths }),
-            )
-        })?;
+            )?;
+            tx.commit()?;
+            Ok(())
+        });
+        if let Err(e) = recorded {
+            eprintln!("class {class_id}: recording a drop of {} file(s) failed: {e:#}", staged.len());
+        }
     }
 
     let job_id = if staged.is_empty() {
