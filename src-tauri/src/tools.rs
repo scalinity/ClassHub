@@ -1640,9 +1640,12 @@ impl Scope {
 /// A division answers to its whole name and to its kind and ordinal
 /// (`week3`), so "Week 1" is an exact hit on Week 1 rather than a substring
 /// of Weeks 10–15. A folder named exactly like a division is that division's
-/// folder (`units::attach_folder_paths` joins them on that equality), so it is
-/// dropped from the candidates and the division wins: its sources include the
-/// folder's files and its lectures both.
+/// folder (`units::attach_folder_paths` joins them on that equality — exact,
+/// case and all, so the comparison here is the same one), so it is dropped
+/// from the candidates and the division wins: its sources include the
+/// folder's files and its lectures both. A folder that only nearly matches
+/// (`module 1` beside `Module 1`) was never attached, so it stays a scope of
+/// its own and a query hitting both is ambiguous rather than guessed.
 fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Scope> {
     // A scope copied out of a guide listing carries the storage prefix.
     let raw = scope
@@ -1659,7 +1662,7 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
     let folders: Vec<String> = folder_counts(conn, class.id)?
         .into_keys()
         .filter(|f| f != "(class folder)")
-        .filter(|f| !units.iter().any(|u| squash(&u.name) == squash(f)))
+        .filter(|f| !units.iter().any(|u| &u.name == f))
         .collect();
     let candidates: Vec<Scope> = units
         .iter()
@@ -2204,7 +2207,9 @@ mod tests {
     }
 
     /// A folder named exactly like a division is that division's folder, so
-    /// the division wins and its sources include the folder's files.
+    /// the division wins and its sources include the folder's files. A folder
+    /// that only nearly matches was never attached, so it stays its own scope
+    /// and a query hitting both is refused as ambiguous.
     #[test]
     fn a_folder_named_like_a_division_resolves_to_the_division() {
         let conn = fixture();
@@ -2217,6 +2222,16 @@ mod tests {
         match resolve_scope(&conn, &biostatistics(), "Module 1").expect("resolves") {
             Scope::Unit { name, .. } => assert_eq!(name, "Module 1"),
             other => panic!("{other:?}"),
+        }
+
+        conn.execute(
+            "UPDATE units SET name = 'module 2', rel_path = NULL WHERE name = 'Module 1'",
+            [],
+        )
+        .expect("rename");
+        match resolve_scope(&conn, &biostatistics(), "Module 2") {
+            Err(e) => assert!(format!("{e:#}").contains("matches 2 scopes"), "{e:#}"),
+            Ok(found) => panic!("guessed {found:?}"),
         }
     }
 
