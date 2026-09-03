@@ -3148,3 +3148,79 @@ Against a copy of the live database (`user_version` 11, 51 units), through
 - The tauri dev watcher rebuilds and relaunches the app on any change under
   `src-tauri/`, so the last tests were added after the dev build was
   stopped.
+
+## Post-M23 — Review fixes (2026-09-03)
+
+A two-agent review of the M23 changeset since eab7e17 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, 8 warnings and 9 suggestions, 2 of the warnings corroborated by
+both reviewers. All were addressed as individual commits, except the two
+observations under "Left as it is". What future sessions should know:
+
+- **The label is read off the original text.** `label_number` sliced the
+  name by the byte length of its lower-cased first word, and lower-casing
+  does not preserve length for every character — a Kelvin sign lowers to a
+  plain k — so such a name panicked on the scan path (both reviewers).
+  `split_label` measures on the original text, and also splits a digit run
+  glued to the word, so `Week7` and `Week 7` are one label.
+- **Only a standard numeral is a Part's number.** `Part Civil` scored 153
+  letter by letter; a run counts only when `roman(value)` writes back as
+  the run itself.
+- **One transaction per upsert, and a `Batch` per pass.** `upsert` opened
+  its IMMEDIATE transaction after the match and the checks, so a second
+  process could rename the row in between and the loser planned moves from
+  a name already gone (both reviewers). The transaction opens first now.
+  `find` is gone: `upsert` takes a `Batch` that holds the rows the pass has
+  written — a second entry for one row comes back `Outcome::Claimed` — and
+  the moves pending, so a target an earlier rename of the same pass vacates
+  counts as free (the rename chain, reachable through Canvas modules
+  renumbered in one sync). The row and its moves reach the batch only after
+  the commit, and the batch is applied once the pass has released the lock.
+- **A rename target on disk is refused whether or not the source is.** The
+  check sat inside the source-exists guard while the row rewrite ran
+  regardless, so a row whose file was gone could be repointed onto another
+  division's (`folder_segment` is not injective). Found while fixing it:
+  APFS volumes are case-insensitive by default, so a rename that only
+  changed case saw its own folder as an occupied target; a target is free
+  when it is the source's own inode (`same_entry`).
+- **A Canvas module sharing a label is inserted unnumbered.** Two modules
+  with one number and different names met on the label match, and the
+  second was refused as "already called" a name nobody held; the label
+  match now passes over a row Canvas gave a different id.
+- **Pending moves are reported on drop.** `#[must_use]` did not cover a
+  caller reading a field and letting the rest fall; `RenameEffects` says on
+  stderr how many moves were never applied.
+- **Migration 0012 is tested against old-style rows**
+  (`db::migration_tests`): guide and job scopes by name rescoped to ids, a
+  scope naming a missing division kept as it is, a folder scope untouched,
+  labels and ranges backfilled, `user_version` at the end.
+- **A rename refreshes the listings.** The `units` hub area now invalidates
+  the guides and contributions queries, whose labels carry the division's
+  name; the Canvas sync already emits `units` after every successful sync.
+- **Smaller things.** The backfill is keyed on the migration's own text
+  rather than its position; the range branch of `week_slots` reads only
+  rows whose kind is not `week`; the frontend `Unit` type carries `number`,
+  `firstWeek` and `lastWeek`; `rename_effects` says where the naming rules
+  it reads live.
+- **Tests**: 216 pass, `npx tsc --noEmit` clean. Every fix went through a
+  gate script that runs `cargo test` to a log file and stops on its exit
+  status — never piped through grep — then `tsc` when frontend files were
+  staged, then commits. Nothing was pushed; the repo has no remote.
+- **Left as it is**: a transcript filed under a week number the ordinal
+  shift produced before M23 would resolve to no slot — none exists, the only
+  filed lecture being Fundamentals' Week 02; `list_guides` running
+  `current_manifest` once per guide, pre-existing and fine at a handful of
+  guides per class; the module cycle between `units` and the owners of a
+  division's artifacts, noted in the code.
+
+### Gotchas
+
+- With `perl -0pi -e 's|…|…|'`, a `\|` inside the replacement is not an
+  escaped pipe: the replacement ends at the first `|` and the tail lands in
+  the file. `#` as the delimiter, or the Edit tool, for text with pipes.
+- `cd src-tauri` does not persist into a Bash call that opens with `sleep`;
+  `cargo test` from the repo root fails on the missing Cargo.toml.
+- A job's label in the Job Center cannot be read through the accessibility
+  tree — the row's text sits inside a button titled "Show output of job N"
+  — and the panel shows only the most recent rows; the label join has a
+  unit test instead.
