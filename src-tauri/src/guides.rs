@@ -443,7 +443,7 @@ pub fn generate_practice(
             ),
         };
 
-        // Same-day exams for the same scope get a numeric suffix instead of
+        // Same-day exams for the same label get a numeric suffix instead of
         // silently overwriting the earlier one. A division's name can carry a
         // slash or a colon, which a file name cannot.
         let class_dir = ctx.class_dir.clone();
@@ -451,12 +451,7 @@ pub fn generate_practice(
             "{PRACTICE_DIR}/{} — {date_label}",
             crate::units::folder_segment(&scope_label)
         );
-        let mut output_rel = format!("{base}.html");
-        let mut n = 2;
-        while class_dir.join(&output_rel).exists() {
-            output_rel = format!("{base} ({n}).html");
-            n += 1;
-        }
+        let output_rel = practice_output_rel(&class_dir, &base, &claimed_practice_paths(&conn, class_id)?);
 
         let prompt = PRACTICE_TEMPLATE
             .replace("{class}", &ctx.class_name)
@@ -482,6 +477,38 @@ pub fn generate_practice(
     fs::create_dir_all(class_dir.join(PRACTICE_DIR))?;
     let job_id = crate::jobs::enqueue_practice(app, class_id, scope, &prompt, payload)?;
     Ok((job_id, output_rel))
+}
+
+/// The first free name under `base`: not on disk, and not claimed by an exam
+/// still being written. The second check matters because a scope's label is
+/// not its scope — the folder `Module 1` and a division called `Module 1`
+/// both label their exams `Module 1`, and the active-job guard keys on scope,
+/// so two such jobs can run at once and the loser would overwrite the winner.
+fn practice_output_rel(class_dir: &Path, base: &str, claimed: &BTreeSet<String>) -> String {
+    let mut output_rel = format!("{base}.html");
+    let mut n = 2;
+    while class_dir.join(&output_rel).exists() || claimed.contains(&output_rel) {
+        output_rel = format!("{base} ({n}).html");
+        n += 1;
+    }
+    output_rel
+}
+
+/// The output paths of this class's queued and running practice jobs.
+fn claimed_practice_paths(conn: &Connection, class_id: i64) -> Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT payload FROM jobs
+         WHERE kind = 'practice' AND class_id = ?1 AND status IN ('queued', 'running')",
+    )?;
+    let paths = stmt
+        .query_map([class_id], |row| row.get::<_, Option<String>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .filter_map(|payload| serde_json::from_str::<PracticePayload>(&payload).ok())
+        .map(|payload| payload.rel_path)
+        .collect();
+    Ok(paths)
 }
 
 /// Practice completion check (job runner, before the row leaves `running`):
@@ -713,4 +740,39 @@ pub fn read_guide(conn: &Connection, class_id: i64, scope: &str) -> Result<Strin
     let rel_path = rel_path.context("no guide recorded for this scope")?;
     let abs = crate::scanner::resolve_rel(conn, class_id, &rel_path)?;
     fs::read_to_string(&abs).with_context(|| format!("reading {rel_path}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A same-day exam takes the next free suffix, whether the earlier one is
+    /// already on disk or still being written by a queued job.
+    #[test]
+    fn a_practice_exam_never_takes_a_name_on_disk_or_in_the_queue() {
+        let conn = crate::db::memory_db();
+        let dir = std::env::temp_dir().join(format!("classhub-practice-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(PRACTICE_DIR)).expect("dir");
+        let base = format!("{PRACTICE_DIR}/Module 1 \u{2014} 2026-09-02");
+
+        let claimed = claimed_practice_paths(&conn, 3).expect("none queued");
+        assert!(claimed.is_empty());
+        assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base}.html"));
+
+        fs::write(dir.join(format!("{base}.html")), "earlier today").expect("write");
+        assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base} (2).html"));
+
+        let payload = serde_json::to_string(&PracticePayload { rel_path: format!("{base} (2).html") })
+            .expect("payload");
+        conn.execute(
+            "INSERT INTO jobs (kind, class_id, scope, status, payload, created_at, owner_pid)
+             VALUES ('practice', 3, 'unit:Module 1', 'running', ?1, 1, 1)",
+            [payload],
+        )
+        .expect("job");
+        let claimed = claimed_practice_paths(&conn, 3).expect("claimed");
+        assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base} (3).html"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
