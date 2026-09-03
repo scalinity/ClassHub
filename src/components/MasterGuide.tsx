@@ -111,87 +111,99 @@ export function MasterGuideStrip({
   };
 
   return (
-    <section aria-label="Semester master" className="mt-8 rounded-xl border px-5 py-4">
+    <section
+      aria-label="Semester master"
+      className="mt-8 rounded-xl border px-5 py-4"
+    >
       <div className="flex min-h-7 items-center justify-between gap-4">
         <h2 className="shrink-0 font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
           SEMESTER MASTER
         </h2>
 
-        {active ? (
-          <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-            {active.status === "running"
-              ? `ELAPSED ${formatElapsed(active.startedAt ?? nowSec, nowSec)}`
-              : "QUEUED"}
-          </span>
-        ) : (
-          <span className="flex min-w-0 items-center gap-1.5">
-            {guide && (
-              <span className="min-w-0 truncate font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                GENERATED {formatGeneratedAt(guide.generatedAt)}
-              </span>
-            )}
-            {failed ? (
-              <>
-                {failed.sessionId && (
+        {/* The practice action sits outside the master's own state: a
+            semester-wide exam neither waits for the master nor blocks it,
+            so it is offered — and its pulse shown — during a master run too. */}
+        <span className="flex min-w-0 items-center gap-1.5">
+          {active ? (
+            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+              {active.status === "running"
+                ? `ELAPSED ${formatElapsed(active.startedAt ?? nowSec, nowSec)}`
+                : "QUEUED"}
+            </span>
+          ) : (
+            <>
+              {guide && (
+                <span className="min-w-0 truncate font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+                  GENERATED {formatGeneratedAt(guide.generatedAt)}
+                </span>
+              )}
+              {failed ? (
+                <>
+                  {failed.sessionId && (
+                    <button
+                      type="button"
+                      title="Continue the failed run from its claude session"
+                      onClick={() => resume(failed.id)}
+                      className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20`}
+                    >
+                      RESUME
+                    </button>
+                  )}
                   <button
                     type="button"
-                    title="Continue the failed run from its claude session"
-                    onClick={() => resume(failed.id)}
-                    className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20`}
+                    onClick={start}
+                    className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground`}
                   >
-                    RESUME
+                    START OVER
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={start}
-                  className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground`}
-                >
-                  START OVER
-                </button>
-              </>
-            ) : guide ? (
-              guide.stale ? (
-                <button
-                  type="button"
-                  title="Sources changed since this master was generated"
-                  onClick={start}
-                  className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
-                >
-                  STALE — REGENERATE
-                </button>
+                </>
+              ) : guide ? (
+                guide.stale ? (
+                  <button
+                    type="button"
+                    title="Sources changed since this master was generated"
+                    onClick={start}
+                    className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+                  >
+                    STALE — REGENERATE
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    title="Regenerate the semester master"
+                    aria-label="Regenerate the semester master"
+                    onClick={start}
+                    className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+                  >
+                    <RefreshCw size={12} aria-hidden />
+                  </button>
+                )
               ) : (
                 <button
                   type="button"
-                  title="Regenerate the semester master"
-                  aria-label="Regenerate the semester master"
                   onClick={start}
-                  className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+                  className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
                 >
-                  <RefreshCw size={12} aria-hidden />
+                  GENERATE SEMESTER MASTER
                 </button>
-              )
-            ) : (
-              <button
-                type="button"
-                onClick={start}
-                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-              >
-                GENERATE SEMESTER MASTER
-              </button>
-            )}
-            <PracticeAction standing active={practiceActive} onSelect={practice} />
-            {guide && (
-              <button
-                type="button"
-                onClick={onView}
-                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-              >
-                VIEW GUIDE
-              </button>
-            )}
-          </span>
-        )}
+              )}
+            </>
+          )}
+          <PracticeAction
+            standing
+            active={practiceActive}
+            onSelect={practice}
+          />
+          {!active && guide && (
+            <button
+              type="button"
+              onClick={onView}
+              className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+            >
+              VIEW GUIDE
+            </button>
+          )}
+        </span>
       </div>
 
       {active ? (
