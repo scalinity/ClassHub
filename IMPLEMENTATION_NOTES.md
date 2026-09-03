@@ -2909,3 +2909,75 @@ session, which held main and the dev port for the whole session.
   a symlink to the main tree's serves `tsc`, and git ignores it.
 - `zsh` treats a leading `=` as equals-expansion, so `echo ====` is an
   error rather than a separator.
+
+## Post-review — Weights from the syllabus (2026-09-03)
+
+A two-agent review of the branch's changes since 4d36ed5 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, 6 warnings and 7 suggestions, 3 of the warnings corroborated by
+both reviewers; all but one were addressed as individual commits on the
+branch. What future sessions should know:
+
+- **Model text reached the job summary uncapped.** The pass used the
+  model's name as given in every summary line and printed a bad weight as
+  its whole JSON value, while the stored name is capped by `read_name`, so
+  the summary could name a category the class does not hold. The name is
+  capped once at the top of the loop at `MAX_NAME_CHARS` (now
+  `pub(crate)`), the bad-weight rendering the same way, and the summary
+  names the stored name.
+- **A scan demoted for its deadlines said nothing about its weights.**
+  `record_units` and `record_weights` commit before the deadline part, and
+  an all-invalid deadline batch bailed with the job's summary set to none,
+  so a weight the scan had set — or a typed weight it had refused to
+  change — went unreported while `hub-changed grades` had already fired.
+  The divisions had the same gap before this branch. The bail's error now
+  ends with the other parts' summaries, and the success path joins the
+  same list.
+- **Two folding rules sat on one path.** The repeat check and the
+  still-at-zero filter folded Unicode; the lookup folds ASCII, SQLite's
+  `LOWER()`. Both fold ASCII now, the deadline part's rule for titles, and
+  a test pins that `ÜBUNGEN` is `Übungen` to both layers and `übungen` a
+  second row to both.
+- **The still-at-zero read is best-effort** (`still_at_zero`): every entry
+  commits on its own, so a failure of that trailing read costs the summary
+  a line rather than reporting the weights as not recorded.
+- **Zero is read within the epsilon.** A stored 0.005 was a typed weight
+  to the exact test; `current.abs() >= WEIGHT_EPSILON` is typed now, and
+  `still_at_zero` asks `ABS(weight) < ?2` with the same constant. The
+  read-only outcomes return before any transaction is opened.
+- **A bare fraction is refused.** `percent_of` took `0.5` as half a
+  percent; a bare value between 0 and 1 is skipped and named, and `"0.5%"`
+  is what it says.
+- `read_name`'s empty-name error no longer says Canvas; the scan's
+  comments say parts rather than halves; SPEC §11 says a part tolerates a
+  malformed entry and a part that is not a list fails the scan, that a
+  demoted scan still reports what the other parts wrote, and what each
+  audit row carries.
+- **Tests**: `percent_of` in every shape; the category rules through
+  `apply_weights` (an over-long name stored and reported as the same
+  81-character string, a weight of exactly 100, a negative weight refused
+  by name, the folding rule); `categories_block`, factored out of
+  `build_prompt` because the prompt itself needs the real tree. Two of the
+  three whole-string summary assertions became field assertions; the
+  Design Studio one keeps the full comparison. `cargo test`: 196 pass, no
+  warnings. `npx tsc --noEmit` clean.
+- **Left as it is**: a unique index on `(class_id, LOWER(name))`, which
+  the auditor suggested as a schema backstop for the name rule — no schema
+  change in this branch, and the app check plus the connection mutex
+  stand. A name capped at 81 characters (80 plus the ellipsis) cannot be
+  saved again from the Grades section without shortening, since
+  `valid_name` refuses more than 80; a long Canvas group name has the same
+  property.
+- Still not run live: the branch is unmerged and no dev build was
+  launched. The merge, the four scans and the rescan are listed under
+  "Verified" above.
+
+### Gotchas
+
+- Renaming half to part in `deadlines.rs` went through `sed` with a list
+  of line-numbered `s` expressions and `#` as the delimiter, so `day half`
+  and the pre-existing test name stayed as they were.
+- The reviewers' reports arrive truncated at about 4,000 characters, and
+  one reviewer regenerated its report with different numbering when asked
+  to resend by number; asking for sections by name, and for the Verdict
+  line explicitly, got the whole of both.
