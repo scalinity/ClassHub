@@ -150,22 +150,30 @@ fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
 /// `module` — the generic one. `kind` groups and labels; `name` is what the
 /// reader actually sees, and it is never normalized.
 pub fn kind_for_name(name: &str) -> &'static str {
-    match label_word(name).as_str() {
+    match split_label(name).0.as_str() {
         "week" | "wk" => "week",
         "part" => "part",
         _ => "module",
     }
 }
 
-/// The word a name opens with, lower-cased: `week` for `Week 7 — …`, `weekly`
-/// for `Weekly Readings`. The whole first word, so "Weekly" is not "Week".
-fn label_word(name: &str) -> String {
-    let lower = name.trim().to_lowercase();
-    lower
-        .split(|c: char| !c.is_alphanumeric())
-        .next()
-        .unwrap_or("")
-        .to_string()
+/// The word a name opens with, lower-cased, and everything after it: `week`
+/// and ` 7 — …` for `Week 7 — …`, `weekly` for `Weekly Readings`. The whole
+/// first word, so "Weekly" is not "Week"; a digit run glued to the word
+/// (`Week7`) is split off, so the spaced and unspaced spellings read alike.
+/// The split is measured on the original text, because lower-casing can
+/// change a character's byte length and an offset taken from the lower-cased
+/// copy would land mid-character.
+fn split_label(name: &str) -> (String, &str) {
+    let trimmed = name.trim();
+    let end = trimmed
+        .find(|c: char| !c.is_alphanumeric())
+        .unwrap_or(trimmed.len());
+    let first = &trimmed[..end];
+    let digits = first
+        .find(|c: char| c.is_ascii_digit())
+        .unwrap_or(first.len());
+    (first[..digits].to_lowercase(), &trimmed[digits..])
 }
 
 /// The course's own number for a division, read from its label: `Week 7 —
@@ -173,13 +181,11 @@ fn label_word(name: &str) -> String {
 /// `Reading Days — No Class` is nothing. Only the words `kind_for_name` knows
 /// count as labels, so a year in `Notes 2026` is not a number.
 pub fn label_number(name: &str) -> Option<i64> {
-    let trimmed = name.trim();
-    let word = label_word(trimmed);
+    let (word, rest) = split_label(name);
     if !matches!(word.as_str(), "week" | "wk" | "module" | "part") {
         return None;
     }
-    let rest = trimmed[word.len()..]
-        .trim_start_matches(|c: char| c.is_whitespace() || c == '#' || c == '.');
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '#' || c == '.');
     match leading_number(rest) {
         // `Week 10/11` and `Weeks 1-8` both open with the first number.
         Some((n, _)) => (n >= 1).then_some(n),
@@ -1086,6 +1092,17 @@ mod tests {
         assert_eq!(label_number("Part ix"), Some(9));
         assert_eq!(label_number("Part 3"), Some(3));
         assert_eq!(label_number("Module #2"), Some(2));
+        // A number glued to the word is the same label as a spaced one, so
+        // the two spellings cannot fork a row.
+        assert_eq!(label_number("Week7 — Topic"), Some(7));
+        assert_eq!(kind_for_name("Week7 — Topic"), "week");
+        assert_eq!(label_number("Wk2"), Some(2));
+        // Lower-casing can change a character's byte length (the Kelvin sign
+        // lowers to a plain k); the split must not slice by the lower-cased
+        // length.
+        assert_eq!(label_number("WEE\u{212A} 7 — Topic"), Some(7));
+        assert_eq!(kind_for_name("WEE\u{212A} 7"), "week");
+        assert_eq!(label_number("\u{212A}"), None);
         // The range in a Part's name is not its label.
         assert_eq!(label_number("Weeks 1-8"), None);
         // Named without a label: the identity falls back to the name.
