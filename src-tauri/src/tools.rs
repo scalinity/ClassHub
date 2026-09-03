@@ -562,7 +562,11 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
             }
         ));
         // Where the course is today, from its own schedule; a course that
-        // published no dates gets no line rather than a computed week.
+        // published no dates gets no line rather than a computed week. The
+        // name is text a model read out of a syllabus PDF, placed in the
+        // system prompt on purpose: it is the same trust tier as the guide
+        // and folder lines below, capped by `units::MAX_UNIT_NAME`, and a
+        // chat that does not know which week it is would be the worse trade.
         if let Some(unit) = crate::units::current_unit(conn, class.id, today_iso)? {
             out.push_str(&format!("Now: {}\n", unit.name));
         }

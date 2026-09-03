@@ -800,17 +800,20 @@ rather than from arithmetic: weeks are not uniformly spaced (§1), so a date can
 into a week number. Where a course publishes no schedule the Add lecture form asks, defaulting
 to the nearest week by date.
 
-The same resolution, run against today instead of a lecture's date, is what tells the app where
-a course *is*. Its **current division** is the week whose published start is the latest on or
-before today — a week runs from its meeting to the next one's, so that is the week containing
-today — resolved through the same slots, so for a Part-numbered course it is the Part whose
-range holds that week. One query answers for every reader: the class card, the workspace
-eyebrow, the Structure list (a `NOW` mark on the row; the list marks it and does not scroll to
-it) and the chat overview's `Now:` line. A course that published no dates has no current
-division and the app shows nothing, because the only alternative is a week from arithmetic;
-Applied Generative AI, whose Parts name week ranges and no days, is that course today. Nothing
-published says when a course ends — no scan has ever filled `ends_on` — so past its last dated
-week the last one stays current.
+The same table, asked about today instead of a lecture's date, is what tells the app where a
+course *is*. Its **current division** is the dated division whose published start is the latest
+on or before today — a division runs from its start to the next one's, so that is the one
+containing today — whatever the course calls it: a syllabus row stored as `module` because its
+name opens with neither "Week" nor "Part" (`Reading Days — No Class`) is no less a division than
+one called a week. Two starting on one day go to the week over a coarser division it sits
+inside, then to the later ordinal. One query answers for every reader: the class card, the
+workspace eyebrow, the Structure list (a `NOW` mark on the row, matched by id; the list marks it
+and does not scroll to it) and the chat overview's `Now:` line — and the query is keyed by the
+day, so a dashboard left open across midnight asks again. A course that published no dates has
+no current division and the app shows nothing, because the only alternative is a week from
+arithmetic; Applied Generative AI, whose Parts name week ranges and no days, is that course
+today. Nothing published says when a course ends — no scan has ever filled `ends_on` — so past
+its last dated division the last one stays current.
 
 This is worth stating because the obvious alternative is wrong here. Asking the digest to
 segment a lecture across units would buy nothing — no division is finer than a meeting, so

@@ -1874,3 +1874,53 @@ individual commits. What future sessions should know:
 - In zsh, `S="perl splice.pl"; $S …` runs a command named `perl splice.pl` —
   no word splitting on an unquoted scalar. A function does what the alias was
   meant to.
+
+## Post-M18 — Review fixes (2026-09-02)
+
+A two-agent review of the M18 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 0 critical, 5 warnings and
+5 suggestions, 3 of them corroborated by both reviewers; all were addressed as
+individual commits. What future sessions should know:
+
+- **The current division is one read over every dated row.** `current_unit`
+  went through `week_slots`, kept the winning slot's week number and re-found
+  a slot by it — `units` is unique on (class, name), not on ordinal, and the
+  scan numbers a row by its position when the model omits the ordinal, so a
+  rescan that renames a week leaves two rows on one number and the lookup took
+  the lower id. It also saw `kind = 'week'` rows only: the live `Reading Days
+  — No Class` and `Final Exam week` rows are weeks because the model said so,
+  and a rescan omitting the kind would store them as `module`
+  (`kind_for_name`'s fallback) and leave the card on Week 15 through December.
+  The resolution now selects from every dated row of the class in one pass —
+  the latest start on or before today, a week winning over a coarser division
+  on the same day, then the later ordinal, then the later row. `current_week`
+  and `unit_by_id` are gone. Tested with a duplicate ordinal, the Reading Days
+  row stored as a `module`, and two shared start dates. SPEC §8.5 states the
+  rule as it now stands.
+- **The card carries the division's id.** `kind` crossed the wire unread, and
+  the Structure row matched its `NOW` on the name string. `CurrentUnit` is
+  `{id, name}` and the row matches on id.
+- **The workspace reads its whole card live.** The header had joined the
+  snapshot's meetings and room with a current division from the live query;
+  `info` is now the live card out of the classes query, with the snapshot
+  standing in until the first fetch, and the eyebrow renders the division
+  through `currentUnitLabel` the way the card does.
+- **The day is in the query key.** `classesQuery()` in `lib/classes.ts` is the
+  one definition the dashboard, the workspace and the chat sidebar use:
+  `["classes", today]`, fetched with the same day, so a dashboard left open
+  across midnight asks again on its next render rather than serving
+  yesterday's division; every `["classes"]` invalidation still matches by
+  prefix.
+- **Unit names now sit in the system prompt.** The `Now:` line carries text a
+  model read out of a syllabus PDF into the prompt's context block — the same
+  trust tier as the guide-scope and folder lines already there, capped at 120
+  characters by `MAX_UNIT_NAME`. Deliberate, and said so at the line: a chat
+  that does not know which week it is would be the worse trade.
+- The overview test's block helper splits on the heading; the index
+  arithmetic it replaced dropped the last three bytes of the final block.
+- Verified: `cargo test` 149 pass, `npx tsc --noEmit` clean, and the fixed
+  build launched beside the installed app: the three dated cards read the same
+  three `WEEK 2` lines, the Biostatistics eyebrow read `THU 11:45 AM–1:40 PM ·
+  WEEK 2 · STUDY DESIGNS · JAX1 231 · 2 CR` with `NOW` on the Week 2 row, and
+  the Applied Generative AI workspace carried neither. Nothing was pushed: the
+  repo has no remote.
