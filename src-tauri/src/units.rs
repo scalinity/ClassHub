@@ -868,6 +868,11 @@ pub struct WeekSlot {
     /// where the course numbers its weeks, or the Part whose range contains it.
     pub unit_id: i64,
     pub unit_name: String,
+    /// The division's kind: `week` where the division is the week itself,
+    /// else the course's word for the division that groups it (`part`) —
+    /// which is when a folder named for the week alone says nothing about
+    /// what the lecture feeds, and the form names the division beside it.
+    pub unit_kind: String,
     /// The date the course itself published for this week, where it published
     /// one — what the Add lecture form's default is measured against.
     pub meets_on: Option<String>,
@@ -913,6 +918,7 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
             folder: week_folder(week, Some(&unit_name)),
             unit_id,
             unit_name,
+            unit_kind: "week".into(),
             meets_on,
         });
     }
@@ -922,7 +928,7 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, first_week, last_week FROM units
+        "SELECT id, name, first_week, last_week, kind FROM units
          WHERE class_id = ?1 AND kind != 'week'
            AND first_week IS NOT NULL AND last_week IS NOT NULL
          ORDER BY ordinal, id",
@@ -934,10 +940,11 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (unit_id, unit_name, first, last) in ranges {
+    for (unit_id, unit_name, first, last, unit_kind) in ranges {
         for week in first..=last {
             // Ranges should not overlap, but if a syllabus says they do, the
             // earlier Part keeps the week rather than the later one silently
@@ -950,6 +957,7 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
                 folder: week_folder(week, None),
                 unit_id,
                 unit_name: unit_name.clone(),
+                unit_kind: unit_kind.clone(),
                 meets_on: None,
             });
         }
@@ -1374,6 +1382,9 @@ mod tests {
         let slots = week_slots(&conn, 4).expect("slots");
         assert_eq!(slots.len(), 16, "the ranges no longer cover weeks 1–16");
         assert_eq!(slot_for_week(&conn, 4, 9).unwrap().unwrap().unit_id, ids[1]);
+        // A week read out of a range is a Part's, and its folder is bare, so
+        // the form has to name the Part beside it — which it does by kind.
+        assert!(slots.iter().all(|s| s.unit_kind == "part" && s.folder == format!("Week {:02}", s.week)));
 
         // A rescan stating a new range replaces the held one.
         let widened = NewUnit {

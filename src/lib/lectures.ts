@@ -148,6 +148,9 @@ export interface WeekSlot {
   folder: string;
   unitId: number;
   unitName: string;
+  /** `week` where the division is the week itself; else the course's word
+   *  for the division that groups it, whose name the option then carries. */
+  unitKind: string;
   /** The date the course published for this week, where it published one. */
   meetsOn: string | null;
 }

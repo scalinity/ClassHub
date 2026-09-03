@@ -11,6 +11,7 @@ import {
   useLectureProgress,
   type LectureProgress,
   type SourceKind,
+  type WeekSlot,
 } from "@/lib/lectures";
 import { todayIso } from "@/lib/schedule";
 import { setDropInterceptor } from "@/lib/sorter";
@@ -116,11 +117,14 @@ export function AddLecture({
   const slot = slots.find((s) => s.week === resolvedWeek) ?? null;
   // A course that groups its weeks — Applied Generative AI's three Parts —
   // names none of them, so its folders are bare `Week NN` and the option has
-  // to say what the week feeds. A week-numbered course's folder already does.
-  const grouped = new Set(slots.map((s) => s.unitId)).size < slots.length;
-  // Resolved to no default: the course published no dates to measure the
-  // session against, so the week is asked for outright (SPEC §8.5).
-  const asked = slots.length > 0 && weeks?.defaultWeek === null;
+  // to say what the week feeds. A week's own folder already does.
+  const optionLabel = (s: WeekSlot) =>
+    s.unitKind === "week" ? s.folder : `${s.folder} · ${s.unitName}`;
+  // The course published no dates to measure the session against, so the
+  // week is asked for outright (SPEC §8.5). Keyed on the dates rather than
+  // on the default: a date the field cannot parse resolves to no default
+  // either, and that is not the course's doing.
+  const asked = slots.length > 0 && slots.every((s) => s.meetsOn === null);
 
   const submit = () => {
     setError(null);
@@ -220,7 +224,7 @@ export function AddLecture({
                   </option>
                   {slots.map((s) => (
                     <option key={s.week} value={s.week}>
-                      {grouped ? `${s.folder} · ${s.unitName}` : s.folder}
+                      {optionLabel(s)}
                     </option>
                   ))}
                 </select>
