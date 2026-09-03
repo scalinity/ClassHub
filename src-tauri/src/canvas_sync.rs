@@ -639,7 +639,8 @@ fn grade_state(assignment: &Value) -> GradeState {
     GradeState::Posted(graded)
 }
 
-/// `grade_state` for a caller that wants the grade or nothing.
+/// `grade_state` for a test that wants the grade or nothing.
+#[cfg(test)]
 fn graded_and_posted(assignment: &Value) -> Option<Graded> {
     match grade_state(assignment) {
         GradeState::Posted(graded) => Some(graded),
