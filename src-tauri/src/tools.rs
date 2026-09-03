@@ -655,10 +655,13 @@ fn notices_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<Str
         return Ok(String::new());
     }
     let day = |posted_at: &str| posted_at[..posted_at.len().min(10)].to_string();
+    // Title and body are the professor's text, folded onto one line each so
+    // neither can open a line of its own in the system prompt.
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let latest = all.iter().take(NOTICES_SHOWN);
     if !detailed {
         let titles = latest
-            .map(|a| format!("\"{}\" ({})", a.title, day(&a.posted_at)))
+            .map(|a| format!("\"{}\" ({})", one_line(&a.title), day(&a.posted_at)))
             .collect::<Vec<_>>()
             .join("; ");
         return Ok(format!("Notices: {titles}\n"));
@@ -669,12 +672,11 @@ fn notices_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<Str
         plural(all.len(), "announcement")
     );
     for a in latest {
-        let body = a.body.split_whitespace().collect::<Vec<_>>().join(" ");
         out.push_str(&format!(
             "- {} · {}\n  {}\n",
             day(&a.posted_at),
-            a.title,
-            truncate(&body, NOTICE_BODY_CHARS)
+            one_line(&a.title),
+            truncate(&one_line(&a.body), NOTICE_BODY_CHARS)
         ));
     }
     Ok(out)
@@ -2243,7 +2245,7 @@ mod tests {
         let conn = fixture();
         for (canvas_id, title, body, posted_at) in [
             ("1", "Welcome", "Slides are under Module 1.", "2026-08-20T00:00"),
-            ("2", "Office hours moved", "Thursday at <b>6 PM</b> this week.\n\nBen", "2026-09-02T15:03"),
+            ("2", "Office hours\nmoved", "Thursday at <b>6 PM</b> this week.\n\nBen", "2026-09-02T15:03"),
             ("3", "Quiz 1 posted", "Due Friday.", "2026-08-28T09:00"),
             ("4", "Reading for week 2", "Chapter 3.", "2026-08-25T09:00"),
         ] {

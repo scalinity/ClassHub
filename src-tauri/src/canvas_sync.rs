@@ -1738,6 +1738,9 @@ fn page_markdown(
     if let Some(url) = url {
         line.push_str(&format!(" · {url}"));
     }
+    // The title is the professor's text; on one line it stays a heading and
+    // cannot open a section of its own in a file a job reads.
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     format!("# {title}\n\n{line}\n\n{}\n", text.trim())
 }
 
@@ -2211,7 +2214,7 @@ mod tests {
             "<h2><span>Responsible AI</span></h2><p>By the end of this <b>module</b>, PHI&nbsp;&amp; HIPAA.</p><img src=\"x.png\">",
         );
         let content = page_markdown(
-            "Module 2",
+            "Module\n 2",
             "Canvas page",
             Some("2026-09-01T02:41"),
             Some("https://ufl.instructure.com/courses/576174/pages/module-2-2"),
