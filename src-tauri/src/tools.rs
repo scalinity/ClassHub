@@ -459,6 +459,22 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+/// Both confirm queues on one line, or nothing when nothing waits: a proposal
+/// the overview never mentions is one chat cannot remind anyone about.
+fn waiting_line(pending_moves: i64, pending_deadlines: i64) -> Option<String> {
+    let mut waiting = Vec::new();
+    if pending_moves > 0 {
+        waiting.push(format!("{pending_moves} file move proposal(s)"));
+    }
+    if pending_deadlines > 0 {
+        waiting.push(format!("{pending_deadlines} deadline proposal(s)"));
+    }
+    if waiting.is_empty() {
+        return None;
+    }
+    Some(format!("{} awaiting Daniel's approval", waiting.join(" and ")))
+}
+
 /// The hub in text. `detailed` adds per-class inventories and guide dates; the
 /// compact form is what rides in the system prompt.
 pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
@@ -475,30 +491,17 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
         classes.len(),
         root.display()
     );
-    let pending_moves: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'",
-        [],
-        |row| row.get(0),
-    )?;
+    // Counted after the vanish pass, so chat and the cards agree on what is
+    // still waiting.
+    let pending_moves = crate::sorter::pending_move_count(conn)?;
     let pending_deadlines: i64 = conn.query_row(
         "SELECT COUNT(*) FROM deadline_proposals WHERE status = 'pending'",
         [],
         |row| row.get(0),
     )?;
-    // Both confirm queues on one line: a proposal the overview never mentions
-    // is one chat cannot remind anyone about.
-    let mut waiting = Vec::new();
-    if pending_moves > 0 {
-        waiting.push(format!("{pending_moves} file move proposal(s)"));
-    }
-    if pending_deadlines > 0 {
-        waiting.push(format!("{pending_deadlines} deadline proposal(s)"));
-    }
-    if !waiting.is_empty() {
-        out.push_str(&format!(
-            "{} awaiting Daniel's approval\n",
-            waiting.join(" and ")
-        ));
+    if let Some(line) = waiting_line(pending_moves, pending_deadlines) {
+        out.push_str(&line);
+        out.push('\n');
     }
 
     for class in classes {
@@ -1648,3 +1651,28 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::waiting_line;
+
+    /// The one new line of user-facing prose in the overview: nothing when
+    /// nothing waits, each queue named only when it holds something, both
+    /// joined when both do.
+    #[test]
+    fn the_waiting_line_names_only_the_queues_that_hold_something() {
+        assert_eq!(waiting_line(0, 0), None);
+        assert_eq!(
+            waiting_line(2, 0).as_deref(),
+            Some("2 file move proposal(s) awaiting Daniel's approval")
+        );
+        assert_eq!(
+            waiting_line(0, 9).as_deref(),
+            Some("9 deadline proposal(s) awaiting Daniel's approval")
+        );
+        assert_eq!(
+            waiting_line(2, 9).as_deref(),
+            Some("2 file move proposal(s) and 9 deadline proposal(s) awaiting Daniel's approval")
+        );
+    }
+}

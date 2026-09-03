@@ -1077,6 +1077,26 @@ mod tests {
         );
     }
 
+    /// The card's PROPOSED badge counts one class's pending rows and nothing
+    /// else: not another class's, not a resolved one.
+    #[test]
+    fn the_badge_counts_only_the_class_s_pending_proposals() {
+        let conn = db();
+        assert_eq!(pending_count(&conn, 1).unwrap(), 0);
+        propose(&conn, "2026-09-07", "syllabus");
+        record_proposal(&conn, 1, "Quiz 1", "quiz", "2026-09-03", None, "canvas").unwrap();
+        record_proposal(&conn, 2, "Form Teams", "project", "2026-09-02", None, "syllabus")
+            .unwrap();
+        assert_eq!(pending_count(&conn, 1).unwrap(), 2);
+        assert_eq!(pending_count(&conn, 2).unwrap(), 1);
+        conn.execute(
+            "UPDATE deadline_proposals SET status = 'approved' WHERE title = 'Quiz 1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(pending_count(&conn, 1).unwrap(), 1);
+    }
+
     /// A decision already made. A re-scan or a re-sync must not put a declined
     /// card back; adding it by hand is the way back.
     #[test]

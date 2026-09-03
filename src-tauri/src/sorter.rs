@@ -595,6 +595,26 @@ fn file_is_gone(path: &Path) -> bool {
     }
 }
 
+/// Pending move proposals across every class, for the chat overview — after
+/// the vanish pass in each, so chat counts what the cards count.
+pub fn pending_move_count(conn: &Connection) -> Result<i64> {
+    let mut stmt = conn.prepare("SELECT id FROM classes")?;
+    let class_ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for class_id in class_ids {
+        match crate::scanner::class_dir(conn, class_id) {
+            Ok(class_dir) => reconcile_vanished(conn, class_id, &class_dir),
+            Err(e) => eprintln!("class {class_id}: no folder to reconcile against: {e:#}"),
+        }
+    }
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 /// The vanish pass as the readers run it: best-effort housekeeping on the way
 /// to an answer. A failure here — the other process holding the write lock
 /// past the busy timeout, say — costs one stale badge, not the dashboard,
