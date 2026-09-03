@@ -119,7 +119,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         let rel_path = unique_rel_path(&class_dir, &dir_rel, &file_name);
         let corpus_rel = corpus_rel_path(&slot.unit_name, &rel_path);
         with_conn(app, |conn| {
-            refuse_held_note(conn, req.class_id, &slot.unit_name, &corpus_rel, &rel_path)
+            refuse_held_note(conn, req.class_id, &class_dir, &slot.unit_name, &corpus_rel, &rel_path)
         })?;
     }
 
@@ -172,7 +172,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     // no guide is the failure this milestone exists to prevent.
     if let Some(slot) = &slot {
         with_conn(app, |conn| {
-            record_contribution(conn, req.class_id, slot, &rel_path, &markdown)
+            record_contribution(conn, req.class_id, &class_dir, slot, &rel_path, &markdown)
         })
         .with_context(|| {
             format!("filed {rel_path}, but mapping it to {} failed", slot.unit_name)
@@ -377,12 +377,13 @@ const PLACEHOLDER_SUMMARY: &str = "Whole session — ";
 fn record_contribution(
     conn: &Connection,
     class_id: i64,
+    class_dir: &Path,
     slot: &crate::units::WeekSlot,
     rel_path: &str,
     markdown: &str,
 ) -> Result<String> {
     let corpus_rel = corpus_rel_path(&slot.unit_name, rel_path);
-    refuse_held_note(conn, class_id, &slot.unit_name, &corpus_rel, rel_path)?;
+    refuse_held_note(conn, class_id, class_dir, &slot.unit_name, &corpus_rel, rel_path)?;
     let (end_ms, lines) = span_of(markdown);
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
@@ -418,30 +419,43 @@ fn record_contribution(
 /// derive one path, and the second digest would write over the first note
 /// with both rows naming it. The refile already refuses that collision
 /// (`refile_lecture`); this is the same line at the filing, and for the
-/// sorter's path through `contribution_for`. A title of its own is the way
-/// out, and the message says so.
+/// sorter's path through `contribution_for`. A name of its own is the way
+/// out — the form's title, or a rename of the file the sorter is moving —
+/// and the message says so.
+///
+/// A holder whose transcript is no longer on disk is a row a delete in
+/// Finder left behind, which no scan clears: it holds the name for a lecture
+/// that is not there, so it is cleared here rather than refusing a real one
+/// in its name. A note it may have left is the next digest's to replace.
 fn refuse_held_note(
     conn: &Connection,
     class_id: i64,
+    class_dir: &Path,
     unit_name: &str,
     corpus_rel: &str,
     rel_path: &str,
 ) -> Result<()> {
-    let holder: Option<String> = conn
+    let holder: Option<(i64, String)> = conn
         .query_row(
-            "SELECT rel_path FROM lecture_contributions
+            "SELECT id, rel_path FROM lecture_contributions
              WHERE class_id = ?1 AND corpus_rel_path = ?2 AND rel_path != ?3",
             rusqlite::params![class_id, corpus_rel, rel_path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    match holder {
-        Some(holder) => bail!(
-            "its note would replace the one for {holder}, which already feeds {unit_name} under \
-             the same name — give this lecture a title of its own"
-        ),
-        None => Ok(()),
+    let Some((id, holder)) = holder else {
+        return Ok(());
+    };
+    if !class_dir.join(&holder).is_file() {
+        conn.execute("DELETE FROM lecture_contributions WHERE id = ?1", [id])?;
+        eprintln!("lectures: cleared the contribution of {holder}, whose transcript is gone");
+        return Ok(());
     }
+    bail!(
+        "its note would replace the one for {holder}, which already feeds {unit_name} under the \
+         same name — file it under a name of its own: the title on the Add lecture form, or a \
+         rename of the file"
+    )
 }
 
 /// A markdown file sitting in a week folder is taken for a lecture — the same
@@ -488,7 +502,7 @@ fn contribution_for(
     };
     let markdown = fs::read_to_string(class_dir.join(rel_path))
         .with_context(|| format!("reading {rel_path}"))?;
-    let corpus_rel = record_contribution(conn, class_id, &slot, rel_path, &markdown)?;
+    let corpus_rel = record_contribution(conn, class_id, class_dir, &slot, rel_path, &markdown)?;
     Ok(Some((slot.unit_id, slot.unit_name, corpus_rel)))
 }
 
@@ -1535,6 +1549,7 @@ mod tests {
         record_contribution(
             &conn,
             1,
+            &dir,
             &crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot"),
             &payload.transcript_rel_path,
             "# Lecture\n\n## 00:00\n\nHello.\n",
@@ -1585,7 +1600,7 @@ mod tests {
         fs::write(dir.join(&from), markdown).expect("transcript");
 
         let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
-        let corpus = record_contribution(&conn, 1, &slot, &from, markdown).expect("record");
+        let corpus = record_contribution(&conn, 1, &dir, &slot, &from, markdown).expect("record");
         fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
         fs::write(dir.join(&corpus), "# note").expect("note");
         // As the digest leaves it: the row carries the session's own title.
@@ -1664,7 +1679,7 @@ mod tests {
         }
         fs::write(dir.join(from), markdown).expect("transcript");
         let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
-        let corpus = record_contribution(&conn, 1, &slot, from, markdown).expect("record");
+        let corpus = record_contribution(&conn, 1, &dir, &slot, from, markdown).expect("record");
         fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
         fs::write(dir.join(&corpus), "# note").expect("note");
 
@@ -1725,7 +1740,7 @@ mod tests {
         fs::write(dir.join(b), markdown).expect("b");
         for (rel, week) in [(a, 8), (b, 12)] {
             let slot = crate::units::slot_for_week(&conn, 1, week).expect("slots").expect("slot");
-            let corpus = record_contribution(&conn, 1, &slot, rel, markdown).expect("record");
+            let corpus = record_contribution(&conn, 1, &dir, &slot, rel, markdown).expect("record");
             fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
             fs::write(dir.join(&corpus), format!("# note for {rel}")).expect("note");
         }
@@ -1752,11 +1767,14 @@ mod tests {
     /// spans several week folders — so two lectures named alike under Week 02
     /// and Week 03 derive one note path, and the second digest would write
     /// over the first note with both rows naming it. Refused at the row, so
-    /// the filing and the sorter's path both stop short of that; a title of
-    /// its own is the way out, and a re-run of the first is not a collision
-    /// with itself.
+    /// the filing and the sorter's path both stop short of that; a name of
+    /// its own is the way out, a re-run of the first is not a collision with
+    /// itself, and a holder whose transcript is gone is a stale row that
+    /// gives the name up.
     #[test]
     fn a_part_holds_one_note_per_transcript_name() {
+        let dir = scratch("classhub-part-note-names");
+        let _ = fs::remove_dir_all(&dir);
         let conn = crate::db::memory_db();
         conn.execute(
             "INSERT INTO units (class_id, ordinal, kind, name, first_week, last_week, source)
@@ -1771,16 +1789,18 @@ mod tests {
         assert_eq!((week2.folder.as_str(), week3.folder.as_str()), ("Week 02", "Week 03"));
 
         let first = "Weeks/Week 02/2026-09-01 — Lecture.md";
-        let note = record_contribution(&conn, 4, &week2, first, markdown).expect("first");
+        fs::create_dir_all(dir.join(first).parent().expect("parent")).expect("week dir");
+        fs::write(dir.join(first), markdown).expect("first on disk");
+        let note = record_contribution(&conn, 4, &dir, &week2, first, markdown).expect("first");
         assert_eq!(
             note,
             ".classhub/corpus/Part I- Deep Learning to Large Language Models/2026-09-01 — Lecture.md"
         );
         let second = "Weeks/Week 03/2026-09-01 — Lecture.md";
         assert_eq!(corpus_rel_path(&week3.unit_name, second), note, "one path for two names");
-        let err = record_contribution(&conn, 4, &week3, second, markdown).expect_err("held");
+        let err = record_contribution(&conn, 4, &dir, &week3, second, markdown).expect_err("held");
         let message = format!("{err:#}");
-        assert!(message.contains(first) && message.contains("title"), "{message}");
+        assert!(message.contains(first) && message.contains("name of its own"), "{message}");
 
         let rows = || -> Vec<(String, String)> {
             let mut stmt = conn
@@ -1798,13 +1818,27 @@ mod tests {
 
         // A title of its own derives a path of its own.
         let titled = "Weeks/Week 03/2026-09-01 — Guest lecture.md";
-        let other = record_contribution(&conn, 4, &week3, titled, markdown).expect("titled");
+        let other = record_contribution(&conn, 4, &dir, &week3, titled, markdown).expect("titled");
         assert_ne!(other, note);
         assert_eq!(rows().len(), 2);
 
         // The first lecture recorded again — a re-run — is not a collision.
-        record_contribution(&conn, 4, &week2, first, markdown).expect("re-record");
+        record_contribution(&conn, 4, &dir, &week2, first, markdown).expect("re-record");
         assert_eq!(rows().len(), 2);
+
+        // Deleted in Finder, the first transcript's row lingers — no scan
+        // clears it — and must not refuse a real lecture in its name: the
+        // stale row goes and the newcomer takes the name.
+        fs::remove_file(dir.join(first)).expect("delete in Finder");
+        let taken = record_contribution(&conn, 4, &dir, &week3, second, markdown).expect("stale row cleared");
+        assert_eq!(taken, note);
+        assert_eq!(
+            rows().iter().map(|(rel, _)| rel.as_str()).collect::<Vec<_>>(),
+            vec![titled, second],
+            "the stale row survived"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Within one week folder the never-overwrite rule already keeps two
