@@ -1221,6 +1221,12 @@ fn record_session(
 mod tests {
     use super::*;
 
+    /// A scratch folder per test and per process, so two `cargo test` runs
+    /// side by side cannot rename or delete each other's fixtures.
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+    }
+
     #[test]
     fn builds_a_dated_transcript_name() {
         assert_eq!(
@@ -1393,7 +1399,7 @@ mod tests {
     /// both counts, which is the failure checking both was added to prevent.
     #[test]
     fn rejects_a_digest_that_reported_one_file_twice() {
-        let dir = std::env::temp_dir().join("classhub-digest-pair");
+        let dir = scratch("classhub-digest-pair");
         let sessions = dir.join(SESSIONS_DIR);
         fs::create_dir_all(&sessions).expect("sessions dir");
         let html = "Study Guides/Sessions/2026-08-24 — Attention.html";
@@ -1430,7 +1436,7 @@ mod tests {
     /// contribution row whose note was never written.
     #[test]
     fn rejects_a_digest_that_skipped_the_corpus_note() {
-        let dir = std::env::temp_dir().join("classhub-digest-corpus");
+        let dir = scratch("classhub-digest-corpus");
         fs::create_dir_all(dir.join(SESSIONS_DIR)).expect("sessions dir");
         let html = "Study Guides/Sessions/2026-08-24 — Study Designs.html";
         let md = "Study Guides/Sessions/2026-08-24 — Study Designs.md";
@@ -1488,7 +1494,7 @@ mod tests {
     /// the map has to move with the file — and move, not multiply.
     #[test]
     fn refiling_a_lecture_moves_its_contribution_rather_than_adding_one() {
-        let root = std::env::temp_dir().join("classhub-refile");
+        let root = scratch("classhub-refile");
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
         // `list_contributions` resolves the class folder to test whether each
@@ -1573,7 +1579,7 @@ mod tests {
     /// sync that declares the week or the refile that comes back.
     #[test]
     fn keeps_the_note_when_the_destination_week_is_undeclared() {
-        let root = std::env::temp_dir().join("classhub-refile-undeclared");
+        let root = scratch("classhub-refile-undeclared");
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
         let folder: String = conn
@@ -1624,7 +1630,7 @@ mod tests {
     /// the transaction, so the whole move rolls back.
     #[test]
     fn refuses_to_move_a_note_onto_another_lecture_s() {
-        let root = std::env::temp_dir().join("classhub-refile-collision");
+        let root = scratch("classhub-refile-collision");
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
         let folder: String = conn
@@ -1686,7 +1692,7 @@ mod tests {
     #[test]
     fn a_session_document_follows_its_refiled_transcript() {
         let conn = crate::db::memory_db();
-        let dir = std::env::temp_dir().join("classhub-refile-session");
+        let dir = scratch("classhub-refile-session");
         let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
         let to = "Weeks/Week 03 — Data Exploration/2026-08-27 — Lecture.md";
         let manifest = serde_json::json!([{ "relPath": from, "sha256": "abc" }]).to_string();
@@ -1741,7 +1747,7 @@ mod tests {
     #[test]
     fn a_stale_session_row_at_the_destination_is_cleared_with_its_documents() {
         let conn = crate::db::memory_db();
-        let dir = std::env::temp_dir().join("classhub-refile-stale-session");
+        let dir = scratch("classhub-refile-stale-session");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(SESSIONS_DIR)).expect("sessions dir");
         let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
