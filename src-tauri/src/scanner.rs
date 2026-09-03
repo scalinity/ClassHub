@@ -220,6 +220,9 @@ pub fn scan_class(
         .collect();
     changed |= crate::units::attach_folder_paths(&tx, class_id, &folders)?;
     tx.commit()?;
+    // The connection is the app's only one; what follows is filesystem work
+    // and needs none of it.
+    drop(conn);
     for effect in effects {
         effect.apply();
     }
