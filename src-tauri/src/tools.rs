@@ -167,7 +167,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "read_material",
-            "description": "Read a bounded window of a text file by its AIBHS-relative path: an extract, note, study guide, or text source such as .R, .Rmd or .md. Binary sources (.pptx, .pdf) cannot be read — read their extract at '<class folder>/.classhub/extracts/<source path>.md' instead. Returns numbered lines; page through long files with offset.",
+            "description": "Read a bounded window of a text file by its AIBHS-relative path: an extract, note, study guide, or text source such as .R, .Rmd, .py, .csv or .md. Binary or bulky sources (.pptx, .pdf, .docx, .ipynb) cannot be read — read their extract at '<class folder>/.classhub/extracts/<source path>.md' instead. Returns numbered lines; page through long files with offset.",
             "input_schema": {
                 "type": "object",
                 "properties": {
