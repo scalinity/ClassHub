@@ -480,29 +480,36 @@ fn sync_units(
         return Ok(());
     }
 
-    let (added, skipped) = with_conn(app, |conn| {
+    let (added, skipped, effects) = with_conn(app, |conn| {
         let mut added = 0usize;
         let mut skipped: Vec<String> = Vec::new();
+        let mut effects = units::RenameEffects::default();
         for (index, module) in modules.iter().enumerate() {
             let Some(name) = module["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
                 continue;
             };
+            let kind = units::kind_for_name(name);
             let unit = NewUnit {
                 // Canvas's own `position` when it has one, else the order it
                 // listed them in.
                 ordinal: module["position"].as_i64().unwrap_or(index as i64 + 1),
-                kind: units::kind_for_name(name).to_string(),
+                kind: kind.to_string(),
                 name: name.to_string(),
                 canvas_id: module["id"].as_i64().map(|id| id.to_string()),
                 rel_path: None,
                 starts_on: iso_date(module["unlock_at"].as_str()),
                 ends_on: None,
+                weeks: units::declared_weeks(kind, name, None),
                 source: "canvas",
             };
             match units::upsert(conn, class.id, &unit) {
-                Ok(true) => added += 1,
-                Ok(false) => {}
+                Ok(written) => {
+                    if written.outcome == units::Outcome::Inserted {
+                        added += 1;
+                    }
+                    effects.extend(written.effects);
+                }
                 // Counted rather than only printed: a module that did not land
                 // shows up as a lower total, which is indistinguishable from
                 // Canvas having published less.
@@ -512,8 +519,11 @@ fn sync_units(
                 }
             }
         }
-        Ok((added, skipped))
+        Ok((added, skipped, effects))
     })?;
+    // A renamed module's corpus folder and guide follow it, once the rows are
+    // committed and the lock is released.
+    effects.apply();
     outcome.units_added = added;
     if !skipped.is_empty() {
         outcome.notes.push(format!(

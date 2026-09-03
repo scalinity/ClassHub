@@ -32,7 +32,6 @@ import {
   generatePractice,
   listGuides,
   MASTER_OUTPUT_PATH,
-  scopeLabel,
   SESSION_SCOPE_PREFIX,
   synthesizeModule,
   synthesizeUnit,
@@ -536,7 +535,7 @@ export function ClassWorkspace({
                   className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
                 />
                 {job.status === "running" ? "GENERATING" : "QUEUED"}
-                {` — ${job.scope && job.scope !== "master" ? scopeLabel(job.scope).toUpperCase() : "SEMESTER"}`}
+                {` — ${job.scope && job.scope !== "master" ? (job.scopeLabel ?? job.scope).toUpperCase() : "SEMESTER"}`}
                 <span className="font-normal text-muted-foreground/70">
                   · LIVE IN THE JOB CENTER
                 </span>

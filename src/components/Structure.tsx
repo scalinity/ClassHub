@@ -229,7 +229,7 @@ function UnitRow({
   onSynthesize: (unitId: number) => void;
   onPractice: (scope: string) => void;
 }) {
-  const scope = unitScope(unit.name);
+  const scope = unitScope(unit.id);
   const guide = controls.guides.get(scope);
   // A division with no folder and no distilled lecture has nothing to build a
   // guide from, so the action stays off the row rather than offering a button

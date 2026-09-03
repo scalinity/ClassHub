@@ -3018,3 +3018,133 @@ picker, choosing the syllabus PDF; the audit log stood at 134 and jobs at
 
 Every class's weights sum to 100. The dev build was stopped afterwards;
 the installed app is still the Aug 25 build until `npm run install-app`.
+
+## M23 — Divisions that survive a rescan (2026-09-03)
+
+### Phase 0 — measured
+
+Against a copy of the live database (`user_version` 11, 51 units), through
+`units::upsert` and `week_slots` as they stood, spending no scan:
+
+- **Fundamentals.** The 2026-09-03 rescan (job 298) inserted `No class (Nov.
+  24) — Thanksgiving Break` at ordinal 14 and moved `Week 14 — Introduction to
+  Deep Learning and Course Synthesis` to ordinal 15. `week_slots` read the
+  week off the ordinal, so week 14 was the Thanksgiving row and week 15 was
+  the course's Week 14, with the folder `Week 15 — Introduction to Deep
+  Learning and Course Synthesis`; `nearest_week` for 2026-12-01 answered 15.
+- **Applied Generative AI**, fed the three suffix-less Part names the M22
+  Canvas-page scan produced: 3 rows became 6 (57–59 beside 37–39), the new
+  three parsed to no range, and all 16 week slots still came from the old
+  three.
+- **Fundamentals, `Week 2 — Responsible AI and Governance`** in place of the
+  name row 24 holds: a second row (60) beside it; the contribution (unit 24),
+  its corpus path and the guide row (`unit:Week 2 — …`, one manifest entry)
+  all stayed with 24; week 2 got two slots, 24 first.
+
+### What was built
+
+- **Schema.** Migration `0012_unit_identity.sql` adds `units.number`,
+  `first_week` and `last_week`, the partial unique index `idx_units_label`
+  on `(class_id, source, kind, number)`, and rewrites `guides.scope` and
+  `jobs.scope` from `unit:<name>` to `unit:<id>` by a join on the name.
+  `units::backfill_labels` runs inside that migration's transaction
+  (`db::UNIT_LABELS_MIGRATION`): each row's number from its label, a
+  non-week row's range from its name, and a number another row of the same
+  class, source and kind holds left empty rather than failing the launch.
+- **Identity.** `units::label_number` reads `Week 7 —` as 7 and `Part II:`
+  as 2 (`roman_number`), nothing for an unlabelled name. `find_held` matches
+  the Canvas id, then the exact name, then `(source, kind, number)` — the
+  name before the number so a fork from before labels is found as itself.
+  `upsert` returns `Upserted { id, outcome, effects }` with `Outcome` as
+  `Inserted | Updated | Unchanged`; `find` exposes the row a division would
+  land on, so `deadlines::record_units` claims each row once and names the
+  second entry under a label in `collapsed`, and a refused entry in
+  `skipped`, both in the job summary (`3 of 3 division(s) updated in
+  place`). A rename onto a name another row holds is refused;
+  `free_number` leaves a duplicate label unnumbered.
+- **The range as data.** `NewUnit.weeks` and `declared_weeks(kind, name,
+  stated)`: the model's `first_week`/`last_week` when sane, else the name's
+  range for a non-week row, nothing for a week. `syllabus.md` asks for the
+  two fields on a division that groups weeks. A same-source refresh keeps
+  the held range when none is stated — unlike a date — because a Part
+  without its range files no lectures. `week_slots` reads a week row's
+  `number` (ordinal fallback, numbered rows first) and then the
+  `first_week..=last_week` ranges, never `parse_week_range` on a name.
+- **Scope by id.** `db::unit_scope(id)` and `unit_scope_id(scope)`;
+  `guides::scope_label(scope, unit_name)`; `GuideInfo.label` and
+  `JobInfo.scope_label` from a `LEFT JOIN units u ON scope = 'unit:' ||
+  u.id`; `extract::current_manifest` looks the unit up by id, and a scope
+  from before ids has no sources; `generate_practice` takes the unit from
+  the scope and lost its `unit_id` parameter; the chat's `Scope::Unit`
+  carries `number` (ordinal fallback) for `week3` and resolves `unit:<id>`.
+- **The rename cascade.** `rename_effects`, inside `upsert`'s IMMEDIATE
+  transaction, rewrites every contribution's `corpus_rel_path`
+  (`lectures::corpus_rel_path` and `corpus_folder`, now `pub(crate)`) and
+  the guide row's `rel_path` (`guides::unit_guide_rel_path`), and returns
+  `RenameEffects` — the corpus folder move and the guide file move — which
+  `record_units` and the Canvas sync apply after the lock is released. A
+  target already on disk refuses the rename inside the transaction.
+  `record_units` emits `files` after a move so the guides and lecture
+  listings refresh.
+- **Frontend.** `unitScope(unitId)`, `GuideInfo.label`, `JobInfo.scopeLabel`;
+  the client-side `scopeLabel()` is gone, and `Structure.tsx`,
+  `GuideViewer.tsx`, `JobCenter.tsx` and `ClassWorkspace.tsx` read the
+  label the backend sends.
+
+### Verified
+
+- `cargo test`: 213 pass, no warnings. New: the label parser; the M22 fork
+  replayed as an update in place with the ranges kept and 16 slots, and a
+  stated range replacing the held one; the inserted-row case (Week 14 at
+  ordinal 15 stays week 14, Thanksgiving gets no slot, finals week takes
+  16); a rename carrying the corpus folder, every stored path and the guide
+  file, and refusing a target on disk; a rename onto a held name refused;
+  `find` claiming one row for two entries; the backfill; the guide and job
+  labels; the chat scope by id. `npx tsc --noEmit` clean.
+- Live, on a dev build (pid 47103) beside the installed app: the shared
+  database went to `user_version` 12 on open — every labelled row numbered,
+  the Parts at 1–8, 9–12 and 13–16, guide 4 and jobs 287 and 293 rescoped
+  `unit:24`. Fundamentals' Structure row for Week 2 still offers VIEW GUIDE
+  and the Study Guides list labels it by name. The Add lecture form, given
+  December 3 (typed through System Events — the date field takes no
+  accessibility set-value, and the `12012026` keystrokes landed as 12/03),
+  resolved `Week 14 — Introduction to Deep Learning and Course Synthesis`,
+  filed under `Weeks/Week 14 — …`; before the change that read Week 15.
+- Two scans of Applied Generative AI, both on the subscription: job 301
+  (the Canvas syllabus page, 21 s, $0.35 list-equivalent) — the model again
+  dropped the suffixes and reported `first_week`/`last_week` on each Part —
+  `3 of 3 division(s) updated in place`, ids 37–39, ranges intact; job 302
+  (the PDF, 15 s, $0.40) — `3 division(s) already recorded`. 51 units
+  before and after, audit log at 146, no deadline proposals. No chat turn
+  was run.
+- Not read live: the Job Center's label for job 287, which sits below the
+  panel's fold behind the recent scans; the join is covered by the test.
+
+### Left as it is
+
+- A job queued at the moment of upgrade keeps `unit:<name>` in its payload;
+  only an older build could have written one, and the installed app
+  predates unit guides.
+- A unit scope naming a division no longer in the table keeps `unit:<name>`,
+  labels as the name and has no sources.
+- A table holding a fork from before labels matches the exact name first,
+  and the second row stays unnumbered.
+- The PDF scan now names the Parts without the suffix too (job 302), since
+  the range has fields of its own; the name is the model's reading and the
+  range is data either way.
+- A digest running while a rescan renames its unit writes its note to the
+  old path and fails its own check; a redistill repairs it.
+
+### Gotchas
+
+- `perl -0pi -e 's{…}{…}'` dies with "Substitution replacement not
+  terminated" when the replacement holds an unbalanced `{` (`pub struct X
+  {`); `/` delimiters or a file-fed replacement avoid it.
+- The Add lecture form's date field ignores `AXValue` set on the
+  `AXDateTimeArea` and on its incrementors; focusing it and sending
+  keystrokes through System Events works, segment by segment.
+- The Materials section's RESCAN is the file scan; the syllabus picker is
+  behind the Deadlines section's SCAN SYLLABUS button every time.
+- The tauri dev watcher rebuilds and relaunches the app on any change under
+  `src-tauri/`, so the last tests were added after the dev build was
+  stopped.

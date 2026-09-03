@@ -22,7 +22,6 @@ import {
   type JobProgressEvent,
 } from "@/lib/jobs";
 import { CLASS_ACCENTS } from "@/lib/classes";
-import { scopeLabel } from "@/lib/guides";
 import { getAppSettings } from "@/lib/settings";
 
 function accentStyle(color: string | null): CSSProperties {
@@ -242,7 +241,7 @@ function JobRow({
           </span>
           <span className="min-w-0 truncate text-[13px] text-muted-foreground">
             {/* scope 'master' is redundant with the MASTER GUIDE kind label */}
-            {[job.className, job.scope === "master" ? null : scopeLabel(job.scope ?? "")]
+            {[job.className, job.scope === "master" ? null : job.scopeLabel]
               .filter(Boolean)
               .join(" · ")}
           </span>

@@ -352,15 +352,24 @@ jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|
 -- replaces "a top-level folder is a module": Biostatistics and Fundamentals divide
 -- into weekly topics and declare no modules at all, Applied Generative AI declares
 -- three Parts, and Canvas may say something different again. `kind` and `name` carry
--- the course's own words; the app never shows the word "unit" to the reader.
+-- the course's own words; the app never shows the word "unit" to the reader. A
+-- division's identity is the course's own label for it: `number` is what the name
+-- opens with — 7 for `Week 7 — …`, 2 for `Part II:` — and with `source` and `kind`
+-- it is what a rescan matches on, after the Canvas id and the exact name, so a model
+-- that spells a name differently updates the row rather than forking it. The ordinal
+-- is the position in the list, which an inserted `No class` row shifts. The weeks a
+-- Part spans are data on the row (§8.5), never read back out of its name.
 units(id INTEGER PK, class_id INTEGER FK, ordinal INTEGER,
       kind TEXT,             -- module|week|part, as the course names it
       name TEXT,             -- 'Module 3' | 'Week 7 — Tree-Based Models' | 'Part II'
+      number INTEGER NULL,   -- the label's number; NULL for 'Reading Days — No Class'
       canvas_id TEXT NULL,   -- set when Canvas is the source
       rel_path TEXT NULL,    -- its folder, when it has one; units need not be folders
       starts_on TEXT NULL, ends_on TEXT NULL,
+      first_week INTEGER NULL, last_week INTEGER NULL,  -- the weeks it spans, where it groups them
       source TEXT,           -- canvas|syllabus — which reader declared it, canvas winning
-      UNIQUE(class_id, name));
+      UNIQUE(class_id, name),
+      UNIQUE(class_id, source, kind, number) WHERE number IS NOT NULL);
 
 -- One span of one lecture, mapped to one unit (§8.5) — the join that lets a lecture
 -- stored by date feed a guide scoped by topic. A lecture contributes its whole length
@@ -381,7 +390,10 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
 -- so they inherit the viewer, the listing and staleness without a table of their own.
 -- Naming the source file rather than the date keeps the scope unique per transcript,
 -- which turns a re-run into an update and gives staleness something real to hash.
-guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- module rel path | 'master' | 'session:<path>'
+-- A division's guide is scoped `unit:<id>` — the row's id, never its name, so a
+-- rescan that renames the division (§7.2) leaves its guide keyed; the guide file
+-- and the corpus folder, both named for the division, follow the name instead.
+guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>'
        rel_path TEXT, generated_at INTEGER,
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
@@ -761,14 +773,24 @@ launch as by hand. It follows the launch scan on the same thread, so its duplica
 a fresh index, and nothing schedules a second one. The dashboard header names the sync's age
 (§12).
 
-**Sync is non-destructive.** New units are
-inserted and existing ones updated in place; units whose name no longer appears in Canvas are
-kept, not deleted — a mid-semester Canvas reshuffle must not silently orphan a guide. A unit
-Canvas has an id for is matched on that id, so renaming a published module updates it rather
-than forking a second row under the new name. A higher-precedence source fills a unit's fields
-in rather than replacing them, because only the tree ever learns where the material sits on
-disk; a source refreshing its own row replaces them, so a date the course removed can be
-cleared.
+**Sync and rescan are non-destructive, and both update in place.** New units are inserted and
+existing ones updated; units that no longer appear in Canvas or in a rescan are kept, not
+deleted — a mid-semester reshuffle must not silently orphan a guide. A division is matched on
+its Canvas id where it has one, then on its exact name, then on the course's own label —
+`(source, kind, number)`, the number being what the name opens with, `Week 7 —` or `Part II:`
+— so a model that spells a name differently on a rescan, as the Applied Generative AI scan did
+on 2026-09-03 when it dropped the Parts' `(Weeks 1-8)` suffixes, renames the row rather than
+forking it. The ordinal is not the identity: a rescan that inserts a `No class` row mid-list
+moves every ordinal after it, and Week 14 stays week 14. A rescan claims each row once, so two
+entries under one label are reported rather than written over each other, and a rename onto a
+name another row holds is refused. What is named for a division on disk follows its name — the
+corpus folder under `.classhub/corpus/`, with every contribution's stored path, and the guide
+file under `Study Guides/` — while its guide and job scopes name the row's id and need nothing.
+A Part's week range is data on the row (§8.5): a rescan that states a range replaces it, and
+one that states none keeps it, since a Part without its range files no lectures. A
+higher-precedence source fills a unit's fields in rather than replacing them, because only the
+tree ever learns where the material sits on disk; a source refreshing its own row replaces its
+dates, so a date the course removed can be cleared.
 
 Assignments become `deadline_proposals` with `source='canvas'`, and their UTC due dates are
 converted through the machine's real timezone (§1). One card per (title, calendar day) whichever
@@ -949,10 +971,15 @@ something has to join the two. `lecture_contributions` (§5) is that join.
 
 **The calendar is the join, not a model.** Each of the four courses meets once a week, and each
 declares divisions no finer than a week: three number their weeks, and the fourth declares three
-Parts whose own names carry the week ranges they span (`Part I: … (Weeks 1-8)`). A meeting
-therefore sits inside exactly one division — for a week-numbered course the week it happened in,
-and for a Part-numbered one the Part whose range contains that week. Nothing has to infer the
-mapping, because filing the transcript already decided it.
+Parts spanning week ranges (`Part I: … (Weeks 1-8)`), which the scan records as `first_week`
+and `last_week` on the row — from the model's own fields, else from the name — so the join
+reads data and never the name. A meeting therefore sits inside exactly one division — for a
+week-numbered course the week it happened in, and for a Part-numbered one the Part whose range
+contains that week. A week row's week is its own number, the course's, not its position in the
+list; a row named without one (`Reading Days — No Class`) takes its ordinal unless a numbered
+row already holds that week, so Fundamentals' Thanksgiving row, which a rescan inserted at
+ordinal 14, gets no week and Week 14 keeps week 14. Nothing has to infer the mapping, because
+filing the transcript already decided it.
 
 Resolving a lecture's week is the one step with any judgement in it, and it comes from `units`
 rather than from arithmetic: weeks are not uniformly spaced (§1), so a date cannot be divided
@@ -1233,7 +1260,9 @@ and apply it. Non-negotiable per project owner.
   the source fingerprint diff, the caption parser and cue merger (§7.1 — a transcript
   shredded into fake speakers, or left unmerged, fails quietly and downstream), and the
   current-division resolution against the seeded syllabi (§8.5 — a wrong week on a card is
-  silent). UI and job plumbing are exercised by running the app.
+  silent), and a division's identity across a rescan (§7.2 — a forked row and a shifted week
+  number are both silent until a guide or a filing goes wrong). UI and job plumbing are
+  exercised by running the app.
 
 ## 14. Milestones
 
@@ -1419,6 +1448,14 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* an announcement appears in its workspace after a sync, a Page is cited by
   chat, the Applied Generative AI scan can read the Canvas syllabus, and the dashboard names the
   sync age.
+
+- [x] **M23 — Divisions that survive a rescan.** (`milestones/M23-divisions-that-survive-a-rescan.md`)
+  A division is matched on the course's own label — `(source, kind, number)` — after the Canvas
+  id and before the exact name; a Part's week range is data on the row; guide and job scopes
+  name the division by id; a rename carries the corpus folder and the guide file with it.
+  *Accepted when:* a rescan that drops a Part's `(Weeks 1-8)` suffix updates the row in place
+  and the join still resolves every week, a renamed week keeps its guide row and its corpus note,
+  the Fundamentals Dec 1 session files as Week 14, and a second identical rescan writes nothing.
 
 ## 15. Risks & trade-offs (accepted)
 

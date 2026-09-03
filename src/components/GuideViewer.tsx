@@ -5,7 +5,6 @@ import { withDocumentCsp } from "@/lib/document";
 import {
   formatGeneratedAt,
   readGuide,
-  scopeLabel,
   type GuideInfo,
 } from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
@@ -40,7 +39,7 @@ export function GuideViewer({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`${scopeLabel(guide.scope)} study guide`}
+      aria-label={`${guide.label} study guide`}
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
@@ -53,7 +52,7 @@ export function GuideViewer({
       >
         <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
           STUDY GUIDE ·{" "}
-          {scopeLabel(guide.scope).toUpperCase()}
+          {guide.label.toUpperCase()}
         </p>
         {guide.stale && (
           <span
@@ -104,7 +103,7 @@ export function GuideViewer({
           <iframe
             sandbox="allow-scripts"
             srcDoc={withDocumentCsp(html)}
-            title={`${scopeLabel(guide.scope)} study guide`}
+            title={`${guide.label} study guide`}
             className="block h-full w-full border-0"
           />
         )}

@@ -18,6 +18,8 @@ export interface JobInfo {
   className: string | null;
   classColor: string | null;
   scope: string | null;
+  /** The scope as it is shown: a division's name for a unit scope. */
+  scopeLabel: string | null;
   status: JobStatus;
   createdAt: number;
   startedAt: number | null;

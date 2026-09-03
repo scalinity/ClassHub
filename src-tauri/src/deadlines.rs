@@ -536,6 +536,11 @@ struct RawUnit {
     starts_on: Option<String>,
     #[serde(default)]
     ends_on: Option<String>,
+    /// The weeks a division spans, for one that groups them (SPEC §8.5).
+    #[serde(default)]
+    first_week: Option<i64>,
+    #[serde(default)]
+    last_week: Option<i64>,
 }
 
 /// One entry of the scan's `grading` array — a component of the final grade
@@ -765,15 +770,17 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
     }
     let recorded = with_conn(app, |conn| {
         let mut added = 0usize;
+        let mut updated = 0usize;
         let mut seen = 0usize;
-        // Names claimed by this scan. `units` holds one row per (class, name),
-        // and courses do repeat a topic — Design Studio runs four separate
-        // "AI Design Project Presentations" weeks. Two entries under one name
-        // become one row and `upsert` reports `Ok(false)`, which reads exactly
-        // like "already recorded": a schedule that quietly lost four of its
-        // fifteen weeks. Counted so the summary can say so.
-        let mut claimed: Vec<String> = Vec::new();
+        // Rows claimed by this scan. A division is matched on its label
+        // (SPEC §7.2), and a model can report two entries under one — two
+        // "Week 7" rows, or one topic twice under no label. The second would
+        // find the row the first just wrote and rename it, so the scan claims
+        // each row once and names the entries it set aside.
+        let mut claimed: Vec<i64> = Vec::new();
         let mut collapsed: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        let mut effects = crate::units::RenameEffects::default();
         for (index, value) in raw.iter().enumerate() {
             let Ok(entry) = serde_json::from_value::<RawUnit>(value.clone()) else {
                 continue;
@@ -783,20 +790,22 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 continue;
             }
             seen += 1;
-            let lowered = name.to_lowercase();
-            if claimed.contains(&lowered) {
-                collapsed.push(name.to_string());
-                continue;
-            }
-            claimed.push(lowered);
+            let kind = entry
+                .kind
+                .as_deref()
+                .map(str::to_lowercase)
+                .filter(|k| crate::units::UNIT_KINDS.contains(&k.as_str()))
+                .unwrap_or_else(|| crate::units::kind_for_name(name).to_string());
+            let stated = match (entry.first_week, entry.last_week) {
+                (Some(first), Some(last)) => Some((first, last)),
+                _ => None,
+            };
             let unit = crate::units::NewUnit {
                 ordinal: entry.ordinal.unwrap_or(index as i64 + 1),
-                kind: entry
-                    .kind
-                    .as_deref()
-                    .map(str::to_lowercase)
-                    .filter(|k| crate::units::UNIT_KINDS.contains(&k.as_str()))
-                    .unwrap_or_else(|| crate::units::kind_for_name(name).to_string()),
+                // The range the model stated, else the one the name carries;
+                // none for a week, whose number says it (SPEC §8.5).
+                weeks: crate::units::declared_weeks(&kind, name, stated),
+                kind,
                 name: name.to_string(),
                 canvas_id: None,
                 rel_path: None,
@@ -810,30 +819,68 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 ends_on: entry.ends_on.filter(|d| valid_due_at(d)).map(day_of),
                 source: "syllabus",
             };
+            match crate::units::find(conn, class_id, &unit) {
+                Ok(Some(id)) if claimed.contains(&id) => {
+                    collapsed.push(name.to_string());
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("syllabus: skipping unit '{name}': {e:#}");
+                    skipped.push(format!("{name} ({e})"));
+                    continue;
+                }
+            }
             match crate::units::upsert(conn, class_id, &unit) {
-                Ok(true) => added += 1,
-                Ok(false) => {}
-                Err(e) => eprintln!("syllabus: skipping unit '{name}': {e:#}"),
+                Ok(written) => {
+                    claimed.push(written.id);
+                    effects.extend(written.effects);
+                    match written.outcome {
+                        crate::units::Outcome::Inserted => added += 1,
+                        crate::units::Outcome::Updated => updated += 1,
+                        crate::units::Outcome::Unchanged => {}
+                    }
+                }
+                Err(e) => {
+                    eprintln!("syllabus: skipping unit '{name}': {e:#}");
+                    skipped.push(format!("{name} ({e})"));
+                }
             }
         }
-        Ok((added, seen, collapsed))
+        Ok((added, updated, seen, collapsed, skipped, effects))
     });
     match recorded {
-        Ok((_, 0, _)) => None,
-        Ok((added, seen, collapsed)) => {
-            if added > 0 {
+        Ok((_, _, 0, ..)) => None,
+        Ok((added, updated, seen, collapsed, skipped, effects)) => {
+            // A renamed division's corpus folder and guide follow it once the
+            // rows are committed and the lock is released; `files` is what
+            // refreshes the guides and the lecture listing that name them.
+            let moved = !effects.is_empty();
+            effects.apply();
+            if added > 0 || updated > 0 {
                 crate::db::emit_hub_change(app, "units");
             }
-            let mut summary = if added == 0 {
-                format!("{seen} division(s) already recorded")
-            } else {
-                format!("{added} of {seen} division(s) recorded")
+            if moved {
+                crate::db::emit_hub_change(app, "files");
+            }
+            let mut summary = match (added, updated) {
+                (0, 0) => format!("{seen} division(s) already recorded"),
+                (0, _) => format!("{updated} of {seen} division(s) updated in place"),
+                (_, 0) => format!("{added} of {seen} division(s) recorded"),
+                _ => format!("{added} of {seen} division(s) recorded · {updated} updated in place"),
             };
             if !collapsed.is_empty() {
                 summary.push_str(&format!(
-                    " · {} share a name with an earlier one and were not recorded separately: {}",
+                    " · {} share a label with an earlier one and were not recorded separately: {}",
                     collapsed.len(),
                     collapsed.join(", ")
+                ));
+            }
+            if !skipped.is_empty() {
+                summary.push_str(&format!(
+                    " · {} could not be recorded: {}",
+                    skipped.len(),
+                    skipped.join("; ")
                 ));
             }
             Some(summary)

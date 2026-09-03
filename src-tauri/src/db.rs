@@ -38,12 +38,24 @@ pub const MASTER_SCOPE: &str = "master";
 /// scope unique per transcript, so `UNIQUE(class_id, scope)` turns a re-run
 /// into an update, and staleness has something real to hash.
 pub const SESSION_SCOPE_PREFIX: &str = "session:";
-/// `guides.scope` prefix for a guide over one of the course's own divisions
-/// (SPEC §8.1), followed by the unit's name. A prefix rather than a bare name
-/// because every other scope value is a folder rel path, and a unit need not be
-/// a folder — `UNIQUE(class_id, name)` on `units` is what makes the name enough
-/// to identify one.
+/// `guides.scope` and `jobs.scope` prefix for one of the course's own divisions
+/// (SPEC §8.1), followed by the unit's row id: `unit:24`. A prefix rather than
+/// a bare value because every other scope is a folder rel path, and the id
+/// rather than the name because a rescan may rename a division (SPEC §7.2) and
+/// a scope keyed on the name would strand its guide.
 pub const UNIT_SCOPE_PREFIX: &str = "unit:";
+
+/// The scope of one of the course's divisions.
+pub fn unit_scope(unit_id: i64) -> String {
+    format!("{UNIT_SCOPE_PREFIX}{unit_id}")
+}
+
+/// The unit id a scope names, if it is a unit scope — `unit:24` → 24. A unit
+/// scope carrying anything but a number is one from before ids that no
+/// migration could resolve, and names no row.
+pub fn unit_scope_id(scope: &str) -> Option<i64> {
+    scope.strip_prefix(UNIT_SCOPE_PREFIX)?.parse().ok()
+}
 
 /// Session digests live in the `guides` table so they inherit the viewer and
 /// staleness, but they are not module guides — the Study Guides list tells them
@@ -160,7 +172,13 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_job_owner.sql"),
     include_str!("../migrations/0010_canvas_grades.sql"),
     include_str!("../migrations/0011_announcements.sql"),
+    include_str!("../migrations/0012_unit_identity.sql"),
 ];
+
+/// The migration after which `units::backfill_labels` runs, inside its
+/// transaction: 0012 adds the label columns, and the rows that predate them
+/// get theirs from their names.
+const UNIT_LABELS_MIGRATION: usize = 12;
 
 /// An in-memory database with every migration applied.
 ///
@@ -272,6 +290,9 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)
             .with_context(|| format!("running migration {:04}", index + 1))?;
+        if index + 1 == UNIT_LABELS_MIGRATION {
+            crate::units::backfill_labels(&tx).context("backfilling unit labels")?;
+        }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
         tx.commit()?;
     }

@@ -113,6 +113,9 @@ pub struct JobInfo {
     pub class_name: Option<String>,
     pub class_color: Option<String>,
     pub scope: Option<String>,
+    /// The scope as it is shown: a division's name for a `unit:<id>` scope,
+    /// the transcript's stem for a session, the folder for a folder.
+    pub scope_label: Option<String>,
     pub status: String,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -779,22 +782,30 @@ pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
 }
 
 pub fn list_jobs(conn: &Connection) -> Result<Vec<JobInfo>> {
+    // A unit scope is a row id; the division's name rides along for the label.
     let mut stmt = conn.prepare(
         "SELECT j.id, j.kind, j.class_id, c.display_name, c.color, j.scope, j.status,
                 j.created_at, j.started_at, j.finished_at, j.error, j.summary,
-                j.log_path, j.session_id
-         FROM jobs j LEFT JOIN classes c ON c.id = j.class_id
+                j.log_path, j.session_id, u.name
+         FROM jobs j
+         LEFT JOIN classes c ON c.id = j.class_id
+         LEFT JOIN units u ON u.class_id = j.class_id AND j.scope = 'unit:' || u.id
          ORDER BY j.id DESC LIMIT 50",
     )?;
     let jobs = stmt
         .query_map([], |row| {
+            let scope: Option<String> = row.get(5)?;
+            let unit_name: Option<String> = row.get(14)?;
             Ok(JobInfo {
                 id: row.get(0)?,
                 kind: row.get(1)?,
                 class_id: row.get(2)?,
                 class_name: row.get(3)?,
                 class_color: row.get(4)?,
-                scope: row.get(5)?,
+                scope_label: scope
+                    .as_deref()
+                    .map(|s| crate::guides::scope_label(s, unit_name.as_deref())),
+                scope,
                 status: row.get(6)?,
                 created_at: row.get(7)?,
                 started_at: row.get(8)?,
@@ -2507,5 +2518,43 @@ mod tests {
             standing_self_check(&conn, now).unwrap().is_none(),
             "a later failure is the verdict, and the check re-runs"
         );
+    }
+    /// A unit scope is a row id, so the listing carries the division's name
+    /// for the label; a scope from before ids shows what it carries.
+    #[test]
+    fn a_job_s_scope_is_labelled_by_the_division_s_name() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, source)
+             VALUES (24, 1, 2, 'week', 'Week 2 — Responsible AI', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        for scope in [
+            "unit:24",
+            "unit:Week 9",
+            "master",
+            "Module 1",
+            "session:Weeks/Week 02/2026-09-01 — Lecture.md",
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (kind, class_id, scope, status, created_at, owner_pid)
+                 VALUES ('module_guide', 1, ?1, 'succeeded', 1, 1)",
+                [scope],
+            )
+            .expect("job");
+        }
+        let jobs = super::list_jobs(&conn).expect("list");
+        let label = |scope: &str| {
+            jobs.iter()
+                .find(|j| j.scope.as_deref() == Some(scope))
+                .and_then(|j| j.scope_label.clone())
+                .expect(scope)
+        };
+        assert_eq!(label("unit:24"), "Week 2 — Responsible AI");
+        assert_eq!(label("unit:Week 9"), "Week 9");
+        assert_eq!(label("master"), "Semester Master");
+        assert_eq!(label("Module 1"), "Module 1");
+        assert_eq!(label("session:Weeks/Week 02/2026-09-01 — Lecture.md"), "2026-09-01 — Lecture");
     }
 }

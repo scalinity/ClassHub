@@ -711,7 +711,7 @@ fn division_rows(
         if filed > 0 {
             line.push_str(&format!(" · {} ({distilled} distilled)", plural(filed, "lecture")));
         }
-        let scope = crate::guides::unit_scope(&unit.name);
+        let scope = crate::db::unit_scope(unit.id);
         if let Some(guide) = guides.iter().find(|g| g.scope == scope) {
             line.push_str(&format!(" · guide {}", freshness(guide.stale)));
         }
@@ -840,7 +840,7 @@ fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
             let scope = if g.session {
                 format!("session {}", document_stem(&g.rel_path))
             } else {
-                crate::guides::scope_label(&g.scope)
+                g.label.clone()
             };
             if detailed {
                 format!(
@@ -1702,8 +1702,9 @@ enum Scope {
     /// A depth-0 folder holding indexed files, by its rel path.
     Folder(String),
     /// One of the course's own divisions, by its `units` row. `kind` and
-    /// `ordinal` are what the row answers to as `week3`.
-    Unit { id: i64, name: String, kind: String, ordinal: i64 },
+    /// `number` — the course's own, falling back to the list position for a
+    /// row named without one — are what the row answers to as `week3`.
+    Unit { id: i64, name: String, kind: String, number: i64 },
 }
 
 impl Scope {
@@ -1712,7 +1713,7 @@ impl Scope {
         match self {
             Scope::Master => crate::db::MASTER_SCOPE.to_string(),
             Scope::Folder(rel) => rel.clone(),
-            Scope::Unit { name, .. } => crate::guides::unit_scope(name),
+            Scope::Unit { id, .. } => crate::db::unit_scope(*id),
         }
     }
 }
@@ -1723,8 +1724,9 @@ impl Scope {
 /// Exploration…`, "module 1" or "m1" finds `Module 1`, and a topic finds the
 /// division named for it.
 ///
-/// A division answers to its whole name and to its kind and ordinal
-/// (`week3`), so "Week 1" is an exact hit on Week 1 rather than a substring
+/// A division answers to its whole name, to its kind and number (`week3`),
+/// and to its storage key (`unit:24`, as a listing prints it), so "Week 1" is
+/// an exact hit on Week 1 rather than a substring
 /// of Weeks 10–15. A folder named exactly like a division is that division's
 /// folder (`units::attach_folder_paths` joins them on that equality — exact,
 /// case and all, so the comparison here is the same one), so it is dropped
@@ -1733,7 +1735,8 @@ impl Scope {
 /// (`module 1` beside `Module 1`) was never attached, so it stays a scope of
 /// its own and a query hitting both is ambiguous rather than guessed.
 fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Scope> {
-    // A scope copied out of a guide listing carries the storage prefix.
+    // A scope copied out of a guide listing carries the storage prefix; one
+    // from before ids carried the name after it, and still resolves by it.
     let raw = scope
         .trim()
         .strip_prefix(crate::db::UNIT_SCOPE_PREFIX)
@@ -1745,6 +1748,19 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
         return Ok(Scope::Master);
     }
     let units = crate::units::list_units(conn, class.id)?;
+    let as_scope = |u: &crate::units::UnitInfo| Scope::Unit {
+        id: u.id,
+        name: u.name.clone(),
+        kind: u.kind.clone(),
+        number: u.number.unwrap_or(u.ordinal),
+    };
+    if let Some(id) = crate::db::unit_scope_id(scope.trim()) {
+        return units
+            .iter()
+            .find(|u| u.id == id)
+            .map(as_scope)
+            .with_context(|| format!("{} has no division with id {id}", class.display_name));
+    }
     let folders: Vec<String> = folder_counts(conn, class.id)?
         .into_keys()
         .filter(|f| f != "(class folder)")
@@ -1752,12 +1768,7 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
         .collect();
     let candidates: Vec<Scope> = units
         .iter()
-        .map(|u| Scope::Unit {
-            id: u.id,
-            name: u.name.clone(),
-            kind: u.kind.clone(),
-            ordinal: u.ordinal,
-        })
+        .map(as_scope)
         .chain(folders.iter().map(|f| Scope::Folder(f.clone())))
         .collect();
     let list = || {
@@ -1790,7 +1801,7 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
     }
     // Master never enters the candidates — it was answered above by name.
     let Some(tier) = best_match(&candidates, &needle, |c| match c {
-        Scope::Unit { name, kind, ordinal, .. } => vec![squash(name), format!("{kind}{ordinal}")],
+        Scope::Unit { name, kind, number, .. } => vec![squash(name), format!("{kind}{number}")],
         Scope::Folder(rel) => vec![squash(rel)],
         Scope::Master => unreachable!("master is resolved before matching"),
     }) else {
@@ -1860,17 +1871,10 @@ fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
         Ok((class, scope))
     })?;
     let key = scope.key();
-    // The division was just resolved, so its row is handed over rather than
-    // found again by name.
-    let unit_id = match &scope {
-        Scope::Unit { id, .. } => Some(*id),
-        _ => None,
-    };
     let (job_id, output_rel) = crate::guides::generate_practice(
         app,
         class.id,
         &key,
-        unit_id,
         focus.as_deref(),
         ctx.today,
         ctx.today_iso,
@@ -2327,15 +2331,23 @@ mod tests {
             resolve_scope(&conn, &class, "whole semester").expect("master"),
             Scope::Master
         );
+        // The storage key names the row, so a scope copied out of a listing
+        // resolves to it without a name.
+        let week3 = match resolve_scope(&conn, &class, "Week 3").expect("week 3") {
+            Scope::Unit { id, .. } => id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(unit_named(&format!("unit:{week3}")), "Week 3 \u{2014} Data Exploration");
+        assert!(resolve_scope(&conn, &class, "unit:999").is_err());
         assert_eq!(
             Scope::Unit {
-                id: 0,
+                id: 24,
                 name: "Week 3 \u{2014} Data Exploration".into(),
                 kind: "week".into(),
-                ordinal: 3,
+                number: 3,
             }
             .key(),
-            "unit:Week 3 \u{2014} Data Exploration"
+            "unit:24"
         );
     }
 
@@ -2412,9 +2424,12 @@ mod tests {
             ordinal: 1,
             kind: kind.into(),
             name: "x".into(),
+            number: None,
             rel_path: None,
             starts_on: None,
             ends_on: None,
+            first_week: None,
+            last_week: None,
             source: source.into(),
         };
         assert_eq!(divisions_line(&[]), "Divisions: none declared\n");

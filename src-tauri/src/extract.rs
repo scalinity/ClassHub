@@ -743,14 +743,19 @@ pub fn current_manifest(
     // (SPEC §8.5). The union is what makes a unit guide go stale when its
     // lecture changes — with the transcripts left out nothing visibly breaks,
     // the guide just quietly stops updating.
-    if let Some(unit_name) = scope.strip_prefix(crate::db::UNIT_SCOPE_PREFIX) {
-        let unit: Option<(i64, Option<String>)> = conn
-            .query_row(
-                "SELECT id, rel_path FROM units WHERE class_id = ?1 AND name = ?2",
-                rusqlite::params![class_id, unit_name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+    if scope.starts_with(crate::db::UNIT_SCOPE_PREFIX) {
+        // A unit scope from before ids names no row, and neither does one
+        // whose division is gone: no sources, rather than the whole class.
+        let unit: Option<(i64, Option<String>)> = match crate::db::unit_scope_id(scope) {
+            Some(unit_id) => conn
+                .query_row(
+                    "SELECT id, rel_path FROM units WHERE class_id = ?1 AND id = ?2",
+                    rusqlite::params![class_id, unit_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?,
+            None => None,
+        };
         let Some((unit_id, unit_folder)) = unit else {
             return Ok(Vec::new());
         };
@@ -1005,7 +1010,7 @@ mod tests {
         )
         .expect("contribution");
 
-        let scope = format!("{}Week 3 — Transformers", crate::db::UNIT_SCOPE_PREFIX);
+        let scope = crate::db::unit_scope(7);
         let manifest = current_manifest(&conn, 1, &scope).expect("manifest");
         let paths: Vec<&str> = manifest.iter().map(|e| e.rel_path.as_str()).collect();
         assert_eq!(paths, ["Module 1/Slides/deck.pdf", transcript]);
@@ -1032,8 +1037,10 @@ mod tests {
             [],
         )
         .expect("file");
-        let scope = format!("{}Week 9", crate::db::UNIT_SCOPE_PREFIX);
-        assert!(current_manifest(&conn, 1, &scope).expect("manifest").is_empty());
+        assert!(current_manifest(&conn, 1, &crate::db::unit_scope(9)).expect("manifest").is_empty());
+        // A scope from before ids names no row either.
+        let legacy = format!("{}Week 9", crate::db::UNIT_SCOPE_PREFIX);
+        assert!(current_manifest(&conn, 1, &legacy).expect("manifest").is_empty());
     }
 
     /// Class HTML notebooks are extracted locally, so this parser is what

@@ -310,15 +310,18 @@ pub struct Contribution {
 /// its source (SPEC §4). That keeps the path knowable at filing time — which is
 /// when the contribution row is written — and makes "did the note get written"
 /// a question about one known path rather than about a name a model reported.
-fn corpus_rel_path(unit_name: &str, transcript_rel: &str) -> String {
+pub(crate) fn corpus_rel_path(unit_name: &str, transcript_rel: &str) -> String {
     let file_name = Path::new(transcript_rel)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| transcript_rel.to_string());
-    format!(
-        "{CORPUS_DIR}/{}/{file_name}",
-        crate::units::folder_segment(unit_name)
-    )
+    format!("{}/{file_name}", corpus_folder(unit_name))
+}
+
+/// The folder one division's notes live in, named for the division — which is
+/// why a rename moves it (`units::upsert`).
+pub(crate) fn corpus_folder(unit_name: &str) -> String {
+    format!("{CORPUS_DIR}/{}", crate::units::folder_segment(unit_name))
 }
 
 /// What one filed transcript covers, end to end: `(end_ms, lines)`.
@@ -1648,14 +1651,14 @@ mod tests {
         let dir = root.join(folder);
         // One Part covering weeks 1–8: two week folders, one corpus folder.
         conn.execute(
-            "INSERT INTO units (class_id, ordinal, kind, name, source)
-             VALUES (1, 1, 'part', 'Part I: Foundations (Weeks 1-8)', 'syllabus')",
+            "INSERT INTO units (class_id, ordinal, kind, name, first_week, last_week, source)
+             VALUES (1, 1, 'part', 'Part I: Foundations (Weeks 1-8)', 1, 8, 'syllabus')",
             [],
         )
         .expect("unit");
         conn.execute(
-            "INSERT INTO units (class_id, ordinal, kind, name, source)
-             VALUES (1, 2, 'part', 'Part II: Models (Weeks 9-16)', 'syllabus')",
+            "INSERT INTO units (class_id, ordinal, kind, name, first_week, last_week, source)
+             VALUES (1, 2, 'part', 'Part II: Models (Weeks 9-16)', 9, 16, 'syllabus')",
             [],
         )
         .expect("unit");

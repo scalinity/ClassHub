@@ -16,7 +16,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::db::{GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, UNIT_SCOPE_PREFIX, lock, now};
+use crate::db::{
+    GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, UNIT_SCOPE_PREFIX, lock, now, unit_scope, unit_scope_id,
+};
 use crate::extract::{current_manifest, manifest_is_stale, ManifestEntry};
 
 /// SPEC §8.3: practice exams are dated files, several per scope — no staleness,
@@ -66,6 +68,9 @@ struct GuidePayload {
 #[serde(rename_all = "camelCase")]
 pub struct GuideInfo {
     pub scope: String,
+    /// What the scope is called on screen — a division's name for `unit:<id>`,
+    /// since the key itself is a row id the reader never sees.
+    pub label: String,
     pub rel_path: String,
     pub generated_at: i64,
     pub stale: bool,
@@ -219,13 +224,13 @@ pub fn synthesize_unit(
             )
             .optional()?
             .context("that division is no longer in this course's structure")?;
-        let scope = unit_scope(&unit_name);
+        let scope = unit_scope(unit_id);
         if has_active_job(&conn, class_id, "module_guide", &scope)? {
             bail!("a synthesis for {unit_name} is already queued or running");
         }
 
         let (ctx, corpus) = unit_context(&conn, class_id, unit_id, &unit_name, &scope)?;
-        let output_rel = format!("{GUIDES_DIR}/{}.html", crate::units::folder_segment(&unit_name));
+        let output_rel = unit_guide_rel_path(&unit_name);
         let prompt =
             render_guide_prompt(&ctx, &unit_name, &output_rel, generated_at_label, &corpus);
         let payload = serde_json::to_string(&GuidePayload {
@@ -269,22 +274,25 @@ fn unit_context(
     Ok((ctx, crate::lectures::corpus_block(&notes)))
 }
 
-/// `guides.scope` and `jobs.scope` for one of the course's own divisions.
-pub(crate) fn unit_scope(unit_name: &str) -> String {
-    format!("{UNIT_SCOPE_PREFIX}{unit_name}")
+/// Where a division's guide is written: `Study Guides/<Unit name>.html`
+/// (SPEC §8.1). Named for the division, so a rename moves it (`units::upsert`).
+pub(crate) fn unit_guide_rel_path(unit_name: &str) -> String {
+    format!("{GUIDES_DIR}/{}.html", crate::units::folder_segment(unit_name))
 }
 
 /// What a scope is called when it is shown or told to someone.
 ///
-/// A scope is a storage key, and two of its four shapes read as machinery: the
-/// app never shows the word "unit" (SPEC §5), and a session names a file path
-/// rather than a session. Mirrored by `scopeLabel` in src/lib/guides.ts.
-pub fn scope_label(scope: &str) -> String {
+/// A scope is a storage key, and two of its four shapes read as machinery: a
+/// unit scope is a row id, and the app never shows the word "unit" (SPEC §5);
+/// a session names a file path rather than a session. The division's name is
+/// the caller's to look up, since the key no longer carries it; a unit scope
+/// from before ids, which no row answers to, shows what it carries.
+pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
     if scope == MASTER_SCOPE {
         return "Semester Master".into();
     }
-    if let Some(name) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
-        return name.to_string();
+    if let Some(rest) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
+        return unit_name.map(str::to_string).unwrap_or_else(|| rest.to_string());
     }
     match scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
         Some(path) => path
@@ -382,34 +390,19 @@ struct PracticePayload {
 }
 
 /// SPEC §8.3: practice exam synthesis, from chat (M8) or the workspace's
-/// PRACTICE EXAM action (M19). Scope is a folder rel path, `unit:<name>` for
+/// PRACTICE EXAM action (M19). Scope is a folder rel path, `unit:<id>` for
 /// one of the course's own divisions — drawing on the same sources as that
 /// division's guide (SPEC §8.5) — or `master` (the whole semester); `focus`
 /// narrows topics. `date_label` names the file (`<scope> — <date>.html`), so
-/// it must be filename-safe (YYYY-MM-DD). A caller that has already resolved
-/// the division passes its `unit_id`; the name in the scope is looked up
-/// only when it has not.
+/// it must be filename-safe (YYYY-MM-DD).
 pub fn generate_practice(
     app: &AppHandle,
     class_id: i64,
     scope: &str,
-    unit_id: Option<i64>,
     focus: Option<&str>,
     generated_at_label: &str,
     date_label: &str,
 ) -> Result<(i64, String)> {
-    let scope_label = if scope == MASTER_SCOPE {
-        "Semester".to_string()
-    } else if let Some(unit_name) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
-        unit_name.to_string()
-    } else {
-        Path::new(scope)
-            .file_name()
-            .context("invalid module path")?
-            .to_string_lossy()
-            .into_owned()
-    };
-
     let (class_dir, output_rel, prompt, payload) = {
         let db = app.state::<crate::Db>();
         let conn = lock(&db.0);
@@ -417,39 +410,44 @@ pub fn generate_practice(
         if has_active_job(&conn, class_id, "practice", scope)? {
             bail!("a practice exam for this scope is already queued or running");
         }
-        let (ctx, corpus) = match scope.strip_prefix(UNIT_SCOPE_PREFIX) {
-            Some(unit_name) => {
-                let unit_id: i64 = match unit_id {
-                    Some(id) => conn.query_row(
-                        "SELECT id FROM units WHERE id = ?1 AND class_id = ?2",
-                        params![id, class_id],
+        let (scope_label, (ctx, corpus)) = match unit_scope_id(scope) {
+            Some(unit_id) => {
+                let unit_name: String = conn
+                    .query_row(
+                        "SELECT name FROM units WHERE id = ?1 AND class_id = ?2",
+                        params![unit_id, class_id],
                         |row| row.get(0),
-                    ),
-                    None => conn.query_row(
-                        "SELECT id FROM units WHERE class_id = ?1 AND name = ?2",
-                        params![class_id, unit_name],
-                        |row| row.get(0),
-                    ),
-                }
-                .optional()?
-                .context("that division is no longer in this course's structure")?;
-                unit_context(&conn, class_id, unit_id, unit_name, scope)?
+                    )
+                    .optional()?
+                    .context("that division is no longer in this course's structure")?;
+                let sources = unit_context(&conn, class_id, unit_id, &unit_name, scope)?;
+                (unit_name, sources)
             }
-            None => (
-                synthesis_context(
+            None => {
+                let label = if scope == MASTER_SCOPE {
+                    "Semester".to_string()
+                } else {
+                    Path::new(scope)
+                        .file_name()
+                        .context("invalid module path")?
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let ctx = synthesis_context(
                     &conn,
                     class_id,
                     scope,
                     None,
                     "no indexed files in that scope — rescan the class first",
-                )?,
+                )?;
                 // A folder is not one of the course's divisions, so no lecture
                 // is mapped to it; the semester scope lists its transcripts
                 // among the files above, since they are source material.
-                "(none — only an exam scoped to one of the course's divisions draws on \
-                 distilled lectures; the files above are the whole of this scope)"
-                    .to_string(),
-            ),
+                let corpus = "(none — only an exam scoped to one of the course's divisions draws on \
+                              distilled lectures; the files above are the whole of this scope)"
+                    .to_string();
+                (label, (ctx, corpus))
+            }
         };
 
         // Same-day exams for the same label get a numeric suffix instead of
@@ -696,9 +694,12 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()>
 // Reads (staleness computed on demand, SPEC §7 step 5)
 
 pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
+    // The division's name rides along for the label: a unit scope is its id.
     let mut stmt = conn.prepare(
-        "SELECT scope, rel_path, generated_at, source_manifest FROM guides
-         WHERE class_id = ?1 ORDER BY scope",
+        "SELECT g.scope, g.rel_path, g.generated_at, g.source_manifest, u.name
+         FROM guides g
+         LEFT JOIN units u ON u.class_id = g.class_id AND g.scope = 'unit:' || u.id
+         WHERE g.class_id = ?1 ORDER BY g.scope",
     )?;
     let rows = stmt
         .query_map([class_id], |row| {
@@ -707,16 +708,18 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut guides = Vec::with_capacity(rows.len());
-    for (scope, rel_path, generated_at, manifest_json) in rows {
+    for (scope, rel_path, generated_at, manifest_json, unit_name) in rows {
         let current = current_manifest(conn, class_id, &scope)?;
         guides.push(GuideInfo {
             stale: manifest_is_stale(&manifest_json, &current),
             session: crate::db::is_session_scope(&scope),
+            label: scope_label(&scope, unit_name.as_deref()),
             scope,
             rel_path,
             generated_at,
@@ -776,7 +779,7 @@ mod tests {
             .expect("payload");
         conn.execute(
             "INSERT INTO jobs (kind, class_id, scope, status, payload, created_at, owner_pid)
-             VALUES ('practice', 3, 'unit:Module 1', 'running', ?1, 1, 1)",
+             VALUES ('practice', 3, 'unit:1', 'running', ?1, 1, 1)",
             [payload],
         )
         .expect("job");
@@ -808,7 +811,7 @@ mod tests {
         let unit_id: i64 = conn
             .query_row("SELECT id FROM units WHERE class_id = 3", [], |row| row.get(0))
             .expect("id");
-        let scope = unit_scope(name);
+        let scope = unit_scope(unit_id);
         let refused = |conn: &Connection| match unit_context(conn, 3, unit_id, name, &scope) {
             Err(e) => format!("{e:#}"),
             Ok(_) => panic!("built a division from nothing"),
@@ -865,10 +868,39 @@ mod tests {
         let module_id: i64 = conn
             .query_row("SELECT id FROM units WHERE name = 'Module 1'", [], |row| row.get(0))
             .expect("id");
-        let (ctx, corpus) = unit_context(&conn, 3, module_id, "Module 1", &unit_scope("Module 1"))
+        let (ctx, corpus) = unit_context(&conn, 3, module_id, "Module 1", &unit_scope(module_id))
             .expect("builds from the folder");
         assert!(ctx.files_block.contains("- source: Module 1/Slides/deck.pptx"), "{}", ctx.files_block);
         assert!(corpus.starts_with("(none"), "{corpus}");
         let _ = fs::remove_dir_all(&root);
+    }
+    /// The listing carries each guide's label — the division's name for a
+    /// unit scope, since the key is its id and the reader never sees it.
+    #[test]
+    fn a_guide_s_label_is_the_division_s_name() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, source)
+             VALUES (24, 1, 2, 'week', 'Week 2 — Responsible AI', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        for (scope, rel_path) in [
+            ("unit:24", "Study Guides/Week 2 — Responsible AI.html"),
+            ("master", "Study Guides/Semester Master.html"),
+            ("Module 1", "Study Guides/Module 1.html"),
+        ] {
+            conn.execute(
+                "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+                 VALUES (1, ?1, ?2, 1, '[]')",
+                [scope, rel_path],
+            )
+            .expect("guide");
+        }
+        let guides = list_guides(&conn, 1).expect("list");
+        let label = |scope: &str| guides.iter().find(|g| g.scope == scope).expect(scope).label.clone();
+        assert_eq!(label("unit:24"), "Week 2 — Responsible AI");
+        assert_eq!(label("master"), "Semester Master");
+        assert_eq!(label("Module 1"), "Module 1");
     }
 }

@@ -62,6 +62,9 @@ How to decide — divisions:
   some syllabi are dated and in others are not; an undated week is normal, and an
   invented date is not. Weeks are not evenly spaced — breaks move them — so never
   compute a date by adding seven days to another one.
+- `first_week` and `last_week` only for a division that groups weeks — a Part or
+  Module the course says runs Weeks 1–8 — as the course states them. Omit both for a
+  week, and never invent a span.
 - If the material publishes no structure above the level of individual readings,
   return an empty `units` array. That is a real answer.
 
@@ -90,12 +93,13 @@ Output contract — your final reply must be ONLY this JSON object, no prose and
 fences:
 
 {"deadlines": [{"title": "<short name>", "kind": "assignment|exam|quiz|project|other", "due_at": "YYYY-MM-DD or YYYY-MM-DDTHH:MM", "notes": "<one optional line>"}],
- "units": [{"name": "<the course's own name for it>", "kind": "week|module|part", "ordinal": 1, "starts_on": "YYYY-MM-DD", "ends_on": "YYYY-MM-DD"}],
+ "units": [{"name": "<the course's own name for it>", "kind": "week|module|part", "ordinal": 1, "starts_on": "YYYY-MM-DD", "ends_on": "YYYY-MM-DD", "first_week": 1, "last_week": 8}],
  "grading": [{"name": "<an existing category's name, or the syllabus's own>", "weight": 50}]}
 
 - Any array may be empty. An honest empty array beats invented deadlines, an invented
   structure or an invented breakdown.
-- Omit `notes`, `starts_on` and `ends_on` rather than filling them with guesses.
+- Omit `notes`, `starts_on`, `ends_on`, `first_week` and `last_week` rather than filling
+  them with guesses.
 - `starts_on` and `ends_on` are dates, never times.
 - Never write, move, or delete anything — your tools are read-only. No deadline is
   added to the list without approval; the divisions you report are recorded

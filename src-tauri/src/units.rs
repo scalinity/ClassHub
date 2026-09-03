@@ -16,6 +16,15 @@
 //! runs from the 20th" and "a syllabus PDF seemed to say so" are different
 //! claims, and the workspace names which one it is showing.
 //!
+//! A division's identity is the course's own label for it. A model does not
+//! spell a name the same way twice — a rescan named a Part without its
+//! `(Weeks 1-8)` suffix and forked a second row beside the first — so a row is
+//! matched on its Canvas id where it has one, then on its exact name, then on
+//! `(source, kind, number)`, the number being what the name opens with:
+//! `Week 7 — …` is 7, `Part II:` is 2. The ordinal is not the identity: it is
+//! the position in the list a reader reported, and a rescan that inserts a
+//! `No class` row mid-list moves every ordinal after it. See `upsert`.
+//!
 //! A folder is not a third source. It is where material sits, not something the
 //! course declared — listing the top-level folders as divisions put a second
 //! numbering sequence under the course's own and labelled it a guess. What the
@@ -25,9 +34,12 @@
 //! Nothing here ever deletes. A unit that stops appearing in Canvas is kept
 //! (SPEC §7.2): a mid-semester reshuffle must not silently orphan a guide.
 
+use std::fs;
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 /// The kinds SPEC §5 allows, i.e. the words a course uses for its divisions.
@@ -44,14 +56,23 @@ pub struct UnitInfo {
     pub ordinal: i64,
     pub kind: String,
     pub name: String,
+    /// The course's own number for it, read from the label its name opens
+    /// with — 7 for `Week 7 — …`, 2 for `Part II:` — and, with the source and
+    /// the kind, the identity a rescan matches on. None where the name opens
+    /// with no such label (`Reading Days — No Class`).
+    pub number: Option<i64>,
     pub rel_path: Option<String>,
     pub starts_on: Option<String>,
     pub ends_on: Option<String>,
-    /// canvas | syllabus | folder — the workspace marks `folder` as inferred.
+    /// The weeks it spans where the course said so (SPEC §8.5): a Part's
+    /// `(Weeks 1-8)` as data on the row rather than a suffix a rescan may drop.
+    pub first_week: Option<i64>,
+    pub last_week: Option<i64>,
+    /// canvas | syllabus — which reader declared it.
     pub source: String,
 }
 
-/// One division on its way into the table, from any of the three sources.
+/// One division on its way into the table, from either source.
 pub struct NewUnit {
     pub ordinal: i64,
     pub kind: String,
@@ -60,15 +81,20 @@ pub struct NewUnit {
     pub rel_path: Option<String>,
     pub starts_on: Option<String>,
     pub ends_on: Option<String>,
+    /// The weeks the division spans, when the reader knows. `None` keeps what
+    /// the row already holds — unlike a date, which a refresh from the same
+    /// source clears — because a Part without its range files no lectures at
+    /// all, and a rescan that happens not to state it must not cost that.
+    pub weeks: Option<(i64, i64)>,
     pub source: &'static str,
 }
 
-/// canvas > syllabus > folder. Higher wins; an equal source refreshes its own
-/// rows, which is what makes a re-sync an update rather than a duplicate.
+/// canvas > syllabus. Higher wins; an equal source refreshes its own rows,
+/// which is what makes a re-sync an update rather than a duplicate.
 ///
 /// `list_units`' `ORDER BY` encodes the same order in SQL. Two hand-kept
 /// orderings, because binding it once would mean building the clause with
-/// `format!` — so a fourth source means changing both, and this is the note
+/// `format!` — so a third source means changing both, and this is the note
 /// saying so.
 fn rank(source: &str) -> u8 {
     match source {
@@ -78,38 +104,43 @@ fn rank(source: &str) -> u8 {
     }
 }
 
+/// The columns every whole-row read here selects, in `read_unit`'s order.
+const UNIT_COLUMNS: &str =
+    "id, ordinal, kind, name, number, rel_path, starts_on, ends_on, first_week, last_week, source";
+
 /// Every division for a class, the declared ones first.
 ///
 /// Ordering by ordinal alone interleaves the sources, and the result reads as
-/// nonsense: a folder called "Module 1" lands between Week 1 and Week 2 because
-/// both call themselves first. Sorting by source before ordinal keeps each
-/// source's own sequence intact and puts what the course actually declared
-/// first. The `CASE` repeats `rank()`'s order in SQL — see the note there.
+/// nonsense: a Canvas "Module 1" lands between Week 1 and Week 2 because both
+/// call themselves first. Sorting by source before ordinal keeps each source's
+/// own sequence intact and puts what the course actually declared first. The
+/// `CASE` repeats `rank()`'s order in SQL — see the note there.
 pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, ordinal, kind, name, rel_path, starts_on, ends_on, source
-         FROM units WHERE class_id = ?1
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {UNIT_COLUMNS} FROM units WHERE class_id = ?1
          ORDER BY CASE source WHEN 'canvas' THEN 0 WHEN 'syllabus' THEN 1 ELSE 2 END,
-                  ordinal, id",
-    )?;
+                  ordinal, id"
+    ))?;
     let rows = stmt
         .query_map([class_id], read_unit)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// One row selected as `id, ordinal, kind, name, rel_path, starts_on, ends_on,
-/// source` — the column order every `UnitInfo` read here uses.
+/// One row selected as `UNIT_COLUMNS`.
 fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
     Ok(UnitInfo {
         id: row.get(0)?,
         ordinal: row.get(1)?,
         kind: row.get(2)?,
         name: row.get(3)?,
-        rel_path: row.get(4)?,
-        starts_on: row.get(5)?,
-        ends_on: row.get(6)?,
-        source: row.get(7)?,
+        number: row.get(4)?,
+        rel_path: row.get(5)?,
+        starts_on: row.get(6)?,
+        ends_on: row.get(7)?,
+        first_week: row.get(8)?,
+        last_week: row.get(9)?,
+        source: row.get(10)?,
     })
 }
 
@@ -119,20 +150,175 @@ fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
 /// `module` — the generic one. `kind` groups and labels; `name` is what the
 /// reader actually sees, and it is never normalized.
 pub fn kind_for_name(name: &str) -> &'static str {
-    let lower = name.trim().to_lowercase();
-    let first = lower.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
-    match first {
+    match label_word(name).as_str() {
         "week" | "wk" => "week",
         "part" => "part",
         _ => "module",
     }
 }
 
-/// Inserts or refreshes one division, honouring source precedence.
-///
-/// Returns whether the row changed, so a sync can report "3 new, 11 unchanged"
-/// rather than claiming to have written what was already there.
-pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> {
+/// The word a name opens with, lower-cased: `week` for `Week 7 — …`, `weekly`
+/// for `Weekly Readings`. The whole first word, so "Weekly" is not "Week".
+fn label_word(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The course's own number for a division, read from its label: `Week 7 —
+/// Tree-Based Models` is 7, `Module 3` is 3, `Part II: Alignment` is 2, and
+/// `Reading Days — No Class` is nothing. Only the words `kind_for_name` knows
+/// count as labels, so a year in `Notes 2026` is not a number.
+pub fn label_number(name: &str) -> Option<i64> {
+    let trimmed = name.trim();
+    let word = label_word(trimmed);
+    if !matches!(word.as_str(), "week" | "wk" | "module" | "part") {
+        return None;
+    }
+    let rest = trimmed[word.len()..]
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '#' || c == '.');
+    match leading_number(rest) {
+        // `Week 10/11` and `Weeks 1-8` both open with the first number.
+        Some((n, _)) => (n >= 1).then_some(n),
+        None => roman_number(rest),
+    }
+}
+
+/// `II` → 2, `IX` → 9, read up to a non-letter; nothing for a run that is not
+/// a numeral, so `Part Introduction` has no number.
+fn roman_number(s: &str) -> Option<i64> {
+    let end = s.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(s.len());
+    let run = &s[..end];
+    if run.is_empty() || run.len() > 8 {
+        return None;
+    }
+    let value = |c: char| match c.to_ascii_uppercase() {
+        'I' => Some(1),
+        'V' => Some(5),
+        'X' => Some(10),
+        'L' => Some(50),
+        'C' => Some(100),
+        _ => None,
+    };
+    let digits = run.chars().map(value).collect::<Option<Vec<i64>>>()?;
+    let mut total = 0;
+    for (i, &d) in digits.iter().enumerate() {
+        if digits.get(i + 1).is_some_and(|&next| next > d) {
+            total -= d;
+        } else {
+            total += d;
+        }
+    }
+    (total >= 1).then_some(total)
+}
+
+/// What `upsert` did with a division.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Inserted,
+    /// Refreshed in place — a rename, a moved date, a new ordinal.
+    Updated,
+    /// Already recorded exactly so, or outranked by what a higher source said.
+    Unchanged,
+}
+
+/// The row a division landed on, what happened to it, and what the rename —
+/// if it was one — leaves for the filesystem.
+#[must_use = "a rename's effects move nothing until applied"]
+#[derive(Debug)]
+pub struct Upserted {
+    pub id: i64,
+    pub outcome: Outcome,
+    pub effects: RenameEffects,
+}
+
+/// Everything a renamed division leaves for the filesystem, decided inside the
+/// write's transaction and performed once it has committed — a refile's rule
+/// (`lectures::RefileEffects`). Two things are named for a division on disk:
+/// its corpus folder under `.classhub/corpus/` and its guide under
+/// `Study Guides/`, and both follow the name, so that what a guide drew on can
+/// still be read by the division's own name.
+#[must_use = "nothing on disk moves until this is applied"]
+#[derive(Debug, Default)]
+pub struct RenameEffects {
+    moves: Vec<(PathBuf, PathBuf)>,
+}
+
+impl RenameEffects {
+    /// Folds another division's effects in, for a caller writing a whole list.
+    pub fn extend(&mut self, other: RenameEffects) {
+        self.moves.extend(other.moves);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.moves.is_empty()
+    }
+
+    /// Applied after the commit, so a failure is logged rather than
+    /// propagated: the rows already name the new paths, and a note or a guide
+    /// left at the old one reads as undistilled or unreadable — which a
+    /// redistill or a regeneration repairs — while the division itself is
+    /// recorded as the course now names it.
+    pub fn apply(self) {
+        for (from, to) in self.moves {
+            if let Some(parent) = to.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::rename(&from, &to) {
+                eprintln!("units: rename failed ({} → {}): {e}", from.display(), to.display());
+            }
+        }
+    }
+}
+
+/// One row as held, read for a match.
+struct Held {
+    id: i64,
+    source: String,
+    ordinal: i64,
+    kind: String,
+    name: String,
+    canvas_id: Option<String>,
+    rel_path: Option<String>,
+    starts_on: Option<String>,
+    ends_on: Option<String>,
+    number: Option<i64>,
+    first_week: Option<i64>,
+    last_week: Option<i64>,
+}
+
+const HELD_COLUMNS: &str = "id, source, ordinal, kind, name, canvas_id, rel_path, starts_on, ends_on, \
+                            number, first_week, last_week";
+
+fn read_held(row: &rusqlite::Row<'_>) -> rusqlite::Result<Held> {
+    Ok(Held {
+        id: row.get(0)?,
+        source: row.get(1)?,
+        ordinal: row.get(2)?,
+        kind: row.get(3)?,
+        name: row.get(4)?,
+        canvas_id: row.get(5)?,
+        rel_path: row.get(6)?,
+        starts_on: row.get(7)?,
+        ends_on: row.get(8)?,
+        number: row.get(9)?,
+        first_week: row.get(10)?,
+        last_week: row.get(11)?,
+    })
+}
+
+/// A division as it will be stored: the name capped, the kind settled, the
+/// number read from the label.
+struct Incoming {
+    name: String,
+    kind: String,
+    number: Option<i64>,
+}
+
+fn incoming(unit: &NewUnit) -> Result<Incoming> {
     let name = crate::db::truncate(unit.name.trim(), MAX_UNIT_NAME);
     if name.is_empty() {
         bail!("a unit needs a name");
@@ -142,159 +328,364 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<bool> 
     } else {
         kind_for_name(&name).to_string()
     };
+    let number = label_number(&name);
+    Ok(Incoming { name, kind, number })
+}
 
-    type Row = (
-        i64,
-        String,
-        i64,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    );
-    let map = |row: &rusqlite::Row| -> rusqlite::Result<Row> {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-            row.get(7)?,
-            row.get(8)?,
-        ))
-    };
-    // Identity is the Canvas id wherever there is one. A professor renaming a
-    // published module is the same division under a new name, and matching on
-    // name alone would insert a second row and go on presenting the old name
-    // as something the course still declares.
-    let by_canvas_id: Option<Row> = match unit.canvas_id.as_deref() {
-        Some(canvas_id) => conn
+/// The row a division matches, by the identity rule in the module doc: the
+/// Canvas id, then the exact name, then `(source, kind, number)`.
+///
+/// The name comes before the number so that a row an earlier rescan forked —
+/// two rows under one label, the second holding no number — is still found
+/// as itself rather than renaming the first onto it.
+///
+/// `.optional()?` rather than `.ok()`: swallowing every error as "no such
+/// row" turned a locked database into an INSERT that then failed on the
+/// uniqueness constraint, reporting a cause that had nothing to do with it.
+fn find_held(conn: &Connection, class_id: i64, unit: &NewUnit, incoming: &Incoming) -> Result<Option<Held>> {
+    if let Some(canvas_id) = unit.canvas_id.as_deref() {
+        let held = conn
             .query_row(
-                "SELECT id, source, ordinal, kind, canvas_id, rel_path, starts_on, ends_on, name
-                 FROM units WHERE class_id = ?1 AND canvas_id = ?2",
+                &format!("SELECT {HELD_COLUMNS} FROM units WHERE class_id = ?1 AND canvas_id = ?2"),
                 params![class_id, canvas_id],
-                map,
+                read_held,
             )
-            .optional()?,
-        None => None,
+            .optional()?;
+        if held.is_some() {
+            return Ok(held);
+        }
+    }
+    let held = conn
+        .query_row(
+            &format!("SELECT {HELD_COLUMNS} FROM units WHERE class_id = ?1 AND name = ?2"),
+            params![class_id, incoming.name],
+            read_held,
+        )
+        .optional()?;
+    if held.is_some() {
+        return Ok(held);
+    }
+    let Some(number) = incoming.number else {
+        return Ok(None);
     };
-    // `.optional()?` rather than `.ok()`: swallowing every error as "no such
-    // row" turned a locked database into an INSERT that then failed on the
-    // uniqueness constraint, reporting a cause that had nothing to do with it.
-    let existing = match by_canvas_id {
-        Some(row) => Some(row),
-        None => conn
-            .query_row(
-                "SELECT id, source, ordinal, kind, canvas_id, rel_path, starts_on, ends_on, name
-                 FROM units WHERE class_id = ?1 AND name = ?2",
-                params![class_id, name],
-                map,
-            )
-            .optional()?,
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {HELD_COLUMNS} FROM units
+                 WHERE class_id = ?1 AND source = ?2 AND kind = ?3 AND number = ?4"
+            ),
+            params![class_id, unit.source, incoming.kind, number],
+            read_held,
+        )
+        .optional()?)
+}
+
+/// The row `upsert` would write this division to, if one exists — what lets a
+/// scan claim each row once, before anything is written.
+pub fn find(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Option<i64>> {
+    let incoming = incoming(unit)?;
+    Ok(find_held(conn, class_id, unit, &incoming)?.map(|held| held.id))
+}
+
+/// The number a row may carry: its own, unless another row of the same class,
+/// source and kind already holds it — the label index is unique — in which
+/// case none, said on stderr. A clean table never gets here; a table holding
+/// a fork from before labels existed does, and one row without a number beats
+/// a launch or a rescan that fails.
+fn free_number(
+    conn: &Connection,
+    class_id: i64,
+    source: &str,
+    kind: &str,
+    number: Option<i64>,
+    except: Option<i64>,
+) -> Result<Option<i64>> {
+    let Some(number) = number else {
+        return Ok(None);
+    };
+    let holder: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM units
+             WHERE class_id = ?1 AND source = ?2 AND kind = ?3 AND number = ?4 AND id IS NOT ?5",
+            params![class_id, source, kind, number, except],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match holder {
+        Some(id) => {
+            eprintln!("units: {kind} {number} of class {class_id} is already row {id}; left unnumbered");
+            Ok(None)
+        }
+        None => Ok(Some(number)),
+    }
+}
+
+/// Inserts or refreshes one division, honouring source precedence.
+///
+/// Reports what it did, so a sync can say "3 new, 11 unchanged" rather than
+/// claiming to have written what was already there, and hands back the moves
+/// a rename leaves for the caller to apply once its own work is committed.
+pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upserted> {
+    let incoming = incoming(unit)?;
+    let held = find_held(conn, class_id, unit, &incoming)?;
+    let Incoming { name, kind, number } = incoming;
+
+    let Some(held) = held else {
+        let number = free_number(conn, class_id, unit.source, &kind, number, None)?;
+        conn.execute(
+            "INSERT INTO units
+             (class_id, ordinal, kind, name, number, canvas_id, rel_path, starts_on, ends_on,
+              first_week, last_week, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                class_id,
+                unit.ordinal,
+                kind,
+                name,
+                number,
+                unit.canvas_id,
+                unit.rel_path,
+                unit.starts_on,
+                unit.ends_on,
+                unit.weeks.map(|(first, _)| first),
+                unit.weeks.map(|(_, last)| last),
+                unit.source
+            ],
+        )?;
+        return Ok(Upserted {
+            id: conn.last_insert_rowid(),
+            outcome: Outcome::Inserted,
+            effects: RenameEffects::default(),
+        });
     };
 
-    match existing {
-        // A folder called "Module 1" must not overwrite what Canvas says
-        // Module 1 is — including its dates, which a folder never has.
-        Some((_, current, ..)) if rank(unit.source) < rank(&current) => Ok(false),
-        Some((
-            id,
-            current,
-            ordinal,
-            current_kind,
-            canvas_id,
-            rel_path,
-            starts_on,
-            ends_on,
-            current_name,
-        )) => {
-            // A higher source knows the division's name, order and dates; it
-            // does not know where the material sits on disk, which only the
-            // folder source ever learns. So a *takeover* fills fields in rather
-            // than replacing them — otherwise Canvas superseding a folder would
-            // blank the path its guide reads from.
-            //
-            // Within one source there is nothing to preserve: the incoming row
-            // simply is the current state, and carrying an old value forward
-            // would make a date the course removed impossible to clear.
-            // Fell through to the name lookup and found a row belonging to a
-            // different Canvas module. Two divisions really can share a topic
-            // name — a term with four "Project Presentations" weeks has four —
-            // and `UNIQUE(class_id, name)` holds only one of them. Refused
-            // loudly rather than letting the second quietly overwrite the
-            // first and counting it as "already recorded".
-            if let (Some(incoming), Some(held)) = (unit.canvas_id.as_deref(), canvas_id.as_deref())
-            {
-                if incoming != held {
-                    bail!("another division of this course is already called '{name}'");
+    // A syllabus "Module 1" must not overwrite what Canvas says Module 1 is —
+    // including its dates.
+    if rank(unit.source) < rank(&held.source) {
+        return Ok(Upserted {
+            id: held.id,
+            outcome: Outcome::Unchanged,
+            effects: RenameEffects::default(),
+        });
+    }
+    // Found by name, and the name belongs to a different Canvas module. Two
+    // divisions really can share a topic name — a term with four "Project
+    // Presentations" weeks has four — and `UNIQUE(class_id, name)` holds only
+    // one of them. Refused loudly rather than letting the second quietly
+    // overwrite the first and counting it as "already recorded".
+    if let (Some(incoming_id), Some(held_id)) = (unit.canvas_id.as_deref(), held.canvas_id.as_deref()) {
+        if incoming_id != held_id {
+            bail!("another division of this course is already called '{name}'");
+        }
+    }
+    // Found by id or by label under a new name: the rename must not land on a
+    // name another row holds.
+    if held.name != name {
+        let holder: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM units WHERE class_id = ?1 AND name = ?2 AND id != ?3",
+                params![class_id, name, held.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if holder.is_some() {
+            bail!("another division of this course is already called '{name}'");
+        }
+    }
+
+    // A higher source knows the division's name, order and dates; it does not
+    // know where the material sits on disk, which only the folder ever learns.
+    // So a *takeover* fills fields in rather than replacing them — otherwise
+    // Canvas superseding the syllabus would blank the path its guide reads.
+    //
+    // Within one source there is nothing to preserve: the incoming row simply
+    // is the current state, and carrying an old value forward would make a
+    // date the course removed impossible to clear.
+    let takeover = rank(unit.source) > rank(&held.source);
+    let keep = |incoming: &Option<String>, held: &Option<String>| match (takeover, incoming) {
+        (true, None) => held.clone(),
+        _ => incoming.clone(),
+    };
+    let merged_canvas_id = keep(&unit.canvas_id, &held.canvas_id);
+    let merged_starts = keep(&unit.starts_on, &held.starts_on);
+    let merged_ends = keep(&unit.ends_on, &held.ends_on);
+    // `rel_path` is the exception in both directions: no source ever supplies
+    // one, so an incoming None is silence rather than a correction.
+    let merged_rel_path = unit.rel_path.clone().or_else(|| held.rel_path.clone());
+    // The range too: see `NewUnit::weeks`.
+    let (first_week, last_week) = match unit.weeks {
+        Some((first, last)) => (Some(first), Some(last)),
+        None => (held.first_week, held.last_week),
+    };
+    let number = free_number(conn, class_id, unit.source, &kind, number, Some(held.id))?;
+    let unchanged = held.ordinal == unit.ordinal
+        && held.kind == kind
+        && held.source == unit.source
+        && held.name == name
+        && held.number == number
+        && held.canvas_id == merged_canvas_id
+        && held.rel_path == merged_rel_path
+        && held.starts_on == merged_starts
+        && held.ends_on == merged_ends
+        && held.first_week == first_week
+        && held.last_week == last_week;
+    if unchanged {
+        return Ok(Upserted {
+            id: held.id,
+            outcome: Outcome::Unchanged,
+            effects: RenameEffects::default(),
+        });
+    }
+
+    // One transaction for the row and everything a rename rewrites beside it.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let effects = if held.name != name {
+        rename_effects(&tx, class_id, held.id, &held.name, &name)?
+    } else {
+        RenameEffects::default()
+    };
+    tx.execute(
+        "UPDATE units
+         SET ordinal = ?1, kind = ?2, name = ?3, number = ?4, canvas_id = ?5, rel_path = ?6,
+             starts_on = ?7, ends_on = ?8, first_week = ?9, last_week = ?10, source = ?11
+         WHERE id = ?12",
+        params![
+            unit.ordinal,
+            kind,
+            name,
+            number,
+            merged_canvas_id,
+            merged_rel_path,
+            merged_starts,
+            merged_ends,
+            first_week,
+            last_week,
+            unit.source,
+            held.id
+        ],
+    )?;
+    tx.commit()?;
+    Ok(Upserted {
+        id: held.id,
+        outcome: Outcome::Updated,
+        effects,
+    })
+}
+
+/// What a rename carries with it: every contribution row's corpus path and the
+/// corpus folder itself, and the guide row's file. Rows are rewritten here,
+/// inside the caller's transaction; the moves are returned for after it.
+///
+/// A target already on disk refuses the rename rather than overwriting — the
+/// refile's rule for a note — so a folder or a guide left behind by an earlier
+/// fork is never silently replaced. The class folder is resolved only when
+/// there is something to move, so a division with neither notes nor a guide
+/// renames without touching the tree.
+fn rename_effects(
+    conn: &Connection,
+    class_id: i64,
+    unit_id: i64,
+    old_name: &str,
+    new_name: &str,
+) -> Result<RenameEffects> {
+    let mut effects = RenameEffects::default();
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path FROM lecture_contributions WHERE class_id = ?1 AND unit_id = ?2",
+    )?;
+    let contributions = stmt
+        .query_map(params![class_id, unit_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let guide: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
+            params![class_id, crate::db::unit_scope(unit_id)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if contributions.is_empty() && guide.is_none() {
+        return Ok(effects);
+    }
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+
+    let old_folder = crate::lectures::corpus_folder(old_name);
+    let new_folder = crate::lectures::corpus_folder(new_name);
+    if old_folder != new_folder {
+        for (id, transcript_rel) in &contributions {
+            conn.execute(
+                "UPDATE lecture_contributions SET corpus_rel_path = ?1 WHERE id = ?2",
+                params![crate::lectures::corpus_rel_path(new_name, transcript_rel), id],
+            )?;
+        }
+        let from = class_dir.join(&old_folder);
+        if from.is_dir() {
+            let to = class_dir.join(&new_folder);
+            if to.exists() {
+                bail!("a corpus folder already exists at {new_folder} — renaming would overwrite it");
+            }
+            effects.moves.push((from, to));
+        }
+    }
+
+    if let Some((guide_id, rel_path)) = guide {
+        let new_rel = crate::guides::unit_guide_rel_path(new_name);
+        if rel_path != new_rel {
+            let from = class_dir.join(&rel_path);
+            if from.is_file() {
+                let to = class_dir.join(&new_rel);
+                if to.exists() {
+                    bail!("a guide already exists at {new_rel} — renaming would overwrite it");
                 }
-            }
-            let takeover = rank(unit.source) > rank(&current);
-            let keep = |incoming: &Option<String>, held: &Option<String>| match (takeover, incoming)
-            {
-                (true, None) => held.clone(),
-                _ => incoming.clone(),
-            };
-            let merged_canvas_id = keep(&unit.canvas_id, &canvas_id);
-            let merged_starts = keep(&unit.starts_on, &starts_on);
-            let merged_ends = keep(&unit.ends_on, &ends_on);
-            // `rel_path` is the exception in both directions: no source above
-            // `folder` ever supplies one, so an incoming None is silence rather
-            // than a correction.
-            let merged_rel_path = unit.rel_path.clone().or_else(|| rel_path.clone());
-            let unchanged = ordinal == unit.ordinal
-                && current_kind == kind
-                && current == unit.source
-                && current_name == name
-                && canvas_id == merged_canvas_id
-                && rel_path == merged_rel_path
-                && starts_on == merged_starts
-                && ends_on == merged_ends;
-            if unchanged {
-                return Ok(false);
+                effects.moves.push((from, to));
             }
             conn.execute(
-                "UPDATE units
-                 SET ordinal = ?1, kind = ?2, name = ?3, canvas_id = ?4, rel_path = ?5,
-                     starts_on = ?6, ends_on = ?7, source = ?8
-                 WHERE id = ?9",
-                params![
-                    unit.ordinal,
-                    kind,
-                    name,
-                    merged_canvas_id,
-                    merged_rel_path,
-                    merged_starts,
-                    merged_ends,
-                    unit.source,
-                    id
-                ],
+                "UPDATE guides SET rel_path = ?1 WHERE id = ?2",
+                params![new_rel, guide_id],
             )?;
-            Ok(true)
         }
-        None => {
-            conn.execute(
-                "INSERT INTO units
-                 (class_id, ordinal, kind, name, canvas_id, rel_path, starts_on, ends_on, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    class_id,
-                    unit.ordinal,
-                    kind,
-                    name,
-                    unit.canvas_id,
-                    unit.rel_path,
-                    unit.starts_on,
-                    unit.ends_on,
-                    unit.source
-                ],
-            )?;
-            Ok(true)
+    }
+    Ok(effects)
+}
+
+/// Fills `number`, `first_week` and `last_week` for every row from its name —
+/// run once by migration 0012, inside its transaction, for the rows that
+/// predate the columns. A number another row of the same class, source and
+/// kind already carries is left empty rather than failing the launch.
+pub fn backfill_labels(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT id, class_id, source, kind, name FROM units ORDER BY id")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, class_id, source, kind, name) in rows {
+        let number = free_number(conn, class_id, &source, &kind, label_number(&name), Some(id))?;
+        let weeks = declared_weeks(&kind, &name, None);
+        conn.execute(
+            "UPDATE units SET number = ?1, first_week = ?2, last_week = ?3 WHERE id = ?4",
+            params![number, weeks.map(|(f, _)| f), weeks.map(|(_, l)| l), id],
+        )?;
+    }
+    Ok(())
+}
+
+/// The weeks a division spans, as a reader states them or as its name does:
+/// a Part or Module named `… (Weeks 1-8)` carries its range in the name, and
+/// a week names only itself, which its number already says.
+pub fn declared_weeks(kind: &str, name: &str, stated: Option<(i64, i64)>) -> Option<(i64, i64)> {
+    match stated {
+        Some((first, last)) if (1..=MAX_WEEK).contains(&first) && last >= first && last <= MAX_WEEK => {
+            Some((first, last))
         }
+        _ if kind != "week" => parse_week_range(name),
+        _ => None,
     }
 }
 
@@ -324,8 +715,8 @@ pub fn attach_folder_paths(conn: &Connection, class_id: i64, folders: &[String])
 /// Attaches a folder to a unit that was declared without one.
 ///
 /// A Canvas or syllabus unit knows its name and dates but not where its
-/// material lives; the folder source knows only the path. When both describe
-/// the same division this is what joins them, so §8.1's guide can find the
+/// material lives; the folder knows only the path. When both describe the
+/// same division this is what joins them, so §8.1's guide can find the
 /// unit's files.
 pub fn attach_rel_path(conn: &Connection, class_id: i64, name: &str, rel_path: &str) -> Result<()> {
     conn.execute(
@@ -342,6 +733,9 @@ pub fn attach_rel_path(conn: &Connection, class_id: i64, name: &str, rel_path: &
 /// The widest a folder segment built from a course's own words gets. Nothing
 /// technical: a path that stays readable in Finder and in a prompt listing.
 const MAX_FOLDER_SEGMENT: usize = 90;
+
+/// Past this, the digits are a year or a room number rather than a week.
+const MAX_WEEK: i64 = 60;
 
 /// One week a lecture can be filed into, and the division it feeds.
 ///
@@ -365,48 +759,67 @@ pub struct WeekSlot {
 
 /// Every week this course can file a lecture into.
 ///
-/// A course that numbers its weeks supplies them directly. Applied Generative
-/// AI numbers none — it declares three Parts whose names carry the week ranges
-/// they span — so its weeks are read out of those ranges, and each maps to the
-/// Part that contains it. A course that declares neither gets no weeks, and a
-/// lecture for it routes through `_Inbox/` for the sorter to place (SPEC §7.1).
+/// A course that numbers its weeks supplies them directly: a week row's week is
+/// its own number — the course's, not the list position, which a `No class`
+/// row inserted mid-list would shift — and a row named without one (`Reading
+/// Days — No Class`) takes its ordinal, unless a numbered row already holds
+/// that week, since the course's own numbering wins. Applied Generative AI
+/// numbers none — it declares three Parts spanning week ranges — so its weeks
+/// are read out of those ranges, and each maps to the Part that contains it. A
+/// course that declares neither gets no weeks, and a lecture for it routes
+/// through `_Inbox/` for the sorter to place (SPEC §7.1).
 pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ordinal, name, starts_on FROM units
-         WHERE class_id = ?1 AND kind = 'week' ORDER BY ordinal, id",
+        "SELECT id, ordinal, number, name, starts_on FROM units
+         WHERE class_id = ?1 AND kind = 'week'
+         ORDER BY number IS NULL, ordinal, id",
     )?;
     let weeks = stmt
         .query_map([class_id], |row| {
-            let unit_id: i64 = row.get(0)?;
-            let week: i64 = row.get(1)?;
-            let unit_name: String = row.get(2)?;
-            Ok(WeekSlot {
-                week,
-                folder: week_folder(week, Some(&unit_name)),
-                unit_id,
-                unit_name,
-                meets_on: row.get(3)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !weeks.is_empty() {
-        return Ok(weeks);
+    let mut slots: Vec<WeekSlot> = Vec::new();
+    for (unit_id, ordinal, number, unit_name, meets_on) in weeks {
+        let week = number.unwrap_or(ordinal);
+        if slots.iter().any(|s| s.week == week) {
+            continue;
+        }
+        slots.push(WeekSlot {
+            week,
+            folder: week_folder(week, Some(&unit_name)),
+            unit_id,
+            unit_name,
+            meets_on,
+        });
+    }
+    if !slots.is_empty() {
+        slots.sort_by_key(|s| s.week);
+        return Ok(slots);
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id, name FROM units WHERE class_id = ?1 AND kind = 'part' ORDER BY ordinal, id",
+        "SELECT id, name, first_week, last_week FROM units
+         WHERE class_id = ?1 AND first_week IS NOT NULL AND last_week IS NOT NULL
+         ORDER BY ordinal, id",
     )?;
-    let parts = stmt
+    let ranges = stmt
         .query_map([class_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut slots: Vec<WeekSlot> = Vec::new();
-    for (unit_id, unit_name) in parts {
-        let Some((first, last)) = parse_week_range(&unit_name) else {
-            continue;
-        };
+    for (unit_id, unit_name, first, last) in ranges {
         for week in first..=last {
             // Ranges should not overlap, but if a syllabus says they do, the
             // earlier Part keeps the week rather than the later one silently
@@ -477,10 +890,9 @@ pub fn current_unit(conn: &Connection, class_id: i64, today: &str) -> Result<Opt
     let Some(target) = day(today) else {
         return Ok(None);
     };
-    let mut stmt = conn.prepare(
-        "SELECT id, ordinal, kind, name, rel_path, starts_on, ends_on, source
-         FROM units WHERE class_id = ?1 AND starts_on IS NOT NULL",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {UNIT_COLUMNS} FROM units WHERE class_id = ?1 AND starts_on IS NOT NULL"
+    ))?;
     let dated = stmt
         .query_map([class_id], read_unit)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -496,13 +908,11 @@ pub fn current_unit(conn: &Connection, class_id: i64, today: &str) -> Result<Opt
 
 /// `Part I: … (Weeks 1-8)` → `Some((1, 8))`.
 ///
-/// The one non-trivial mapping in SPEC §8.5. Applied Generative AI declares no
-/// weeks of its own, only three Parts whose names carry the week ranges they
-/// span, so a lecture's week finds its division by reading that range back out.
-/// A name with no range is not an error — most unit names have none.
+/// How a range written into a name is read — into `first_week`/`last_week`
+/// when a Part is recorded, and back out of a `Weeks/Week 05 — …` folder name
+/// when a filed transcript is mapped. A name with no range is not an error —
+/// most unit names have none.
 pub fn parse_week_range(name: &str) -> Option<(i64, i64)> {
-    /// Past this, the digits are a year or a room number rather than a week.
-    const MAX_WEEK: i64 = 60;
     let lower = name.to_lowercase();
     let mut cursor = 0usize;
     while let Some(at) = lower[cursor..].find("week") {
@@ -613,21 +1023,38 @@ pub fn folder_segment(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The real migration against the tables it alters, so the schema these
-    /// tests run on is the schema the app runs on.
+    /// The real schema, so these tests run on what the app runs on.
     fn db() -> Connection {
-        let conn = Connection::open_in_memory().expect("open");
-        conn.execute_batch(
-            "CREATE TABLE classes (id INTEGER PRIMARY KEY);
-             INSERT INTO classes (id) VALUES (1);
-             CREATE TABLE deadline_proposals (id INTEGER PRIMARY KEY);",
-        )
-        .expect("fixture");
-        conn.execute_batch(include_str!("../migrations/0007_units.sql"))
-            .expect("migration");
-        conn.execute_batch(include_str!("../migrations/0008_folder_units.sql"))
-            .expect("migration");
-        conn
+        crate::db::memory_db()
+    }
+
+    fn unit(ordinal: i64, kind: &str, name: &str, starts_on: Option<&str>) -> NewUnit {
+        NewUnit {
+            ordinal,
+            kind: kind.into(),
+            name: name.into(),
+            canvas_id: None,
+            rel_path: None,
+            starts_on: starts_on.map(Into::into),
+            ends_on: None,
+            weeks: None,
+            source: "syllabus",
+        }
+    }
+
+    fn canvas_unit(ordinal: i64, name: &str, canvas_id: &str) -> NewUnit {
+        NewUnit {
+            canvas_id: Some(canvas_id.into()),
+            source: "canvas",
+            ..unit(ordinal, "module", name, None)
+        }
+    }
+
+    /// `upsert` for a test that wants the outcome and nothing on disk.
+    fn write(conn: &Connection, class_id: i64, unit: &NewUnit) -> Outcome {
+        let written = upsert(conn, class_id, unit).expect("upsert");
+        assert!(written.effects.is_empty(), "nothing here should move on disk");
+        written.outcome
     }
 
     #[test]
@@ -644,33 +1071,47 @@ mod tests {
         assert_eq!(kind_for_name("Weekly Readings"), "module");
     }
 
+    /// The identity a rescan matches on: the number the course's own label
+    /// carries, in Arabic or Roman figures, and nothing for a row named
+    /// without one.
+    #[test]
+    fn reads_the_number_out_of_a_division_s_label() {
+        assert_eq!(label_number("Week 7 — Classification Methods I: Tree-Based Models"), Some(7));
+        assert_eq!(label_number("week 14"), Some(14));
+        assert_eq!(label_number("Wk 2: Study Designs"), Some(2));
+        assert_eq!(label_number("Module 3 — Regression"), Some(3));
+        assert_eq!(label_number("Part I: Deep Learning to Large Language Models (Weeks 1-8)"), Some(1));
+        assert_eq!(label_number("Part II: Reinforcement Learning and Alignment"), Some(2));
+        assert_eq!(label_number("Part IV"), Some(4));
+        assert_eq!(label_number("Part ix"), Some(9));
+        assert_eq!(label_number("Part 3"), Some(3));
+        assert_eq!(label_number("Module #2"), Some(2));
+        // The range in a Part's name is not its label.
+        assert_eq!(label_number("Weeks 1-8"), None);
+        // Named without a label: the identity falls back to the name.
+        assert_eq!(label_number("Reading Days — No Class"), None);
+        assert_eq!(label_number("No class (Nov. 24) — Thanksgiving Break"), None);
+        assert_eq!(label_number("Finals week — Capstone Presentations"), None);
+        assert_eq!(label_number("Part Introduction"), None);
+        assert_eq!(label_number("Weekly Readings"), None);
+        assert_eq!(label_number("Week 0"), None);
+        assert_eq!(label_number("Week of 2026"), None);
+        assert_eq!(label_number(""), None);
+    }
+
     /// The precedence rule, which is the whole reason `source` is stored.
     #[test]
     fn a_syllabus_week_never_overwrites_what_canvas_declared() {
         let conn = db();
         let canvas = NewUnit {
             ordinal: 3,
-            kind: "module".into(),
-            name: "Module 1".into(),
-            canvas_id: Some("55".into()),
-            rel_path: None,
             starts_on: Some("2026-08-20".into()),
-            ends_on: None,
-            source: "canvas",
+            ..canvas_unit(3, "Module 1", "55")
         };
-        assert!(upsert(&conn, 1, &canvas).expect("insert"));
+        assert_eq!(write(&conn, 1, &canvas), Outcome::Inserted);
 
-        let syllabus = NewUnit {
-            ordinal: 1,
-            kind: "module".into(),
-            name: "Module 1".into(),
-            canvas_id: None,
-            rel_path: None,
-            starts_on: Some("2026-09-01".into()),
-            ends_on: None,
-            source: "syllabus",
-        };
-        assert!(!upsert(&conn, 1, &syllabus).expect("upsert"), "the syllabus won");
+        let syllabus = unit(1, "module", "Module 1", Some("2026-09-01"));
+        assert_eq!(write(&conn, 1, &syllabus), Outcome::Unchanged, "the syllabus won");
 
         let units = list_units(&conn, 1).expect("list");
         assert_eq!(units.len(), 1);
@@ -685,17 +1126,7 @@ mod tests {
     #[test]
     fn a_folder_gives_a_declared_division_its_path() {
         let conn = db();
-        let declared = NewUnit {
-            ordinal: 1,
-            kind: "module".into(),
-            name: "Module 1".into(),
-            canvas_id: None,
-            rel_path: None,
-            starts_on: None,
-            ends_on: None,
-            source: "syllabus",
-        };
-        assert!(upsert(&conn, 1, &declared).expect("insert"));
+        assert_eq!(write(&conn, 1, &unit(1, "module", "Module 1", None)), Outcome::Inserted);
         attach_folder_paths(&conn, 1, &["Module 1".into(), "Slides".into()]).expect("attach");
 
         let units = list_units(&conn, 1).expect("list");
@@ -711,22 +1142,16 @@ mod tests {
     fn a_source_can_clear_a_date_it_set_itself() {
         let conn = db();
         let with_date = NewUnit {
-            ordinal: 1,
-            kind: "week".into(),
-            name: "Week 1".into(),
-            canvas_id: Some("9".into()),
-            rel_path: None,
             starts_on: Some("2026-08-20".into()),
-            ends_on: None,
-            source: "canvas",
+            ..canvas_unit(1, "Week 1", "9")
         };
-        assert!(upsert(&conn, 1, &with_date).expect("insert"));
+        assert_eq!(write(&conn, 1, &with_date), Outcome::Inserted);
 
         let cleared = NewUnit {
             starts_on: None,
             ..with_date
         };
-        assert!(upsert(&conn, 1, &cleared).expect("update"), "reported no change");
+        assert_eq!(write(&conn, 1, &cleared), Outcome::Updated, "reported no change");
         assert_eq!(list_units(&conn, 1).expect("list")[0].starts_on, None);
     }
 
@@ -737,26 +1162,228 @@ mod tests {
     fn a_renamed_canvas_module_keeps_its_row() {
         let conn = db();
         let before = NewUnit {
-            ordinal: 1,
-            kind: "module".into(),
-            name: "Module 1".into(),
-            canvas_id: Some("55".into()),
             rel_path: Some("Module 1".into()),
-            starts_on: None,
-            ends_on: None,
-            source: "canvas",
+            ..canvas_unit(1, "Module 1", "55")
         };
-        assert!(upsert(&conn, 1, &before).expect("insert"));
+        assert_eq!(write(&conn, 1, &before), Outcome::Inserted);
         let after = NewUnit {
             name: "Module 1 — Foundations".into(),
             ..before
         };
-        assert!(upsert(&conn, 1, &after).expect("rename"));
+        assert_eq!(write(&conn, 1, &after), Outcome::Updated);
 
         let units = list_units(&conn, 1).expect("list");
         assert_eq!(units.len(), 1, "the rename forked the division");
         assert_eq!(units[0].name, "Module 1 — Foundations");
         assert_eq!(units[0].rel_path.as_deref(), Some("Module 1"));
+    }
+
+    /// The M22 fork: a rescan of Applied Generative AI's syllabus named the
+    /// Parts without their `(Weeks 1-8)` suffixes, and three rows landed
+    /// beside the three that carried the ranges. Matched on the label, the
+    /// same row takes the new name, keeps its range as data, and the
+    /// week-to-Part join still resolves every week.
+    #[test]
+    fn a_rescan_that_drops_a_part_s_suffix_updates_the_row_in_place() {
+        let conn = db();
+        let parts = [
+            "Part I: Deep Learning to Large Language Models (Weeks 1-8)",
+            "Part II: Reinforcement Learning and Alignment (Weeks 9-12)",
+            "Part III: Agentic AI in Medicine (Weeks 13-16)",
+        ];
+        for (i, name) in parts.iter().enumerate() {
+            let part = NewUnit {
+                weeks: declared_weeks("part", name, None),
+                ..unit(i as i64 + 1, "part", name, None)
+            };
+            assert_eq!(write(&conn, 4, &part), Outcome::Inserted);
+        }
+        let ids: Vec<i64> = list_units(&conn, 4).expect("list").iter().map(|u| u.id).collect();
+
+        for (i, name) in [
+            "Part I: Deep Learning to Large Language Models",
+            "Part II: Reinforcement Learning and Alignment",
+            "Part III: Agentic AI in Medicine",
+        ]
+        .iter()
+        .enumerate()
+        {
+            // The rescan states no range: the one held stands.
+            assert_eq!(write(&conn, 4, &unit(i as i64 + 1, "part", name, None)), Outcome::Updated);
+        }
+        let after = list_units(&conn, 4).expect("list");
+        assert_eq!(after.len(), 3, "the rescan forked the Parts");
+        assert_eq!(after.iter().map(|u| u.id).collect::<Vec<_>>(), ids);
+        assert_eq!(after[0].name, "Part I: Deep Learning to Large Language Models");
+        assert_eq!(after[0].number, Some(1));
+        assert_eq!((after[0].first_week, after[0].last_week), (Some(1), Some(8)));
+        assert_eq!((after[2].first_week, after[2].last_week), (Some(13), Some(16)));
+
+        let slots = week_slots(&conn, 4).expect("slots");
+        assert_eq!(slots.len(), 16, "the ranges no longer cover weeks 1–16");
+        assert_eq!(slot_for_week(&conn, 4, 9).unwrap().unwrap().unit_id, ids[1]);
+
+        // A rescan stating a new range replaces the held one.
+        let widened = NewUnit {
+            weeks: Some((13, 17)),
+            ..unit(3, "part", "Part III: Agentic AI in Medicine", None)
+        };
+        assert_eq!(write(&conn, 4, &widened), Outcome::Updated);
+        assert_eq!(week_slots(&conn, 4).expect("slots").len(), 17);
+    }
+
+    /// The identity is the label, not the ordinal: a rescan that inserts an
+    /// unnumbered row mid-list moves every ordinal after it, and Week 14 must
+    /// still be week 14 — which is what the Add lecture form files by.
+    #[test]
+    fn an_inserted_row_moves_the_ordinals_and_not_the_weeks() {
+        let conn = db();
+        for (ordinal, name, on) in [
+            (13, "Week 13 — Model Lifecycle, MLOps, and Reproducibility", "2026-11-17"),
+            (14, "Week 14 — Introduction to Deep Learning and Course Synthesis", "2026-12-01"),
+        ] {
+            assert_eq!(write(&conn, 1, &unit(ordinal, "week", name, Some(on))), Outcome::Inserted);
+        }
+        let week14 = list_units(&conn, 1).expect("list")[1].id;
+
+        // The rescan: Thanksgiving at 14, Week 14 pushed to 15, finals at 16.
+        for (ordinal, name, on, expected) in [
+            (13, "Week 13 — Model Lifecycle, MLOps, and Reproducibility", "2026-11-17", Outcome::Unchanged),
+            (14, "No class (Nov. 24) — Thanksgiving Break", "2026-11-24", Outcome::Inserted),
+            (15, "Week 14 — Introduction to Deep Learning and Course Synthesis", "2026-12-01", Outcome::Updated),
+            (16, "Finals week — Capstone Presentations", "2026-12-05", Outcome::Inserted),
+        ] {
+            assert_eq!(write(&conn, 1, &unit(ordinal, "week", name, Some(on))), expected, "{name}");
+        }
+        let units = list_units(&conn, 1).expect("list");
+        assert_eq!(units.len(), 4);
+        assert_eq!(units[2].id, week14, "Week 14 was forked rather than moved");
+        assert_eq!((units[2].ordinal, units[2].number), (15, Some(14)));
+        assert_eq!(units[1].number, None);
+
+        let slots = week_slots(&conn, 1).expect("slots");
+        let by_week = |week: i64| slots.iter().find(|s| s.week == week).map(|s| s.unit_name.as_str());
+        assert_eq!(by_week(13), Some("Week 13 — Model Lifecycle, MLOps, and Reproducibility"));
+        // The course's Week 14 is week 14; the Thanksgiving row, which took
+        // ordinal 14, gets no slot — no class meets.
+        assert_eq!(by_week(14), Some("Week 14 — Introduction to Deep Learning and Course Synthesis"));
+        assert_eq!(by_week(15), None);
+        // A row named without a label still takes its ordinal where no
+        // numbered row holds it, so a session in finals week has a home.
+        assert_eq!(by_week(16), Some("Finals week — Capstone Presentations"));
+        assert_eq!(nearest_week(&slots, "2026-12-01"), Some(14));
+        assert_eq!(
+            slots.iter().find(|s| s.week == 14).unwrap().folder,
+            "Week 14 — Introduction to Deep Learning and Course Synthesis"
+        );
+    }
+
+    /// A renamed week keeps its row, and everything named for it on disk
+    /// follows: the corpus folder, with every contribution's stored path, and
+    /// the guide file, with the row's. The guide's scope names the id, so it
+    /// needs nothing.
+    #[test]
+    fn a_renamed_week_carries_its_corpus_folder_and_its_guide() {
+        let conn = db();
+        let root = std::env::temp_dir().join(format!("classhub-unit-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let class_dir = root.join("Fundamentals of Artificial Intelligence in Medicine I");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+
+        let old_name = "Week 2 — Responsible AI, Ethics, and Governance";
+        let new_name = "Week 2 — Responsible AI and Governance";
+        let written = upsert(&conn, 1, &unit(2, "week", old_name, Some("2026-09-01"))).expect("insert");
+        let unit_id = written.id;
+        let transcript = "Weeks/Week 02 — Responsible AI, Ethics, and Governance/2026-09-01 — Lecture.md";
+        let old_note = crate::lectures::corpus_rel_path(old_name, transcript);
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (1, ?1, ?2, 0, 1, 1, 1, ?3, 'Whole session', 'high', 'applied', 1)",
+            params![unit_id, transcript, old_note],
+        )
+        .expect("contribution");
+        let old_guide = crate::guides::unit_guide_rel_path(old_name);
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+             VALUES (1, ?1, ?2, 1, '[]')",
+            params![crate::db::unit_scope(unit_id), old_guide],
+        )
+        .expect("guide");
+        for rel in [&old_note, &old_guide] {
+            let path = class_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            fs::write(&path, "content").expect("file");
+        }
+
+        let written = upsert(&conn, 1, &unit(2, "week", new_name, Some("2026-09-01"))).expect("rename");
+        assert_eq!((written.id, written.outcome), (unit_id, Outcome::Updated));
+        assert!(!written.effects.is_empty(), "nothing was moved");
+        written.effects.apply();
+
+        let units = list_units(&conn, 1).expect("list");
+        assert_eq!(units.len(), 1, "the rename forked the week");
+        assert_eq!(units[0].name, new_name);
+        let new_note = crate::lectures::corpus_rel_path(new_name, transcript);
+        let stored: String = conn
+            .query_row("SELECT corpus_rel_path FROM lecture_contributions WHERE unit_id = ?1", [unit_id], |r| r.get(0))
+            .expect("row");
+        assert_eq!(stored, new_note);
+        assert!(class_dir.join(&new_note).is_file(), "the note did not move");
+        assert!(!class_dir.join(&old_note).exists());
+        assert!(!class_dir.join(crate::lectures::corpus_folder(old_name)).exists(), "the old folder lingers");
+        let (scope, rel): (String, String) = conn
+            .query_row("SELECT scope, rel_path FROM guides WHERE class_id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("guide");
+        assert_eq!(scope, crate::db::unit_scope(unit_id));
+        assert_eq!(rel, crate::guides::unit_guide_rel_path(new_name));
+        assert!(class_dir.join(&rel).is_file(), "the guide did not move");
+        assert!(!class_dir.join(&old_guide).exists());
+        // The slot follows the row, so the lecture still maps to the same id.
+        assert_eq!(slot_for_week(&conn, 1, 2).unwrap().unwrap().unit_id, unit_id);
+
+        // A target already on disk refuses the rename rather than overwriting.
+        let taken = "Week 2 — Ethics";
+        fs::create_dir_all(class_dir.join(crate::lectures::corpus_folder(taken))).expect("stray");
+        let err = upsert(&conn, 1, &unit(2, "week", taken, Some("2026-09-01"))).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err:#}");
+        assert_eq!(list_units(&conn, 1).expect("list")[0].name, new_name, "a refused rename wrote");
+    }
+
+    /// A rename must not land on a name another row holds: a Canvas module
+    /// found by its id and renamed onto a syllabus row's name is refused
+    /// rather than leaving two rows under one name or overwriting one.
+    #[test]
+    fn a_rename_onto_a_held_name_is_refused() {
+        let conn = db();
+        assert_eq!(write(&conn, 1, &canvas_unit(1, "Module 1", "55")), Outcome::Inserted);
+        assert_eq!(write(&conn, 1, &unit(2, "module", "Module 2", None)), Outcome::Inserted);
+        let err = upsert(&conn, 1, &canvas_unit(1, "Module 2", "55")).unwrap_err();
+        assert!(err.to_string().contains("already called"), "{err:#}");
+        let names: Vec<String> = list_units(&conn, 1).expect("list").into_iter().map(|u| u.name).collect();
+        assert_eq!(names, ["Module 1", "Module 2"]);
+    }
+
+    /// `find` answers the row a division would write to, which is what lets a
+    /// scan claim each row once: two entries under one label go to one row.
+    #[test]
+    fn two_entries_under_one_label_resolve_to_one_row() {
+        let conn = db();
+        let written = upsert(&conn, 1, &unit(7, "week", "Week 7 — A", None)).expect("insert");
+        assert_eq!(find(&conn, 1, &unit(7, "week", "Week 7 — B", None)).expect("find"), Some(written.id));
+        assert_eq!(find(&conn, 1, &unit(8, "week", "Week 8 — C", None)).expect("find"), None);
+        // Unlabelled rows resolve by name alone.
+        let reading = upsert(&conn, 1, &unit(16, "week", "Reading Days", None)).expect("insert");
+        assert_eq!(find(&conn, 1, &unit(17, "week", "Reading Days", None)).expect("find"), Some(reading.id));
+        assert_eq!(find(&conn, 1, &unit(17, "week", "Finals week", None)).expect("find"), None);
     }
 
     /// Re-syncing changes nothing (M13 acceptance): no duplicates, and the
@@ -765,17 +1392,11 @@ mod tests {
     fn re_syncing_is_a_no_op() {
         let conn = db();
         let unit = || NewUnit {
-            ordinal: 1,
-            kind: "week".into(),
-            name: "Week 1 — Intro".into(),
-            canvas_id: Some("9".into()),
-            rel_path: None,
             starts_on: Some("2026-08-20".into()),
-            ends_on: None,
-            source: "canvas",
+            ..canvas_unit(1, "Week 1 — Intro", "9")
         };
-        assert!(upsert(&conn, 1, &unit()).expect("first"));
-        assert!(!upsert(&conn, 1, &unit()).expect("second"), "reported a change");
+        assert_eq!(write(&conn, 1, &unit()), Outcome::Inserted);
+        assert_eq!(write(&conn, 1, &unit()), Outcome::Unchanged, "reported a change");
         assert_eq!(list_units(&conn, 1).expect("list").len(), 1);
     }
 
@@ -785,39 +1406,11 @@ mod tests {
     fn a_unit_that_disappears_from_canvas_is_retained() {
         let conn = db();
         for (ordinal, name) in [(1, "Module 1"), (2, "Module 2")] {
-            upsert(
-                &conn,
-                1,
-                &NewUnit {
-                    ordinal,
-                    kind: "module".into(),
-                    name: name.into(),
-                    canvas_id: Some(ordinal.to_string()),
-                    rel_path: None,
-                    starts_on: None,
-                    ends_on: None,
-                    source: "canvas",
-                },
-            )
-            .expect("insert");
+            write(&conn, 1, &canvas_unit(ordinal, name, &ordinal.to_string()));
         }
         // A later sync sees only Module 1. Nothing here deletes, so there is
         // no call to make — the assertion is that Module 2 is still listed.
-        upsert(
-            &conn,
-            1,
-            &NewUnit {
-                ordinal: 1,
-                kind: "module".into(),
-                name: "Module 1".into(),
-                canvas_id: Some("1".into()),
-                rel_path: None,
-                starts_on: None,
-                ends_on: None,
-                source: "canvas",
-            },
-        )
-        .expect("resync");
+        write(&conn, 1, &canvas_unit(1, "Module 1", "1"));
         let names: Vec<String> = list_units(&conn, 1)
             .expect("list")
             .into_iter()
@@ -829,30 +1422,48 @@ mod tests {
     #[test]
     fn caps_a_name_that_would_not_fit_a_heading() {
         let conn = db();
-        upsert(
-            &conn,
-            1,
-            &NewUnit {
-                ordinal: 1,
-                kind: "week".into(),
-                name: "W".repeat(400),
-                canvas_id: None,
-                rel_path: None,
-                starts_on: None,
-                ends_on: None,
-                source: "syllabus",
-            },
-        )
-        .expect("insert");
+        write(&conn, 1, &unit(1, "week", &"W".repeat(400), None));
         let units = list_units(&conn, 1).expect("list");
         assert!(units[0].name.chars().count() <= MAX_UNIT_NAME + 1, "{}", units[0].name);
+    }
+
+    /// The migration's pass over rows from before labels existed: numbers and
+    /// ranges from the names, and a number two rows would share left empty.
+    #[test]
+    fn backfills_labels_and_ranges_from_the_names() {
+        let conn = db();
+        for (class_id, ordinal, kind, name) in [
+            (1, 14, "week", "No class (Nov. 24) — Thanksgiving Break"),
+            (1, 15, "week", "Week 14 — Introduction to Deep Learning and Course Synthesis"),
+            (4, 1, "part", "Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
+            (4, 2, "part", "Part I: Deep Learning (again)"),
+            (3, 16, "week", "Reading Days — No Class (Reading Days)"),
+        ] {
+            conn.execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, source)
+                 VALUES (?1, ?2, ?3, ?4, 'syllabus')",
+                params![class_id, ordinal, kind, name],
+            )
+            .expect("row");
+        }
+        backfill_labels(&conn).expect("backfill");
+        let labels = |class_id: i64| {
+            list_units(&conn, class_id)
+                .expect("list")
+                .into_iter()
+                .map(|u| (u.number, u.first_week, u.last_week))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(1), [(None, None, None), (Some(14), None, None)]);
+        assert_eq!(labels(4), [(Some(1), Some(1), Some(8)), (None, None, None)]);
+        assert_eq!(labels(3), [(None, None, None)]);
     }
 
     // -----------------------------------------------------------------------
     // Weeks (SPEC §8.5)
 
-    /// The one non-trivial mapping in M14: Applied Generative AI declares no
-    /// weeks, only Parts carrying the ranges they span.
+    /// A range written into a name, read back out — what fills a Part's
+    /// columns and what maps a `Weeks/` folder to its week.
     #[test]
     fn reads_the_week_range_out_of_a_part_s_name() {
         assert_eq!(
@@ -875,6 +1486,15 @@ mod tests {
         // name parses as.
         assert_eq!(parse_week_range("Week 03 \u{2014} Transformers"), Some((3, 3)));
         assert_eq!(parse_week_range("Week 5"), Some((5, 5)));
+
+        // What a scan records: the model's own range when it states a sane
+        // one, the name's otherwise, and nothing for a week.
+        assert_eq!(declared_weeks("part", "Part I (Weeks 1-8)", None), Some((1, 8)));
+        assert_eq!(declared_weeks("part", "Part I", Some((1, 8))), Some((1, 8)));
+        assert_eq!(declared_weeks("part", "Part I (Weeks 1-8)", Some((3, 2))), Some((1, 8)));
+        assert_eq!(declared_weeks("module", "Module 2 (Weeks 3-5)", None), Some((3, 5)));
+        assert_eq!(declared_weeks("week", "Week 3 \u{2014} Transformers", None), None);
+        assert_eq!(declared_weeks("part", "Part IV: Clinical Deployment", None), None);
     }
 
     /// Most unit names carry no range at all, and that is not an error — it is
@@ -902,21 +1522,7 @@ mod tests {
             (13, "Week 13 \u{2014} Model Lifecycle", "2026-11-17"),
             (14, "Week 14 \u{2014} Deep Learning", "2026-12-01"),
         ] {
-            upsert(
-                &conn,
-                1,
-                &NewUnit {
-                    ordinal,
-                    kind: "week".into(),
-                    name: name.into(),
-                    canvas_id: None,
-                    rel_path: None,
-                    starts_on: Some(starts_on.into()),
-                    ends_on: None,
-                    source: "syllabus",
-                },
-            )
-            .expect("insert");
+            write(&conn, 1, &unit(ordinal, "week", name, Some(starts_on)));
         }
         let slots = week_slots(&conn, 1).expect("slots");
         assert_eq!(slots.len(), 3);
@@ -930,7 +1536,7 @@ mod tests {
     }
 
     /// A course with no weeks of its own still files lectures by week — each
-    /// one landing in the Part whose range contains it.
+    /// one landing in the Part whose range, held as data, contains it.
     #[test]
     fn a_part_numbered_course_gets_its_weeks_from_the_ranges() {
         let conn = db();
@@ -939,33 +1545,27 @@ mod tests {
             (2, "Part II: Reinforcement Learning and Alignment (Weeks 9-12)"),
             (3, "Part III: Agentic AI in Medicine (Weeks 13-16)"),
         ] {
-            upsert(
-                &conn,
-                1,
-                &NewUnit {
-                    ordinal,
-                    kind: "part".into(),
-                    name: name.into(),
-                    canvas_id: None,
-                    rel_path: None,
-                    starts_on: None,
-                    ends_on: None,
-                    source: "syllabus",
-                },
-            )
-            .expect("insert");
+            let part = NewUnit {
+                weeks: declared_weeks("part", name, None),
+                ..unit(ordinal, "part", name, None)
+            };
+            write(&conn, 4, &part);
         }
-        let slots = week_slots(&conn, 1).expect("slots");
+        let slots = week_slots(&conn, 4).expect("slots");
         assert_eq!(slots.len(), 16, "the three ranges cover weeks 1–16");
-        assert!(slot_for_week(&conn, 1, 1).unwrap().unwrap().unit_name.starts_with("Part I:"));
-        assert!(slot_for_week(&conn, 1, 9).unwrap().unwrap().unit_name.starts_with("Part II:"));
-        assert!(slot_for_week(&conn, 1, 16).unwrap().unwrap().unit_name.starts_with("Part III:"));
-        assert!(slot_for_week(&conn, 1, 17).unwrap().is_none(), "no Part covers week 17");
+        assert!(slot_for_week(&conn, 4, 1).unwrap().unwrap().unit_name.starts_with("Part I:"));
+        assert!(slot_for_week(&conn, 4, 9).unwrap().unwrap().unit_name.starts_with("Part II:"));
+        assert!(slot_for_week(&conn, 4, 16).unwrap().unwrap().unit_name.starts_with("Part III:"));
+        assert!(slot_for_week(&conn, 4, 17).unwrap().is_none(), "no Part covers week 17");
         // No dates anywhere, so nothing is defaulted — the form asks.
         assert_eq!(nearest_week(&slots, "2026-09-10"), None);
         // The folder carries no topic, because the Part's name is not the
         // week's name.
         assert_eq!(slots[2].folder, "Week 03");
+        // A Part recorded without a range — its name carries none and the
+        // reader stated none — covers nothing.
+        write(&conn, 2, &unit(1, "part", "Part I: Foundations", None));
+        assert!(week_slots(&conn, 2).expect("slots").is_empty());
     }
 
     /// The week's own unit wins over any Part that also spans it: it is the
@@ -973,36 +1573,12 @@ mod tests {
     #[test]
     fn a_week_unit_outranks_a_part_that_spans_it() {
         let conn = db();
-        upsert(
-            &conn,
-            1,
-            &NewUnit {
-                ordinal: 1,
-                kind: "part".into(),
-                name: "Part I (Weeks 1-8)".into(),
-                canvas_id: None,
-                rel_path: None,
-                starts_on: None,
-                ends_on: None,
-                source: "syllabus",
-            },
-        )
-        .expect("part");
-        upsert(
-            &conn,
-            1,
-            &NewUnit {
-                ordinal: 3,
-                kind: "week".into(),
-                name: "Week 3 \u{2014} Transformers".into(),
-                canvas_id: None,
-                rel_path: None,
-                starts_on: Some("2026-09-10".into()),
-                ends_on: None,
-                source: "syllabus",
-            },
-        )
-        .expect("week");
+        let part = NewUnit {
+            weeks: Some((1, 8)),
+            ..unit(1, "part", "Part I (Weeks 1-8)", None)
+        };
+        write(&conn, 1, &part);
+        write(&conn, 1, &unit(3, "week", "Week 3 \u{2014} Transformers", Some("2026-09-10")));
 
         let slots = week_slots(&conn, 1).expect("slots");
         assert_eq!(slots.len(), 1);
@@ -1045,17 +1621,7 @@ mod tests {
     /// seeded class ids.
     #[test]
     fn names_the_division_a_course_is_in_today() {
-        let conn = crate::db::memory_db();
-        let unit = |ordinal: i64, kind: &str, name: &str, starts_on: Option<&str>| NewUnit {
-            ordinal,
-            kind: kind.into(),
-            name: name.into(),
-            canvas_id: None,
-            rel_path: None,
-            starts_on: starts_on.map(Into::into),
-            ends_on: None,
-            source: "syllabus",
-        };
+        let conn = db();
         // Fundamentals: Tuesdays, Week 13 on Nov 17 and Week 14 on Dec 1.
         for (ordinal, name, on) in [
             (1, "Week 1 \u{2014} Introduction to AI in Medicine", "2026-08-25"),
@@ -1064,7 +1630,7 @@ mod tests {
             (13, "Week 13 \u{2014} Model Lifecycle, MLOps, and Reproducibility", "2026-11-17"),
             (14, "Week 14 \u{2014} Introduction to Deep Learning and Course Synthesis", "2026-12-01"),
         ] {
-            upsert(&conn, 1, &unit(ordinal, "week", name, Some(on))).expect("insert");
+            write(&conn, 1, &unit(ordinal, "week", name, Some(on)));
         }
         // Biostatistics: Thursdays, with a week the syllabus declares as no class
         // and one it named without numbering.
@@ -1075,24 +1641,23 @@ mod tests {
             (14, "Week 14 \u{2014} Project preparation", "2026-11-19"),
             (15, "Week 15 \u{2014} No Class (Thanksgiving Week)", "2026-11-26"),
         ] {
-            upsert(&conn, 3, &unit(ordinal, "week", name, Some(on))).expect("insert");
+            write(&conn, 3, &unit(ordinal, "week", name, Some(on)));
         }
         // A row the scan stores as `module` when the model omits the kind,
         // since its name opens with neither "Week" nor "Part". Dated, so it is
         // still where the course is on that day.
-        upsert(
+        write(
             &conn,
             3,
             &unit(16, "module", "Reading Days \u{2014} No Class (Reading Days)", Some("2026-12-03")),
-        )
-        .expect("insert");
+        );
         // Applied Generative AI: three Parts naming their week ranges, no dates.
         for (ordinal, name) in [
             (1, "Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
             (2, "Part II: Reinforcement Learning and Alignment (Weeks 9-12)"),
             (3, "Part III: Agentic AI in Medicine (Weeks 13-16)"),
         ] {
-            upsert(&conn, 4, &unit(ordinal, "part", name, None)).expect("insert");
+            write(&conn, 4, &unit(ordinal, "part", name, None));
         }
 
         let now = |class_id: i64, today: &str| {
@@ -1137,38 +1702,23 @@ mod tests {
         assert_eq!(now(2, "2026-09-02"), None);
     }
 
-    /// `units` is unique on (class, name), not on ordinal — the scan numbers a
-    /// row by its position when the model omits the ordinal, so a rescan that
-    /// renames a week leaves two rows sharing a number. The date decides, not
-    /// the number and not which row was inserted first.
+    /// Two rows can share an ordinal — the scan numbers a row by its position
+    /// when the model omits the ordinal — and the date decides, not the number
+    /// and not which row was inserted first.
     #[test]
     fn a_duplicate_ordinal_does_not_hide_the_row_whose_date_won() {
-        let conn = crate::db::memory_db();
+        let conn = db();
         for (name, on) in [
-            ("Week 16 \u{2014} Reading Days", "2026-12-03"),
-            ("Week 16 \u{2014} Final Exam", "2026-12-10"),
+            ("Reading Days \u{2014} Week 16", "2026-12-03"),
+            ("Final Exam \u{2014} Week 16", "2026-12-10"),
         ] {
-            upsert(
-                &conn,
-                2,
-                &NewUnit {
-                    ordinal: 16,
-                    kind: "week".into(),
-                    name: name.into(),
-                    canvas_id: None,
-                    rel_path: None,
-                    starts_on: Some(on.into()),
-                    ends_on: None,
-                    source: "syllabus",
-                },
-            )
-            .expect("insert");
+            write(&conn, 2, &unit(16, "week", name, Some(on)));
         }
         let name = |today: &str| {
             current_unit(&conn, 2, today).expect("resolve").map(|u| u.name)
         };
-        assert_eq!(name("2026-12-04").as_deref(), Some("Week 16 \u{2014} Reading Days"));
-        assert_eq!(name("2026-12-11").as_deref(), Some("Week 16 \u{2014} Final Exam"));
+        assert_eq!(name("2026-12-04").as_deref(), Some("Reading Days \u{2014} Week 16"));
+        assert_eq!(name("2026-12-11").as_deref(), Some("Final Exam \u{2014} Week 16"));
     }
 
     /// Two divisions starting on one day: the week wins over a coarser
@@ -1177,28 +1727,14 @@ mod tests {
     /// the answer is one row, the same one every time.
     #[test]
     fn a_shared_start_date_goes_to_the_week_then_to_the_later_one() {
-        let conn = crate::db::memory_db();
+        let conn = db();
         for (ordinal, kind, name, on) in [
             (1, "part", "Part I (Weeks 1-8)", "2026-08-25"),
             (1, "week", "Week 1 \u{2014} Intro", "2026-08-25"),
             (3, "week", "Week 3 \u{2014} Later", "2026-09-01"),
             (2, "week", "Week 2 \u{2014} Earlier", "2026-09-01"),
         ] {
-            upsert(
-                &conn,
-                2,
-                &NewUnit {
-                    ordinal,
-                    kind: kind.into(),
-                    name: name.into(),
-                    canvas_id: None,
-                    rel_path: None,
-                    starts_on: Some(on.into()),
-                    ends_on: None,
-                    source: "syllabus",
-                },
-            )
-            .expect("insert");
+            write(&conn, 2, &unit(ordinal, kind, name, Some(on)));
         }
         let name = |today: &str| {
             current_unit(&conn, 2, today).expect("resolve").map(|u| u.name)
