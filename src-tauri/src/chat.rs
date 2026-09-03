@@ -1165,8 +1165,13 @@ fn stream_turn(
                 if let Some(reason) = value["delta"]["stop_reason"].as_str() {
                     turn.stop_reason = Some(reason.to_string());
                 }
-                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
-                    usage["output_tokens"] = json!(output);
+                // Inserted through the map rather than by index: indexing a
+                // non-object `Value` panics, and this thread has nothing to
+                // catch one — the session would stay "still answering".
+                if let (Some(output), Some(fields)) =
+                    (value["usage"]["output_tokens"].as_u64(), usage.as_object_mut())
+                {
+                    fields.insert("output_tokens".to_string(), json!(output));
                 }
             }
             "message_stop" => {
