@@ -782,8 +782,24 @@ fn class_block(
     // Both confirm queues (SPEC §10, §11), so the model can say what waits
     // and where. Ids in the detailed form only: chat has no tool that acts
     // on a proposal, so an id is something to name, not something to press.
+    // The move rows are read directly rather than through `sort_state`: the
+    // vanish pass already ran for every class at the top of the overview,
+    // and the inbox listing it would also produce is not shown here.
     let deadline_proposals = crate::deadlines::pending_proposals(conn, class.id)?;
-    let move_proposals = crate::sorter::sort_state(conn, class.id)?.proposals;
+    let mut move_stmt = conn.prepare(
+        "SELECT id, source_rel_path, dest_rel_path, source FROM move_proposals
+         WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
+    )?;
+    let move_proposals = move_stmt
+        .query_map([class.id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     if !deadline_proposals.is_empty() || !move_proposals.is_empty() {
         if detailed {
             out.push_str("Waiting for approval:\n");
@@ -797,13 +813,10 @@ fn class_block(
                     proposer(&p.source)
                 ));
             }
-            for p in &move_proposals {
+            for (id, from, to, source) in &move_proposals {
                 out.push_str(&format!(
-                    "- move proposal #{} · {} → {} · from {}\n",
-                    p.id,
-                    p.source_rel_path,
-                    p.dest_rel_path,
-                    proposer(&p.source)
+                    "- move proposal #{id} · {from} → {to} · from {}\n",
+                    proposer(source)
                 ));
             }
         } else {
