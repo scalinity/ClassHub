@@ -1548,7 +1548,7 @@ fn announcements_newest_first(
 /// Inside `.classhub/extracts/` so `search_material` covers them without a
 /// new root; a folder of their own so they never share a name with a source
 /// file's extract.
-const CANVAS_TEXTS_DIR: &str = "Canvas";
+pub(crate) const CANVAS_TEXTS_DIR: &str = "Canvas";
 /// The syllabus page's file stem, reserved so a Page titled "Syllabus" lands
 /// beside it rather than on it.
 const SYLLABUS_STEM: &str = "Syllabus";

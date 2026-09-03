@@ -577,6 +577,14 @@ pub fn remove_mirror(class_dir: &Path, rel_path: &str) {
     if !plain || path.as_os_str().is_empty() {
         return;
     }
+    // The Canvas sync keeps the course's Pages under a folder of its own in
+    // the mirror, with no `files` row behind them; a source folder of the
+    // same name would mirror into it, and a vanished source there must not
+    // take the professor's pages with it. Left as they are: the sync
+    // reconciles that folder itself.
+    if path.starts_with(crate::canvas_sync::CANVAS_TEXTS_DIR) {
+        return;
+    }
     let root = class_dir.join(EXTRACTS_DIR);
     for suffix in MIRROR_SUFFIXES {
         let entry = root.join(format!("{rel_path}{suffix}"));
@@ -1035,6 +1043,12 @@ mod tests {
             super::remove_mirror(&class_dir, rel);
             assert!(inside.is_file() && outside.is_file(), "{rel:?} removed something");
         }
+
+        // The sync's Canvas texts are nobody's extract, whatever a source
+        // folder is called.
+        let page = write(".classhub/extracts/Canvas/Home.md");
+        super::remove_mirror(&class_dir, "Canvas/Home");
+        assert!(page.is_file(), "a Canvas page went with a source");
         let _ = std::fs::remove_dir_all(&class_dir);
     }
 
