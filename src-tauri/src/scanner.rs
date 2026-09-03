@@ -869,12 +869,17 @@ mod tests {
         let (db, dir) = part_numbered_class("classhub-scan-parked");
         let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
         let (note, html, _md) = filed_and_digested(&db, &dir, transcript, PART_I);
+        let extract = dir.join(format!(".classhub/extracts/{transcript}.md"));
+        write(extract.clone(), "# extract");
         scan_class(&db, 4).expect("scan");
 
         fs::create_dir_all(dir.join("_Inbox")).expect("inbox");
         fs::rename(dir.join(transcript), dir.join("_Inbox/2026-09-15 — Lecture.md")).expect("park");
         let scan = scan_class(&db, 4).expect("scan");
         assert!(scan.changed, "the index lost a file");
+        // The row went with the walk, and the mirror with the row: the sorter
+        // starts an inbox file fresh, so nothing would have reused the entry.
+        assert!(!extract.exists(), "a parked file's extract stayed");
         let conn = db.lock().expect("db");
         assert_eq!(count(&conn, "files"), 0, "the index reflects the walk");
         assert_eq!(count(&conn, "lecture_contributions"), 1, "the row was forgotten");
