@@ -62,7 +62,8 @@ pub fn fetch_caption(
     on_stage("Opening Zoom — sign in if prompted…");
     let window = open_window(app, url)?;
 
-    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+    let started = Instant::now();
+    let deadline = started + CAPTURE_TIMEOUT;
     let mut last_state = String::new();
     let mut last_found = String::new();
     let mut last_error: Option<String> = None;
@@ -101,10 +102,6 @@ pub fn fetch_caption(
         };
 
         let state = probe["state"].as_str().unwrap_or("waiting").to_string();
-        if state != last_state {
-            on_stage(stage_label(&state));
-            last_state = state.clone();
-        }
         if let Some(found) = probe["found"].as_array() {
             if !found.is_empty() {
                 last_found = found
@@ -113,6 +110,18 @@ pub fn fetch_caption(
                     .collect::<Vec<_>>()
                     .join(", ");
             }
+        }
+        if state != last_state {
+            on_stage(stage_label(&state));
+            // The page's shape is undocumented and the window closes on
+            // success, so this line is the only record of which route paid
+            // off and how long each gate took.
+            eprintln!(
+                "zoom capture: {state} after {:.1}s · page had: {}",
+                started.elapsed().as_secs_f64(),
+                if last_found.is_empty() { "nothing recognizable" } else { &last_found }
+            );
+            last_state = state.clone();
         }
         match state.as_str() {
             "ready" => {
@@ -143,10 +152,19 @@ pub fn fetch_caption(
     match outcome {
         Outcome::Caption(text) => {
             let _ = window.close();
+            eprintln!(
+                "zoom capture: caption via [{last_found}] in {:.1}s — {}",
+                started.elapsed().as_secs_f64(),
+                describe_caption(&text)
+            );
             on_stage("Transcript captured");
             Ok((text, name))
         }
         Outcome::Media(media_url) => {
+            eprintln!(
+                "zoom capture: no caption via [{last_found}] after {:.1}s — downloading the recording",
+                started.elapsed().as_secs_f64()
+            );
             on_stage("No transcript published — downloading the recording…");
             // Both origins: Zoom serves recordings off a media host of its own,
             // so the page's cookies alone leave the request unauthenticated.
@@ -177,6 +195,20 @@ fn is_zoom_host(host: &str) -> bool {
     ["zoom.us", "zoom.com"]
         .iter()
         .any(|z| host == *z || host.ends_with(&format!(".{z}")))
+}
+
+/// Size, cue count and the first cue of a captured track, for the log line:
+/// whether Zoom sent speaker names is the one thing the filed transcript
+/// cannot show, because the merger attributes nothing it did not find.
+fn describe_caption(text: &str) -> String {
+    let mut lines = text.lines();
+    let cues = text.lines().filter(|l| l.contains("-->")).count();
+    let first = lines
+        .find(|l| l.contains("-->"))
+        .and_then(|_| lines.next())
+        .map(|l| l.chars().take(80).collect::<String>())
+        .unwrap_or_default();
+    format!("{} bytes, {cues} cues, first cue: {first:?}", text.len())
 }
 
 fn stage_label(state: &str) -> &'static str {
@@ -416,6 +448,7 @@ const PROBE: &str = r#"
     var list = s.transcriptList;
     var rows = [];
     var anyTimed = false;
+    var named = 0;
     if (list && list.length) {
       out.found.push("transcriptList:" + list.length);
       for (var i = 0; i < list.length; i++) {
@@ -423,10 +456,15 @@ const PROBE: &str = r#"
         var text = (it.text || it.originLangText || "").trim();
         if (!text) continue;
         var who = (it.username || it.name || "").trim();
+        if (who) named++;
         var a = clock(it.ts), b = clock(it.endTs);
         if (a) anyTimed = true;
         rows.push({ a: a, b: b, line: who ? who + ": " + text : text });
       }
+      // How many rows Zoom attributed to someone. A recording made from one
+      // account in a lecture hall carries no names at all, and the filed
+      // transcript cannot say whether that was Zoom or the merger.
+      out.found.push("named:" + named);
     }
     // Keyed on the rows that survived, not on the list's length: a list whose
     // entries are all empty would otherwise report "ready" with no text and

@@ -58,9 +58,13 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["canvasStatus"] });
       break;
     case "files":
-      // An approved move changed the tree on disk; the rescan also refreshes
-      // guide staleness through the tree-keyed guides query.
+      // An approved move changed the tree on disk.
       void queryClient.invalidateQueries({ queryKey: ["classTree"] });
+      // Staleness is measured against that tree, and a refiled lecture also
+      // changes which guide's sources it counts among and which transcript
+      // its session document is keyed by — none of which the guides query
+      // sees unless told.
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
       // The same scan points each declared division at its folder, so the
       // Structure list is reading a join the scan just rewrote.
       void queryClient.invalidateQueries({ queryKey: ["units"] });

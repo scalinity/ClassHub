@@ -437,8 +437,11 @@ fn contribution_for(
 /// through the §10 confirm queue. Called inside the move's own transaction.
 ///
 /// Refiling to a different week is the correction affordance (SPEC §8.5), so
-/// this has to re-resolve the unit rather than only rewrite the path — and it
-/// clears the row outright when the new home is not a week, because a
+/// this has to re-resolve the unit rather than only rewrite the path. The
+/// distilled note travels with the row: it holds the transcript's content,
+/// which the move did not change, and leaving it behind would price every
+/// correction at a fresh digest of a three-hour lecture. Only when the new
+/// home is not a week is the row cleared and the note removed, because a
 /// contribution naming a transcript that has left `Weeks/` maps a guide to
 /// something no longer there.
 pub fn refile_contribution(
@@ -448,14 +451,7 @@ pub fn refile_contribution(
     source_rel: &str,
     dest_rel: &str,
 ) -> Result<()> {
-    let mapped: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
-        rusqlite::params![class_id, source_rel],
-        |row| row.get(0),
-    )?;
-    if mapped == 0 && !is_filed_transcript(dest_rel) {
-        return Ok(());
-    }
+    refile_session(conn, class_id, source_rel, dest_rel)?;
 
     let old_corpus: Option<String> = conn
         .query_row(
@@ -465,19 +461,83 @@ pub fn refile_contribution(
             |row| row.get(0),
         )
         .optional()?;
+    if old_corpus.is_none() && !is_filed_transcript(dest_rel) {
+        return Ok(());
+    }
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
         rusqlite::params![class_id, source_rel],
     )?;
     let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
 
-    // The note under the old unit would otherwise stay in that unit's corpus
-    // and go on feeding its guide the lecture that left. Removed rather than
-    // relocated: it opens with the transcript's old path, and a redistill is
-    // what makes it true again.
-    if let Some(old) = old_corpus.filter(|old| moved.as_ref().is_none_or(|(_, _, new)| new != old)) {
-        let _ = fs::remove_file(class_dir.join(old));
+    let Some(old) = old_corpus else {
+        return Ok(());
+    };
+    let from = class_dir.join(&old);
+    match moved {
+        // A different unit's corpus: the note goes with the lecture, so that
+        // unit's guide reads it and the old unit's guide stops reading it.
+        Some((_, _, new)) if new != old => {
+            if from.is_file() {
+                let to = class_dir.join(&new);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(&from, &to)
+                    .with_context(|| format!("moving the corpus note {old} to {new}"))?;
+                // `remove_dir` refuses a folder with anything left in it, which
+                // is the whole check: a unit's corpus folder outlives its last
+                // note only as clutter.
+                if let Some(parent) = from.parent() {
+                    let _ = fs::remove_dir(parent);
+                }
+            }
+        }
+        Some(_) => {}
+        // Out of `Weeks/`: no unit reads it any more.
+        None => {
+            let _ = fs::remove_file(from);
+        }
     }
+    Ok(())
+}
+
+/// The session document follows its transcript. Its `guides` row is keyed by
+/// the transcript's path (`session:<path>`) and its manifest names that path,
+/// so left alone a refiled lecture's digest would drop out of the Lectures
+/// listing and read as stale over a move that changed no content — inviting a
+/// redistill to buy back nothing.
+fn refile_session(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: &str) -> Result<()> {
+    let old_scope = session_scope(source_rel);
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, source_manifest FROM guides WHERE class_id = ?1 AND scope = ?2",
+            rusqlite::params![class_id, &old_scope],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, manifest)) = row else {
+        return Ok(());
+    };
+    let mut entries: Vec<crate::extract::ManifestEntry> =
+        serde_json::from_str(&manifest).context("reading the session's manifest")?;
+    for entry in &mut entries {
+        if entry.rel_path == source_rel {
+            entry.rel_path = dest_rel.to_string();
+        }
+    }
+    let new_scope = session_scope(dest_rel);
+    // A row already at the new scope can only be a leftover from a transcript
+    // that vanished without a move; the destination itself was checked to be
+    // free on disk. Cleared so the rewrite cannot hit UNIQUE(class_id, scope).
+    conn.execute(
+        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2 AND id != ?3",
+        rusqlite::params![class_id, &new_scope, id],
+    )?;
+    conn.execute(
+        "UPDATE guides SET scope = ?1, source_manifest = ?2 WHERE id = ?3",
+        rusqlite::params![new_scope, serde_json::to_string(&entries)?, id],
+    )?;
     Ok(())
 }
 
@@ -1341,16 +1401,60 @@ mod tests {
             !dir.join(&corpus).exists(),
             "the old unit kept a note for a lecture that left it"
         );
+        // The distillation is the transcript's, not the unit's: the note moved
+        // with the lecture rather than being spent again on a redistill.
+        assert!(rows[0].distilled, "the note did not follow the lecture");
+        assert_eq!(
+            fs::read_to_string(dir.join(&rows[0].corpus_rel_path)).expect("moved note"),
+            "# note"
+        );
+        let moved_note = rows[0].corpus_rel_path.clone();
 
         // And moving it out of Weeks/ entirely leaves nothing mapping a guide
-        // to a transcript that is no longer there.
+        // to a transcript that is no longer there — the note included.
         let out = "Module 1/2026-08-27 — Lecture.md".to_string();
         fs::create_dir_all(dir.join("Module 1")).expect("module dir");
         fs::rename(dir.join(&to), dir.join(&out)).expect("move out");
         refile_contribution(&conn, 1, &dir, &to, &out).expect("refile out");
         assert!(list_contributions(&conn, 1).expect("list").is_empty());
+        assert!(!dir.join(&moved_note).exists(), "a note survived with no unit reading it");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A session document is keyed by its transcript's path, so a refile that
+    /// left the row alone would drop the digest from the Lectures listing and
+    /// mark it stale over a rename — a redistill of a three-hour lecture to
+    /// buy back nothing.
+    #[test]
+    fn a_session_document_follows_its_refiled_transcript() {
+        let conn = crate::db::memory_db();
+        let dir = std::env::temp_dir().join("classhub-refile-session");
+        let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
+        let to = "Weeks/Week 03 — Data Exploration/2026-08-27 — Lecture.md";
+        let manifest = serde_json::json!([{ "relPath": from, "sha256": "abc" }]).to_string();
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+             VALUES (1, ?1, 'Study Guides/Sessions/2026-08-27 — Designs.html', 1, ?2)",
+            rusqlite::params![session_scope(from), manifest],
+        )
+        .expect("session row");
+
+        // No units declared, so nothing maps — the session still follows.
+        refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        let (scope, manifest): (String, String) = conn
+            .query_row(
+                "SELECT scope, source_manifest FROM guides WHERE class_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("one row");
+        assert_eq!(scope, session_scope(to));
+        let entries: Vec<crate::extract::ManifestEntry> =
+            serde_json::from_str(&manifest).expect("manifest");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].rel_path, to, "the manifest still names the old path");
+        assert_eq!(entries[0].sha256, "abc");
     }
 
     /// A slide deck the sorter files under a week is not a lecture, and a

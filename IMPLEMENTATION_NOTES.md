@@ -1414,3 +1414,122 @@ addressed as individual commits. What future sessions should know:
 - The auditor's report was cut off after its third suggestion when the review
   agents were stopped; anything that followed is not reflected here.
 - The repo still has no git remote; review fixes are local commits only.
+
+## M16 — The first real lecture (2026-09-02)
+
+### What happened
+
+- The recording was the Fundamentals of AI in Medicine I session of 2026-09-01, as a
+  Zoom share link from Canvas, run through the Add lecture form on the dev build with the
+  digest left on. The form resolved the date to `Week 02 — Responsible AI, Ethics, and
+  Governance`, which is the week the syllabus dates 2026-09-01. Five seconds after ADD
+  LECTURE the transcript was filed at `Weeks/Week 02 — …/2026-09-01 — Lecture.md`, its
+  `lecture_contributions` row was `applied` on unit 24 spanning 0–9,300,000 ms over 196
+  lines, its `files` row carried a zero-token extract, and digest job 286 was running.
+- **Zoom.** No sign-in and no passcode were asked for: the share link serves the
+  recording-player page to an anonymous GET and the player's store fills in on its own.
+  The probe went `waiting` (1.5 s, no store) → `fetching` (4.5 s, store with `ccUrl`) →
+  `ready` (6.1 s). The caption is a 102 KB sentence-level WebVTT of 755 cues with no
+  speaker prefix on any of them — one Zoom account in a lecture hall records everyone as
+  nobody. `zoom.rs` now writes each state change, the route that paid off, the timing, the
+  byte and cue counts and the first cue to stderr, and the probe reports `named:N` for
+  the `transcriptList` route, because the filed transcript cannot show whether names were
+  absent from the page or dropped by the merger. Measured the second time round (see
+  Verified) since the first capture pre-dates the logging.
+- **Normalization.** 755 cues became 67 paragraphs under 30 `## HH:MM` anchors; 2 h 36 m
+  reported in the header. Anchors label paragraph start times, so they run `00:08, 00:17,
+  00:20, 00:25 …` — the mic was off for the first eight minutes (the transcript says so)
+  and one paragraph spanned 00:15. Zoom punctuates sparsely, so seven paragraphs ran past
+  the 1,500-character soft cap (longest 2,449); the digest's `Read` returned them whole.
+- **Digest** (job 286): 12.4 min, 5 turns, $3.06 list-equivalent, 69k output tokens.
+  It named the session *Clinical Model Evaluation, Fairness, and HIPAA*, wrote the 57 KB
+  markdown, the 75 KB HTML in a single `Write` (no output cap hit, so the chunked-writing
+  clause was not needed) and the 18 KB corpus note with 46 anchors, whose header states
+  that the transcript carries no speaker labels. The HTML has no external reference.
+- **Guide** (job 287, `unit:Week 2 — …`): 18.2 min, 34 turns, $5.59 list-equivalent,
+  103k output tokens (29k thinking), 160 KB through one `Write` and 13 `Edit`s, six
+  sections, self-contained (the two "CONTINUE" hits are SVG label text). It read the
+  corpus note once and then the transcript in full across four paged `Read`s, despite the
+  prompt's "open it only where the distillation is not enough": with the note as its only
+  source it chose the record. It cites `2026-09-01 — Lecture.md · HH:MM` 117 times and
+  the note once by path. Left as is — the transcript is ~20k input tokens against 103k
+  of output, and the citations do scrub to the recording.
+- **Chat**: asked where the instructor said prevalence changes PPV, it searched, read the
+  transcript's extract copy (`.classhub/extracts/Weeks/…/Lecture.md.md`, `## 01:05`) and
+  cross-cited the session markdown at line 73. Citing the extract rather than the source
+  transcript is how every text-route file is cited; cosmetic.
+- **Parakeet** was not on the path (Zoom published a caption), so its throughput was
+  measured with the app's exact invocation on 73 minutes of 16 kHz speech synthesized by
+  `say` from the real transcript: 49 s wall time including the model load, ~0.7 minutes of
+  compute per hour of audio, 548 cues.
+
+### What broke, and what was done
+
+- **A refile orphaned the session document.** An approved move rewrote the `files` row,
+  moved the extract and re-resolved the contribution, but the `guides` row for the digest
+  is keyed `session:<transcript path>` with a manifest naming that path, so after the move
+  the Lectures listing showed the transcript as undigested (DISTILL) and the digest as a
+  row for a path nothing was at. `lectures::refile_session` rewrites the scope and the
+  manifest entry; a stale row already at the new scope is cleared first so the rewrite
+  cannot hit `UNIQUE(class_id, scope)`.
+- **A refile deleted the corpus note**, by M14 design, pricing every correction at a
+  fresh $3 digest of a three-hour lecture for content the move did not change.
+  `refile_contribution` now relocates the note into the new unit's corpus folder (and
+  removes the emptied old folder); it is removed only when the transcript leaves `Weeks/`.
+  SPEC §8.5 states the new design.
+- **The Structure row hid a guide whose sources had left.** `UnitRow` rendered the guide
+  cluster only when the unit had a folder or a distilled lecture, so after the refile the
+  Week 2 row showed neither VIEW GUIDE nor STALE — exactly the state the row exists to
+  show. A guide that exists is now always shown.
+- **Staleness never refreshed after a move.** The `files` hub change invalidated the tree,
+  units and contributions but not `["guides"]`, and the comment there claimed the guides
+  query was tree-keyed; it is keyed on the class alone. The badge stayed wherever it was
+  until something else refetched. `query.ts` now invalidates guides on `files`.
+
+### Verified
+
+- `cargo test`: 133 pass, one new (`a_session_document_follows_its_refiled_transcript`);
+  the refile test now asserts the note moved and is readable at its new path, and is gone
+  once the transcript leaves `Weeks/`. `npx tsc --noEmit` clean. The probe harness under
+  node still passes with the `named:` entry.
+- Every UI state was seen live in the dev build: the form's resolved week and "feeds"
+  line; `TRANSCRIPT FILED` with the digest running; `DISTILLING · 2026-09-01 — Lecture.md`
+  and the `LECTURE DIGEST 04:26` pill; the session row with its `WEEK 2 — …` badge; the
+  Week 2 row gaining `1 LECTURE` and SYNTHESIZE GUIDE; `SYNTHESIZING…`; VIEW GUIDE fresh.
+- Refile through a chat proposal (proposal 17, APPROVE): one contribution row, now on
+  unit 25 with the note under `corpus/Week 3 — Biomedical Data Foundations/`, the session
+  row's scope and manifest on the new path, the extract moved, `sort.move` audited. The
+  move back (proposal 18) restored all of it, and the Week 2 guide's stored manifest equals
+  the current one byte for byte, so it reads fresh without a resynthesis.
+- The same link captured a second time with the digest off filed as `2026-09-01 — Lecture
+  (2).md` (the never-overwrite rule) and put a second source under Week 2, which flipped
+  its guide to `STALE — RESYNTHESIZE` live; a proposal moving the duplicate to the class
+  root cleared its contribution row, and the guide read fresh again live after the
+  `query.ts` fix (proposals 19–21; the duplicate and its extract were then deleted and the
+  class rescanned). The round trip Week 2 → Week 3 → Week 2 was repeated after a full
+  page reload to see stale and then fresh with no remount.
+- Final state: one transcript under `Weeks/Week 02 — …`, its note under
+  `.classhub/corpus/Week 2 — …/`, the session pair under `Study Guides/Sessions/`, the
+  Week 2 guide, one `applied` contribution row, guides rows 3 (session) and 4 (unit). No
+  file in the tree was edited by hand.
+
+### Gotchas
+
+- **Two processes named `classhub`.** AppleScript resolves `process "classhub"` by name,
+  so with the installed app running every reference — even one built from `unix id` —
+  re-resolves to the first one, and the first half-hour of AX driving landed on the Aug 25
+  build. The Swift accessibility driver used instead (`AXUIElementCreateApplication(pid)`,
+  scratch only, not committed) needs `AXEnhancedUserInterface` set on the app element
+  before the web content is exposed. The dialog's `aria-modal` hides the rest of the page
+  from AX, which is why "ADD LECTURE" resolved to the form's button while it was open.
+- **`tauri dev` rebuilds and relaunches the app on any `src-tauri` change**, which would
+  orphan a running job. Rust edits waited for jobs 286 and 287 to settle.
+- **Vite HMR of `query.ts` creates a second `QueryClient`** that the provider never sees,
+  so a cache-invalidation change looks broken until a full page reload (`touch
+  index.html`). Verify frontend cache changes after a reload, not after HMR.
+- The contribution row's `summary` reverts to the filing-time placeholder on a refile
+  (`contribution_for` re-records the row); nothing displays it, so it was left.
+- The Materials tree offers SYNTHESIZE GUIDE on the `Weeks` folder as if it were a module
+  folder. Untouched here.
+- The installed app is still the Aug 25 build; it was not reinstalled this session and
+  was left running throughout (no job of its own was active).

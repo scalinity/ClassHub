@@ -35,22 +35,42 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   not vector-based. No embedding provider, no vector DB.
 - **Claude cannot read `.pptx`.** It reads PDFs and images natively. LibreOffice
   (`soffice --headless --convert-to pdf`) converts PPTX → PDF during ingestion.
-- **A Zoom recording link cannot be fetched.** There is no supported way to pull a caption
-  track from a share link: university recordings sit behind institutional SSO and often a
-  passcode, whether a *viewer* may see the transcript is the host's setting, and the Zoom
-  API path needs host/admin OAuth that a student account does not have. A plain HTTP GET
-  lands on a login page. Only a browser session the user signed in themselves can reach the
-  recording, which is what §7.1's capture window is for.
+- **A Zoom recording link is read through a browser window, never fetched.** There is no
+  supported way to pull a caption track from a share link: the Zoom API path needs
+  host/admin OAuth that a student account does not have, whether a *viewer* may see the
+  transcript is the host's setting, and a recording may sit behind institutional SSO or a
+  passcode. So the link opens in a webview the user can sign in to, which is what §7.1's
+  capture window is for. Measured 2026-09-02 on a UF cloud recording (Fundamentals,
+  2026-09-01): the share link served Zoom's recording-player page to an anonymous GET with
+  no redirect, no passcode gate and no sign-in; the player's Vuex store was populated 4.5 s
+  after the window opened and exposed `ccUrl`; the caption fetched from it was a 102 KB
+  WebVTT of 755 sentence-level cues, and the whole capture took 6.1 s. That track carries
+  **no speaker names**: the room's one Zoom account recorded everyone, so for a lecture-hall
+  recording the professor/student distinction is absent whichever route produced the text,
+  and the digest says so in its header rather than inventing it.
+- **What one real session costs.** Measured 2026-09-02 on that 2 h 36 m recording, Opus at
+  `xhigh`, list-price equivalents from the CLI's own accounting: the digest (§8.4) ran
+  12.4 min over 5 turns for $3.06, writing 69k output tokens — the 75 KB session HTML fit in
+  one `Write`, so the output cap was never reached; the Week 2 unit guide (§8.1), built from
+  that one corpus note, ran 18.2 min over 34 turns for $5.59, 103k output tokens through the
+  chunked Write-then-Edit pattern. Both draw on the subscription's rolling limits, not on
+  credits.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
   borrowed — each transcription pays its own model load. Its packaged `parakeet-mlx` console
   script also carries a stale shebang from the machine it was built on, so the module entry
-  (`python -c "from parakeet_mlx.cli import app; app()"`) is what gets invoked.
+  (`python -c "from parakeet_mlx.cli import app; app()"`) is what gets invoked. Measured
+  2026-09-02 with exactly that invocation on 73 minutes of 16 kHz speech (the real Week 2
+  transcript read aloud by macOS `say`, since Zoom published a caption for the session):
+  49 s wall time including the model load, about **0.7 minutes of compute per hour of
+  audio**, 548 sentence-level cues.
 - **Parakeet does no speaker diarization.** Its output is unattributed text. Zoom's own caption
-  track carries speaker names, and for a lecture the professor/student distinction is most of
-  what makes a transcript worth reading — so Zoom's track is always preferred, and Parakeet is
-  the fallback for when the host published none.
+  track carries speaker names when the people speaking are on their own Zoom accounts, and for
+  a lecture the professor/student distinction is most of what makes a transcript worth reading
+  — so Zoom's track is always preferred, and Parakeet is the fallback for when the host
+  published none. A lecture-hall recording made from the room's single account carries no
+  names on either route (measured above).
 - **The four courses do not share an organizational structure.** Read from the syllabi:
 
   | Class | The course's own divisions | Dates in syllabus |
@@ -503,11 +523,24 @@ came in becomes cues, the cues become markdown, the markdown is filed as source 
    `viewMp4Url` is downloaded with the same session's cookies and routed to (2). That
    degradation is why on-device transcription earns its place rather than duplicating Zoom.
 
+   On a UF cloud recording (measured 2026-09-02, §1) the probe's states run `waiting`
+   (page loaded, no store yet, 1.5 s) → `fetching` (store up with `ccUrl`, 4.5 s) → `ready`
+   (6.1 s), with no `login` or `passcode` state in between; `ccUrl` is the route that pays
+   off, and the track it serves is sentence-level WebVTT with no speaker prefix. Each state
+   change and the final route are written to stderr with their timings, because the window
+   closes on success and nothing else records what the page looked like.
+
 **Normalization** is pure, local and zero-token. A raw caption track is one cue per couple of
 seconds, so a lecture arrives as thousands of fragments — unreadable, and hostile as input to
 a digest prompt. Consecutive cues from one speaker merge back into paragraphs, breaking on a
 speaker change, a long pause, or a soft length cap at a sentence boundary, with an `## HH:MM`
-anchor every five minutes so a digest can cite a time that scrubs to the right moment.
+anchor every five minutes so a digest can cite a time that scrubs to the right moment. An
+anchor carries the start time of the paragraph that opens its five-minute section, so the
+sequence is irregular where a paragraph runs across a boundary (the real Week 2 transcript
+opens `00:08`, `00:17`, `00:20`, `00:25` …: the mic was off for eight minutes, and one
+paragraph spanned the 00:15 mark). Zoom punctuates sparsely, so a merged paragraph can run
+well past the soft cap before a sentence ends; the digest's `Read` returned every such
+paragraph whole.
 
 Speaker attribution is a guess with a corroboration rule: a multi-word `Name:` prefix is taken
 as a display name, but a single-word one has to recur before it counts, because `Danny:` and
@@ -777,7 +810,13 @@ the distillation is not enough. `.classhub/corpus/` joins the extract cache in
 
 A contribution is recorded as applied when it is written, because the filing decision it follows
 is the user's own rather than a model's reading. Correcting one means refiling the lecture into
-a different week, which is a move like any other — there is no separate span to reassign.
+a different week, which is a move like any other — there is no separate span to reassign. The
+distillation travels with the transcript: an approved move re-resolves the unit, relocates the
+corpus note into the new unit's folder, and rewrites the session document's scope and manifest to
+the new path, so a refile spends no tokens and the session document never reads as stale over a
+rename. The guide the lecture left goes stale — its manifest still names a transcript that no
+longer counts among its sources — and the guide it joined gains a note. A transcript moved out
+of `Weeks/` altogether loses its row and its note, since no division reads it any more.
 
 `lecture_contributions` keeps its per-span shape (`start_ms`/`end_ms`, resolved line bounds)
 even though a lecture currently contributes its whole length to a single unit. The columns cost
@@ -1034,7 +1073,7 @@ Mark the checkbox when the acceptance criteria pass.
   `/Applications/ClassHub.app` on the current commit opening the same database, and two launches
   in a day produce one self-check.
 
-- [ ] **M16 — The first real lecture.** (`milestones/M16-first-real-lecture.md`)
+- [x] **M16 — The first real lecture.** (`milestones/M16-first-real-lecture.md`)
   M14 was accepted on fixtures. One real recording goes through the Zoom, transcription,
   filing, digest, corpus and unit-guide path, everything that breaks is fixed, and what was
   measured lands in §1 and §7.1.

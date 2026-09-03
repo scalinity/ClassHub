@@ -208,8 +208,10 @@ function UnitRow({
   const guide = controls.guides.get(scope);
   // A division with no folder and no distilled lecture has nothing to build a
   // guide from, so the action stays off the row rather than offering a button
-  // that can only refuse.
-  const buildable = distilled > 0 || unit.relPath !== null;
+  // that can only refuse. A guide that already exists is shown regardless: a
+  // lecture refiled out of this week leaves its guide behind and stale, and
+  // that is exactly what the row must not hide.
+  const buildable = distilled > 0 || unit.relPath !== null || guide !== undefined;
 
   return (
     <li className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
