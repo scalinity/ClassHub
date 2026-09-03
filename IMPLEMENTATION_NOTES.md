@@ -3446,3 +3446,113 @@ should know:
   noticing; a relaunch forgets the sleeps, which is the rare case.
 - The Job Center's live output remains the way to tell a hung job from a
   suspended one; nothing here changes what the runner does.
+
+## M25 — What a week's folder holds (2026-09-03)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database
+(`user_version` 13, 35 file rows, 3 contributions, 7 guides, jobs at 308,
+audit at 162, no active job) through an ignored probe test in `guides.rs`,
+under the code at 162b114: `current_manifest("unit:37")` was the two
+transcripts and its `files_block` empty, the slots weeks 1–8 as bare
+folders; `current_manifest("unit:24")` was its one transcript and its
+listing empty; all five guides fresh. On disk, `Weeks/Week 01/` held the
+deck and `Weeks/Week 02/` the notebook, both indexed and extracted, and
+Fundamentals' Week 02 folder held its transcript alone beside an empty
+`Week 03 — Biomedical Data Foundations/`. Under the widened code, same
+copy: unit:37's manifest four entries — the deck and the notebook beside
+the transcripts — its listing naming the deck with its extract and its
+original and the notebook with its extract, row 7 stale, row 4 fresh. The
+installed app is the Aug 25 build; no dev build was running; the Sept 8
+lecture is next Tuesday's, so the fallback branch applied.
+
+### What was built
+
+- **The week folders count.** `extract::current_manifest` for a unit
+  scope unions in every `files` row under `Weeks/` whose folder's week
+  (`units::week_from_rel_path`) is one of the weeks `week_slots` maps to
+  the unit — by number, so a week the syllabus renamed still counts the
+  folder it was filed under. `files_block` is manifest-driven, so the deck
+  and the notebook are listed with their extracts while the contributing
+  transcripts stay listed apart through their notes; `unit_context`'s
+  refusal names the weeks.
+- **The row offers what the backend accepts.** `UnitInfo.materials` — the
+  manifest less the contributing transcripts, filled by `list_units` —
+  gates SYNTHESIZE GUIDE and PRACTICE EXAM in `Structure.tsx` beside the
+  distilled count. `relPath !== null` left the gate: an empty folder was
+  refused anyway.
+- **A scan settles what a vanished transcript leaves.**
+  `scanner::scan_class` returns `Scan { tree, changed }`. For each path
+  the index held and the walk did not, `lectures::lecture_left` refiles it
+  through `refile_lecture` when a scanned file the index did not hold
+  carries the same hash, and otherwise clears the session row with both
+  documents (`drop_session`, now shared with `refile_session`), the
+  contribution row and the note. Each lecture runs on its own savepoint,
+  effects apply after the commit, and a refusal is logged with the row
+  left as it was. `NoteMove::Remove` prunes the emptied corpus folder the
+  way `Relocate` does.
+- **The `index` hub change.** The scan command and the launch scan push
+  it when the index changed; `query.ts` refetches guides, units,
+  contributions and classes, never the tree, which is the scan's own
+  result. Before this a RESCAN that added a file beside a transcript moved
+  no badge until a job settled.
+- SPEC §4, §7 step 5, §7.2, §8.1, §8.5 and §13 state the design.
+
+### Verified
+
+- `cargo test`: 224 pass, four new — a Part's manifest over its own
+  weeks' folders and not the next Part's, a renamed week's folder counted
+  by number, staleness flipping on the deck's hash; the listing naming the
+  deck and not the transcript (the unit-context test, extended); the
+  materials count; a scan forgetting a deleted transcript (row, note,
+  emptied corpus folder, session row, both documents, and a second scan
+  unchanged) and refiling a moved one (row on Part II, note relocated,
+  session row rekeyed, document kept). `npx tsc --noEmit` clean.
+- Live on the dev build (pid 56780) beside the installed app (8598); the
+  launch scan found nothing stale and enqueued no job. The Part I row read
+  `2 LECTURES · STALE — RESYNTHESIZE · PRACTICE EXAM · VIEW GUIDE` on the
+  widening alone, and Parts II and III offered nothing. Fundamentals' Week
+  2 row read `1 LECTURE · VIEW GUIDE` fresh, `STALE — RESYNTHESIZE` after
+  `m25-fixture.csv` was dropped beside its transcript and RESCAN pressed
+  (extracted locally, no job), and fresh again after the file was removed
+  and RESCAN pressed; the empty Week 3 folder offered nothing.
+- A two-cue caption filed through the form into Week 04 with the digest
+  off (`Weeks/Week 04/2026-09-03 — Lecture.md`, row 4 on unit 37, audit
+  163), then given a note at its corpus path and a session row with two
+  documents by hand: reopening the workspace read `3 LECTURES` and `3
+  SESSIONS`. Moved in Finder to `Week 09` and RESCAN: row 4 on unit 38
+  with its note under `Part II- …`, session row 8 rekeyed, the Lectures
+  row badged `PART II`, Part I `2 LECTURES`, Part II `1 LECTURE` with
+  SYNTHESIZE GUIDE, the log naming the move. Deleted in Finder and RESCAN:
+  two rows for the class, guides 5–7, files at 35, the note and both
+  documents gone, the log naming the loss. The emptied `Part II- …` corpus
+  folder stayed, which is the prune added afterwards and pinned in the
+  scan test. Fixture folders and extracts removed and RESCAN: 35 files, 3
+  contributions, 7 guides, 51 units, jobs at 308, audit at 163.
+- Not run: any chat turn, digest or guide. Session cost: nothing on the
+  subscription, nothing on credits.
+
+### Left as it is
+
+- The Part I guide (row 7) reads stale until the Sept 8 lecture is filed
+  and the guide rebuilt from three notes: its manifest lacks the deck and
+  the notebook it read, and a rebuild from the same two notes would be
+  stale again in five days.
+- A row written by hand — a note at the corpus path, a session row — is
+  not a scan change, so it shows after a reopen rather than a RESCAN.
+- The scanner leaves the extract of a deleted file under
+  `.classhub/extracts/`.
+- The Materials tree still offers SYNTHESIZE GUIDE on `Slides` and
+  `Weeks`; an edit of the owner's own during an extract job demotes the
+  job.
+
+### Gotchas
+
+- The WEEK popup took a typed `Week 04` as Week 01 this time; `ax press
+  Week` opens the menu and `ax press '<item title>'` picks the item.
+- The digest checkbox is checked by default and enabled once a week is
+  picked; uncheck it before ADD LECTURE or a fixture costs a digest.
+- A `.md` fixture in a week folder is a lecture to the listing; a `.csv`
+  extracts locally and spawns no job.
+- Killing the app pid ended `tauri dev` and freed :1420.

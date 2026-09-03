@@ -56,10 +56,15 @@ fn scan_class(
     state: tauri::State<Db>,
     class_id: i64,
 ) -> Result<Vec<scanner::TreeNode>, String> {
-    let tree = scanner::scan_class(&state.0, class_id).map_err(|e| format!("{e:#}"))?;
+    let scan = scanner::scan_class(&state.0, class_id).map_err(|e| format!("{e:#}"))?;
+    // Staleness, the divisions' counts and the lectures read rows the scan
+    // rewrote, and the tree's own refetch does not reach them.
+    if scan.changed {
+        db::emit_hub_change(&app, "index");
+    }
     // SPEC §7: auto-extract after every scan; a no-change scan is a no-op there.
     extract::spawn_pipeline(&app, class_id);
-    Ok(tree)
+    Ok(scan.tree)
 }
 
 #[tauri::command(async)]
@@ -687,7 +692,12 @@ fn scan_and_extract_all(app: &tauri::AppHandle) {
     };
     for class_id in class_ids {
         match scanner::scan_class(&db.0, class_id) {
-            Ok(_) => extract::spawn_pipeline(app, class_id),
+            Ok(scan) => {
+                if scan.changed {
+                    db::emit_hub_change(app, "index");
+                }
+                extract::spawn_pipeline(app, class_id)
+            }
             Err(e) => eprintln!("launch scan skipped class {class_id}: {e:#}"),
         }
     }

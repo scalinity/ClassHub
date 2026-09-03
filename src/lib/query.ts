@@ -15,7 +15,8 @@ interface HubChange {
     | "deadlineProposals"
     | "units"
     | "announcements"
-    | "canvasSyllabus";
+    | "canvasSyllabus"
+    | "index";
 }
 
 // Backend writes (chat tools, drop-to-sort, deadline CRUD) change hub data;
@@ -93,6 +94,17 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // A move can be a lecture refiled into a different week, which moves
       // which division it feeds (SPEC §8.5).
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+      break;
+    case "index":
+      // A scan changed the file index — a file added, changed or removed on
+      // disk, or a transcript deleted or moved in Finder forgotten or refiled
+      // (SPEC §8.5). Staleness, the divisions' counts, the lectures and the
+      // card's stale count read what the scan rewrote; the tree itself is the
+      // scan's own result, so it is not run again.
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      void queryClient.invalidateQueries({ queryKey: ["units"] });
+      void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+      void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
   }
 });

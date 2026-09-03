@@ -231,13 +231,13 @@ function UnitRow({
 }) {
   const scope = unitScope(unit.id);
   const guide = controls.guides.get(scope);
-  // A division with no folder and no distilled lecture has nothing to build a
-  // guide from, so the action stays off the row rather than offering a button
-  // that can only refuse. A guide that already exists is shown regardless: a
-  // lecture refiled out of this week leaves its guide behind and stale, and
-  // that is exactly what the row must not hide — viewable, without an action
-  // the backend would turn down.
-  const canBuild = distilled > 0 || unit.relPath !== null;
+  // A division with nothing filed under its folder or its weeks and no
+  // distilled lecture has nothing to build a guide from, so the action stays
+  // off the row rather than offering a button that can only refuse. A guide
+  // that already exists is shown regardless: a lecture refiled out of this
+  // week leaves its guide behind and stale, and that is exactly what the row
+  // must not hide — viewable, without an action the backend would turn down.
+  const canBuild = distilled > 0 || unit.materials > 0;
   const hasGuideCluster =
     canBuild || guide !== undefined || controls.activePracticeScopes.has(scope);
 

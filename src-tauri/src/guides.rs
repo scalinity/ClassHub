@@ -200,12 +200,13 @@ pub fn synthesize_module(
 /// SPEC §8.1: synthesis for one of the course's own divisions — a Module, a
 /// Week or a Part, whatever that course calls it (SPEC §5).
 ///
-/// Its sources are the three of SPEC §8.5: files under the unit's folder where
-/// it has one, files Canvas attributed to it, and its corpus notes — which is
-/// how a lecture stored under `Weeks/` reaches a guide scoped by topic. Today
-/// no unit of these four courses has a folder, so the corpus notes are usually
-/// all of it, and a division with no distilled lecture has nothing to build
-/// from and says so rather than producing a guide out of nothing.
+/// Its sources are those of SPEC §8.5: files under the unit's folder where it
+/// has one and under the week folders its weeks name, files Canvas attributed
+/// to it, and its corpus notes — which is how a lecture stored under `Weeks/`
+/// reaches a guide scoped by topic, and how the deck filed beside it does. No
+/// unit of these four courses has a folder, so the notes and the week folders
+/// are all of it, and a division with neither has nothing to build from and
+/// says so rather than producing a guide out of nothing.
 pub fn synthesize_unit(
     app: &AppHandle,
     class_id: i64,
@@ -262,9 +263,9 @@ fn unit_context(
     scope: &str,
 ) -> Result<(SynthesisContext, String)> {
     let nothing = format!(
-        "nothing to build {unit_name} from yet — it has no folder of its own and no \
-         lecture mapped to it has been distilled. Add a lecture for one of its weeks, \
-         or distil one already filed."
+        "nothing to build {unit_name} from yet — nothing is filed under its weeks, it has \
+         no folder of its own, and no lecture mapped to it has been distilled. Add a \
+         lecture or a file for one of its weeks, or distil a lecture already filed."
     );
     let notes = crate::lectures::corpus_notes(conn, class_id, unit_id)?;
     let ctx = synthesis_context(conn, class_id, scope, Some(unit_id), &nothing)?;
@@ -789,12 +790,13 @@ mod tests {
     }
 
     /// The refusal the unit guide and the unit exam share (SPEC §8.5): a
-    /// division builds from its folder or from its distilled notes. One whose
-    /// lectures are filed but not distilled has a manifest — the transcripts
-    /// are what staleness watches — and nothing a job could read; one with
-    /// neither has nothing at all. Both are refused before anything is made.
+    /// division builds from its folder, from what its week folders hold, or
+    /// from its distilled notes. One whose lectures are filed but not
+    /// distilled has a manifest — the transcripts are what staleness watches —
+    /// and nothing a job could read; one with none of the three has nothing at
+    /// all. Both are refused before anything is made.
     #[test]
-    fn a_division_builds_from_its_folder_or_its_notes_and_from_nothing_else() {
+    fn a_division_builds_from_its_folder_its_weeks_or_its_notes_and_from_nothing_else() {
         let conn = crate::db::memory_db();
         let root = std::env::temp_dir().join(format!("classhub-unit-context-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -838,6 +840,23 @@ mod tests {
         )
         .expect("contribution");
         assert!(refused(&conn).starts_with("nothing to build Week 2"), "{}", refused(&conn));
+
+        // A deck filed beside the transcript is the week's material, and the
+        // week is this division: it builds, with the deck listed and the
+        // transcript still named only through its note — which there is none of.
+        let deck = "Weeks/Week 02 \u{2014} Study Designs/deck.pdf";
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (3, ?1, 'deck', 1, 1, 'pdf')",
+            [deck],
+        )
+        .expect("deck");
+        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope).expect("builds from the deck");
+        assert!(ctx.files_block.contains(&format!("- source: {deck}")), "{}", ctx.files_block);
+        assert!(!ctx.files_block.contains(transcript), "{}", ctx.files_block);
+        assert!(corpus.starts_with("(none"), "{corpus}");
+        assert!(ctx.manifest.iter().any(|e| e.rel_path == deck), "{}", ctx.manifest_block);
+        conn.execute("DELETE FROM files WHERE rel_path = ?1", [deck]).expect("remove deck");
 
         // Distilled: the note is the source, named with its transcript, and
         // the transcript stays in the manifest.

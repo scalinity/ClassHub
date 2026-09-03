@@ -319,7 +319,9 @@ Rules:
   there because a lecture happens at a time. Each course meets once a week and divides itself no
   finer than a week, so the week a lecture was filed under is the division it belongs to (§8.5).
   The two axes are kept separate anyway: a course that divided itself finer than its meetings
-  would need them apart, and nothing about storing a lecture by date assumes otherwise.
+  would need them apart, and nothing about storing a lecture by date assumes otherwise. The
+  same rule reads the rest of the folder: a deck or a notebook filed under a week folder is
+  that week's material, and the division the week feeds counts it among its sources (§8.5).
 - `Weeks/` is **not** app-managed. A transcript is source material like a slide deck: the
   scanner indexes it, extraction routes it through the zero-token text path, and chat searches
   it. Filing it in the tree is what joins it to the pipeline rather than parking it beside.
@@ -590,7 +592,8 @@ agent and synthesis prompts can search text instead of re-reading binaries.
      mirrored extract path.
 4. **Record**: update `extract_rel_path`, `extracted_at`, `extracted_sha256`.
 5. **Staleness**: a guide is stale when its `source_manifest` differs from the current set of
-   `{rel_path, sha256}` in its scope. Computed on demand; surfaced as badges.
+   `{rel_path, sha256}` in its scope. Computed on demand and refetched after a scan that
+   changed the index; surfaced as badges.
 
 Extraction is triggered automatically after a scan finds changes (extraction is cheap:
 sonnet + mostly local), but **guide synthesis is never automatic**.
@@ -771,8 +774,8 @@ name matches the unit's, which is what gives §8.1's guide something to read.
 **That match does not currently fire for any of the four courses.** A division is named the way
 the course names it — `Week 1 — Introduction to Biostatistics for Artificial Intelligence in
 Medicine` — and the folders beside it are `Module 1` and `Syllabus`, so name equality never
-holds. Every unit's `rel_path` is NULL, and a unit guide has no file sources; what it is built
-from is its corpus notes (§8.5), which reach it without a folder.
+holds. Every unit's `rel_path` is NULL; what a unit guide is built from is what its week
+folders hold and its corpus notes (§8.5), both of which reach it without a folder of its own.
 
 Nothing looser is built, and matching on the ordinal is the candidate that was considered and
 declined. Across all four classes there is exactly one top-level content folder — `Biostatistics
@@ -917,10 +920,11 @@ Manual trigger per unit from the Class Workspace — one guide for one of the co
 divisions (§5), whatever that course calls them. The job kind keeps its original name; the UI
 shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
 
-- Inputs: all extracts under the unit's folder when it has one (primary) + originals via
-  `--add-dir` when the extract flags a figure worth re-inspecting; Daniel's classwork files
-  marked as "learner work" for the worked-examples section; and the unit's corpus notes, which
-  are how lecture content reaches a guide when the lecture itself lives under `Weeks/` (§8.5).
+- Inputs: all extracts under the unit's folder when it has one and under the week folders
+  its weeks name (primary) + originals via `--add-dir` when the extract flags a figure worth
+  re-inspecting; Daniel's classwork files marked as "learner work" for the worked-examples
+  section; and the unit's corpus notes, which are how lecture content reaches a guide when the
+  lecture itself lives under `Weeks/` (§8.5) — the transcripts are listed only through them.
 - Output: **one self-contained HTML file** at `Study Guides/<Unit name>.html`. No external
   requests (no CDN fonts/JS/CSS). Inline CSS, inline SVG, and inline vanilla JS powering
   interactive teaching devices (owner decision 2026-08-22: interactivity is load-bearing).
@@ -1047,10 +1051,15 @@ first note with both rows naming it. It is refused instead — at the filing, be
 and at the sorter's move, inside its transaction — and a title of its own is the way out.
 
 **A unit guide's sources** are therefore: files under the unit's folder when it has one — which
-is what `units.rel_path` records (§7.2) — files Canvas attributed to it (§7.2), and its corpus
-notes, each listed with the transcript path so the job can open the professor's exact words when
-the distillation is not enough. `.classhub/corpus/` joins the extract cache in
-`search_material`'s scope (§9), so chat retrieves it too.
+is what `units.rel_path` records (§7.2) — every file under a week folder whose number is one of
+the division's weeks (§4), read off the folder the way a filed transcript's week is, so a week
+the syllabus renames still counts the folder it was filed under; files Canvas attributed to it
+(§7.2); and its corpus notes, each listed with the transcript path so the job can open the
+professor's exact words when the distillation is not enough. The prompt lists the files with
+their extracts and the transcripts only through their notes, and the Structure row offers a
+guide exactly when a file or a note exists (§8.3) — the backend's own refusal, read the other
+way. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so chat
+retrieves it too.
 
 A contribution is recorded as applied when it is written, because the filing decision it follows
 is the user's own rather than a model's reading. Correcting one means refiling the lecture into
@@ -1061,6 +1070,16 @@ the new path, so a refile spends no tokens and the session document never reads 
 rename. The guide the lecture left goes stale — its manifest still names a transcript that no
 longer counts among its sources — and the guide it joined gains a note. A transcript moved out
 of `Weeks/` altogether loses its row and its note, since no division reads it any more.
+
+The scan holds the same line for a transcript that leaves the tree without a proposal. One
+deleted in Finder loses its contribution row, its note, and its session row with both documents
+at the next scan — a pair nothing points at would go on answering for a lecture that is not
+there. One moved in Finder — the same content at a path the index did not hold — is refiled as
+an approved move would refile it, note and session row following; a refile the rules refuse is
+logged and the row left as it was. Each is settled on its own savepoint inside the scan, and
+what it leaves for the disk is applied after the commit. A scan that changed the index pushes
+one `index` change, so staleness, the divisions' counts and the lectures follow a rescan
+without a second scan.
 
 `lecture_contributions` keeps its per-span shape (`start_ms`/`end_ms`, resolved line bounds)
 even though a lecture currently contributes its whole length to a single unit. The columns cost
@@ -1289,9 +1308,12 @@ and apply it. Non-negotiable per project owner.
   shredded into fake speakers, or left unmerged, fails quietly and downstream), and the
   current-division resolution against the seeded syllabi (§8.5 — a wrong week on a card is
   silent), a division's identity across a rescan (§7.2 — a forked row and a shifted week
-  number are both silent until a guide or a filing goes wrong), and a division's one note per
-  transcript name (§8.5 — a second digest writing over the first note is silent). UI and job
-  plumbing are exercised by running the app.
+  number are both silent until a guide or a filing goes wrong), a division's one note per
+  transcript name (§8.5 — a second digest writing over the first note is silent), a division's
+  manifest over its week folders (§8.5 — a corrected deck leaving a guide fresh is silent), and
+  a scan's forget-or-refile of a transcript that left the tree (§8.5 — a row for a transcript
+  that is not there is silent until a guide reads it). UI and job plumbing are exercised by
+  running the app.
 
 ## 14. Milestones
 
@@ -1495,6 +1517,18 @@ Mark the checkbox when the acceptance criteria pass.
   one feeds, a Sept 1 session is in `Weeks/Week 02/`, the Part I corpus and a session document,
   the Part guide is built from two weeks' notes, and a further transcript filed into the Part
   makes that guide stale without replacing either note.
+
+- [x] **M25 — What a week's folder holds.** (`milestones/M25-what-a-weeks-folder-holds.md`)
+  M24's Part I guide read the Week 01 deck and the Week 02 notebook, and its manifest named
+  neither: a division's sources were its folder, which none has, and its notes, and what is
+  filed under its week folders was nothing's. A division's sources widen to every file under
+  the week folders its weeks name, the prompt lists them, the row offers a guide when they
+  exist, and a transcript deleted in Finder loses its row, its note and its session document
+  at the next scan, while one moved in Finder is refiled.
+  *Accepted when:* the Part I manifest names the deck and the notebook, a Fundamentals week
+  guide stays fresh and goes stale on a file added beside its transcript and fresh again on
+  its removal, the prompt lists both files, and a transcript deleted in Finder leaves no row,
+  note or session row after a rescan.
 
 ## 15. Risks & trade-offs (accepted)
 

@@ -70,6 +70,13 @@ pub struct UnitInfo {
     pub last_week: Option<i64>,
     /// canvas | syllabus — which reader declared it.
     pub source: String,
+    /// Files a guide would read beside the division's distilled lectures
+    /// (SPEC §8.5): under its folder and under the week folders its weeks
+    /// name, the transcripts left out since they reach a guide through their
+    /// notes. What the Structure row offers a guide on, beside the notes.
+    /// Filled by `list_units`, which the workspace and the overview read; a
+    /// row read on its own carries zero, since nothing there asks.
+    pub materials: i64,
 }
 
 /// One division on its way into the table, from either source.
@@ -121,10 +128,26 @@ pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
          ORDER BY CASE source WHEN 'canvas' THEN 0 WHEN 'syllabus' THEN 1 ELSE 2 END,
                   ordinal, id"
     ))?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([class_id], read_unit)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    for unit in &mut rows {
+        unit.materials = materials(conn, class_id, unit.id)?;
+    }
     Ok(rows)
+}
+
+/// How many files a guide for the division would read beside its distilled
+/// lectures (SPEC §8.5): its manifest less the transcripts on its
+/// contribution rows, which reach a guide through their notes rather than as
+/// files — the count the workspace row and the backend's own refusal agree on.
+fn materials(conn: &Connection, class_id: i64, unit_id: i64) -> Result<i64> {
+    let manifest = crate::extract::current_manifest(conn, class_id, &crate::db::unit_scope(unit_id))?;
+    let transcripts = crate::lectures::contributing_paths(conn, class_id, unit_id)?;
+    Ok(manifest
+        .iter()
+        .filter(|entry| !transcripts.contains(&entry.rel_path))
+        .count() as i64)
 }
 
 /// One row selected as `UNIT_COLUMNS`.
@@ -141,6 +164,7 @@ fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
         first_week: row.get(8)?,
         last_week: row.get(9)?,
         source: row.get(10)?,
+        materials: 0,
     })
 }
 
@@ -1152,6 +1176,47 @@ mod tests {
     /// The real schema, so these tests run on what the app runs on.
     fn db() -> Connection {
         crate::db::memory_db()
+    }
+
+    /// SPEC §8.3: the row offers a guide exactly when one could be built, so
+    /// the count it reads is the backend's own — the files under the
+    /// division's folder and its week folders, with the transcripts left out
+    /// since they reach a guide through their notes.
+    #[test]
+    fn a_division_counts_the_files_a_guide_would_read_beside_its_notes() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (37, 4, 1, 'part', 'Part I', 1, 1, 8, 'syllabus'),
+                    (38, 4, 2, 'part', 'Part II', 2, 9, 12, 'syllabus')",
+            [],
+        )
+        .expect("parts");
+        let transcript = "Weeks/Week 02/2026-09-01 — Lecture.md";
+        for (rel_path, kind) in [
+            ("Weeks/Week 01/deck.pdf", "pdf"),
+            (transcript, "md"),
+            ("Slides/loose.pdf", "pdf"),
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+                 VALUES (4, ?1, ?1, 1, 1, ?2)",
+                params![rel_path, kind],
+            )
+            .expect("file");
+        }
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (4, 37, ?1, 0, 0, 1, 1, 'n.md', 's', 'high', 'applied', 0)",
+            [transcript],
+        )
+        .expect("row");
+        let units = list_units(&conn, 4).expect("list");
+        let materials = |id: i64| units.iter().find(|u| u.id == id).expect("unit").materials;
+        assert_eq!(materials(37), 1, "the deck, and not the transcript");
+        assert_eq!(materials(38), 0, "nothing under Part II's weeks");
     }
 
     fn unit(ordinal: i64, kind: &str, name: &str, starts_on: Option<&str>) -> NewUnit {

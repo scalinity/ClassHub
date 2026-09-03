@@ -738,11 +738,11 @@ pub fn current_manifest(
         return Ok(read(rows)?);
     }
 
-    // A unit's sources come from two places that share no path prefix: the
-    // folder holding its material, and the lectures the calendar mapped to it
-    // (SPEC §8.5). The union is what makes a unit guide go stale when its
-    // lecture changes — with the transcripts left out nothing visibly breaks,
-    // the guide just quietly stops updating.
+    // A unit's sources come from three places that share no path prefix: the
+    // folder holding its material, the week folders its weeks name, and the
+    // lectures the calendar mapped to it (SPEC §8.5). The union is what makes
+    // a unit guide go stale when its lecture or its deck changes — with either
+    // left out nothing visibly breaks, the guide just quietly stops updating.
     if scope.starts_with(crate::db::UNIT_SCOPE_PREFIX) {
         // A unit scope from before ids names no row, and neither does one
         // whose division is gone: no sources, rather than the whole class.
@@ -764,6 +764,24 @@ pub fn current_manifest(
             Some(folder) => folder_manifest(conn, class_id, &folder)?,
             None => Vec::new(),
         };
+        // What is filed under a week folder is that week's material, and the
+        // week feeds this division (SPEC §4) — the join a transcript makes,
+        // made for the deck and the notebook filed beside it. Read off the
+        // folder's number the way `week_from_rel_path` reads a transcript's,
+        // so a week the syllabus renames still counts the folder it was filed
+        // under.
+        let weeks: std::collections::BTreeSet<i64> = crate::units::week_slots(conn, class_id)?
+            .into_iter()
+            .filter(|slot| slot.unit_id == unit_id)
+            .map(|slot| slot.week)
+            .collect();
+        if !weeks.is_empty() {
+            let filed = folder_manifest(conn, class_id, crate::db::WEEKS_DIR)?;
+            entries.extend(filed.into_iter().filter(|entry| {
+                crate::units::week_from_rel_path(&entry.rel_path)
+                    .is_some_and(|week| weeks.contains(&week))
+            }));
+        }
         let mut stmt = conn.prepare(
             "SELECT f.rel_path, f.sha256 FROM files f
              JOIN lecture_contributions lc
@@ -772,9 +790,9 @@ pub fn current_manifest(
         )?;
         let rows = stmt.query(rusqlite::params![class_id, unit_id])?;
         entries.extend(read(rows)?);
-        // A transcript filed inside the unit's own folder would otherwise be
-        // counted twice, and a manifest that holds a duplicate never equals the
-        // set it is compared against.
+        // A transcript is under its week folder and on a contribution row, so
+        // it arrives twice, and a manifest that holds a duplicate never equals
+        // the set it is compared against.
         entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
         entries.dedup_by(|a, b| a.rel_path == b.rel_path);
         return Ok(entries);
@@ -1024,6 +1042,82 @@ mod tests {
         .expect("edit");
         let after = current_manifest(&conn, 1, &scope).expect("manifest");
         assert!(super::manifest_is_stale(&stored, &after), "the union missed the lecture");
+    }
+
+    /// SPEC §4/§8.5: what is filed under a week folder is that week's
+    /// material, and the week feeds a division. A Part's manifest covers the
+    /// folders of its own weeks and not the next Part's; a week-numbered
+    /// course's covers its own folder alone, read by the folder's number so a
+    /// week renamed since its folder was made still counts it; and a corrected
+    /// deck is what a regenerated guide has to notice. Nothing outside
+    /// `Weeks/` arrives this way.
+    #[test]
+    fn a_unit_s_manifest_covers_the_week_folders_its_weeks_name() {
+        let conn = crate::db::memory_db();
+        // Applied Generative AI's shape: Parts over ranges, no week rows.
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (37, 4, 1, 'part', 'Part I', 1, 1, 8, 'syllabus'),
+                    (38, 4, 2, 'part', 'Part II', 2, 9, 12, 'syllabus')",
+            [],
+        )
+        .expect("parts");
+        // Fundamentals' shape: numbered weeks, one renamed since its folder was made.
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, number, source)
+             VALUES (24, 1, 2, 'week', 'Week 2 — Responsible AI', 2, 'syllabus'),
+                    (25, 1, 3, 'week', 'Week 3 — Data', 3, 'syllabus')",
+            [],
+        )
+        .expect("weeks");
+        let transcript = "Weeks/Week 02/2026-09-01 — Lecture.md";
+        for (class_id, rel_path, sha) in [
+            (4, "Weeks/Week 01/deck.pdf", "a"),
+            (4, transcript, "b"),
+            (4, "Weeks/Week 02/notebook.ipynb", "c"),
+            (4, "Weeks/Week 09/part-two.pdf", "d"),
+            (4, "Slides/loose.pdf", "e"),
+            (1, "Weeks/Week 02 — Responsible AI, Ethics/deck.pptx", "f"),
+            (1, "Weeks/Week 03 — Data/other.pdf", "g"),
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+                 VALUES (?1, ?2, ?3, 1, 1, 'pdf')",
+                rusqlite::params![class_id, rel_path, sha],
+            )
+            .expect("file");
+        }
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (4, 37, ?1, 0, 0, 1, 1, 'x.md', 's', 'high', 'applied', 0)",
+            [transcript],
+        )
+        .expect("contribution");
+
+        let paths = |class_id: i64, unit_id: i64| -> Vec<String> {
+            current_manifest(&conn, class_id, &crate::db::unit_scope(unit_id))
+                .expect("manifest")
+                .into_iter()
+                .map(|e| e.rel_path)
+                .collect()
+        };
+        assert_eq!(
+            paths(4, 37),
+            ["Weeks/Week 01/deck.pdf", transcript, "Weeks/Week 02/notebook.ipynb"]
+        );
+        assert_eq!(paths(4, 38), ["Weeks/Week 09/part-two.pdf"]);
+        assert_eq!(paths(1, 24), ["Weeks/Week 02 — Responsible AI, Ethics/deck.pptx"]);
+
+        let stored = serde_json::to_string(
+            &current_manifest(&conn, 4, &crate::db::unit_scope(37)).expect("manifest"),
+        )
+        .expect("json");
+        conn.execute("UPDATE files SET sha256 = 'a2' WHERE rel_path = 'Weeks/Week 01/deck.pdf'", [])
+            .expect("edit");
+        let after = current_manifest(&conn, 4, &crate::db::unit_scope(37)).expect("manifest");
+        assert!(super::manifest_is_stale(&stored, &after), "the week folder's deck was missed");
     }
 
     /// A division nothing declares any more has no sources, rather than

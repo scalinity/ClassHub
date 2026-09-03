@@ -32,6 +32,9 @@ export interface Unit {
   firstWeek: number | null;
   lastWeek: number | null;
   source: UnitSource;
+  /** Files a guide would read beside the division's distilled lectures —
+   *  under its folder and its week folders (SPEC §8.5). */
+  materials: number;
 }
 
 /** Which reader supplied the division. A folder is not one of them: it is where

@@ -708,6 +708,12 @@ impl NoteMove {
             NoteMove::Remove(path) => {
                 if let Err(e) = fs::remove_file(&path) {
                     eprintln!("corpus note removal failed ({}): {e}", path.display());
+                    return;
+                }
+                // The same check as above: a folder emptied of its last note
+                // is clutter, and `remove_dir` refuses one that is not empty.
+                if let Some(parent) = path.parent() {
+                    let _ = fs::remove_dir(parent);
                 }
             }
         }
@@ -737,18 +743,7 @@ fn refile_session(
     // document, and its pair would open the other lecture. The documents go
     // with it, as `record_session` does with a superseded pair, once the
     // caller has committed.
-    let mut stmt = conn.prepare("SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2")?;
-    let orphaned: Vec<PathBuf> = stmt
-        .query_map(rusqlite::params![class_id, &new_scope], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .flat_map(|html| [html.clone(), format!("{}.md", html.trim_end_matches(".html"))])
-        .filter_map(|rel| session_path(class_dir, &rel))
-        .collect();
-    conn.execute(
-        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2",
-        rusqlite::params![class_id, &new_scope],
-    )?;
+    let orphaned = drop_session(conn, class_id, class_dir, &new_scope)?;
 
     let old_scope = session_scope(source_rel);
     let row: Option<(i64, String)> = conn
@@ -781,6 +776,83 @@ fn refile_session(
         rusqlite::params![new_scope, manifest, id],
     )?;
     Ok(orphaned)
+}
+
+/// Deletes a session row and hands back its two documents for the caller to
+/// remove once its transaction has committed. The pair sits under `Study
+/// Guides/`, which chat's search walks, so left on disk it would go on
+/// answering for a lecture that is not there.
+fn drop_session(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    scope: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut stmt = conn.prepare("SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2")?;
+    let orphaned: Vec<PathBuf> = stmt
+        .query_map(rusqlite::params![class_id, scope], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .flat_map(|html| [html.clone(), format!("{}.md", html.trim_end_matches(".html"))])
+        .filter_map(|rel| session_path(class_dir, &rel))
+        .collect();
+    conn.execute(
+        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2",
+        rusqlite::params![class_id, scope],
+    )?;
+    Ok(orphaned)
+}
+
+/// What a scan does about a transcript the walk no longer found where the
+/// index held it (SPEC §8.5). The same content at a path the index did not
+/// hold is the transcript moved in Finder, and it is refiled the way an
+/// approved move refiles it — the correction affordance, without a proposal.
+/// Otherwise the transcript is gone, and everything keyed by its path goes
+/// with it: the session row and its documents, the contribution row, and the
+/// note, since no division reads it any more — the rule for a transcript that
+/// leaves `Weeks/`, applied to one that leaves the tree. `None` when nothing
+/// was keyed by the path: a deck that vanished is the index's business alone.
+/// Called inside the scan's transaction; what it hands back is applied after
+/// the commit.
+pub fn lecture_left(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    rel_path: &str,
+    moved_to: Option<&str>,
+) -> Result<Option<RefileEffects>> {
+    let scope = session_scope(rel_path);
+    let keyed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2)
+             OR EXISTS(SELECT 1 FROM guides WHERE class_id = ?1 AND scope = ?3)",
+        rusqlite::params![class_id, rel_path, &scope],
+        |row| row.get(0),
+    )?;
+    if !keyed {
+        return Ok(None);
+    }
+    if let Some(dest) = moved_to {
+        eprintln!("lectures: {rel_path} moved in Finder to {dest}; refiling it");
+        return refile_lecture(conn, class_id, class_dir, rel_path, dest).map(Some);
+    }
+    let orphaned = drop_session(conn, class_id, class_dir, &scope)?;
+    let note: Option<String> = conn
+        .query_row(
+            "SELECT corpus_rel_path FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, rel_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    conn.execute(
+        "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+        rusqlite::params![class_id, rel_path],
+    )?;
+    let note = note
+        .map(|rel| class_dir.join(rel))
+        .filter(|path| path.is_file())
+        .map(NoteMove::Remove);
+    eprintln!("lectures: {rel_path} is gone; its row, its note and its session document go with it");
+    Ok(Some(RefileEffects { note, orphaned }))
 }
 
 /// Every lecture that feeds one of this class's divisions.

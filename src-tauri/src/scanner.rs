@@ -63,8 +63,18 @@ pub fn class_dir(conn: &Connection, class_id: i64) -> Result<PathBuf> {
     Ok(crate::db::aibhs_root(conn)?.join(folder))
 }
 
+/// What a scan found, and whether it changed anything beyond the tree.
+pub struct Scan {
+    pub tree: Vec<TreeNode>,
+    /// The index changed — a file added, changed or removed, or a lecture
+    /// forgotten or refiled (SPEC §8.5) — so staleness, the divisions' counts
+    /// and the lectures read rows the scan just rewrote, which the tree's own
+    /// refetch does not reach.
+    pub changed: bool,
+}
+
 /// Walks the class folder, syncs the `files` table (upsert added/changed, delete removed),
-/// and returns the module/file tree.
+/// settles what a vanished transcript leaves behind, and returns the module/file tree.
 /// Takes the connection itself, in two short windows rather than one long one:
 /// the walk in between recurses the whole class folder and SHA-256s everything
 /// that changed, and holding the app's single connection across it blocked
@@ -72,7 +82,7 @@ pub fn class_dir(conn: &Connection, class_id: i64) -> Result<PathBuf> {
 pub fn scan_class(
     db: &std::sync::Mutex<Connection>,
     class_id: i64,
-) -> Result<Vec<TreeNode>> {
+) -> Result<Scan> {
     let (dir, existing) = {
         let conn = crate::db::lock(db);
         let dir = class_dir(&conn, class_id)?;
@@ -88,8 +98,14 @@ pub fn scan_class(
         .with_context(|| format!("scanning {}", dir.display()))?;
 
     let seen: HashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+    let mut vanished: Vec<&String> = existing
+        .keys()
+        .filter(|rel_path| !seen.contains(rel_path.as_str()))
+        .collect();
+    vanished.sort();
+    let mut changed = !vanished.is_empty();
     let mut conn = crate::db::lock(db);
-    let tx = conn.transaction()?;
+    let mut tx = conn.transaction()?;
     {
         let mut upsert = tx.prepare(
             "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
@@ -99,13 +115,38 @@ pub fn scan_class(
                mtime = excluded.mtime, kind = excluded.kind",
         )?;
         for f in &files {
+            changed |= existing.get(&f.rel_path).is_none_or(|i| i.sha256 != f.sha256);
             upsert.execute(params![class_id, f.rel_path, f.sha256, f.size, f.mtime, f.kind])?;
         }
         let mut delete = tx.prepare("DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2")?;
-        for rel_path in existing.keys() {
-            if !seen.contains(rel_path.as_str()) {
-                delete.execute(params![class_id, rel_path])?;
+        for rel_path in &vanished {
+            delete.execute(params![class_id, rel_path])?;
+        }
+    }
+    // A transcript the index held and the walk did not is a lecture moved in
+    // Finder — the same content at a path the index did not hold — or one
+    // deleted there (SPEC §8.5). Each is settled on its own savepoint, so one
+    // that cannot follow — a refile onto a held note — is logged and left as
+    // it was rather than costing the scan; what each leaves for the
+    // filesystem is applied once the whole scan has committed.
+    let arrived: HashMap<&str, &str> = files
+        .iter()
+        .filter(|f| !existing.contains_key(&f.rel_path))
+        .map(|f| (f.sha256.as_str(), f.rel_path.as_str()))
+        .collect();
+    let mut effects = Vec::new();
+    for rel_path in &vanished {
+        let moved_to = existing
+            .get(*rel_path)
+            .and_then(|indexed| arrived.get(indexed.sha256.as_str()))
+            .copied();
+        let savepoint = tx.savepoint()?;
+        match crate::lectures::lecture_left(&savepoint, class_id, &dir, rel_path, moved_to) {
+            Ok(effect) => {
+                savepoint.commit()?;
+                effects.extend(effect);
             }
+            Err(e) => eprintln!("scan: {rel_path} left the tree and its lecture could not follow: {e:#}"),
         }
     }
     // A declared division knows its name and its dates; only the tree knows
@@ -120,7 +161,10 @@ pub fn scan_class(
         .collect();
     crate::units::attach_folder_paths(&tx, class_id, &folders)?;
     tx.commit()?;
-    Ok(tree)
+    for effect in effects {
+        effect.apply();
+    }
+    Ok(Scan { tree, changed })
 }
 
 /// Cap on vocabulary entries in a prompt — the shared names are the point, and
@@ -512,8 +556,150 @@ pub fn hash_file(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_fingerprints, fingerprint_sources, folder_vocabulary};
+    use super::{diff_fingerprints, fingerprint_sources, folder_vocabulary, scan_class};
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use rusqlite::{params, Connection};
+
+    /// Applied Generative AI's shape in a scratch folder: Parts over week
+    /// ranges and no week rows, the class folder where the settings say it is.
+    fn part_numbered_class(name: &str) -> (Mutex<Connection>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 4", [], |row| row.get(0))
+            .expect("class");
+        let dir = root.join(folder);
+        fs::create_dir_all(&dir).expect("class dir");
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (37, 4, 1, 'part', 'Part I: Deep Learning', 1, 1, 8, 'syllabus'),
+                    (38, 4, 2, 'part', 'Part II: Alignment', 2, 9, 12, 'syllabus')",
+            [],
+        )
+        .expect("parts");
+        (Mutex::new(conn), dir)
+    }
+
+    fn write(path: PathBuf, content: &str) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        fs::write(path, content).expect("write");
+    }
+
+    /// A transcript on disk with what a filing and a digest leave behind: a
+    /// contribution row on Part I, a note at the Part's corpus path, a session
+    /// row and its two documents. Returns the note and the documents,
+    /// class-relative.
+    fn filed_and_digested(db: &Mutex<Connection>, dir: &Path, transcript: &str) -> (String, String, String) {
+        let conn = db.lock().expect("db");
+        write(dir.join(transcript), "# Lecture\n\n## 00:00\n\nHello.\n");
+        let note = crate::lectures::corpus_rel_path("Part I: Deep Learning", transcript);
+        write(dir.join(&note), "# note");
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (4, 37, ?1, 0, 0, 1, 1, ?2, 'Topic', 'high', 'applied', 0)",
+            params![transcript, note],
+        )
+        .expect("row");
+        let html = "Study Guides/Sessions/2026-09-15 — Topic.html".to_string();
+        let md = "Study Guides/Sessions/2026-09-15 — Topic.md".to_string();
+        write(dir.join(&html), "<html></html>");
+        write(dir.join(&md), "# session");
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+             VALUES (4, ?1, ?2, 1, '[]')",
+            params![format!("session:{transcript}"), html],
+        )
+        .expect("session row");
+        (note, html, md)
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE class_id = 4"), [], |row| row.get(0))
+            .expect("count")
+    }
+
+    /// SPEC §8.5: a transcript deleted in Finder leaves nothing keyed by its
+    /// path once the scan has run — no contribution row, no note, no session
+    /// row and no session document — and a second scan changes nothing.
+    #[test]
+    fn a_scan_forgets_a_transcript_deleted_in_finder() {
+        let (db, dir) = part_numbered_class("classhub-scan-forget");
+        let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let (note, html, md) = filed_and_digested(&db, &dir, transcript);
+
+        let first = scan_class(&db, 4).expect("scan");
+        assert!(first.changed, "the transcript was indexed");
+        assert!(first.tree.iter().any(|node| node.name == "Weeks"));
+        assert_eq!(count(&db.lock().expect("db"), "lecture_contributions"), 1);
+
+        fs::remove_file(dir.join(transcript)).expect("delete in Finder");
+        let second = scan_class(&db, 4).expect("scan");
+        assert!(second.changed, "a deleted transcript is a change");
+        {
+            let conn = db.lock().expect("db");
+            assert_eq!(count(&conn, "files"), 0);
+            assert_eq!(count(&conn, "lecture_contributions"), 0, "the row outlived its transcript");
+            assert_eq!(count(&conn, "guides"), 0, "the session row outlived its transcript");
+        }
+        assert!(!dir.join(&note).exists(), "the note outlived its transcript");
+        let corpus_folder = dir.join(&note).parent().expect("folder").to_path_buf();
+        assert!(!corpus_folder.exists(), "the emptied corpus folder stayed as clutter");
+        assert!(!dir.join(&html).exists() && !dir.join(&md).exists(), "the session documents outlived it");
+
+        let third = scan_class(&db, 4).expect("scan");
+        assert!(!third.changed, "an unchanged tree is not a change");
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// The same content at a path the index did not hold is the transcript
+    /// moved in Finder, and the scan refiles it as an approved move would: the
+    /// row follows to the Part the new week feeds, the note goes with it, and
+    /// the session row is keyed by the new path with its documents kept.
+    #[test]
+    fn a_scan_refiles_a_transcript_moved_in_finder() {
+        let (db, dir) = part_numbered_class("classhub-scan-move");
+        let from = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let to = "Weeks/Week 09/2026-09-15 — Lecture.md";
+        let (note, html, _md) = filed_and_digested(&db, &dir, from);
+        scan_class(&db, 4).expect("scan");
+
+        fs::create_dir_all(dir.join("Weeks/Week 09")).expect("week dir");
+        fs::rename(dir.join(from), dir.join(to)).expect("move in Finder");
+        let scan = scan_class(&db, 4).expect("scan");
+        assert!(scan.changed);
+
+        let conn = db.lock().expect("db");
+        let (unit_id, corpus): (i64, String) = conn
+            .query_row(
+                "SELECT unit_id, corpus_rel_path FROM lecture_contributions WHERE class_id = 4 AND rel_path = ?1",
+                [to],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the row followed");
+        assert_eq!(unit_id, 38, "Week 9 feeds Part II");
+        assert_eq!(count(&conn, "lecture_contributions"), 1);
+        assert!(!dir.join(&note).exists(), "the note stayed behind");
+        assert_eq!(fs::read_to_string(dir.join(&corpus)).expect("moved note"), "# note");
+        let scope: String = conn
+            .query_row("SELECT scope FROM guides WHERE class_id = 4", [], |row| row.get(0))
+            .expect("session row");
+        assert_eq!(scope, format!("session:{to}"));
+        assert!(dir.join(&html).is_file(), "the session document went with a move");
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE class_id = 4 AND rel_path = ?1", [to], |row| row.get(0))
+            .expect("files");
+        assert_eq!(indexed, 1);
+        drop(conn);
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
 
     /// The shared vocabulary, which is what stops each class being sorted in
     /// isolation and coining its own word for the same kind of material.
