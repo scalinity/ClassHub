@@ -535,14 +535,22 @@ pub(crate) fn upsert_canvas_category(
     Ok(outcome)
 }
 
-/// Upserts the item for a graded, posted submission under `category_id`.
+/// Upserts the item for a graded, posted submission under `category_id`, one
+/// of `class_id`'s categories.
 ///
 /// Identity is the assignment id, so a regrade updates the row and a hand
 /// edit is overwritten with Canvas's number — the item says so in the UI. An
 /// assignment moved between groups moves its item, since the category is
-/// Canvas's placement too.
+/// Canvas's placement too. An item carrying no id and the same name anywhere
+/// in the class (case-insensitive, the category rule) is claimed rather than
+/// duplicated: a score typed from the returned paper before the professor
+/// posted it is the same score, and a second row would count it twice in the
+/// weighted grade. The lookup stays inside the class — the index on the
+/// assignment id is global, so a row another class holds for it is refused
+/// rather than moved.
 pub(crate) fn upsert_canvas_item(
     conn: &Connection,
+    class_id: i64,
     category_id: i64,
     score: &CanvasScore,
 ) -> Result<CanvasWrite> {
@@ -553,45 +561,84 @@ pub(crate) fn upsert_canvas_item(
     if score.score < 0.0 {
         bail!("{name} has a negative score");
     }
-    type Row = (i64, i64, String, f64, f64, Option<String>);
-    let existing: Option<Row> = conn
+    // id, class, category, name, score, max, graded_at
+    type Row = (i64, i64, i64, String, f64, f64, Option<String>);
+    let read = |row: &rusqlite::Row| -> rusqlite::Result<Row> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    };
+    let owned: Option<Row> = conn
         .query_row(
-            "SELECT id, category_id, name, score, max_score, graded_at FROM grade_items
-             WHERE canvas_assignment_id = ?1",
+            "SELECT i.id, c.class_id, i.category_id, i.name, i.score, i.max_score, i.graded_at
+             FROM grade_items i JOIN grade_categories c ON c.id = i.category_id
+             WHERE i.canvas_assignment_id = ?1",
             [score.assignment_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
+            read,
         )
         .optional()?;
+    if let Some((_, holder, ..)) = owned.as_ref().filter(|row| row.1 != class_id) {
+        bail!(
+            "assignment {} is already recorded under class #{holder} — two classes matched one \
+             Canvas course",
+            score.assignment_id
+        );
+    }
+    let claimed: Option<Row> = match owned {
+        Some(_) => None,
+        None => conn
+            .query_row(
+                "SELECT i.id, c.class_id, i.category_id, i.name, i.score, i.max_score, i.graded_at
+                 FROM grade_items i JOIN grade_categories c ON c.id = i.category_id
+                 WHERE c.class_id = ?1 AND LOWER(i.name) = LOWER(?2)
+                   AND i.canvas_assignment_id IS NULL
+                 ORDER BY (i.category_id = ?3) DESC, i.id LIMIT 1",
+                params![class_id, name, category_id],
+                read,
+            )
+            .optional()?,
+    };
+    // A claim always writes: the id is what changes.
+    let claiming = owned.is_none();
     let tx = conn.unchecked_transaction()?;
-    let outcome = match existing {
-        Some((id, current_category, current_name, current_score, current_max, current_graded)) => {
+    let outcome = match (owned, claimed) {
+        (Some(row), _) | (None, Some(row)) => {
+            let (id, _, current_category, current_name, current_score, current_max, current_graded) =
+                row;
             let same = current_category == category_id
                 && current_name == name
                 && (current_score - score.score).abs() < f64::EPSILON
                 && (current_max - score.max_score).abs() < f64::EPSILON
                 && current_graded.as_deref() == score.graded_at;
-            if same {
+            if same && !claiming {
                 return Ok(CanvasWrite::Unchanged);
             }
             tx.execute(
                 "UPDATE grade_items
-                 SET category_id = ?1, name = ?2, score = ?3, max_score = ?4, graded_at = ?5
-                 WHERE id = ?6",
-                params![category_id, name, score.score, score.max_score, score.graded_at, id],
+                 SET canvas_assignment_id = ?1, category_id = ?2, name = ?3, score = ?4,
+                     max_score = ?5, graded_at = ?6
+                 WHERE id = ?7",
+                params![
+                    score.assignment_id,
+                    category_id,
+                    name,
+                    score.score,
+                    score.max_score,
+                    score.graded_at,
+                    id
+                ],
             )?;
             audit(
                 &tx,
                 "canvas.upsert_grade_item",
                 json!({ "id": id, "canvasAssignmentId": score.assignment_id,
+                        "claimed": claiming,
                         "before": { "categoryId": current_category, "name": current_name,
                                     "score": current_score, "maxScore": current_max,
                                     "gradedAt": current_graded },
@@ -599,9 +646,13 @@ pub(crate) fn upsert_canvas_item(
                                    "score": score.score, "maxScore": score.max_score,
                                    "gradedAt": score.graded_at } }),
             )?;
-            CanvasWrite::Updated
+            if claiming {
+                CanvasWrite::Claimed
+            } else {
+                CanvasWrite::Updated
+            }
         }
-        None => {
+        (None, None) => {
             tx.execute(
                 "INSERT INTO grade_items
                  (category_id, name, score, max_score, graded_at, canvas_assignment_id)
@@ -824,17 +875,17 @@ mod tests {
             max_score: 10.0,
             graded_at: Some("2026-09-03"),
         };
-        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("first"), CanvasWrite::Created);
+        assert_eq!(upsert_canvas_item(&conn, 3, category_id, &score).expect("first"), CanvasWrite::Created);
 
         let audits = count(&conn, "SELECT COUNT(*) FROM audit_log");
-        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("second"), CanvasWrite::Unchanged);
+        assert_eq!(upsert_canvas_item(&conn, 3, category_id, &score).expect("second"), CanvasWrite::Unchanged);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM audit_log"), audits, "a no-op left a row");
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_items"), 1);
 
         // A hand edit is a correction until the next sync, which is Canvas's.
         conn.execute("UPDATE grade_items SET score = 10 WHERE canvas_assignment_id = '5001'", [])
             .expect("hand edit");
-        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("third"), CanvasWrite::Updated);
+        assert_eq!(upsert_canvas_item(&conn, 3, category_id, &score).expect("third"), CanvasWrite::Updated);
         let stored: f64 = conn
             .query_row("SELECT score FROM grade_items WHERE canvas_assignment_id = '5001'", [], |r| r.get(0))
             .expect("score");
@@ -843,6 +894,87 @@ mod tests {
 
         // What the CHECK would refuse is refused a step earlier, by name.
         let pointless = CanvasScore { max_score: 0.0, ..score };
-        assert!(upsert_canvas_item(&conn, category_id, &pointless).is_err());
+        assert!(upsert_canvas_item(&conn, 3, category_id, &pointless).is_err());
+    }
+
+    /// A score typed from the returned paper before the professor posted it is
+    /// the same score: the sync claims that row rather than counting the quiz
+    /// twice, and another class's row for the same assignment is refused.
+    #[test]
+    fn a_hand_entered_score_is_claimed_and_another_class_s_row_is_refused() {
+        let conn = crate::db::memory_db();
+        let (quizzes, _) = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "901", name: "Quizzes", weight: Some(20.0) },
+        )
+        .expect("category");
+        let (homework, _) = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "902", name: "Homework", weight: Some(30.0) },
+        )
+        .expect("category");
+        conn.execute(
+            "INSERT INTO grade_items (category_id, name, score, max_score) VALUES (?1, 'quiz 2', 18, 20)",
+            [quizzes],
+        )
+        .expect("typed by hand");
+
+        let posted = CanvasScore {
+            assignment_id: "5002",
+            name: "Quiz 2",
+            score: 17.0,
+            max_score: 20.0,
+            graded_at: Some("2026-09-24"),
+        };
+        assert_eq!(upsert_canvas_item(&conn, 3, quizzes, &posted).expect("claim"), CanvasWrite::Claimed);
+        let (rows, name, score, id): (i64, String, f64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(name), MIN(score), MIN(canvas_assignment_id)
+                 FROM grade_items WHERE category_id = ?1",
+                [quizzes],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!((rows, name.as_str(), score, id.as_deref()), (1, "Quiz 2", 17.0, Some("5002")));
+        assert_eq!(weighted_grade(&conn, 3).expect("grade"), Some(85.0), "counted once");
+        assert_eq!(
+            upsert_canvas_item(&conn, 3, quizzes, &posted).expect("again"),
+            CanvasWrite::Unchanged
+        );
+
+        // A hand item filed under another category is still the same score,
+        // and moves to where Canvas keeps it.
+        conn.execute(
+            "INSERT INTO grade_items (category_id, name, score, max_score) VALUES (?1, 'Homework 1', 9, 10)",
+            [quizzes],
+        )
+        .expect("misfiled by hand");
+        let filed = CanvasScore {
+            assignment_id: "5003",
+            name: "Homework 1",
+            score: 9.0,
+            max_score: 10.0,
+            graded_at: None,
+        };
+        assert_eq!(upsert_canvas_item(&conn, 3, homework, &filed).expect("claim"), CanvasWrite::Claimed);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_items WHERE name = 'Homework 1'"), 1);
+        let moved: i64 = conn
+            .query_row("SELECT category_id FROM grade_items WHERE canvas_assignment_id = '5003'", [], |r| r.get(0))
+            .expect("category");
+        assert_eq!(moved, homework);
+
+        // Two classes matched to one Canvas course: the second is refused
+        // rather than moving the first's row across.
+        let (elsewhere, _) = upsert_canvas_category(
+            &conn,
+            1,
+            &CanvasGroup { id: "801", name: "Quizzes", weight: None },
+        )
+        .expect("category");
+        let err = upsert_canvas_item(&conn, 1, elsewhere, &posted).unwrap_err().to_string();
+        assert!(err.contains("another class") || err.contains("class #3"), "{err}");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_items WHERE canvas_assignment_id = '5002'"), 1);
     }
 }

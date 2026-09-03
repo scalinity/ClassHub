@@ -666,7 +666,7 @@ fn sync_grades(
                 max_score: graded.max_score,
                 graded_at: graded.graded_at.as_deref(),
             };
-            match crate::grades::upsert_canvas_item(conn, category_id, &score) {
+            match crate::grades::upsert_canvas_item(conn, class.id, category_id, &score) {
                 Ok(CanvasWrite::Unchanged) => {}
                 Ok(_) => {
                     recorded += 1;
