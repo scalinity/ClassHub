@@ -567,7 +567,7 @@ pub fn enqueue_module_guide(
     prompt: &str,
     payload: String,
 ) -> Result<i64> {
-    enqueue(app, "module_guide", Some(class_id), Some(scope), prompt, Some(payload), None)
+    enqueue_unique_scoped(app, "module_guide", class_id, scope, prompt, Some(payload), None)
 }
 
 /// SPEC §8.2: semester master synthesis (manual trigger only, runs exclusively).
@@ -579,11 +579,11 @@ pub fn enqueue_master_guide(
     payload: String,
     resume_session: Option<String>,
 ) -> Result<i64> {
-    enqueue(
+    enqueue_unique_scoped(
         app,
         "master_guide",
-        Some(class_id),
-        Some("master"),
+        class_id,
+        "master",
         prompt,
         Some(payload),
         resume_session,
@@ -599,7 +599,7 @@ pub fn enqueue_practice(
     prompt: &str,
     payload: String,
 ) -> Result<i64> {
-    enqueue(app, "practice", Some(class_id), Some(scope), prompt, Some(payload), None)
+    enqueue_unique_scoped(app, "practice", class_id, scope, prompt, Some(payload), None)
 }
 
 /// SPEC §8.4: distills one filed lecture transcript into a session document.
@@ -614,11 +614,11 @@ pub fn enqueue_lecture_digest(
     prompt: &str,
     payload: String,
 ) -> Result<i64> {
-    enqueue(
+    enqueue_unique_scoped(
         app,
         "lecture_digest",
-        Some(class_id),
-        Some(transcript_rel_path),
+        class_id,
+        transcript_rel_path,
         prompt,
         Some(payload),
         None,
@@ -892,6 +892,66 @@ fn insert_job(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// `enqueue` for a kind that may have one active row per class and scope — a
+/// guide per scope, an exam per scope, a digest per transcript. The check and
+/// the insert share one IMMEDIATE transaction, as `enqueue_unique` does per
+/// class: the `has_active_job` a caller ran before building its prompt is the
+/// courtesy message, and this is the guard, since two clicks or two
+/// processes can both pass that check and only the write lock orders them.
+fn enqueue_unique_scoped(
+    app: &AppHandle,
+    kind: &str,
+    class_id: i64,
+    scope: &str,
+    prompt: &str,
+    payload: Option<String>,
+    resume_session: Option<String>,
+) -> Result<i64> {
+    let id = with_conn(app, |conn| {
+        insert_unique_scoped_job(conn, kind, class_id, scope, payload.as_deref())
+    })?;
+    let Some(id) = id else {
+        bail!("a job of this kind is already queued or running for this scope");
+    };
+    queue_job(
+        app,
+        QueuedJob {
+            id,
+            kind: kind.to_string(),
+            class_id: Some(class_id),
+            scope: Some(scope.to_string()),
+            prompt: prompt.to_string(),
+            payload,
+            resume_session,
+        },
+    );
+    Ok(id)
+}
+
+/// `insert_unique_job` keyed on the scope as well as the class.
+fn insert_unique_scoped_job(
+    conn: &Connection,
+    kind: &str,
+    class_id: i64,
+    scope: &str,
+    payload: Option<&str>,
+) -> Result<Option<i64>> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let active: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM jobs
+         WHERE kind = ?1 AND class_id = ?2 AND scope = ?3
+           AND status IN ('queued', 'running')",
+        params![kind, class_id, scope],
+        |row| row.get(0),
+    )?;
+    if active > 0 {
+        return Ok(None); // the transaction rolls back on drop
+    }
+    let id = insert_job(&tx, kind, Some(class_id), Some(scope), payload)?;
+    tx.commit()?;
+    Ok(Some(id))
 }
 
 /// Inserts unless a row of this kind is already queued or running for the
