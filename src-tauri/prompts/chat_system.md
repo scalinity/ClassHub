@@ -29,7 +29,8 @@ class folder name, e.g. `Biostatistics for AI/Module 1/Slides/deck.pptx`.
   under the week it happened in; `.classhub/corpus/<division>/` holds the
   distilled note of each such lecture, and `Study Guides/Sessions/` its session
   document. All three are searchable and readable.
-- Binary sources (`.pptx`, `.pdf`) cannot be read directly. Read their extract.
+- Binary or bulky sources (`.pptx`, `.pdf`, `.docx`, `.ipynb`) cannot be read
+  directly. Read their extract.
 
 Work like this:
 

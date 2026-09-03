@@ -14,6 +14,7 @@ mod grades;
 mod guides;
 mod jobs;
 mod lectures;
+mod notebook;
 mod notes;
 mod scanner;
 mod settings;
@@ -106,6 +107,32 @@ fn read_class_file(
         return Err("too large to view in-app — use its default app".into());
     }
     std::fs::read_to_string(&path).map_err(|e| format!("reading {rel_path}: {e}"))
+}
+
+/// SPEC §12: what the viewer frames for a PDF or a slide deck — the absolute
+/// path its `asset:` URL is built from, inside the scope `allow_asset_root`
+/// granted. A deck answers with its converted twin, or an error the tree turns
+/// into an open in the default app.
+#[tauri::command(async)]
+fn pdf_view_path(
+    state: tauri::State<Db>,
+    class_id: i64,
+    rel_path: String,
+) -> Result<String, String> {
+    let conn = db::lock(&state.0);
+    extract::pdf_view_path(&conn, class_id, &rel_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// SPEC §13: the asset protocol reaches the AIBHS root and nothing else. The
+/// scope starts empty in `tauri.conf.json`, because the root is a setting the
+/// config cannot follow, and is widened here to whatever the setting says —
+/// at launch, and again when the setting changes.
+pub(crate) fn allow_asset_root(app: &tauri::AppHandle, root: &std::path::Path) {
+    if let Err(e) = app.asset_protocol_scope().allow_directory(root, true) {
+        eprintln!("asset scope: could not allow {}: {e}", root.display());
+    }
 }
 
 /// SPEC §8.1: manual synthesis trigger. The label is the guide footer's
@@ -659,6 +686,10 @@ pub fn run() {
             };
             jobs::startup_recovery(&conn)?;
             jobs::prune_logs(&data_dir);
+            match db::aibhs_root(&conn) {
+                Ok(root) => allow_asset_root(app.handle(), &root),
+                Err(e) => eprintln!("asset scope: no AIBHS root to allow: {e:#}"),
+            }
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
             app.manage(chat::ChatState::default());
@@ -689,6 +720,7 @@ pub fn run() {
             list_guides,
             read_guide,
             read_class_file,
+            pdf_view_path,
             list_notes,
             list_practice,
             save_note,

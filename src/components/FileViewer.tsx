@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
 
 import { escapeHtml } from "@/lib/answer";
@@ -11,11 +12,18 @@ import { headerAction } from "@/lib/styles";
 export interface ViewedFile {
   relPath: string;
   name: string;
-  kind: string; // scanner kind: html | md | rmd | r | ...
+  kind: string; // scanner kind: html | md | rmd | r | py | csv | ipynb | pdf | pptx | ...
   /** Live document preview: poll the growing file and refresh in place. */
   live?: boolean;
   /** The job composing this file — gates the live view to fresh content. */
   jobId?: number;
+  /**
+   * Absolute path of a PDF to frame through the asset protocol — the file
+   * itself, or a deck's converted twin. Nothing is read as text when set.
+   */
+  pdfPath?: string;
+  /** Class-relative path read in place of `relPath`: a notebook's extract. */
+  source?: string;
 }
 
 /**
@@ -31,14 +39,22 @@ const KIND_LABELS: Record<string, string> = {
   md: "MARKDOWN",
   rmd: "R MARKDOWN",
   r: "R SCRIPT",
+  py: "PYTHON",
+  csv: "CSV",
+  ipynb: "NOTEBOOK EXTRACT",
+  pdf: "PDF",
+  pptx: "SLIDES AS PDF",
 };
 
 /**
  * In-app reading view for class materials — the same reading room as the
  * guide viewer. Markdown and code render in ClassHub's document register;
  * HTML notebooks run their own embedded scripts but stay sandboxed from the
- * app (no same-origin). Live mode polls the file a synthesis job is writing
- * and refreshes the frame in place, preserving the scroll position.
+ * app (no same-origin). A PDF, or a deck's converted twin, is WebKit's own
+ * PDF view on an `asset:` URL: a different origin by scheme, admitted by the
+ * window CSP's `frame-src` and reaching only the AIBHS root (SPEC §13). Live
+ * mode polls the file a synthesis job is writing and refreshes the frame in
+ * place, preserving the scroll position.
  */
 export function FileViewer({
   classId,
@@ -49,9 +65,11 @@ export function FileViewer({
   file: ViewedFile;
   onClose: () => void;
 }) {
+  const textPath = file.source ?? file.relPath;
   const { data, error, isPending } = useQuery({
-    queryKey: ["classFile", classId, file.relPath, file.live ?? false],
-    queryFn: () => readClassFile(classId, file.relPath),
+    queryKey: ["classFile", classId, textPath, file.live ?? false],
+    queryFn: () => readClassFile(classId, textPath),
+    enabled: file.pdfPath === undefined,
     refetchInterval: file.live ? 3000 : false,
     retry: false,
   });
@@ -77,7 +95,7 @@ export function FileViewer({
       ? undefined
       : file.kind === "html"
         ? withDocumentCsp(data)
-        : file.kind === "md" || file.kind === "rmd"
+        : file.kind === "md" || file.kind === "rmd" || file.kind === "ipynb"
           ? docShell(renderMarkdown(data))
           : docShell(`<pre class="sheet">${escapeHtml(data)}</pre>`);
 
@@ -142,7 +160,15 @@ export function FileViewer({
       </header>
 
       <div className="min-h-0 flex-1">
-        {file.live ? (
+        {file.pdfPath !== undefined ? (
+          // No sandbox attribute: a sandboxed frame has no plugins, and
+          // WebKit's PDF view is one. The asset scheme keeps it cross-origin.
+          <iframe
+            src={convertFileSrc(file.pdfPath)}
+            title={file.name}
+            className="block h-full w-full border-0"
+          />
+        ) : file.live ? (
           srcDoc === undefined || stale ? (
             <p className="py-16 text-center font-mono text-xs text-muted-foreground">
               WAITING FOR THE FIRST SECTION

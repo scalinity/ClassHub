@@ -44,11 +44,14 @@ import {
   listLectureContributions,
 } from "@/lib/lectures";
 import {
+  extractPath,
   listNotes,
   listPractice,
   openInDefaultApp,
+  pdfViewPath,
   scanClass,
   type ManagedFile,
+  type TreeNode,
 } from "@/lib/materials";
 import { formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { useDragState } from "@/lib/sorter";
@@ -179,6 +182,28 @@ export function ClassWorkspace({
     setSynthError(null);
     generatePractice(info.id, scope).catch((e) =>
       setSynthError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+    );
+  };
+  /**
+   * A Materials row asked to be read in-app (SPEC §12). A PDF is framed
+   * from its own path and a deck from its converted twin; a deck the pipeline
+   * has not converted yet opens in its default app instead. A notebook opens
+   * its extract — the flattened form chat reads — and everything else its
+   * own text.
+   */
+  const openMaterial = (node: TreeNode) => {
+    const kind = node.kind ?? "other";
+    const file = { relPath: node.relPath, name: node.name, kind };
+    if (kind === "pdf" || kind === "pptx") {
+      pdfViewPath(info.id, node.relPath)
+        .then((pdfPath) => setViewFile({ ...file, pdfPath }))
+        .catch(() =>
+          openInDefaultApp(info.id, node.relPath).catch(() => refetch()),
+        );
+      return;
+    }
+    setViewFile(
+      kind === "ipynb" ? { ...file, source: extractPath(node.relPath) } : file,
     );
   };
   const viewedGuide = viewScope ? (guideMap.get(viewScope) ?? null) : null;
@@ -320,13 +345,7 @@ export function ClassWorkspace({
               classId={info.id}
               nodes={tree}
               onEntryMissing={() => refetch()}
-              onViewFile={(node) =>
-                setViewFile({
-                  relPath: node.relPath,
-                  name: node.name,
-                  kind: node.kind ?? "other",
-                })
-              }
+              onViewFile={openMaterial}
               guideControls={{
                 guides: guideMap,
                 activeScopes,

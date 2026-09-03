@@ -3,11 +3,13 @@
 //!
 //! A file is stale when `extracted_sha256` differs from its current `sha256`
 //! (the scanner's upsert deliberately leaves extract columns untouched).
-//! Text-native formats are extracted locally — zero tokens. PPTX sources are
-//! converted to PDF via headless LibreOffice, then all stale PDFs go into one
-//! batched `extract` job per class through the job runner (SPEC §6, the single
-//! gateway to the subscription). Extract paths mirror the source rel path with
-//! `.md` appended under `.classhub/extracts/` (SPEC §4).
+//! Text-native formats are extracted locally — zero tokens — and so are the
+//! two that need a local pass first: a DOCX goes through headless LibreOffice
+//! to HTML and then the HTML stripper, a notebook through `notebook::flatten`.
+//! PPTX sources are converted to PDF via headless LibreOffice, then all stale
+//! PDFs go into one batched `extract` job per class through the job runner
+//! (SPEC §6, the single gateway to the subscription). Extract paths mirror the
+//! source rel path with `.md` appended under `.classhub/extracts/` (SPEC §4).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,18 +55,24 @@ enum Route {
     Text,
     Html,
     Caption,
+    Notebook,
+    Csv,
     Pdf,
     Pptx,
+    Docx,
     Skip,
 }
 
 fn route(rel_path: &str, kind: &str) -> Route {
     match kind {
-        "rmd" | "r" | "md" => Route::Text,
+        "rmd" | "r" | "md" | "py" => Route::Text,
+        "csv" => Route::Csv,
         "html" => Route::Html,
         "caption" => Route::Caption,
+        "ipynb" => Route::Notebook,
         "pdf" => Route::Pdf,
         "pptx" => Route::Pptx,
+        "docx" => Route::Docx,
         // Deliberately skipped: transcribing is minutes of compute, so it
         // happens when a lecture is explicitly added, never as a side effect of
         // a scan noticing a media file somewhere in the tree.
@@ -120,39 +128,45 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
     let mut batch: Vec<BatchItem> = Vec::new();
     for file in &stale {
         let extract_rel = format!("{EXTRACTS_DIR}/{}.md", file.rel_path);
-        match route(&file.rel_path, &file.kind) {
-            Route::Text | Route::Html | Route::Caption => {
-                let how = route(&file.rel_path, &file.kind);
-                match extract_local(&class_dir, &file.rel_path, &extract_rel, &how) {
-                    Ok(()) => {
-                        let db = app.state::<crate::Db>();
-                        record(&lock(&db.0), class_id, &file.rel_path, &extract_rel, &file.sha256)?;
-                    }
-                    Err(e) => eprintln!(
-                        "extract pipeline class {class_id}: local extract of {} failed: {e:#}",
-                        file.rel_path
-                    ),
-                }
+        // Zero-token: read `input_rel` (the source, or what LibreOffice made
+        // of it), write the extract, record it against the source.
+        let local = |input_rel: &str, how: Route| -> Result<()> {
+            extract_local(&class_dir, input_rel, &extract_rel, &how)?;
+            let db = app.state::<crate::Db>();
+            let conn = lock(&db.0);
+            record(&conn, class_id, &file.rel_path, &extract_rel, &file.sha256)
+        };
+        let outcome = match route(&file.rel_path, &file.kind) {
+            how @ (Route::Text | Route::Html | Route::Caption | Route::Notebook | Route::Csv) => {
+                local(&file.rel_path, how)
             }
-            Route::Pdf => batch.push(BatchItem {
-                rel_path: file.rel_path.clone(),
-                sha256: file.sha256.clone(),
-                input_rel_path: file.rel_path.clone(),
-                extract_rel_path: extract_rel,
-            }),
-            Route::Pptx => match convert_pptx(app, &class_dir, &file.rel_path, &file.sha256) {
-                Ok(pdf_rel) => batch.push(BatchItem {
+            Route::Docx => convert(app, &class_dir, &file.rel_path, &file.sha256, &DOCX_TO_HTML)
+                .and_then(|html_rel| local(&html_rel, Route::Html)),
+            Route::Pdf => {
+                batch.push(BatchItem {
                     rel_path: file.rel_path.clone(),
                     sha256: file.sha256.clone(),
-                    input_rel_path: pdf_rel,
-                    extract_rel_path: extract_rel,
+                    input_rel_path: file.rel_path.clone(),
+                    extract_rel_path: extract_rel.clone(),
+                });
+                Ok(())
+            }
+            Route::Pptx => convert(app, &class_dir, &file.rel_path, &file.sha256, &PPTX_TO_PDF)
+                .map(|pdf_rel| {
+                    batch.push(BatchItem {
+                        rel_path: file.rel_path.clone(),
+                        sha256: file.sha256.clone(),
+                        input_rel_path: pdf_rel,
+                        extract_rel_path: extract_rel.clone(),
+                    })
                 }),
-                Err(e) => eprintln!(
-                    "extract pipeline class {class_id}: pptx conversion of {} failed: {e:#}",
-                    file.rel_path
-                ),
-            },
-            Route::Skip => {}
+            Route::Skip => Ok(()),
+        };
+        if let Err(e) = outcome {
+            eprintln!(
+                "extract pipeline class {class_id}: extract of {} failed: {e:#}",
+                file.rel_path
+            );
         }
     }
 
@@ -254,19 +268,23 @@ fn record(
 // ---------------------------------------------------------------------------
 // Local (zero-token) extraction
 
-fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, how: &Route) -> Result<()> {
-    let raw = fs::read(class_dir.join(rel_path))
-        .with_context(|| format!("reading {rel_path}"))?;
+/// `input_rel` is the file read — the source itself, or for a DOCX the HTML
+/// LibreOffice made of it — while the extract lands at `extract_rel`.
+fn extract_local(class_dir: &Path, input_rel: &str, extract_rel: &str, how: &Route) -> Result<()> {
+    let raw = fs::read(class_dir.join(input_rel))
+        .with_context(|| format!("reading {input_rel}"))?;
     let text = String::from_utf8_lossy(&raw).replace("\r\n", "\n");
     let mut content = match how {
         Route::Html => strip_html(&text),
+        Route::Notebook => crate::notebook::flatten(&text)?,
+        Route::Csv => cap_csv(&text),
         // A raw caption track is thousands of two-second fragments. What the
         // agent should search is the merged prose, not the timing grid.
         Route::Caption => {
-            let name = Path::new(rel_path)
+            let name = Path::new(input_rel)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| rel_path.to_string());
+                .unwrap_or_else(|| input_rel.to_string());
             crate::transcripts::to_markdown(
                 &crate::transcripts::parse(&text),
                 &crate::transcripts::Meta {
@@ -280,9 +298,9 @@ fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, how: &Rout
             )
         }
         Route::Text => text,
-        // Named rather than caught by a catch-all, so a fourth local route has
+        // Named rather than caught by a catch-all, so a new local route has
         // to say what it does instead of silently extracting as raw text.
-        Route::Pdf | Route::Pptx | Route::Skip => text,
+        Route::Pdf | Route::Pptx | Route::Docx | Route::Skip => text,
     };
     content.truncate(content.trim_end().len());
     content.push('\n');
@@ -294,6 +312,25 @@ fn extract_local(class_dir: &Path, rel_path: &str, extract_rel: &str, how: &Rout
     Ok(())
 }
 
+/// Lines of a CSV kept in its extract. An extract exists to be searched — the
+/// header and the shape of the rows are what a question about the data needs —
+/// not to hold the dataset; the rest stays in the source.
+const MAX_CSV_LINES: usize = 300;
+
+fn cap_csv(text: &str) -> String {
+    let total = text.lines().count();
+    if total <= MAX_CSV_LINES {
+        return text.to_string();
+    }
+    let mut out = text.lines().take(MAX_CSV_LINES).collect::<Vec<_>>().join("\n");
+    out.push_str(&format!(
+        "\n\n… {} more lines not extracted ({total} in the file, header included) — \
+         read the source for the rest.",
+        total - MAX_CSV_LINES
+    ));
+    out
+}
+
 const SKIP_CONTENT_TAGS: &[&str] = &["script", "style", "noscript"];
 const BLOCK_TAGS: &[&str] = &[
     "p", "div", "br", "li", "ul", "ol", "tr", "table", "thead", "tbody", "pre",
@@ -301,14 +338,43 @@ const BLOCK_TAGS: &[&str] = &[
     "h3", "h4", "h5", "h6",
 ];
 
-/// Minimal tag-strip for R-rendered notebook HTML (SPEC §7 step 3): drops tags
-/// plus script/style payloads, decodes common entities, keeps `<pre>` text
-/// intact, and collapses runs of blank lines. Zero tokens, zero dependencies.
+/// Minimal tag-strip for R-rendered notebook HTML and LibreOffice's DOCX
+/// export (SPEC §7 step 3): drops tags plus script/style payloads, decodes
+/// common entities, keeps `<pre>` text intact, and collapses runs of blank
+/// lines. Outside `<pre>` a newline in the text is source formatting — HTML
+/// renders it as a space — and it is folded into one, because LibreOffice
+/// hard-wraps every paragraph at about seventy characters and a phrase that
+/// crossed the wrap would be unfindable by a line-based search. Zero tokens,
+/// zero dependencies.
 fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 4);
     let mut rest = html;
+    let mut pre_depth = 0usize;
+    // A newline seen in prose, owed as one space before the next word.
+    let mut soft_break = false;
+    let mut emit = |text: &str, out: &mut String, in_pre: bool, soft_break: &mut bool| {
+        let mut decoded = String::new();
+        decode_entities(text, &mut decoded);
+        if in_pre {
+            out.push_str(&decoded);
+            return;
+        }
+        for c in decoded.chars() {
+            if c == '\n' || c == '\r' {
+                *soft_break = true;
+                continue;
+            }
+            if *soft_break {
+                *soft_break = false;
+                if !c.is_whitespace() && out.chars().last().is_some_and(|l| !l.is_whitespace()) {
+                    out.push(' ');
+                }
+            }
+            out.push(c);
+        }
+    };
     while let Some(open) = rest.find('<') {
-        decode_entities(&rest[..open], &mut out);
+        emit(&rest[..open], &mut out, pre_depth > 0, &mut soft_break);
         rest = &rest[open..];
         if let Some(after) = rest.strip_prefix("<!--") {
             rest = after.find("-->").map(|i| &after[i + 3..]).unwrap_or("");
@@ -336,13 +402,18 @@ fn strip_html(html: &str) -> String {
             }
             continue;
         }
+        if name == "pre" {
+            pre_depth = if tag.starts_with('/') { pre_depth.saturating_sub(1) } else { pre_depth + 1 };
+        }
         if BLOCK_TAGS.contains(&name.as_str()) {
             out.push('\n');
+            soft_break = false;
         } else if name == "td" || name == "th" {
             out.push(' ');
+            soft_break = false;
         }
     }
-    decode_entities(rest, &mut out);
+    emit(rest, &mut out, pre_depth > 0, &mut soft_break);
 
     let mut result = String::with_capacity(out.len());
     let mut blanks = 0;
@@ -410,24 +481,63 @@ fn decode_entities(text: &str, out: &mut String) {
 }
 
 // ---------------------------------------------------------------------------
-// PPTX → PDF conversion (SPEC §7 step 2)
+// LibreOffice conversions (SPEC §7 step 2)
 
-/// Converts `<rel>.pptx` to `.classhub/extracts/<rel>.pptx.pdf`, skipping when
-/// the existing PDF was produced from the current source hash (sidecar file).
-/// Returns the converted PDF's class-relative path.
-fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str) -> Result<String> {
-    let pdf_rel = format!("{EXTRACTS_DIR}/{rel_path}.pdf");
-    let pdf_abs = class_dir.join(&pdf_rel);
-    let sidecar = class_dir.join(format!("{pdf_rel}.sha256"));
-    let current = pdf_abs.is_file()
-        && fs::read_to_string(&sidecar)
+/// What headless LibreOffice is asked to make of a source, and the extension
+/// its output carries in the extracts mirror: `<rel>.pptx.pdf`, `<rel>.docx.html`.
+struct Conversion {
+    /// soffice's `--convert-to` argument — an extension, or one with a filter
+    /// and its options.
+    convert_to: &'static str,
+    ext: &'static str,
+}
+
+const PPTX_TO_PDF: Conversion = Conversion { convert_to: "pdf", ext: "pdf" };
+
+/// `EmbedImages` keeps the export to one file. Without it Writer writes every
+/// figure beside the HTML as a loose PNG — eleven of them, 2.9 MB, for the one
+/// docx in the tree — and the stripper drops an `<img>` whichever way its
+/// source is written, so nothing is lost by inlining that was kept by the
+/// files.
+const DOCX_TO_HTML: Conversion = Conversion {
+    convert_to: "html:HTML (StarWriter):EmbedImages",
+    ext: "html",
+};
+
+/// The mirror path of a source's conversion, and the sidecar that records
+/// which source hash it was made from.
+fn conversion_paths(class_dir: &Path, rel_path: &str, how: &Conversion) -> (String, PathBuf, PathBuf) {
+    let out_rel = format!("{EXTRACTS_DIR}/{rel_path}.{}", how.ext);
+    let out_abs = class_dir.join(&out_rel);
+    let sidecar = class_dir.join(format!("{out_rel}.sha256"));
+    (out_rel, out_abs, sidecar)
+}
+
+/// Whether the mirror already holds this source's conversion as it is now:
+/// the sidecar carries the hash it was converted from.
+fn conversion_is_current(out_abs: &Path, sidecar: &Path, sha256: &str) -> bool {
+    out_abs.is_file()
+        && fs::read_to_string(sidecar)
             .map(|s| s.trim() == sha256)
-            .unwrap_or(false);
-    if current {
-        return Ok(pdf_rel);
+            .unwrap_or(false)
+}
+
+/// Converts `<rel>` into the extracts mirror under `how`, skipping when the
+/// existing output was produced from the current source hash (sidecar file).
+/// Returns the output's class-relative path.
+fn convert(
+    app: &AppHandle,
+    class_dir: &Path,
+    rel_path: &str,
+    sha256: &str,
+    how: &Conversion,
+) -> Result<String> {
+    let (out_rel, out_abs, sidecar) = conversion_paths(class_dir, rel_path, how);
+    if conversion_is_current(&out_abs, &sidecar, sha256) {
+        return Ok(out_rel);
     }
 
-    let out_dir = pdf_abs.parent().context("pdf path has no parent")?;
+    let out_dir = out_abs.parent().context("conversion path has no parent")?;
     fs::create_dir_all(out_dir)?;
     // A dedicated user profile keeps headless runs independent of any open
     // LibreOffice GUI instance (they otherwise refuse to start concurrently).
@@ -442,7 +552,7 @@ fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str)
     // extraction dead for the rest of the session.
     let child = Command::new(soffice_bin())
         .arg(format!("-env:UserInstallation={profile_url}"))
-        .args(["--headless", "--convert-to", "pdf", "--outdir"])
+        .args(["--headless", "--convert-to", how.convert_to, "--outdir"])
         .arg(out_dir)
         .arg(class_dir.join(rel_path))
         .stdin(Stdio::null())
@@ -464,12 +574,14 @@ fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str)
         );
     }
 
-    // soffice names its output `<stem>.pdf`; move it to `<name>.pptx.pdf` (§4).
+    // soffice names its output `<stem>.<ext>`; move it to `<name>.<source
+    // ext>.<ext>` (§4). The stem keeps whatever the name had before its
+    // extension, a trailing space included.
     let stem = Path::new(rel_path)
         .file_stem()
-        .context("pptx has no file stem")?
+        .context("source has no file stem")?
         .to_string_lossy();
-    let produced = out_dir.join(format!("{stem}.pdf"));
+    let produced = out_dir.join(format!("{stem}.{}", how.ext));
     if !produced.is_file() {
         bail!(
             "soffice reported success but produced no {}: {}",
@@ -477,9 +589,37 @@ fn convert_pptx(app: &AppHandle, class_dir: &Path, rel_path: &str, sha256: &str)
             String::from_utf8_lossy(&output.stdout).trim()
         );
     }
-    fs::rename(&produced, &pdf_abs)?;
+    fs::rename(&produced, &out_abs)?;
     fs::write(&sidecar, sha256)?;
-    Ok(pdf_rel)
+    Ok(out_rel)
+}
+
+/// SPEC §12: the absolute path the viewer's PDF frame loads through the asset
+/// protocol — a PDF itself, or a deck's converted twin when the twin was made
+/// from the deck as it is now. An unconverted deck is refused, and the tree
+/// opens it in its default app instead.
+pub fn pdf_view_path(conn: &Connection, class_id: i64, rel_path: &str) -> Result<PathBuf> {
+    let source = crate::scanner::resolve_rel(conn, class_id, rel_path)?;
+    match crate::scanner::kind_for(&source) {
+        "pdf" => Ok(source),
+        "pptx" => {
+            let sha256: String = conn
+                .query_row(
+                    "SELECT sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+                    params![class_id, rel_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .context("not indexed yet — rescan the class")?;
+            let class_dir = crate::scanner::class_dir(conn, class_id)?;
+            let (_, twin, sidecar) = conversion_paths(&class_dir, rel_path, &PPTX_TO_PDF);
+            if !conversion_is_current(&twin, &sidecar, &sha256) {
+                bail!("not converted to PDF yet — the next scan converts it");
+            }
+            Ok(twin)
+        }
+        kind => bail!("a {kind} file has no PDF to show"),
+    }
 }
 
 fn soffice_bin() -> PathBuf {
@@ -620,7 +760,86 @@ pub fn manifest_is_stale(stored_manifest_json: &str, current: &[ManifestEntry]) 
 
 #[cfg(test)]
 mod tests {
-    use super::{current_manifest, strip_html};
+    use super::{cap_csv, current_manifest, pdf_view_path, strip_html, MAX_CSV_LINES};
+
+    /// A CSV's extract is for search, not for holding the dataset: past the
+    /// cap the rows stay in the source and the note says how many.
+    #[test]
+    fn a_csv_past_the_cap_keeps_its_head_and_names_the_rest() {
+        let mut text = String::from("id,age,outcome\n");
+        for i in 1..=1_000 {
+            text.push_str(&format!("{i},{},{}\n", 20 + i % 60, i % 2));
+        }
+        let capped = cap_csv(&text);
+        let lines: Vec<&str> = capped.lines().collect();
+        assert_eq!(lines[0], "id,age,outcome");
+        assert_eq!(lines[MAX_CSV_LINES - 1], "299,79,1");
+        assert!(lines[MAX_CSV_LINES].is_empty());
+        assert_eq!(
+            lines[MAX_CSV_LINES + 1],
+            "… 701 more lines not extracted (1001 in the file, header included) — read the source for the rest."
+        );
+        assert!(!capped.contains("\n300,"), "{capped}");
+    }
+
+    #[test]
+    fn a_csv_within_the_cap_is_kept_whole() {
+        let text = "a,b\n1,2\n3,4\n";
+        assert_eq!(cap_csv(text), text);
+    }
+
+    /// What the viewer's PDF frame is given: the PDF, or a deck's twin only
+    /// while the twin was made from the deck as it is now.
+    #[test]
+    fn the_pdf_view_path_is_the_pdf_or_a_current_twin() {
+        let root = std::env::temp_dir().join(format!("classhub-pdf-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let class_dir = root.join("Biostatistics for AI");
+        std::fs::create_dir_all(class_dir.join(".classhub/extracts/Slides")).unwrap();
+        std::fs::create_dir_all(class_dir.join("Slides")).unwrap();
+        std::fs::write(class_dir.join("Slides/deck.pptx"), b"pptx").unwrap();
+        std::fs::write(class_dir.join("Slides/paper.pdf"), b"pdf").unwrap();
+        std::fs::write(class_dir.join("Slides/notes.md"), b"md").unwrap();
+
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_id: i64 = conn
+            .query_row(
+                "SELECT id FROM classes WHERE folder_name = 'Biostatistics for AI'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seeded class");
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (?1, 'Slides/deck.pptx', 'abc', 4, 1, 'pptx')",
+            [class_id],
+        )
+        .expect("file");
+
+        assert_eq!(
+            pdf_view_path(&conn, class_id, "Slides/paper.pdf").expect("pdf"),
+            class_dir.join("Slides/paper.pdf")
+        );
+        let err = pdf_view_path(&conn, class_id, "Slides/deck.pptx").unwrap_err();
+        assert!(err.to_string().contains("not converted"), "{err:#}");
+
+        let twin = class_dir.join(".classhub/extracts/Slides/deck.pptx.pdf");
+        std::fs::write(&twin, b"pdf").unwrap();
+        std::fs::write(class_dir.join(".classhub/extracts/Slides/deck.pptx.pdf.sha256"), "abc").unwrap();
+        assert_eq!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").expect("twin"), twin);
+
+        // The deck changed since the twin was made: back to the default app
+        // until the next scan converts it again.
+        conn.execute("UPDATE files SET sha256 = 'abd' WHERE rel_path = 'Slides/deck.pptx'", [])
+            .expect("edit");
+        assert!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").is_err());
+
+        let err = pdf_view_path(&conn, class_id, "Slides/notes.md").unwrap_err();
+        assert!(err.to_string().contains("no PDF"), "{err:#}");
+        assert!(pdf_view_path(&conn, class_id, "../etc/passwd").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// SPEC §8.5's least visible requirement. A unit's sources come from a
     /// folder and from lectures that share no path prefix with it, so a
@@ -694,6 +913,18 @@ mod tests {
     #[test]
     fn keeps_text_and_drops_tags() {
         assert_eq!(strip_html("<p>Hello <b>world</b></p>").trim(), "Hello world");
+    }
+
+    /// LibreOffice hard-wraps every paragraph of a DOCX export; the phrase
+    /// across the wrap has to land on one line or search never finds it.
+    /// Inside `<pre>` the newlines are the content and stay.
+    #[test]
+    fn folds_soft_line_breaks_in_prose_but_not_in_pre() {
+        let html = "<p>Introducing Navigator\nToolkit <b>API</b>\nKey to\r\n<span>Posit</span> </p>\n<pre>x &lt;- 1\ny &lt;- 2</pre>";
+        assert_eq!(
+            strip_html(html),
+            "Introducing Navigator Toolkit API Key to Posit\n\nx <- 1\ny <- 2\n"
+        );
     }
 
     #[test]

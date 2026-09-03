@@ -242,5 +242,9 @@ pub fn set_aibhs_root(app: &AppHandle, path: &str) -> Result<()> {
     if !expanded.is_dir() {
         bail!("no folder at {}", expanded.display());
     }
-    set_audited(app, ROOT_SETTING, &expanded.to_string_lossy())
+    set_audited(app, ROOT_SETTING, &expanded.to_string_lossy())?;
+    // The viewer's PDF frames read through the asset protocol, whose scope
+    // followed the old root; the old one stays allowed until relaunch.
+    crate::allow_asset_root(app, &expanded);
+    Ok(())
 }

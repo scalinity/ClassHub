@@ -268,7 +268,9 @@ Rules:
 - Folder structure inside each class is **arbitrary and user-owned**; never assume the exact
   layout above. Scanner and agents must tolerate any nesting.
 - Extract paths mirror the source file's relative path with `.md` appended, under
-  `.classhub/extracts/`. PPTX→PDF conversions live alongside as `<name>.pptx.pdf`.
+  `.classhub/extracts/`. LibreOffice conversions live alongside, named for the source and
+  what it became — `<name>.pptx.pdf`, `<name>.docx.html` — each with a `.sha256` sidecar
+  naming the source hash it was made from, so an unchanged file is never converted twice.
 - `Study Guides/`, `Notes/`, `_Inbox/`, `.classhub/` are excluded from scanning, drop-to-sort
   proposals, and staleness computation of source material.
 - **`Weeks/` is storage, and for these four courses it also settles scope.** A lecture goes
@@ -299,7 +301,8 @@ meetings(id INTEGER PK, class_id INTEGER FK, weekday INTEGER,  -- 1=Mon .. 7=Sun
          start_time TEXT, end_time TEXT, periods TEXT);
 
 files(id INTEGER PK, class_id INTEGER FK, rel_path TEXT, sha256 TEXT, size INTEGER,
-      mtime INTEGER, kind TEXT,            -- pptx|pdf|rmd|r|html|md|other
+      mtime INTEGER, kind TEXT,            -- pptx|pdf|docx|rmd|r|py|ipynb|html|md|csv|
+                                           -- caption|media|other, by extension (§7)
       extract_rel_path TEXT NULL, extracted_at INTEGER NULL,
       extracted_sha256 TEXT NULL,          -- hash of source when extract was made
       UNIQUE(class_id, rel_path));
@@ -485,11 +488,20 @@ agent and synthesis prompts can search text instead of re-reading binaries.
    added/changed/removed files by hash.
 2. **Convert**: for `.pptx` files, run
    `soffice --headless --convert-to pdf --outdir <extracts mirror dir> <file>`
-   producing `<name>.pptx.pdf`. Skip if the PDF is newer than the source hash.
+   producing `<name>.pptx.pdf`; for `.docx` files the same subprocess with
+   `--convert-to "html:HTML (StarWriter):EmbedImages"`, producing `<name>.docx.html`
+   (images inlined so the export is one file rather than a scatter of PNGs beside it).
+   Both skip when the sidecar carries the current source hash (§4).
 3. **Extract** (per changed file, batched into one `extract` job per class per run):
-   - Text-native formats (`.Rmd`, `.R`, `.md`, `.txt`): local Rust extraction (copy /
-     light normalization). `.html` (R-rendered notebooks): local tag-strip to text.
-     No tokens spent.
+   - Text-native formats (`.Rmd`, `.R`, `.md`, `.py`): local Rust extraction (copy /
+     light normalization). `.csv`: the first 300 lines and a note of the total, since an
+     extract exists to be searched, not to hold a dataset. `.html` (R-rendered notebooks)
+     and the converted `.docx.html`: local tag-strip to text, with soft line breaks in
+     prose folded to spaces so a phrase LibreOffice wrapped stays on one line for search;
+     a docx's figures are lost, which is acceptable for a document. `.ipynb`: flattened
+     locally — markdown cells verbatim, code cells fenced with the kernel's language,
+     `stream` and `text/plain` outputs kept and capped per cell, image outputs replaced
+     by `[Figure: image output]`. No tokens spent on any of these.
    - Visual formats (`.pdf`, converted PPTX-PDFs): `claude -p` extraction. The prompt
      instructs: read the PDF, produce a faithful markdown extract preserving structure,
      tables, formulas, code; **describe every figure/diagram/chart in brackets**
@@ -502,7 +514,8 @@ agent and synthesis prompts can search text instead of re-reading binaries.
 Extraction is triggered automatically after a scan finds changes (extraction is cheap:
 sonnet + mostly local), but **guide synthesis is never automatic**.
 
-Caption tracks (`.vtt`, `.srt`) found in the tree are extracted locally through the same
+Caption tracks (`.vtt`, `.srt`, and `.txt`, since Zoom's in-meeting transcript is a caption
+track in everything but extension) found in the tree are extracted locally through the same
 normalizer §7.1 uses — the searchable copy is the merged prose, not the timing grid. Media
 files are indexed but never extracted: transcribing is minutes of compute, so it happens when
 a lecture is explicitly added, never as a side effect of a scan noticing an `.mp4`.
@@ -968,6 +981,11 @@ and apply it. Non-negotiable per project owner.
   · Class Workspace (accent header whose eyebrow names the current division after the
   meeting time; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in Browser / Show in Finder)
+  · Material viewer (the same reading room for a class file: markdown, R and Python
+  scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
+  a Jupyter notebook as its extract, and a PDF — or a slide deck, through its converted
+  twin — in WebKit's own PDF view framed over the asset protocol (§13); a deck whose twin
+  is missing or out of date opens in its default app instead)
   · Chat sidebar (global, overlays right side, keyboard shortcut) · Job Center (bottom bar
   pill expanding to a panel with live logs) · Settings.
 - Empty states matter: a class with no modules yet (3 of 4 classes today) shows a friendly
@@ -1003,6 +1021,18 @@ and apply it. Non-negotiable per project owner.
   policy must keep `script-src 'unsafe-inline'` or those frames go inert. The window CSP
   is therefore an anti-exfiltration control (no external script origin, no external
   connect-src, no object/base/form), not the thing that blocks `javascript:` URLs.
+- **The asset protocol reaches the AIBHS root and nothing else.** The material viewer frames
+  a PDF on an `asset:` URL (§12), so `frame-src` in both window policies admits
+  `asset: http://asset.localhost` beside what `img-src` already carried. The scope is not
+  written in `tauri.conf.json` — the root is a setting, and a static list could not follow
+  it — so it starts empty there and is granted at launch to the root the database names,
+  and again when the setting changes; the old root stays allowed until relaunch. The scope
+  matches dot-directories deliberately (`requireLiteralLeadingDot: false`), because a
+  deck's converted twin lives under `.classhub/`. WebKit's PDF view is a plugin, which a
+  sandboxed frame has none of, so the PDF frame carries no `sandbox` attribute and is
+  cross-origin by scheme instead. Measured 2026-09-02 on a hand-written PDF carrying a URI
+  `OpenAction`, a URI link annotation and an image with a remote file specification, all
+  pointed at a local listener: the page rendered and the listener saw nothing.
 - **One database for every build.** The data directory is Tauri's own `app_data_dir()`
   (`~/Library/Application Support/com.danny.classhub`), resolved by `lib.rs::data_dir` for
   every caller — the database, job logs, the LibreOffice profile, Zoom downloads and the
@@ -1179,7 +1209,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a question asked from a workspace needs no class name, "make a practice exam
   for Week 3" queues a unit-scoped job, and the same exam can be started from the row's button.
 
-- [ ] **M20 — Every format in the tree.** (`milestones/M20-every-format.md`)
+- [x] **M20 — Every format in the tree.** (`milestones/M20-every-format.md`)
   `docx` through LibreOffice to the HTML stripper, `ipynb` flattened locally, `py` and `csv` on
   the text route, all zero-token; PDFs and converted decks viewable in the app through the asset
   protocol scoped to the AIBHS root.

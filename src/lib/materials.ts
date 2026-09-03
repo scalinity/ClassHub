@@ -4,7 +4,7 @@ export interface TreeNode {
   name: string;
   relPath: string;
   dir: boolean;
-  kind?: string; // pptx | pdf | rmd | r | html | md | other
+  kind?: string; // pptx | pdf | docx | rmd | r | py | ipynb | html | md | csv | caption | media | other
   size?: number;
   children: TreeNode[];
 }
@@ -26,6 +26,20 @@ export function openInDefaultApp(classId: number, relPath: string): Promise<void
 /** Raw text of a class file for the in-app viewer (backend caps the size). */
 export function readClassFile(classId: number, relPath: string): Promise<string> {
   return invoke<string>("read_class_file", { classId, relPath });
+}
+
+/**
+ * The absolute path the viewer frames for a PDF, or for a slide deck its
+ * converted twin — rejected while the twin is missing or made from an older
+ * deck, which is when the deck opens in its default app instead.
+ */
+export function pdfViewPath(classId: number, relPath: string): Promise<string> {
+  return invoke<string>("pdf_view_path", { classId, relPath });
+}
+
+/** A source's markdown extract, class-relative (SPEC §4). */
+export function extractPath(relPath: string): string {
+  return `.classhub/extracts/${relPath}.md`;
 }
 
 /** A file in an app-managed directory (notes, practice exams); disk is truth. */
@@ -58,12 +72,21 @@ export function listPractice(classId: number): Promise<ManagedFile[]> {
   return invoke<ManagedFile[]>("list_practice", { classId });
 }
 
-/** Kinds the in-app viewer can render; the rest open in their default app. */
+/**
+ * Kinds the in-app viewer can render; the rest open in their default app.
+ * A PDF and a converted deck are framed through the asset protocol, a
+ * notebook opens as its extract, scripts and CSVs as text (SPEC §12).
+ */
 export const VIEWABLE_KINDS: ReadonlySet<string> = new Set([
   "html",
   "md",
   "rmd",
   "r",
+  "py",
+  "csv",
+  "ipynb",
+  "pdf",
+  "pptx",
 ]);
 
 export function countFiles(nodes: TreeNode[]): number {

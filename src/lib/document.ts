@@ -106,6 +106,9 @@ pre {
 code { font-size: 13px; }
 p code, li code { background: var(--shade); border-radius: 4px; padding: 0.1em 0.35em; font-size: 12.5px; }
 pre code { background: none; padding: 0; }
+/* A notebook extract's output block — what a cell printed, as against what
+   was written in it — reads quieter: no fill, a dashed rule, muted ink. */
+pre:has(> code.language-output) { background: none; border-style: dashed; color: var(--muted); }
 pre.sheet, pre.frontmatter { white-space: pre-wrap; }
 pre.frontmatter { font-size: 11px; color: var(--muted); margin-bottom: 2rem; }
 blockquote { margin: 1em 0; padding-left: 1em; border-left: 2px solid var(--hairline); color: var(--muted); }

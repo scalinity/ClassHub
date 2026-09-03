@@ -446,10 +446,14 @@ pub fn kind_for(path: &Path) -> &'static str {
     match ext.as_str() {
         "pptx" => "pptx",
         "pdf" => "pdf",
+        "docx" => "docx",
         "rmd" => "rmd",
         "r" => "r",
+        "py" => "py",
+        "ipynb" => "ipynb",
         "html" | "htm" => "html",
         "md" => "md",
+        "csv" => "csv",
         // Caption tracks a lecture arrived with, kept alongside the normalized
         // markdown so the original is never the thing that got thrown away.
         "vtt" | "srt" => "caption",

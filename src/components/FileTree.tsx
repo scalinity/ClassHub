@@ -7,12 +7,16 @@ import {
   CodeXml,
   File,
   FileCode,
+  FileTerminal,
   FileText,
   FolderSearch,
+  NotebookPen,
   NotebookText,
   NotepadText,
   Presentation,
   RefreshCw,
+  ScrollText,
+  Sheet,
   type LucideIcon,
 } from "lucide-react";
 
@@ -31,10 +35,14 @@ import { monoAction } from "@/lib/styles";
 const KIND_ICONS: Record<string, LucideIcon> = {
   pptx: Presentation,
   pdf: FileText,
+  docx: ScrollText,
   rmd: NotebookText,
   r: FileCode,
+  py: FileTerminal,
+  ipynb: NotebookPen,
   html: CodeXml,
   md: NotepadText,
+  csv: Sheet,
   caption: Captions,
   media: AudioLines,
 };

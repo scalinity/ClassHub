@@ -2165,3 +2165,156 @@ What future sessions should know:
   clean. The rebuilt dev build showed the Fundamentals strip and rows with
   the same clusters and the exam listing. Nothing was pushed: the repo has
   no remote.
+
+## M20 — Every format in the tree (2026-09-02)
+
+### What was built
+
+- **Kinds.** `scanner::kind_for` names `docx`, `ipynb`, `py` and `csv`
+  beside the kinds it had; SPEC §5's comment now lists every value the
+  column holds, `FileTree`'s icon map gives each a glyph, and
+  `VIEWABLE_KINDS` gains the four plus `pdf` and `pptx`.
+- **Zero-token extracts.** `extract::route` has three new arms. `Docx` runs
+  the same bounded LibreOffice subprocess `pptx` uses — `convert_pptx`
+  became `convert(app, class_dir, rel, sha, &Conversion)`, with
+  `PPTX_TO_PDF` and `DOCX_TO_HTML` naming the `--convert-to` argument and
+  the extension the mirror keeps — then feeds the result through the
+  `Route::Html` code path to `<name>.docx.md`. `Notebook` is
+  `notebook::flatten`, a pure function over nbformat 4: markdown and raw
+  cells verbatim, code cells fenced with `language_info.name` (falling back
+  to the kernelspec's language, then a bare fence), `stream` and
+  `text/plain` outputs in a fenced `output` block capped at 40 lines and
+  4 KB per cell, an image output replaced by `[Figure: image output]` before
+  its `text/plain` placeholder is considered, an `error` output reduced to
+  `ename: evalue` without the ANSI traceback. `Csv` is `cap_csv`: the first
+  300 lines and a note naming the remainder. `py` joins the text route;
+  `.txt` keeps its caption route. The pipeline loop now funnels every local
+  route through one closure that extracts and records, so a fourth local
+  route is one match arm.
+- **The docx export is one file.** Writer's HTML export drops every figure
+  beside the HTML as a loose PNG — eleven of them, 2.9 MB, for the one docx
+  in the tree, against a 7 KB HTML — so the filter is invoked as
+  `html:HTML (StarWriter):EmbedImages`, which inlines them as data URIs the
+  stripper discards like any other `<img>`. The mirror holds
+  `<name>.docx.html` (3.9 MB for that file) and its `.sha256` sidecar, the
+  same rule as a deck's PDF twin, and the extract is 2.1 KB.
+- **The stripper folds soft line breaks.** Writer hard-wraps every
+  paragraph at about seventy characters, and the first extract read
+  `Introducing Navigator\nToolkit API Key…`, which a line-based search
+  could never match across the wrap. `strip_html` now tracks `<pre>` depth
+  and, outside one, turns a newline in prose into a single space owed
+  before the next word — a pending break carried across inline tags, so
+  `Navigator\n<b>Toolkit</b>` does not glue. Inside `<pre>` nothing
+  changes; a block tag still starts a line.
+- **PDFs in the app.** `tauri` gains the `protocol-asset` feature,
+  `tauri.conf.json` enables the asset protocol with an empty scope, and
+  `lib::allow_asset_root` widens it to the AIBHS root at launch and again
+  from `set_aibhs_root`. `frame-src` in both CSPs admits
+  `asset: http://asset.localhost`. `extract::pdf_view_path` answers the
+  `pdf_view_path` command with the absolute path to frame: a PDF itself, or
+  a deck's twin when `conversion_is_current` says the sidecar matches the
+  indexed hash, and an error otherwise. `ClassWorkspace::openMaterial`
+  resolves that before opening the viewer and falls back to the default
+  app on refusal; a notebook opens with `source` set to its extract path;
+  scripts and CSVs open as text. `FileViewer` frames a `pdfPath` on
+  `convertFileSrc` with no sandbox attribute — a sandboxed frame has no
+  plugins, and WebKit's PDF view is one — and labels the eyebrow `PDF`,
+  `SLIDES AS PDF`, `NOTEBOOK EXTRACT`, `PYTHON`, `CSV`. The document shell
+  draws a notebook's `output` fences without fill, dashed and in muted ink,
+  so what a cell printed reads apart from what was written in it.
+- The chat prompt's binary-sources line names `.docx` and `.ipynb` beside
+  `.pptx` and `.pdf`; `read_material` already refused both, and the extract
+  is the copy worth reading in either case.
+
+### Verified
+
+- `cargo test`: 170 pass, 13 new. The notebook flattener against
+  `src-tauri/tests/notebook.ipynb` (markdown verbatim, python fences, the
+  stream and the describe() result, the HTML twin dropped, the figure
+  marker with no base64 and no placeholder, the error by name, an unrun
+  cell with no output block, a kernelspec-only and a bare-fence notebook,
+  JSON that is not a notebook refused, a 100-line output capped at 40 with
+  `(60 more lines)`, a 5,000-character line cut at a char boundary); the
+  CSV cap at 300 lines with its note and a short CSV kept whole; the soft
+  break fold with `<pre>` untouched; `pdf_view_path` for a PDF, an
+  unconverted deck, a current twin, a twin from an older hash, a markdown
+  file and a traversal. `npx tsc --noEmit` clean.
+- Live on the dev build beside the installed app (pids 29957, 30619, then
+  30746 across two rebuilds — the stripper fold and the scope's leading-dot
+  rule), driven through the M16 accessibility driver, no job running at
+  either rebuild:
+  - The launch scan extracted the Biostatistics `.docx` and, in a
+    throwaway `AI in Health Design Studio I/M20 Format Check/` folder, the
+    fixture notebook, a 14-line `warmup.py` and a 350-line `cohort.csv`
+    (extract of 302 lines ending `… 50 more lines not extracted (350 in the
+    file, header included)`). The jobs table gained no row: the highest id
+    stayed 293 throughout. Biostatistics went from 14 of 15 to 15 of 15
+    extracted, and the compact overview, printed read-only from the live
+    database through a throwaway ignored test, reads `Material: 15 files
+    indexed, 15 with a current extract`.
+  - The reading PDF under `Module 1/Reading Material` opened inline under
+    `MATERIAL · PDF`; `Biostatistics_Module1_Slides_class2.pptx` opened as
+    its twin under `MATERIAL · SLIDES AS PDF` (blank on the first try — see
+    Gotchas); Applied Generative AI's `Weeks/Week 01` deck PDF opened
+    inline. The notebook opened as its extract, the script as `PYTHON`, the
+    CSV as `CSV`.
+  - A hand-written `network probe.pdf` in the fixture folder — a URI
+    `OpenAction`, a URI link annotation and an image XObject with a remote
+    `/F` file specification, all at `http://127.0.0.1:8765` — rendered its
+    text with a `nc` loop listening; the listener's log stayed at 0 bytes
+    (a `curl` self-test showed it logging). The probe was pre-recorded as
+    extracted in `files` before the scan reached it, since a stale PDF is
+    exactly what enqueues an extract job.
+  - One chat turn from the Biostatistics workspace, model `claude-sonnet-5`:
+    "Which base URL does the Posit Assistant setup document say to enter
+    alongside the UF Navigator Toolkit API key?" — `search_material`
+    (12 lines in 2 files), a second search, `read_material` on the docx
+    extract, and the answer quoted `https://api.ai.it.ufl.edu/v1/` from
+    Step 5 citing the extract path. Three rounds: 21,575 uncached input,
+    8,697 cache write, 17,394 cache read, 398 output — about $0.07 at
+    Sonnet 5 list price. The cache write is the system block plus tools,
+    66 tokens over M19's measurement.
+  - The fixture folder and its mirror were removed and RESCAN pressed
+    before the commit: Design Studio back to 1 indexed file, no `M20` rows,
+    no `M20 Format Check` in the tree.
+
+### Left as it is
+
+- A `.docx` opens in its default app, as the brief lists it nowhere among
+  the in-app kinds; its extract carries no figures and Word shows them.
+- The deck fallback to the default app is covered by `pdf_view_path`'s
+  refusal in the tests and not exercised live, since that launches
+  PowerPoint; the frontend's `.catch` is the same call the row's arrow
+  makes.
+- The installed app is still the Aug 25 build. Until it is reinstalled its
+  scans on window focus rewrite the four new kinds to `other` (the upsert
+  sets `kind`), which the dev build's next scan rewrites back; the extract
+  columns are untouched either way, so nothing is re-extracted and the
+  overview's count holds.
+- An old root stays in the asset scope after the setting changes, until
+  relaunch: `forbid_directory` on the old root would also forbid a new root
+  nested inside it.
+- Chat citations still open only the text kinds (`answer.ts`'s map); a
+  cited `.py` or `.csv` path stays a code span.
+
+### Gotchas
+
+- **Tauri's scope globs refuse a leading dot by default on Unix.**
+  `allow_directory(root, true)` pushes `root/**`, and with
+  `require_literal_leading_dot` true that never matches `.classhub/…`, so
+  the deck's twin framed blank while the reading PDF beside it rendered.
+  The config's object form of `scope` carries `requireLiteralLeadingDot`;
+  set to `false`, the scope is still the root and nothing else.
+- **soffice names its HTML `<stem>.html`**, stem including the trailing
+  space this docx has before its extension, so the rename to
+  `<name>.docx.html` is the same move the PDF twin makes.
+- The editor passed the fixture's ANSI escape bytes through literally, and
+  `serde_json` refuses a control character in a string; the fixture
+  carries them as `\u001b` escapes.
+- A raw `<` in test HTML (`x <- 1` inside `<pre>`) is a tag to the
+  stripper; real notebook HTML escapes it, so the test does too.
+- The scan of a class runs at launch, so a file added a minute later waits
+  for the next scan — the probe PDF was indexed by hand for that reason,
+  and the extract columns set with it.
+- `cd src-tauri` persists across Bash calls; two later commands with
+  relative paths failed on it.
