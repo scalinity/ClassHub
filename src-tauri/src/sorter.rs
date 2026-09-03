@@ -223,9 +223,11 @@ fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
         }
         build_prompt(conn, class_id, false)
     })?;
-    // Enqueued outside the DB lock — the job runner takes the lock itself.
+    // Enqueued outside the DB lock — the job runner takes the lock itself, and
+    // its insert is what settles "one sort per class"; the check above only
+    // saves building a prompt nothing will run.
     match prompt {
-        Some(prompt) => Ok(Some(crate::jobs::enqueue_sort(app, class_id, None, &prompt)?)),
+        Some(prompt) => crate::jobs::enqueue_sort(app, class_id, None, &prompt),
         None => Ok(None),
     }
 }
@@ -253,7 +255,8 @@ pub fn run_sort_job(app: &AppHandle, class_id: i64) -> Result<i64> {
         build_prompt(conn, class_id, true)
     })?
     .context("the inbox is empty — drop files onto the workspace first")?;
-    crate::jobs::enqueue_sort(app, class_id, None, &prompt)
+    crate::jobs::enqueue_sort(app, class_id, None, &prompt)?
+        .context("a sort job for this class is already queued or running")
 }
 
 /// SORT BY CONTENT on a Canvas card (SPEC §7.2): a sort job over that one
@@ -292,7 +295,11 @@ pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
         let prompt = render_prompt(conn, class_id, &class_dir, &[file])?;
         Ok((class_id, source_rel, prompt))
     })?;
-    crate::jobs::enqueue_sort(app, class_id, Some(&source_rel), &prompt)
+    // The active-sort check above ran under the lock and this runs after it;
+    // the insert re-checks under the write lock, so a second click or the
+    // other process cannot both get a job.
+    crate::jobs::enqueue_sort(app, class_id, Some(&source_rel), &prompt)?
+        .context("a sort job for this class is already queued or running")
 }
 
 fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {

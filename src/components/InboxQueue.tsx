@@ -63,6 +63,9 @@ export function InboxQueue({
   // jobs arrive newest-first; a failure only matters while files remain unsorted.
   const lastFailed =
     !active && sortJobs[0]?.status === "failed" ? sortJobs[0] : null;
+  // Which jobs the snapshot knows: a card that started a sort holds itself
+  // until the job it was handed shows up here.
+  const jobIds: ReadonlySet<number> = new Set(jobs.map((j) => j.id));
 
   const inbox = data?.inbox ?? [];
   const proposals = data?.proposals ?? [];
@@ -167,8 +170,11 @@ export function InboxQueue({
             dirs={dirs}
             dirSet={dirSet}
             // An explicit SORT BY CONTENT carries the file as the job's scope,
-            // which is how this card knows the running sort is its own.
+            // which is how this card knows the running sort is its own. Any
+            // sort for the class blocks another, so every card learns that too.
             sorting={active !== null && active.scope === p.sourceRelPath}
+            sortActive={active !== null}
+            jobIds={jobIds}
           />
         ))}
         {unproposed.map((f) => (
@@ -223,6 +229,8 @@ function ProposalCard({
   dirs,
   dirSet,
   sorting,
+  sortActive,
+  jobIds,
 }: {
   proposal: MoveProposal;
   /** null while the tree is loading. */
@@ -230,17 +238,25 @@ function ProposalCard({
   dirSet: ReadonlySet<string> | null;
   /** A SORT BY CONTENT job for this file is queued or running. */
   sorting: boolean;
+  /** Any sort job for the class is queued or running: the backend allows one
+   *  at a time, so SORT BY CONTENT on another card could only be refused. */
+  sortActive: boolean;
+  /** Every job id the jobs snapshot currently knows. */
+  jobIds: ReadonlySet<number>;
 }) {
   // Busy holds until the hub-changed refetch removes the card (or an error
   // re-enables the actions) — a resolved proposal must not be re-clickable.
   const [busy, setBusy] = useState(false);
-  // Held only while the sort command is in flight; once the job exists the
-  // jobs store carries the state, and this card survives the sort as the
-  // same row rewritten — so a held flag would outlive the run.
+  // The sort this card started: held while the command is in flight and
+  // until the job it returned reaches the jobs snapshot, after which the
+  // snapshot carries the state. Not folded into `busy`: this card survives
+  // the sort as the same row rewritten, so a held flag would outlive the run.
   const [sortStarting, setSortStarting] = useState(false);
+  const [sortJobId, setSortJobId] = useState<number | null>(null);
+  const awaitingJob = sortJobId !== null && !jobIds.has(sortJobId);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const held = busy || sorting || sortStarting;
+  const held = busy || sorting || sortStarting || awaitingJob;
 
   const source = proposal.sourceRelPath;
   const fileName = source.slice(source.lastIndexOf("/") + 1);
@@ -269,7 +285,10 @@ function ProposalCard({
     setError(null);
     setPickerOpen(false);
     sortByContent(proposal.id)
-      .then(() => setSortStarting(false))
+      .then((jobId) => {
+        setSortJobId(jobId);
+        setSortStarting(false);
+      })
       .catch((e) => {
         setError(String(e));
         setSortStarting(false);
@@ -316,7 +335,7 @@ function ProposalCard({
           // destination replaces Canvas's for this one file, and for no other
           // (SPEC §7.2). The result re-renders here as a sort proposal with
           // the Canvas folder still named in its reasoning.
-          (sorting || sortStarting ? (
+          (sorting || sortStarting || awaitingJob ? (
             <span className="flex items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
               <span
                 aria-hidden
@@ -328,8 +347,12 @@ function ProposalCard({
             <button
               type="button"
               onClick={sortNow}
-              disabled={held}
-              title="Ask a sort job to read the file and propose a folder in place of the one Canvas keeps it in"
+              disabled={held || sortActive}
+              title={
+                sortActive
+                  ? "A sort job for this class is already running — one at a time"
+                  : "Ask a sort job to read the file and propose a folder in place of the one Canvas keeps it in"
+              }
               className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
             >
               SORT BY CONTENT

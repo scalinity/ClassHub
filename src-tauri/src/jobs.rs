@@ -627,13 +627,17 @@ pub fn enqueue_lecture_digest(
 
 /// SPEC §10 step 2: sort_proposal job over a class inbox (read-only tools).
 /// The strict JSON it returns on stdout is recorded by sorter::finalize_job.
+/// One active sort per class, decided by the insert itself rather than by a
+/// check the caller ran a moment earlier: two clicks, or two processes, can
+/// both pass such a check, and only the write lock orders them. None means
+/// one is already queued or running.
 pub fn enqueue_sort(
     app: &AppHandle,
     class_id: i64,
     scope: Option<&str>,
     prompt: &str,
-) -> Result<i64> {
-    enqueue(app, "sort_proposal", Some(class_id), scope, prompt, None, None)
+) -> Result<Option<i64>> {
+    enqueue_unique(app, "sort_proposal", Some(class_id), scope, prompt, None)
 }
 
 /// SPEC §11: syllabus_scan over a chosen file (scope = its rel path) or the
