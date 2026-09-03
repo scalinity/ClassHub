@@ -35,7 +35,8 @@ pub struct TreeNode {
     /// (SPEC §8.1); a folder named for a kind of file or for the calendar
     /// (`Slides`, `Weeks`) is storage, and what it holds reaches a guide
     /// through the division that reads it, so the Materials tree offers a
-    /// guide only here (SPEC §8.3).
+    /// guide only here (SPEC §8.3). Set on every folder, read on the
+    /// top-level ones, which are the rows that carry a guide.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labelled: bool,
     pub children: Vec<TreeNode>,
@@ -160,7 +161,7 @@ pub fn scan_class(
     // — or parked under an app-managed folder, which the sorter starts fresh,
     // the entries under the old path are dead weight. Removed after the
     // commit, and only for a row that stayed deleted.
-    let mut cleared: Vec<&str> = Vec::new();
+    let mut mirrors_to_clear: Vec<&str> = Vec::new();
     for rel_path in &vanished {
         let savepoint = tx.savepoint()?;
         savepoint.execute(
@@ -169,7 +170,7 @@ pub fn scan_class(
         )?;
         if !crate::lectures::keyed_by(&savepoint, class_id, rel_path)? {
             savepoint.commit()?;
-            cleared.push(rel_path);
+            mirrors_to_clear.push(rel_path);
             continue;
         }
         let indexed = existing.get(*rel_path);
@@ -193,13 +194,13 @@ pub fn scan_class(
         {
             eprintln!("scan: {rel_path} is resting under an app-managed folder; its lecture waits");
             savepoint.commit()?;
-            cleared.push(rel_path);
+            mirrors_to_clear.push(rel_path);
             continue;
         }
         match crate::lectures::lecture_left(&savepoint, class_id, &dir, rel_path, moved_to) {
             Ok(effect) => {
                 savepoint.commit()?;
-                cleared.push(rel_path);
+                mirrors_to_clear.push(rel_path);
                 effects.extend(effect);
             }
             Err(e) => eprintln!(
@@ -226,7 +227,7 @@ pub fn scan_class(
     for effect in effects {
         effect.apply();
     }
-    for rel_path in cleared {
+    for rel_path in mirrors_to_clear {
         crate::extract::remove_mirror(&dir, rel_path);
     }
     Ok(Scan { tree, changed })
