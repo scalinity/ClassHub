@@ -233,11 +233,14 @@ fn sync_class(
     if let Err(e) = sync_units(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "modules")?;
     }
-    // Grades are read off the same assignment list, submissions included, so
-    // they come only when that read succeeded — and the groups they sit under
-    // are one more request.
-    match sync_assignments(app, session, class, course_id, outcome, on_stage) {
+    // One read of the assignments, submissions included, feeds both the
+    // deadline pass and the grade pass; the groups the grades sit under are
+    // one more request inside the second.
+    match fetch_assignments(session, course_id, on_stage) {
         Ok(assignments) => {
+            if let Err(e) = sync_assignments(app, class, &assignments, outcome) {
+                note_or_fail(outcome, e, "assignments")?;
+            }
             if let Err(e) =
                 sync_grades(app, session, class, course, &assignments, outcome, on_stage)
             {
@@ -407,8 +410,18 @@ fn local_iso(utc: &str) -> Option<String> {
 // Assignments → the deadline confirm queue (SPEC §11), and the deadlines
 // already on the list that Canvas tracks
 
-/// Reads the course's assignments, each with the reader's own submission, and
-/// returns them for the grade pass to reuse.
+/// The course's assignments, each with the reader's own submission — the one
+/// read the deadline pass and the grade pass both consume.
+fn fetch_assignments(
+    session: &Session,
+    course_id: i64,
+    on_stage: &dyn Fn(&str),
+) -> Result<Vec<Value>> {
+    let path = format!("/api/v1/courses/{course_id}/assignments?include[]=submission");
+    session.get_all(&path, on_stage)
+}
+
+/// Brings the deadline list up to date with the course's assignments.
 ///
 /// An assignment that already has a deadline — approved from an earlier card,
 /// or a syllabus row on the same title and day, which takes the assignment's id
@@ -417,22 +430,17 @@ fn local_iso(utc: &str) -> Option<String> {
 /// confirm queue as before.
 fn sync_assignments(
     app: &AppHandle,
-    session: &Session,
     class: &ClassRow,
-    course_id: i64,
+    assignments: &[Value],
     outcome: &mut ClassOutcome,
-    on_stage: &dyn Fn(&str),
-) -> Result<Vec<Value>> {
-    let path = format!("/api/v1/courses/{course_id}/assignments?include[]=submission");
-    let assignments = session.get_all(&path, on_stage)?;
-
+) -> Result<()> {
     let (proposed, undated, known, completed, moved) = with_conn(app, |conn| {
         let mut proposed = 0usize;
         let mut undated = 0usize;
         let mut known = 0usize;
         let mut completed = 0usize;
         let mut moved = 0usize;
-        for assignment in &assignments {
+        for assignment in assignments {
             let Some(title) = assignment["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
                 continue;
@@ -535,7 +543,7 @@ fn sync_assignments(
     if completed > 0 || moved > 0 {
         emit_hub_change(app, "deadlines");
     }
-    Ok(assignments)
+    Ok(())
 }
 
 /// `100` rather than `100.0`, since points are almost always whole.
