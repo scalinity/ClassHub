@@ -562,16 +562,32 @@ fn dismiss_vanished(conn: &Connection, class_id: i64, class_dir: &Path) -> Resul
     if vanished.is_empty() {
         return Ok(());
     }
+    dismiss_rows(conn, vanished)?;
+    Ok(())
+}
+
+/// Dismisses the rows the vanish pass selected, in one transaction, and says
+/// how many it actually dismissed. The other process may have resolved a row
+/// between the read and here — an approve is exactly what makes a file leave
+/// the inbox — so each write is conditional on the row still being pending,
+/// and the audit row is written only by the call that dismissed it.
+fn dismiss_rows(conn: &Connection, vanished: Vec<(i64, serde_json::Value)>) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
+    let mut dismissed = 0usize;
     for (id, payload) in vanished {
-        tx.execute(
-            "UPDATE move_proposals SET status = 'dismissed', resolved_at = ?1 WHERE id = ?2",
+        let changed = tx.execute(
+            "UPDATE move_proposals SET status = 'dismissed', resolved_at = ?1
+             WHERE id = ?2 AND status = 'pending'",
             params![now(), id],
         )?;
+        if changed == 0 {
+            continue;
+        }
         crate::db::audit(&tx, "sort.proposal_vanished", payload)?;
+        dismissed += 1;
     }
     tx.commit()?;
-    Ok(())
+    Ok(dismissed)
 }
 
 pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
@@ -1345,5 +1361,48 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         dismiss_vanished(&conn, 1, &dir).expect("pass");
         assert_eq!(status("still-here.pdf"), "pending");
+    }
+
+    /// Two processes share the table: a row the pass selected as pending can be
+    /// approved by the other one before the write lands — the approve is what
+    /// moved the file — and the dismissal must then neither overwrite the
+    /// approval nor leave a "vanished" row contradicting the real move.
+    #[test]
+    fn a_row_the_other_process_resolved_meanwhile_is_left_alone() {
+        let conn = crate::db::memory_db();
+        upsert_proposal(
+            &conn,
+            1,
+            "sort_job",
+            &format!("{INBOX_DIR}/deck.pdf"),
+            "Slides/deck.pdf",
+            "because",
+            Some("high"),
+        )
+        .expect("propose");
+        let id: i64 = conn
+            .query_row("SELECT id FROM move_proposals", [], |r| r.get(0))
+            .expect("id");
+        // Selected as vanished, then approved elsewhere before the write.
+        conn.execute(
+            "UPDATE move_proposals SET status = 'approved' WHERE id = ?1",
+            [id],
+        )
+        .expect("approve");
+        let dismissed = dismiss_rows(&conn, vec![(id, json!({ "proposalId": id }))])
+            .expect("dismiss");
+        assert_eq!(dismissed, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM move_proposals WHERE id = ?1", [id], |r| r.get(0))
+            .expect("status");
+        assert_eq!(status, "approved", "the approval was overwritten");
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'sort.proposal_vanished'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(audit_rows, 0, "a vanished row was written for a move that happened");
     }
 }
