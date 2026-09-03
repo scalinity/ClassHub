@@ -136,7 +136,7 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
             extract_local(&class_dir, input_rel, &extract_rel, &how)?;
             let db = app.state::<crate::Db>();
             let conn = lock(&db.0);
-            record(&conn, class_id, &file.rel_path, &extract_rel, &file.sha256)
+            record(&conn, &class_dir, class_id, &file.rel_path, &extract_rel, &file.sha256)
         };
         let outcome = match route(&file.rel_path, &file.kind) {
             how @ (Route::Text | Route::Html | Route::Caption | Route::Notebook | Route::Csv) => {
@@ -209,7 +209,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()>
             .map(|m| m.is_file() && m.len() > 0)
             .unwrap_or(false);
         if written {
-            record(&conn, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
+            record(&conn, &class_dir, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
         } else {
             eprintln!(
                 "extract job wrote no output for {} — stays stale for the next scan",
@@ -252,18 +252,28 @@ fn has_active_extract_job(conn: &Connection, class_id: i64) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Records an extract against its source's row. The scan takes no pipeline
+/// lock, so a source can be deleted between `stale_files` and this write: by
+/// now a scan has dropped its row and cleared its mirror, and the extract just
+/// written would be an orphan nothing points at and chat's search still finds.
+/// A record no row takes therefore goes the way of the row's mirror.
 fn record(
     conn: &Connection,
+    class_dir: &Path,
     class_id: i64,
     rel_path: &str,
     extract_rel_path: &str,
     sha256: &str,
 ) -> Result<()> {
-    conn.execute(
+    let took = conn.execute(
         "UPDATE files SET extract_rel_path = ?1, extracted_at = ?2, extracted_sha256 = ?3
          WHERE class_id = ?4 AND rel_path = ?5",
         params![extract_rel_path, now(), sha256, class_id, rel_path],
     )?;
+    if took == 0 {
+        eprintln!("extract of {rel_path} outlived its row; its mirror entries go with it");
+        remove_mirror(class_dir, rel_path);
+    }
     Ok(())
 }
 
@@ -1002,6 +1012,42 @@ mod tests {
             assert!(super::MIRROR_SUFFIXES.contains(&sidecar.as_str()), "{sidecar}");
         }
         assert!(super::MIRROR_SUFFIXES.contains(&".md"));
+    }
+
+    /// An extract recorded for a source whose row is gone — deleted while the
+    /// pipeline was writing it — is removed rather than left as an orphan;
+    /// one whose row is there is recorded and kept.
+    #[test]
+    fn a_record_no_row_takes_removes_the_extract_it_was_for() {
+        let conn = crate::db::memory_db();
+        let class_dir =
+            std::env::temp_dir().join(format!("classhub-record-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&class_dir);
+        let extract_rel = ".classhub/extracts/Weeks/Week 04/deck.pdf.md";
+        let extract = class_dir.join(extract_rel);
+        std::fs::create_dir_all(extract.parent().expect("parent")).expect("dir");
+        std::fs::write(&extract, "# extract").expect("write");
+
+        super::record(&conn, &class_dir, 4, "Weeks/Week 04/deck.pdf", extract_rel, "abc")
+            .expect("record");
+        assert!(!extract.exists(), "an extract with no row behind it stayed");
+
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (4, 'Weeks/Week 04/deck.pdf', 'abc', 1, 1, 'pdf')",
+            [],
+        )
+        .expect("row");
+        std::fs::create_dir_all(extract.parent().expect("parent")).expect("dir");
+        std::fs::write(&extract, "# extract").expect("write");
+        super::record(&conn, &class_dir, 4, "Weeks/Week 04/deck.pdf", extract_rel, "abc")
+            .expect("record");
+        let recorded: Option<String> = conn
+            .query_row("SELECT extract_rel_path FROM files WHERE class_id = 4", [], |row| row.get(0))
+            .expect("row");
+        assert_eq!(recorded.as_deref(), Some(extract_rel));
+        assert!(extract.is_file(), "a recorded extract went");
+        let _ = std::fs::remove_dir_all(&class_dir);
     }
 
     /// `remove_mirror` deletes only under the mirror and only what the
