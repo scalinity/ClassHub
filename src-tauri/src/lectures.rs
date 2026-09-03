@@ -345,6 +345,10 @@ fn span_of(markdown: &str) -> (i64, i64) {
     (end_ms, lines.max(1))
 }
 
+/// What a contribution row says about the session until the digest has read
+/// it, followed by the unit's name.
+const PLACEHOLDER_SUMMARY: &str = "Whole session — ";
+
 /// Records the join between a lecture stored by date and the division it
 /// covers, and returns where its corpus note goes.
 ///
@@ -378,7 +382,7 @@ fn record_contribution(
             end_ms,
             lines,
             corpus_rel,
-            format!("Whole session — {}", slot.unit_name),
+            format!("{PLACEHOLDER_SUMMARY}{}", slot.unit_name),
             now(),
         ],
     )?;
@@ -454,15 +458,15 @@ pub fn refile_contribution(
     let orphaned = refile_session(conn, class_id, class_dir, source_rel, dest_rel)?;
     let mut effects = RefileEffects { note: None, orphaned };
 
-    let old_corpus: Option<String> = conn
+    let old_row: Option<(String, String)> = conn
         .query_row(
-            "SELECT corpus_rel_path FROM lecture_contributions
+            "SELECT corpus_rel_path, summary FROM lecture_contributions
              WHERE class_id = ?1 AND rel_path = ?2",
             rusqlite::params![class_id, source_rel],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if old_corpus.is_none() && !is_filed_transcript(dest_rel) {
+    if old_row.is_none() && !is_filed_transcript(dest_rel) {
         return Ok(effects);
     }
     conn.execute(
@@ -470,6 +474,21 @@ pub fn refile_contribution(
         rusqlite::params![class_id, source_rel],
     )?;
     let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
+    let (old_corpus, old_summary) = match old_row {
+        Some((corpus, summary)) => (Some(corpus), Some(summary)),
+        None => (None, None),
+    };
+    // The re-recorded row opens with the filing placeholder again. The digest's
+    // title was worth keeping and the note that carried it survives, so the
+    // summary travels too; a placeholder names the old unit and is left behind.
+    if let (Some(summary), Some(_)) = (&old_summary, &moved) {
+        if !summary.starts_with(PLACEHOLDER_SUMMARY) {
+            conn.execute(
+                "UPDATE lecture_contributions SET summary = ?1 WHERE class_id = ?2 AND rel_path = ?3",
+                rusqlite::params![summary, class_id, dest_rel],
+            )?;
+        }
+    }
 
     let Some(old) = old_corpus else {
         return Ok(effects);
@@ -1489,6 +1508,12 @@ mod tests {
         let corpus = record_contribution(&conn, 1, &slot, &from, markdown).expect("record");
         fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
         fs::write(dir.join(&corpus), "# note").expect("note");
+        // As the digest leaves it: the row carries the session's own title.
+        conn.execute(
+            "UPDATE lecture_contributions SET summary = 'Study Designs' WHERE class_id = 1",
+            [],
+        )
+        .expect("summary");
 
         // The move itself, then the map catching up with it. The note's own
         // move is decided now and performed after the commit: until it is
@@ -1515,6 +1540,7 @@ mod tests {
             fs::read_to_string(dir.join(&rows[0].corpus_rel_path)).expect("moved note"),
             "# note"
         );
+        assert_eq!(rows[0].summary, "Study Designs", "the digest's title was reset");
         let moved_note = rows[0].corpus_rel_path.clone();
 
         // And moving it out of Weeks/ entirely leaves nothing mapping a guide
