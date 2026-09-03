@@ -3633,3 +3633,105 @@ frontend files are staged. What future sessions should know:
   for the wrong one.
 - A `_Inbox/` fixture in a scanner test needs the folder created first;
   the scratch class folder starts empty.
+
+## M26 — A Tuesday's two lectures (2026-09-03)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database
+(`user_version` 13, 35 file rows, 3 contributions, 7 guides, jobs at 308,
+audit at 163, no active job, every `canvas_synced_at` 2026-09-03) through
+an ignored probe test in `guides.rs`, under the code at 4aabfa6:
+`week_slots(1)` gave 15 slots and `nearest_week` for 2026-09-08 answered 3
+— `Week 03 — Biomedical Data Foundations`, unit 25, meeting 2026-09-08 —
+so the Fundamentals form resolves the week; `week_slots(4)` gave 16 slots
+with no `meets_on`, `nearest_week` answered nothing, and week 3 mapped to
+unit 37 (Part I, kind `part`, folder `Week 03`), so the Applied form asks.
+`unit_context(4, 37)`: a four-entry manifest (the two transcripts, the
+Week 01 deck, the Week 02 notebook), the deck listed with its extract and
+its original and the notebook with its extract, neither transcript in the
+listing, and two notes in the corpus block; `unit_context(1, 25)` refused
+— nothing filed, no folder, nothing distilled. Guides: row 7 stale, row 4
+fresh, the three session rows fresh. The M25 dump of the Applied workspace
+showed `Slides`, `Syllabus` and `Weeks` each carrying SYNTHESIZE GUIDE and
+PRACTICE EXAM; the top-level folders across the tree are Design Studio
+`Syllabus`; Applied `Slides`, `Syllabus`, `Weeks`; Biostatistics `Coding
+Material`, `Module 1`, `Module 2`, `Reading Material`, `Slides`,
+`Syllabus`; Fundamentals `Syllabus`, `Weeks`. The extract mirror held
+exactly the 35 indexed sources — no orphaned entry — and one leftover: the
+empty folder `.classhub/extracts/Weeks/Week 03 — Biomedical Data
+Foundations/` in Fundamentals, where M25's fixture extract had sat. The
+installed app is the Aug 25 build; no dev build was running. Today is
+Sept 3: neither Sept 8 recording exists, confirmed when asked, so the
+fallback branch applied.
+
+### What was built
+
+- **The tree offers a guide where a folder is a unit of material.**
+  `TreeNode.labelled` — `units::label_number` on the folder's name, the
+  read §7.2 matches a folder to a division by — is set by `walk_dir`, and
+  `FileTree`'s `DirNode` renders the guide cluster on a top-level folder
+  when it is labelled or when a guide is already built for that scope, so
+  nothing built goes unreachable. `Module 1` and `Module 2` keep the
+  cluster; `Weeks`, `Slides`, `Syllabus`, `Coding Material` and `Reading
+  Material` keep their file count and lose it. `synthesize_module` and
+  chat's folder scope are untouched.
+- **A vanished file's mirror entries go with its row.**
+  `extract::remove_mirror` removes the five `MIRROR_SUFFIXES` entries under
+  `.classhub/extracts/` for a plain class-relative path and prunes the
+  folders they emptied up to the mirror root, which stays. `scan_class`
+  collects every vanished path whose savepoint committed — not keyed,
+  parked, or settled — and calls it after the transaction's commit; a
+  refused settle keeps its row and its extract.
+- SPEC §7 step 1, §8.3, §8.5, §13 and §14 state the design.
+
+### Verified
+
+- `cargo test`: 232 pass, two new — a deleted deck's extract, conversion,
+  sidecar and emptied mirror folders gone with the root kept; the walk
+  marking `Module 1` and not `Slides`, `Weeks` or a file — and two
+  extended: the moved transcript's old-path extract gone, the refused
+  settle's extract kept over both passes. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 60107) beside the installed app; the launch
+  scan found nothing stale and enqueued no job. The Applied Materials rows
+  `Slides`, `Syllabus` and `Weeks` carried no cluster while Part I's
+  Structure row still read `STALE — RESYNTHESIZE · PRACTICE EXAM · VIEW
+  GUIDE`; Biostatistics' `Module 1` row read `STALE — RESYNTHESIZE ·
+  PRACTICE EXAM · VIEW GUIDE` and `Module 2` `SYNTHESIZE GUIDE · PRACTICE
+  EXAM`, its four storage folders nothing. The Applied form with Sept 8
+  typed read `Sort it into a week` under "This course publishes no dates
+  for its weeks, so pick the one the session fell in"; the Fundamentals
+  form read `Week 03 — Biomedical Data Foundations`, "Filed under
+  Weeks/Week 03 — Biomedical Data Foundations, feeding Week 3 — Biomedical
+  Data Foundations". `m26-fixture.csv` dropped into that empty folder and
+  RESCAN: extracted locally, no job, the Week 3 row `SYNTHESIZE GUIDE ·
+  PRACTICE EXAM`; deleted in Finder and RESCAN: the extract and the mirror
+  folder gone — M25's leftover folder with it, since the fixture's extract
+  landed there — the `Weeks/` mirror still holding Week 02, the row
+  offering nothing. Database back at 35 files, 3 contributions, 7 guides,
+  jobs at 308, audit at 163.
+- Not run: any chat turn, digest or guide. Session cost: nothing on the
+  subscription, nothing on credits.
+
+### Left as it is
+
+- The Sept 8 lectures: both forms are ready, and the Part I guide (row 7)
+  reads stale until Applied's lecture is filed and the guide rebuilt from
+  three notes with the deck and the notebook listed; Fundamentals' Week 3
+  guide waits for its note. §1's cost of a guide whose files are listed
+  rather than found is still unmeasured.
+- `units: … claims week 14 …` is logged on every `week_slots` call — seven
+  lines per RESCAN on the dev build — since Post-M25 made the skip say so.
+- A folder guide built through chat for a storage folder (`Slides`) shows
+  on its row from then on, by the guide half of the gate.
+
+### Gotchas
+
+- `ax dump` lists buttons and fields only this session; `ax text` carries
+  the static text (the form's help lines, the Structure rows' names).
+- The WEEK popup's menu is not in the window's AX tree: a dump while it is
+  open shows the form alone; `ax press '<item title>'` still picks.
+- Typing a date segment: `ax focus <segment>` then a System Events
+  keystroke; zsh does not word-split an unquoted variable, so a `for` over
+  "month 09" pairs needs explicit arguments.
+- Killing the app pid ended `tauri dev` and freed :1420 within seconds.

@@ -8,6 +8,8 @@ export interface TreeNode {
   size?: number;
   /** Class-relative extract made from the file as it is now; absent until the pipeline has written one. */
   extractRelPath?: string;
+  /** A folder named the way a division is — `Module 1` — the one kind the tree offers a guide on (SPEC §8.3); absent on storage folders and files. */
+  labelled?: boolean;
   children: TreeNode[];
 }
 

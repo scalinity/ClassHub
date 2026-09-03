@@ -29,6 +29,15 @@ pub struct TreeNode {
     /// a file the pipeline has not reached yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_rel_path: Option<String>,
+    /// A folder named the way a division is — a kind and a number, `Module
+    /// 1` — read by `units::label_number`, the same read SPEC §7.2 matches a
+    /// folder to a division by. A guide over such a folder is a module guide
+    /// (SPEC §8.1); a folder named for a kind of file or for the calendar
+    /// (`Slides`, `Weeks`) is storage, and what it holds reaches a guide
+    /// through the division that reads it, so the Materials tree offers a
+    /// guide only here (SPEC §8.3).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub labelled: bool,
     pub children: Vec<TreeNode>,
 }
 
@@ -144,6 +153,14 @@ pub fn scan_class(
         }
     }
     let mut effects = Vec::new();
+    // A row that goes takes its mirror entries with it (SPEC §7 step 1): an
+    // extract nothing points at would go on answering chat's search for a
+    // file that is not there. Whether the file was deleted, moved — the walk
+    // found its new path as new material, and the pipeline extracts it again
+    // — or parked under an app-managed folder, which the sorter starts fresh,
+    // the entries under the old path are dead weight. Removed after the
+    // commit, and only for a row that stayed deleted.
+    let mut cleared: Vec<&str> = Vec::new();
     for rel_path in &vanished {
         let savepoint = tx.savepoint()?;
         savepoint.execute(
@@ -152,6 +169,7 @@ pub fn scan_class(
         )?;
         if !crate::lectures::keyed_by(&savepoint, class_id, rel_path)? {
             savepoint.commit()?;
+            cleared.push(rel_path);
             continue;
         }
         let indexed = existing.get(*rel_path);
@@ -175,11 +193,13 @@ pub fn scan_class(
         {
             eprintln!("scan: {rel_path} is resting under an app-managed folder; its lecture waits");
             savepoint.commit()?;
+            cleared.push(rel_path);
             continue;
         }
         match crate::lectures::lecture_left(&savepoint, class_id, &dir, rel_path, moved_to) {
             Ok(effect) => {
                 savepoint.commit()?;
+                cleared.push(rel_path);
                 effects.extend(effect);
             }
             Err(e) => eprintln!(
@@ -202,6 +222,9 @@ pub fn scan_class(
     tx.commit()?;
     for effect in effects {
         effect.apply();
+    }
+    for rel_path in cleared {
+        crate::extract::remove_mirror(&dir, rel_path);
     }
     Ok(Scan { tree, changed })
 }
@@ -447,6 +470,7 @@ fn walk_dir(
 
         if file_type.is_dir() {
             let children = walk_dir(&path, class_dir, depth + 1, existing, out)?;
+            let labelled = crate::units::label_number(&name).is_some();
             dirs.push(TreeNode {
                 name,
                 rel_path,
@@ -454,6 +478,7 @@ fn walk_dir(
                 kind: None,
                 size: None,
                 extract_rel_path: None,
+                labelled,
                 children,
             });
         } else {
@@ -490,6 +515,7 @@ fn walk_dir(
                 kind: Some(kind),
                 size: Some(size),
                 extract_rel_path,
+                labelled: false,
                 children: Vec::new(),
             });
         }
@@ -757,6 +783,52 @@ mod tests {
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 
+    /// A file the index no longer holds takes its mirror entries with it —
+    /// the extract, the conversion and its sidecar — and the mirror folders
+    /// it emptied, up to the root, which stays. Left behind, an extract
+    /// nothing points at goes on answering chat's search for a file that is
+    /// not there.
+    #[test]
+    fn a_vanished_file_takes_its_mirror_entries_with_it() {
+        let (db, dir) = part_numbered_class("classhub-scan-mirror");
+        let deck = "Weeks/Week 04/deck.pptx";
+        write(dir.join(deck), "PK a deck");
+        let mirror = dir.join(".classhub/extracts");
+        for suffix in crate::extract::MIRROR_SUFFIXES {
+            write(mirror.join(format!("{deck}{suffix}")), "made from the deck");
+        }
+        scan_class(&db, 4).expect("scan");
+
+        fs::remove_file(dir.join(deck)).expect("delete the deck");
+        assert!(scan_class(&db, 4).expect("scan").changed);
+        for suffix in crate::extract::MIRROR_SUFFIXES {
+            assert!(!mirror.join(format!("{deck}{suffix}")).exists(), "{suffix} outlived its source");
+        }
+        assert!(!mirror.join("Weeks").exists(), "the emptied mirror folders stayed as clutter");
+        assert!(mirror.is_dir(), "the mirror root is never pruned");
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// The tree marks a folder named as a division is — a kind and a number —
+    /// and not one named for a kind of file or for the calendar: `Module 1`
+    /// is a guide's scope in the Materials tree, `Slides` and `Weeks` are
+    /// storage (SPEC §8.3).
+    #[test]
+    fn a_folder_named_as_a_division_is_labelled_and_a_storage_one_is_not() {
+        let (db, dir) = part_numbered_class("classhub-scan-labelled");
+        write(dir.join("Module 1/notes.pdf"), "%PDF");
+        write(dir.join("Slides/deck.pdf"), "%PDF");
+        write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF");
+        let tree = scan_class(&db, 4).expect("scan").tree;
+        let labelled = |name: &str| tree.iter().find(|n| n.name == name).expect(name).labelled;
+        assert!(labelled("Module 1"));
+        assert!(!labelled("Slides"));
+        assert!(!labelled("Weeks"));
+        let file = &tree.iter().find(|n| n.name == "Module 1").expect("folder").children[0];
+        assert!(!file.dir && !file.labelled, "a file carries no label");
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
     /// A transcript with a session document and no contribution row — one
     /// the sorter filed and the digest read before any division claimed it —
     /// is keyed by its path all the same, and its session row and documents
@@ -824,6 +896,8 @@ mod tests {
         let mover = "Weeks/Week 09/2026-09-15 — Lecture.md";
         filed_and_digested(&db, &dir, held, PART_I);
         let (note, html, _md) = filed_and_digested(&db, &dir, mover, PART_II);
+        let extract = dir.join(format!(".classhub/extracts/{mover}.md"));
+        write(extract.clone(), "# extract");
         scan_class(&db, 4).expect("scan");
 
         // Into Part I, under the name Part I already holds a note for.
@@ -853,6 +927,7 @@ mod tests {
             };
             assert_eq!(indexed(mover), 1, "pass {pass}: the path left the index, so nothing will try again");
             assert_eq!(indexed(dest), 1, "pass {pass}: the destination is on disk");
+            assert!(extract.is_file(), "pass {pass}: a row that stayed lost its extract");
         }
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
@@ -903,12 +978,15 @@ mod tests {
         let from = "Weeks/Week 04/2026-09-15 — Lecture.md";
         let to = "Weeks/Week 09/2026-09-15 — Lecture.md";
         let (note, html, _md) = filed_and_digested(&db, &dir, from, PART_I);
+        let old_extract = dir.join(format!(".classhub/extracts/{from}.md"));
+        write(old_extract.clone(), "# extract");
         scan_class(&db, 4).expect("scan");
 
         fs::create_dir_all(dir.join("Weeks/Week 09")).expect("week dir");
         fs::rename(dir.join(from), dir.join(to)).expect("move in Finder");
         let scan = scan_class(&db, 4).expect("scan");
         assert!(scan.changed);
+        assert!(!old_extract.exists(), "the old path's extract outlived the move");
 
         let conn = db.lock().expect("db");
         let (unit_id, corpus): (i64, String) = conn

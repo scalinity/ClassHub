@@ -562,6 +562,42 @@ const DOCX_TO_HTML: Conversion = Conversion {
 /// it is derived from; a test holds the two together.
 pub const MIRROR_SUFFIXES: [&str; 5] = [".md", ".pdf", ".pdf.sha256", ".html", ".html.sha256"];
 
+/// Removes what the mirror holds for a source the index no longer does — its
+/// extract and any conversion with its sidecar — and prunes the folders that
+/// emptied, up to the mirror root, the way a corpus folder emptied of its
+/// last note is pruned. Only a plain class-relative path is acted on, and
+/// only at the entries the pipeline itself writes, so a row holding anything
+/// else removes nothing. Best effort, after the scan's commit: a removal that
+/// fails is logged, and the entry is dead weight rather than a wrong answer.
+pub fn remove_mirror(class_dir: &Path, rel_path: &str) {
+    let path = Path::new(rel_path);
+    let plain = path
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !plain || path.as_os_str().is_empty() {
+        return;
+    }
+    let root = class_dir.join(EXTRACTS_DIR);
+    for suffix in MIRROR_SUFFIXES {
+        let entry = root.join(format!("{rel_path}{suffix}"));
+        if !entry.is_file() {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&entry) {
+            eprintln!("mirror entry removal failed ({}): {e}", entry.display());
+        }
+    }
+    // `remove_dir` refuses a folder with anything left in it, which is the
+    // whole check; the root itself stays, empty or not.
+    let mut dir = root.join(rel_path);
+    while let Some(parent) = dir.parent().map(Path::to_path_buf) {
+        if parent == root || !parent.starts_with(&root) || fs::remove_dir(&parent).is_err() {
+            break;
+        }
+        dir = parent;
+    }
+}
+
 /// Where a source's conversion lives in the mirror, and the sidecar that
 /// records which source hash it was made from.
 struct ConversionPaths {

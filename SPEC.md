@@ -568,7 +568,13 @@ agent and synthesis prompts can search text instead of re-reading binaries.
 
 1. **Scan** (on launch, on window focus, and manual refresh): walk each class folder
    (excluding app-managed dirs), upsert `files` rows with sha256 + mtime. Detect
-   added/changed/removed files by hash.
+   added/changed/removed files by hash. A file the index held and the walk did not loses
+   its row, and its mirror entries go with the row once the scan has committed — the
+   extract, any conversion and its sidecar, and the mirror folders they emptied, up to the
+   mirror root — because an extract nothing points at would go on answering chat's search
+   for a file that is not there. That holds whether the file was deleted, moved (the walk
+   finds its new path as new material) or parked under an app-managed folder; a transcript
+   is settled first (§8.5), and a row a refused settle keeps keeps its extract.
 2. **Convert**: for `.pptx` files, run
    `soffice --headless --convert-to pdf --outdir <extracts mirror dir> <file>`
    producing `<name>.pptx.pdf`; for `.docx` files the same subprocess with
@@ -954,7 +960,13 @@ plus a "Cross-module threads" section. This is a long-running exclusive job (pot
 
 Triggered from chat, or from the `PRACTICE EXAM` action that sits beside `VIEW GUIDE` in
 every guide cluster of the workspace — a folder's row in Materials, a division's row in the
-Structure list, and the semester-master strip. Inputs: scope (a division, a folder, or the
+Structure list, and the semester-master strip. A folder's row carries the cluster when the
+folder is named the way a division is — a kind and a number, `Module 1`, the read §7.2
+matches a folder to a division by — or once a guide has been built for it, so nothing built
+goes unreachable; a folder named for a kind of file or for the calendar (`Slides`,
+`Syllabus`, `Weeks`) is storage, and what it holds reaches a guide through the division that
+reads it (§8.5). Chat's `trigger_synthesis` still takes any folder by name, because a
+folder asked for is the reader asking. Inputs: scope (a division, a folder, or the
 semester) + optional focus topics from chat. A division's exam draws on the same sources as
 its guide (§8.5) — its folder, if it has one, and its distilled lectures — so the action is
 offered on a division's row exactly when a guide could be built, and a division with neither
@@ -1082,7 +1094,8 @@ dragged into `_Inbox/` or another app-managed folder, which the walk skips, is p
 than gone: its rows and its note wait for the sorter to bring it back. Two lectures with one
 content are not a move the index can name, and are settled as gone. Each is settled on its own
 savepoint inside the scan, the index row included, and what it leaves for the disk is applied
-after the commit; a note is removed only at a corpus note's path. A scan asked for from the
+after the commit; a note is removed only at a corpus note's path, and the mirror entries of
+every row that stayed deleted go after the commit too (§7 step 1). A scan asked for from the
 workspace that changed the index pushes one `index` change, so staleness, the divisions' counts
 and the lectures follow it without a second scan; the launch scan, whose tree reaches no one,
 pushes `files`.
@@ -1318,8 +1331,10 @@ and apply it. Non-negotiable per project owner.
   transcript name (§8.5 — a second digest writing over the first note is silent), a division's
   manifest over its week folders (§8.5 — a corrected deck leaving a guide fresh is silent), and
   a scan's forget-or-refile of a transcript that left the tree (§8.5 — a row for a transcript
-  that is not there is silent until a guide reads it). UI and job plumbing are exercised by
-  running the app.
+  that is not there is silent until a guide reads it), what a vanished file leaves in the
+  mirror (§7 — an extract nothing points at is silent until chat cites it), and which folders
+  the tree marks as a guide's scope (§8.3 — a guide offered on `Weeks` is a second guide,
+  quietly). UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1535,6 +1550,18 @@ Mark the checkbox when the acceptance criteria pass.
   guide stays fresh and goes stale on a file added beside its transcript and fresh again on
   its removal, the prompt lists both files, and a transcript deleted in Finder leaves no row,
   note or session row after a rescan.
+
+- [x] **M26 — A Tuesday's two lectures.** (`milestones/M26-a-tuesdays-two-lectures.md`)
+  Sept 8 is the first Tuesday since a week folder's material became a division's source, and two
+  courses meet: Applied Generative AI's third Part I lecture and Fundamentals' Week 3, whose empty
+  folder already exists. Both go through the form, the digest and the guide — the Part I guide
+  rebuilt from three notes with the deck and the notebook listed for the first time — and two
+  leftovers on the same path close: the Materials tree offers a guide only on a folder named as a
+  division is, and a scan removes what a vanished file left in the extract mirror.
+  *Accepted when:* `Weeks` and `Slides` offer no guide while `Module 1` still does, a file deleted
+  in Finder leaves no extract after a rescan, and, where the Sept 8 recordings exist, both sessions
+  are in `Weeks/Week 03…` with notes and session documents, the Part I guide's manifest and prompt
+  name three notes, the deck and the notebook, and Fundamentals' Week 3 guide is built from its note.
 
 ## 15. Risks & trade-offs (accepted)
 

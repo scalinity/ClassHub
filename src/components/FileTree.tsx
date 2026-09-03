@@ -132,6 +132,14 @@ function DirNode({
   const isCollapsed = collapsed.has(node.relPath);
   const isModule = depth === 0;
   const fileCount = countFiles(node.children);
+  // A folder is a guide's scope when it is named as a division is (`Module
+  // 1`), or once a guide has been built for it, so nothing built goes
+  // unreachable. `Weeks`, `Slides` and `Syllabus` are storage: what they hold
+  // reaches a guide through the division that reads it (SPEC §8.3).
+  const offersGuide =
+    isModule &&
+    guideControls !== undefined &&
+    (node.labelled === true || guideControls.guides.has(node.relPath));
 
   return (
     <div className={isModule ? "not-first:mt-3" : undefined}>
@@ -161,7 +169,7 @@ function DirNode({
             {node.name}
           </span>
         </button>
-        {isModule && guideControls && (
+        {offersGuide && guideControls && (
           <GuideCluster scope={node.relPath} controls={guideControls} />
         )}
         {isModule && (
