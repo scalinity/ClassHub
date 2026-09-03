@@ -1130,8 +1130,9 @@ its meetings.
   syllabus names and the class lacks is created with its weight and no Canvas id; one whose
   weight was already set and disagrees with the syllabus is left alone and named in the job
   summary, so a rescan never silently changes a number that was typed. The writes are direct
-  with audit rows (`syllabus.set_grade_weight`, before and after) and refresh the Grades
-  section, and the summary says what was set — `weights set: Assignments 50, Quizzes 20,
+  with audit rows (`syllabus.set_grade_weight`: the weight before and after when one is
+  filled, the row when one is created) and refresh the Grades section, and the summary says
+  what was set — `weights set: Assignments 50, Quizzes 20,
   Project 30 · Survey left at 0 — the syllabus does not weight it`. A rescan of an unchanged
   syllabus writes nothing and leaves no row. Whether the weights add up is the section's own
   ≠100% warning's job, and chat's weights line reports the same sum.

@@ -544,7 +544,7 @@ struct RawWeight {
     weight: serde_json::Value,
 }
 
-/// The three halves of a scan's output, split by `split_output`.
+/// The three parts of a scan's output, split by `split_output`.
 struct ScanOutput {
     deadlines: Vec<serde_json::Value>,
     units: Vec<serde_json::Value>,
@@ -701,7 +701,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
     Ok(summary)
 }
 
-/// Splits the scan's output into its three halves.
+/// Splits the scan's output into its three parts.
 ///
 /// The contract is one object holding `deadlines`, `units` and `grading`,
 /// because the weekly schedule, the due dates and the grade breakdown live in
@@ -719,7 +719,7 @@ fn split_output(result_text: &str) -> Result<ScanOutput> {
             // items, or no structure. A key that is present and not a list is
             // not: collapsing that to an empty vec reported "no date-bearing
             // items found", the same words a genuinely dateless syllabus earns,
-            // and the scan's whole deadline half vanished without a trace.
+            // and the scan's whole deadline part vanished without a trace.
             let array = |key: &str| -> Result<Vec<serde_json::Value>> {
                 match record.get(key) {
                     None | Some(serde_json::Value::Null) => Ok(Vec::new()),
@@ -750,10 +750,10 @@ fn split_output(result_text: &str) -> Result<ScanOutput> {
 
 /// Records the divisions the syllabus declared, as SPEC §7.2's middle source.
 ///
-/// Failures here are reported, never propagated: the two halves of a scan are
+/// Failures here are reported, never propagated: the parts of a scan are
 /// independent findings out of one document, and losing the deadlines because
 /// a week entry was malformed would be the wrong trade. Run before the
-/// deadlines block for the same reason in reverse — a scan whose deadline half
+/// deadlines block for the same reason in reverse — a scan whose deadline part
 /// is unusable has still read the schedule, and that is worth keeping.
 fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Option<String> {
     if raw.is_empty() {
@@ -841,7 +841,7 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
     }
 }
 
-/// What a scan's grading half did, for the job summary.
+/// What a scan's grading part did, for the job summary.
 #[derive(Default)]
 struct WeightsRecorded {
     /// Weights written: `Assignments 50`, `Peer Design Sessions 20 (new)`.
@@ -887,7 +887,7 @@ impl WeightsRecorded {
 /// whose weight is still zero takes the syllabus's, one the class lacks is
 /// created, and one already set is left alone and named. Same posture as
 /// `record_units` — reported, never propagated, and run before the deadline
-/// half so a scan whose deadlines are unusable still keeps what it read.
+/// part so a scan whose deadlines are unusable still keeps what it read.
 fn record_weights(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Option<String> {
     if raw.is_empty() {
         return None;
@@ -924,7 +924,7 @@ fn apply_weights(
                 continue;
             }
         };
-        // The untrusted boundary, as in the deadline half: model-supplied text
+        // The untrusted boundary, as in the deadline part: model-supplied text
         // is capped before it reaches the summary, at the bound the stored
         // name has, so the summary names the category the class holds.
         let name = truncate(entry.name.trim(), MAX_NAME_CHARS);
@@ -940,7 +940,7 @@ fn apply_weights(
             continue;
         };
         // ASCII folding, to match SQLite's LOWER() in the lookup below — the
-        // deadline half's rule, for the same reason: Unicode folding here
+        // deadline part's rule, for the same reason: Unicode folding here
         // would let the two layers disagree on a non-ASCII name.
         let lowered = name.to_ascii_lowercase();
         if claimed.contains(&lowered) {
@@ -1583,7 +1583,7 @@ mod tests {
 
     /// An absent key is a real answer; a key that is present and not a list is
     /// a malformed scan. Collapsing the second to an empty vec reported "no
-    /// date-bearing items found" and lost the scan's whole deadline half.
+    /// date-bearing items found" and lost the scan's whole deadline part.
     #[test]
     fn a_malformed_half_fails_the_scan_rather_than_reading_as_empty() {
         let output = split_output(r#"{"deadlines": [{"title": "x"}]}"#).expect("valid shape");
