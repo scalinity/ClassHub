@@ -210,8 +210,10 @@ function UnitRow({
   // guide from, so the action stays off the row rather than offering a button
   // that can only refuse. A guide that already exists is shown regardless: a
   // lecture refiled out of this week leaves its guide behind and stale, and
-  // that is exactly what the row must not hide.
-  const buildable = distilled > 0 || unit.relPath !== null || guide !== undefined;
+  // that is exactly what the row must not hide — viewable, without an action
+  // the backend would turn down.
+  const canBuild = distilled > 0 || unit.relPath !== null;
+  const hasGuideCluster = canBuild || guide !== undefined;
 
   return (
     <li className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
@@ -234,12 +236,13 @@ function UnitRow({
           {distilled === 1 ? "1 LECTURE" : `${distilled} LECTURES`}
         </span>
       )}
-      {buildable && (
+      {hasGuideCluster && (
         <UnitGuideCluster
           scope={scope}
           unitId={unit.id}
           unitName={unit.name}
           guide={guide}
+          canBuild={canBuild}
           controls={controls}
           onSynthesize={onSynthesize}
         />
@@ -263,6 +266,7 @@ function UnitGuideCluster({
   unitId,
   unitName,
   guide,
+  canBuild,
   controls,
   onSynthesize,
 }: {
@@ -270,6 +274,8 @@ function UnitGuideCluster({
   unitId: number;
   unitName: string;
   guide: GuideInfo | undefined;
+  /** Whether the division has anything to build a guide from right now. */
+  canBuild: boolean;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
 }) {
@@ -299,7 +305,15 @@ function UnitGuideCluster({
 
   return (
     <span className="flex shrink-0 items-center gap-0.5">
-      {guide.stale ? (
+      {guide.stale && !canBuild ? (
+        // Stale with nothing left to rebuild from: said, not offered.
+        <span
+          title="Its sources are gone — refile a lecture here to rebuild it"
+          className="px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-class-amber"
+        >
+          STALE
+        </span>
+      ) : guide.stale ? (
         <button
           type="button"
           title="Sources changed since this guide was generated"
@@ -308,7 +322,7 @@ function UnitGuideCluster({
         >
           STALE — RESYNTHESIZE
         </button>
-      ) : (
+      ) : !canBuild ? null : (
         <button
           type="button"
           title="Resynthesize guide"
