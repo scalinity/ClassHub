@@ -938,7 +938,15 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
     let mut slots: Vec<WeekSlot> = Vec::new();
     for (unit_id, ordinal, number, unit_name, meets_on) in weeks {
         let week = number.unwrap_or(ordinal);
-        if slots.iter().any(|s| s.week == week) {
+        // Said out loud, because the week decides what the division files
+        // and which folders its guide reads: a row that loses its week to
+        // another gets neither.
+        if let Some(holder) = slots.iter().find(|s| s.week == week) {
+            eprintln!(
+                "units: {unit_name} claims week {week}, which {} already holds; it files no \
+                 lecture and counts no week folder",
+                holder.unit_name
+            );
             continue;
         }
         slots.push(WeekSlot {
@@ -975,9 +983,14 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
     for (unit_id, unit_name, first, last, unit_kind) in ranges {
         for week in first..=last {
             // Ranges should not overlap, but if a syllabus says they do, the
-            // earlier Part keeps the week rather than the later one silently
-            // taking it.
-            if slots.iter().any(|s| s.week == week) {
+            // earlier Part keeps the week rather than the later one taking
+            // it, and the overlap is said out loud.
+            if let Some(holder) = slots.iter().find(|s| s.week == week) {
+                eprintln!(
+                    "units: {unit_name} claims week {week}, which {} already holds; that week \
+                     files into and counts for the earlier one",
+                    holder.unit_name
+                );
                 continue;
             }
             slots.push(WeekSlot {
