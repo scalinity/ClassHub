@@ -899,7 +899,7 @@ fn apply_weights(
     class_id: i64,
     raw: &[serde_json::Value],
 ) -> Result<WeightsRecorded> {
-    use crate::grades::{set_syllabus_weight, trim_num, WeightWrite};
+    use crate::grades::{set_syllabus_weight, trim_num, WeightWrite, MAX_NAME_CHARS};
     let mut out = WeightsRecorded::default();
     // Names this scan has handled, lowercased: a second entry under one name
     // is the model repeating itself, and the first reading stands.
@@ -912,13 +912,19 @@ fn apply_weights(
                 continue;
             }
         };
-        let name = entry.name.trim();
+        // The untrusted boundary, as in the deadline half: model-supplied text
+        // is capped before it reaches the summary, at the bound the stored
+        // name has, so the summary names the category the class holds.
+        let name = truncate(entry.name.trim(), MAX_NAME_CHARS);
         if name.is_empty() {
             out.skipped.push(format!("entry {} (empty name)", index + 1));
             continue;
         }
         let Some(weight) = percent_of(&entry.weight) else {
-            out.skipped.push(format!("{name} (bad weight {})", entry.weight));
+            out.skipped.push(format!(
+                "{name} (bad weight {})",
+                truncate(&entry.weight.to_string(), MAX_NAME_CHARS)
+            ));
             continue;
         };
         let lowered = name.to_lowercase();
@@ -927,7 +933,7 @@ fn apply_weights(
             continue;
         }
         claimed.push(lowered);
-        match set_syllabus_weight(conn, class_id, name, weight) {
+        match set_syllabus_weight(conn, class_id, &name, weight) {
             Ok(WeightWrite::Set) => out.set.push(format!("{name} {}", trim_num(weight))),
             Ok(WeightWrite::Created) => {
                 out.set.push(format!("{name} {} (new)", trim_num(weight)))

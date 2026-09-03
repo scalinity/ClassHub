@@ -43,7 +43,7 @@ impl GradeAccumulator {
 
 use crate::db::{audit, emit_hub_change, with_conn};
 
-const MAX_NAME_CHARS: usize = 80;
+pub(crate) const MAX_NAME_CHARS: usize = 80;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
