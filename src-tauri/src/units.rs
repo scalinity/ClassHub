@@ -881,7 +881,8 @@ pub struct WeekSlot {
 /// Days — No Class`) takes its ordinal, unless a numbered row already holds
 /// that week, since the course's own numbering wins. Applied Generative AI
 /// numbers none — it declares three Parts spanning week ranges — so its weeks
-/// are read out of those ranges, and each maps to the Part that contains it. A
+/// are read out of those ranges, held on the rows of the divisions that group
+/// weeks, and each maps to the Part that contains it. A
 /// course that declares neither gets no weeks, and a lecture for it routes
 /// through `_Inbox/` for the sorter to place (SPEC §7.1).
 pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
@@ -922,7 +923,8 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
 
     let mut stmt = conn.prepare(
         "SELECT id, name, first_week, last_week FROM units
-         WHERE class_id = ?1 AND first_week IS NOT NULL AND last_week IS NOT NULL
+         WHERE class_id = ?1 AND kind != 'week'
+           AND first_week IS NOT NULL AND last_week IS NOT NULL
          ORDER BY ordinal, id",
     )?;
     let ranges = stmt
