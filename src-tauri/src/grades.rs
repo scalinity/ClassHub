@@ -442,7 +442,7 @@ pub(crate) enum CanvasWrite {
 fn read_name(name: &str) -> Result<String> {
     let name = crate::db::truncate(name.trim(), MAX_NAME_CHARS);
     if name.is_empty() {
-        bail!("a Canvas name is empty");
+        bail!("a name is empty");
     }
     Ok(name)
 }
