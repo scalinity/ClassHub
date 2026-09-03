@@ -1716,3 +1716,73 @@ suggestion were addressed as individual commits. What future sessions should kno
   files. Both were caught by the compiler; edits went through the editor after that.
 - The page reloaded to the dashboard once mid-session with no rebuild in the log;
   the workspace was simply reopened.
+
+## Post-M17 — Review fixes (2026-09-02)
+
+A two-agent review of the M17 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 7 warnings and
+10 suggestions, 5 of them corroborated by both reviewers; all were addressed as
+individual commits. What future sessions should know:
+
+- **The vanish pass writes conditionally.** It read a row as pending, checked
+  the disk, then wrote `dismissed` by id. With two processes on the table, an
+  approve in the other one is exactly what makes a file leave the inbox, so the
+  write could land over an approval and add a `sort.proposal_vanished` row
+  contradicting the real `sort.move`. `dismiss_rows` updates `WHERE status =
+  'pending'` and writes the audit row only when the update changed a row;
+  tested with a row approved between selection and write.
+- **"Cannot tell" is not "gone".** `is_file()` answers false for a permission
+  or I/O error as readily as for a missing path, and a dismissal is terminal per
+  path. `file_is_gone` dismisses on `NotFound` or a non-file at the path only;
+  tested with a proposal inside a `chmod 000` folder, which stays pending. The
+  stored path is read through `clean_rel` first, and the stats stay per
+  proposal because a directory listing could not make that distinction.
+- **The pass is housekeeping, not a precondition.** `pending_count` and
+  `sort_state` propagated its error, so one class's write that could not commit
+  failed `list_classes` for every class. `reconcile_vanished` logs and the read
+  answers from the table as it stands. Chat's overview now runs the same pass
+  per class before counting (`sorter::pending_move_count`), so the three
+  readers agree.
+- **A moved file is cleared from the write guard only under its own
+  signature.** Path-only exclusion left a path unguarded for the whole window
+  once the app had moved a file there — a job rewriting it at minute 20 of a
+  master guide went unreported. `app_written_paths` now returns
+  `AppWrite::MovedFrom(origin)` for a move's destination, and
+  `excluding_app_writes` clears it only while the after-run fingerprint still
+  equals the file's before-run signature at the origin (a rename changes
+  neither size nor mtime); a file that arrived during the window under its own
+  row stays path-based, and a path a file left is the app's outright, which is
+  what makes a chain of moves read correctly whatever order the rows come in.
+  The same read filters the class in SQL — `json_extract` raises on a payload
+  that is not JSON, and only `CASE WHEN json_valid(...)` is guaranteed not to
+  reach it — binds through `params_from_iter`, and states that the
+  whole-second window is inclusive on purpose. SPEC §6 states the signature
+  rule.
+- **A scoped sort records only its file.** `finalize_job` routed the scoped
+  entry to the override but let any other entry through to the ordinary upsert,
+  and counted a refused Canvas replacement as recorded. The loop is now
+  `record_entries`, which a test drives with a scope: other files are ignored
+  and said so in the summary, `upsert_proposal` returns whether it wrote so a
+  refusal is a skip, and a scoped file resolved while the job ran — approved,
+  which moved it, or left in the inbox — is a reported outcome ("resolved while
+  the sort ran — nothing recorded") rather than a failed job or a card brought
+  back. A class-root placement reads "in the class root" instead of a quoted
+  folder called the class folder.
+- **One sort per class is settled by the insert.** `enqueue_sort` goes through
+  `enqueue_unique`, so two clicks or two processes cannot both get a job past a
+  check that ran a moment earlier. In the queue, SORT BY CONTENT is disabled on
+  every Canvas card while any sort for the class is active, a card that started
+  one holds itself until the job id it was handed reaches the jobs snapshot,
+  and the header stays quiet for a scoped run, whose card carries the state.
+- **A drop's bookkeeping never fails a finished copy.** The dismissed-row
+  deletes and the `sort.staged` row commit together and a failure is logged,
+  the way a filed lecture records its own row.
+- Tests added: the conditional dismissal, the unreadable folder, the scoped
+  run, the override's no-row and class-root branches, a job rewrite after an
+  app move, a non-JSON audit row, the overview's waiting line and
+  `deadlines::pending_count`; the guard fixture asserts its rewrite changed the
+  length, since mtime is whole seconds.
+- Verified: `cargo test` 144 pass, `npx tsc --noEmit` clean, and the fixed
+  build launched beside the installed app with the dashboard and the Applied
+  Generative AI workspace rendering as they were left (no card, no badge).
+  Nothing was pushed: the repo has no remote.
