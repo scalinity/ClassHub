@@ -107,7 +107,7 @@ export function AddLecture({
   const resolvedDate = date ?? dateFromFileName(source) ?? todayIso();
   // Keyed on the date: the week follows from it, so changing the date
   // re-resolves rather than leaving a stale answer standing.
-  const { data: weeks } = useQuery({
+  const { data: weeks, error: weeksError } = useQuery({
     queryKey: ["lectureWeeks", classId, resolvedDate],
     queryFn: () => lectureWeeks(classId, resolvedDate),
     placeholderData: (prev) => prev,
@@ -222,9 +222,11 @@ export function AddLecture({
                   className={`${inputBase} w-full disabled:opacity-50`}
                 >
                   <option value="">
-                    {slots.length === 0
-                      ? "No schedule published"
-                      : "Sort it into a week"}
+                    {weeks === undefined
+                      ? "Reading the schedule…"
+                      : slots.length === 0
+                        ? "No schedule published"
+                        : "Sort it into a week"}
                   </option>
                   {slots.map((s) => (
                     <option key={s.week} value={s.week}>
@@ -246,7 +248,11 @@ export function AddLecture({
                   . Wrong week? Change it here, or refile it later — the map
                   follows the file.
                 </>
-              ) : slots.length === 0 ? (
+              ) : weeksError ? (
+                `The course's schedule could not be read — ${String(weeksError)}`
+              ) : weeks === undefined ? (
+                "Reading the course's schedule…"
+              ) : noWeeks ? (
                 "This course declares no weeks yet, so there is nowhere to file the session. Scan its syllabus from the Deadlines tab first — the form then resolves the week from the course's own dates."
               ) : asked ? (
                 "This course publishes no dates for its weeks, so pick the one the session fell in. Left unpicked, it goes to the inbox and the sorter proposes a week."
