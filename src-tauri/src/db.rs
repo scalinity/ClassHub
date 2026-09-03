@@ -194,12 +194,12 @@ pub struct DeadlineChip {
 }
 
 /// The division a course is in today (SPEC §8.5), in the course's own words.
+/// The id is what the Structure list matches its row on.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentUnit {
+    pub id: i64,
     pub name: String,
-    /// module | week | part — the course's word for it.
-    pub kind: String,
 }
 
 #[derive(Serialize)]
@@ -360,8 +360,8 @@ pub fn list_classes(conn: &Connection, today: &str) -> Result<Vec<ClassCard>> {
             .optional()?;
         let current_grade = crate::grades::weighted_grade(conn, id)?;
         let current_unit = crate::units::current_unit(conn, id, today)?.map(|unit| CurrentUnit {
+            id: unit.id,
             name: unit.name,
-            kind: unit.kind,
         });
         cards.push(ClassCard {
             id,
@@ -413,7 +413,10 @@ mod tests {
         let by_id = |id: i64| cards.iter().find(|c| c.id == id).expect("seeded class");
         let now = by_id(3).current_unit.as_ref().expect("Biostatistics is dated");
         assert_eq!(now.name, "Week 15 \u{2014} No Class (Thanksgiving Week)");
-        assert_eq!(now.kind, "week");
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM units WHERE name = ?1", [&now.name], |row| row.get(0))
+            .expect("the row");
+        assert_eq!(now.id, row_id);
         assert!(by_id(4).current_unit.is_none(), "no dates, no answer");
         assert!(by_id(1).current_unit.is_none(), "no divisions, no answer");
     }

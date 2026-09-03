@@ -40,13 +40,13 @@ export interface UnitGuideControls {
  */
 export function StructureSection({
   classId,
-  currentUnit,
+  currentUnitId,
   controls,
 }: {
   classId: number;
-  /** The name of the division the course is in today (SPEC §8.5), unique
-   *  per class — null where the course published no dates. */
-  currentUnit: string | null;
+  /** The division the course is in today (SPEC §8.5) — null where the course
+   *  published no dates. */
+  currentUnitId: number | null;
   controls: UnitGuideControls;
 }) {
   const { data: units, error } = useQuery({
@@ -167,7 +167,7 @@ export function StructureSection({
                 <UnitRow
                   key={unit.id}
                   unit={unit}
-                  current={unit.name === currentUnit}
+                  current={unit.id === currentUnitId}
                   distilled={distilledPerUnit.get(unit.id) ?? 0}
                   controls={controls}
                   onSynthesize={synthesize}

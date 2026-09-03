@@ -238,7 +238,7 @@ export function ClassWorkspace({
 
       <StructureSection
         classId={info.id}
-        currentUnit={currentUnit?.name ?? null}
+        currentUnitId={currentUnit?.id ?? null}
         controls={{
           guides: guideMap,
           activeScopes,

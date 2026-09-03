@@ -34,7 +34,7 @@ export interface ClassInfo {
    * its published schedule, never computed, so a course that publishes no
    * dates has none.
    */
-  currentUnit: { name: string; kind: "module" | "week" | "part" } | null;
+  currentUnit: { id: number; name: string } | null;
   meetings: Meeting[];
 }
 
