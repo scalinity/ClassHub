@@ -514,22 +514,31 @@ const DOCX_TO_HTML: Conversion = Conversion {
 /// it is derived from; a test holds the two together.
 pub const MIRROR_SUFFIXES: [&str; 5] = [".md", ".pdf", ".pdf.sha256", ".html", ".html.sha256"];
 
-/// The mirror path of a source's conversion, and the sidecar that records
-/// which source hash it was made from.
-fn conversion_paths(class_dir: &Path, rel_path: &str, how: &Conversion) -> (String, PathBuf, PathBuf) {
-    let out_rel = format!("{EXTRACTS_DIR}/{rel_path}.{}", how.ext);
-    let out_abs = class_dir.join(&out_rel);
-    let sidecar = class_dir.join(format!("{out_rel}.sha256"));
-    (out_rel, out_abs, sidecar)
+/// Where a source's conversion lives in the mirror, and the sidecar that
+/// records which source hash it was made from.
+struct ConversionPaths {
+    /// Class-relative, the form the batch payload and the callers keep.
+    rel: String,
+    abs: PathBuf,
+    sidecar: PathBuf,
 }
 
-/// Whether the mirror already holds this source's conversion as it is now:
-/// the sidecar carries the hash it was converted from.
-fn conversion_is_current(out_abs: &Path, sidecar: &Path, sha256: &str) -> bool {
-    out_abs.is_file()
-        && fs::read_to_string(sidecar)
-            .map(|s| s.trim() == sha256)
-            .unwrap_or(false)
+impl ConversionPaths {
+    fn of(class_dir: &Path, rel_path: &str, how: &Conversion) -> Self {
+        let rel = format!("{EXTRACTS_DIR}/{rel_path}.{}", how.ext);
+        let abs = class_dir.join(&rel);
+        let sidecar = class_dir.join(format!("{rel}.sha256"));
+        Self { rel, abs, sidecar }
+    }
+
+    /// Whether the mirror already holds this source's conversion as it is
+    /// now: the sidecar carries the hash it was converted from.
+    fn is_current(&self, sha256: &str) -> bool {
+        self.abs.is_file()
+            && fs::read_to_string(&self.sidecar)
+                .map(|s| s.trim() == sha256)
+                .unwrap_or(false)
+    }
 }
 
 /// Converts `<rel>` into the extracts mirror under `how`, skipping when the
@@ -542,12 +551,12 @@ fn convert(
     sha256: &str,
     how: &Conversion,
 ) -> Result<String> {
-    let (out_rel, out_abs, sidecar) = conversion_paths(class_dir, rel_path, how);
-    if conversion_is_current(&out_abs, &sidecar, sha256) {
-        return Ok(out_rel);
+    let out = ConversionPaths::of(class_dir, rel_path, how);
+    if out.is_current(sha256) {
+        return Ok(out.rel);
     }
 
-    let out_dir = out_abs.parent().context("conversion path has no parent")?;
+    let out_dir = out.abs.parent().context("conversion path has no parent")?;
     fs::create_dir_all(out_dir)?;
     // A dedicated user profile keeps headless runs independent of any open
     // LibreOffice GUI instance (they otherwise refuse to start concurrently).
@@ -599,9 +608,9 @@ fn convert(
             String::from_utf8_lossy(&output.stdout).trim()
         );
     }
-    fs::rename(&produced, &out_abs)?;
-    fs::write(&sidecar, sha256)?;
-    Ok(out_rel)
+    fs::rename(&produced, &out.abs)?;
+    fs::write(&out.sidecar, sha256)?;
+    Ok(out.rel)
 }
 
 /// SPEC §12: the absolute path the viewer's PDF frame loads through the asset
@@ -622,11 +631,11 @@ pub fn pdf_view_path(conn: &Connection, class_id: i64, rel_path: &str) -> Result
                 .optional()?
                 .context("not indexed yet — rescan the class")?;
             let class_dir = crate::scanner::class_dir(conn, class_id)?;
-            let (_, twin, sidecar) = conversion_paths(&class_dir, rel_path, &PPTX_TO_PDF);
-            if !conversion_is_current(&twin, &sidecar, &sha256) {
+            let twin = ConversionPaths::of(&class_dir, rel_path, &PPTX_TO_PDF);
+            if !twin.is_current(&sha256) {
                 bail!("not converted to PDF yet — the next scan converts it");
             }
-            Ok(twin)
+            Ok(twin.abs)
         }
         kind => bail!("a {kind} file has no PDF to show"),
     }
