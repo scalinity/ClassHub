@@ -38,8 +38,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       break;
     case "deadlineProposals":
       // The workspace's confirm cards — a syllabus scan or a Canvas sync
-      // proposed something, or one was approved or skipped.
+      // proposed something, or one was approved or skipped — and the card's
+      // PROPOSED count, which reads the same queue.
       void queryClient.invalidateQueries({ queryKey: ["deadlineProposals"] });
+      void queryClient.invalidateQueries({ queryKey: ["classes"] });
       break;
     case "notes":
       void queryClient.invalidateQueries({ queryKey: ["notes"] });

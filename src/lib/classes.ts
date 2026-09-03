@@ -19,6 +19,8 @@ export interface ClassInfo {
   staleGuides: number;
   /** Items waiting in the drop-to-sort flow: pending proposals + unproposed inbox files. */
   inboxPending: number;
+  /** Proposed deadlines still waiting on a decision, from the syllabus scan or Canvas. */
+  pendingDeadlineProposals: number;
   /** Nearest open deadline (card line), overdue included. */
   nextDeadline: { title: string; dueAt: string } | null;
   /** Current weighted grade over graded items (null until something is graded). */

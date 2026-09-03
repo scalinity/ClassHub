@@ -78,6 +78,11 @@ export function DeadlinesSection({
   const open = deadlines.filter((d) => d.status === "open");
   const done = deadlines.filter((d) => d.status === "done");
   const cards = (proposals ?? []).filter((p) => !resolvedIds.has(p.id));
+  // A date already gone is not what ADD ALL is for: it may be a real deadline
+  // entered late, or a scan misreading last year's syllabus, and only its own
+  // card can tell. Each stays addable one at a time.
+  const pastCards = cards.filter((p) => daysUntil(p.dueAt) < 0);
+  const addable = cards.filter((p) => daysUntil(p.dueAt) >= 0);
 
   const scanJobs = jobs.filter(
     (j) => j.kind === "syllabus_scan" && j.classId === classId,
@@ -114,7 +119,7 @@ export function DeadlinesSection({
   const addAll = () => {
     setAddingAll(true);
     setActionError(null);
-    approveDeadlineProposals(cards.map((card) => card.id))
+    approveDeadlineProposals(addable.map((card) => card.id))
       .then((outcome) => {
         setResolvedIds((prev) => {
           const next = new Set(prev);
@@ -241,15 +246,25 @@ export function DeadlinesSection({
                 covers all of them. */}
             <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
               NOTHING IS ADDED UNTIL YOU CONFIRM
+              {pastCards.length > 0 && (
+                <span className="text-muted-foreground/60">
+                  {" · ADD ALL SKIPS "}
+                  {pastCards.length === 1
+                    ? "1 PAST DATE"
+                    : `${pastCards.length} PAST DATES`}
+                </span>
+              )}
             </p>
-            <button
-              type="button"
-              onClick={addAll}
-              disabled={addingAll}
-              className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
-            >
-              {addingAll ? "ADDING…" : `ADD ALL ${cards.length}`}
-            </button>
+            {addable.length > 0 && (
+              <button
+                type="button"
+                onClick={addAll}
+                disabled={addingAll}
+                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+              >
+                {addingAll ? "ADDING…" : `ADD ALL ${addable.length}`}
+              </button>
+            )}
           </div>
           {cards.map((proposal) => (
             <ProposalCard
@@ -561,6 +576,9 @@ function ProposalCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Before today: shown in the muted register with a PAST tag rather than as
+  // OVERDUE — nothing is overdue until it is a deadline.
+  const past = daysUntil(proposal.dueAt) < 0;
 
   const resolve = (approve: boolean) => {
     setBusy(true);
@@ -583,8 +601,21 @@ function ProposalCard({
           {proposal.kind.toUpperCase()}
         </span>
       </div>
-      <p className="mt-1 flex items-baseline gap-2 font-mono text-[11px] font-medium text-(--accent)">
-        {dueDayLabel(proposal.dueAt)}
+      <p
+        className={
+          "mt-1 flex items-baseline gap-2 font-mono text-[11px] font-medium " +
+          (past ? "text-muted-foreground" : "text-(--accent)")
+        }
+      >
+        {past ? formatDueDate(proposal.dueAt) : dueDayLabel(proposal.dueAt)}
+        {past && (
+          <span
+            title="This date has already passed — add it only if it is a real deadline entered late"
+            className="rounded border px-1 py-px text-[9px] font-normal tracking-[0.12em] text-muted-foreground"
+          >
+            PAST
+          </span>
+        )}
         <span
           title={deadlineSourceBadge(proposal.source)?.title}
           className="font-normal tracking-[0.12em] text-[9px] text-muted-foreground/60"

@@ -209,6 +209,11 @@ pub struct ClassCard {
     /// Drop-to-sort badge (SPEC §10 step 5): pending proposals plus inbox
     /// files nothing has proposed for yet.
     pub inbox_pending: i64,
+    /// Proposed deadlines (SPEC §11) still waiting on a decision, from either
+    /// reader. Counted on the card because the queue lives inside the
+    /// workspace, and a proposal nothing on the dashboard mentions is one that
+    /// waits until something else brings the reader there.
+    pub pending_deadline_proposals: i64,
     /// Nearest open deadline (SPEC §12 card contents), overdue included —
     /// an open deadline in the past is the most urgent line on the card.
     pub next_deadline: Option<DeadlineChip>,
@@ -322,6 +327,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
         let folder_present = root.join(&folder_name).is_dir();
         let stale_guides = crate::guides::stale_guide_count(conn, id)?;
         let inbox_pending = crate::sorter::pending_count(conn, id)?;
+        let pending_deadline_proposals = crate::deadlines::pending_count(conn, id)?;
         // ISO text sorts chronologically, so MIN(due_at) is the nearest.
         let next_deadline = conn
             .query_row(
@@ -349,6 +355,7 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             folder_present,
             stale_guides,
             inbox_pending,
+            pending_deadline_proposals,
             next_deadline,
             current_grade,
             final_exam_start,

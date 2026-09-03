@@ -480,9 +480,24 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
         [],
         |row| row.get(0),
     )?;
+    let pending_deadlines: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM deadline_proposals WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    )?;
+    // Both confirm queues on one line: a proposal the overview never mentions
+    // is one chat cannot remind anyone about.
+    let mut waiting = Vec::new();
     if pending_moves > 0 {
+        waiting.push(format!("{pending_moves} file move proposal(s)"));
+    }
+    if pending_deadlines > 0 {
+        waiting.push(format!("{pending_deadlines} deadline proposal(s)"));
+    }
+    if !waiting.is_empty() {
         out.push_str(&format!(
-            "{pending_moves} file move proposal(s) awaiting Daniel's approval\n"
+            "{} awaiting Daniel's approval\n",
+            waiting.join(" and ")
         ));
     }
 

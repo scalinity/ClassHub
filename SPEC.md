@@ -439,6 +439,14 @@ claude -p <prompt>
   anything outside `Study Guides/` and `.classhub/extracts/` is demoted to failed, records
   nothing, and its full path list is written to `audit_log`. This is what enforces §4's
   promise that the app never destroys source material.
+
+  The app itself moves files while a job runs — an approved sort or Canvas move, a drop or a
+  Canvas download staged into `_Inbox/`, a lecture filed into `Weeks/`, a note saved — and
+  none of that is the job's doing. Each of those writes an audit row naming its paths, and
+  the compare reads the rows for the job's window and takes those paths out of the touched
+  list. Exclusion is by audit row, never by the shape of the change: a rename with no row
+  behind it is still the job's. The corollary is that every app write into source material
+  must be audited, because the audit log is what tells the guard "that was us".
 - **Models**: one global model/effort pair, set in Settings and read at spawn time so a
   change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
@@ -683,10 +691,15 @@ never replaces a stated time with a bare date.
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
 invented and the file waits for the content-aware sorter, which the sync enqueues. **A sort job
-never replaces a Canvas destination.** Where Canvas filed a file is an observation — the
-professor put it there — and a sort job's destination is an inference from a filename and a
-tree; a file Canvas has placed is out of a sort's scope entirely, and the card's own "change
-destination" is how to disagree with it. A chat move is the reader asking, so it retargets.
+never replaces a Canvas destination on its own.** Where Canvas filed a file is an observation —
+the professor put it there — and a sort job's destination is an inference from a filename and a
+tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
+reader asking, so it retargets. Disagreeing with the placement takes one of two explicit
+routes on the card: "change destination" names the folder directly, and **SORT BY CONTENT**
+runs a sort job over that one file and, because it was asked for, lets the sort's destination
+replace Canvas's. The card then re-renders as a sort proposal with the Canvas folder named in
+its reasoning, so the professor's placement stays visible. Explicit, never heuristic: for every
+file nobody asked about, Canvas's placement still outranks a content guess.
 
 Each folder name is mapped onto the vocabulary the tree already uses, so a course calling its
 decks "Lecture Slides" does not earn that class a second folder beside the "Slides" every other
@@ -864,6 +877,12 @@ its meetings.
 4. On approve, Rust performs the move (creating folders as needed), updates the file index,
    and writes an `audit_log` entry. No file ever moves without explicit approval.
 5. The inbox badge on the class card shows pending count.
+6. A pending proposal whose file is no longer on disk — sorted by hand in Finder, or moved
+   from another build's queue — is resolved as dismissed with an audit row
+   (`sort.proposal_vanished`, carrying the row) before either the queue or the badge answers,
+   so both agree with the disk. Dismissal is terminal per path: a file that comes back to that
+   inbox path through a drop is a fresh proposal, and a Canvas re-sync, which matches files by
+   name and size against the tree, never re-proposes one.
 
 ## 11. Hub features
 
@@ -872,6 +891,11 @@ its meetings.
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
   chat tools. **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
   class folder) and proposes deadlines as JSON → confirm cards → insert with `source='syllabus'`.
+  Proposals still waiting, from either reader, are counted on the class card (`N PROPOSED`) and
+  in the chat overview, since the queue itself lives inside the workspace. A proposal dated
+  before today is tagged `PAST` and left out of ADD ALL: a past date may be a real deadline
+  entered late or a scan misreading last year's syllabus, and only its own card can say, so it
+  stays individually addable.
 - **Notes**: markdown files in `<Class>/Notes/`. Lightweight editor (textarea + live preview,
   no heavy editor dependency). Notes are included in `search_material` scope.
 - **Grades**: weighted categories per class (weights should sum to 100%; show a warning
@@ -888,7 +912,7 @@ and apply it. Non-negotiable per project owner.
   bundled variable font (no CDN fetches).
 - Per-class accent colors: blue, orange, green, amber (matching the enrollment screenshot's
   card edge bars). Class cards show a left accent bar, `display_name` only (never course
-  codes), next meeting, staleness/inbox badges, current grade, nearest deadline.
+  codes), next meeting, staleness, inbox and proposal badges, current grade, nearest deadline.
 - **Views**: Dashboard (4 class cards + deadlines strip + exam countdowns + job status pill)
   · Class Workspace (accent header; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in Browser / Show in Finder)
@@ -1080,7 +1104,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a real session is in the tree, the corpus, a session document and its unit's
   guide with nothing hand-edited, chat cites it, and refiling it moves its contribution.
 
-- [ ] **M17 — Proposals that tell the truth.** (`milestones/M17-proposals-tell-the-truth.md`)
+- [x] **M17 — Proposals that tell the truth.** (`milestones/M17-proposals-tell-the-truth.md`)
   Pending deadline proposals counted on the class card; past-dated proposals marked and skipped
   by ADD ALL; move proposals whose file has left the inbox resolved; the write-scope check
   excludes the app's own audited moves; SORT BY CONTENT on a Canvas card.

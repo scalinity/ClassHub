@@ -306,6 +306,16 @@ pub struct DeadlineProposal {
     pub source: String,
 }
 
+/// How many of the class's proposals still wait — the card's `N PROPOSED`
+/// badge, read on every dashboard refetch, so it counts rather than loads.
+pub fn pending_count(conn: &Connection, class_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM deadline_proposals WHERE class_id = ?1 AND status = 'pending'",
+        [class_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// The class's confirm queue: every proposed deadline still awaiting a
 /// decision, whichever reader proposed it.
 pub fn pending_proposals(conn: &Connection, class_id: i64) -> Result<Vec<DeadlineProposal>> {

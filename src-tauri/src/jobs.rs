@@ -4,7 +4,7 @@
 //! auth env vars stripped (SPEC §1), raw stream-json persisted to a log file, and
 //! condensed progress forwarded to the frontend via `job://{id}/progress` events.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::PathBuf;
@@ -127,6 +127,10 @@ struct QueuedJob {
     id: i64,
     kind: String,
     class_id: Option<i64>,
+    /// What the row's `scope` column says: a unit or transcript for a guide or
+    /// digest, and for a sort job the one inbox file an explicit SORT BY
+    /// CONTENT was pressed for (SPEC §7.2).
+    scope: Option<String>,
     prompt: String,
     /// Kind-specific completion data (e.g. the extract batch manifest). Also
     /// persisted to jobs.payload so a failed master_guide can be resumed after
@@ -315,6 +319,74 @@ fn record_contract_breach(app: &AppHandle, job: &QueuedJob, touched: &[String]) 
     }
 }
 
+/// The audit actions that record the app itself writing into a class folder,
+/// with the payload keys naming the class-relative paths it wrote. The write
+/// guard reads these to tell the app's own moves apart from a job's; an app
+/// write into source material that is not on this list is one the guard will
+/// pin on whichever job was running.
+const APP_WRITES: &[(&str, &[&str])] = &[
+    ("sort.move", &["from", "to"]),
+    ("sort.staged", &["staged"]),
+    ("canvas.staged_file", &["source"]),
+    ("lecture.added", &["relPath"]),
+    ("chat.write_note", &["relPath"]),
+    ("ui.write_note", &["relPath"]),
+];
+
+/// Every path the app recorded writing in `class_id`'s folder since `since`,
+/// read out of the audit log — the set the write-scope guard subtracts from a
+/// job's touched list (SPEC §6).
+fn app_written_paths(conn: &Connection, class_id: i64, since: i64) -> Result<HashSet<String>> {
+    let actions: Vec<&str> = APP_WRITES.iter().map(|(action, _)| *action).collect();
+    let placeholders = actions
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT action, payload FROM audit_log
+         WHERE created_at >= ?1 AND action IN ({placeholders})"
+    ))?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&since];
+    params.extend(actions.iter().map(|a| a as &dyn rusqlite::ToSql));
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut paths = HashSet::new();
+    for row in rows {
+        let (action, payload) = row?;
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        if payload["classId"].as_i64() != Some(class_id) {
+            continue;
+        }
+        let Some((_, keys)) = APP_WRITES.iter().find(|(a, _)| *a == action) else {
+            continue;
+        };
+        for key in *keys {
+            match &payload[*key] {
+                serde_json::Value::String(path) => {
+                    paths.insert(path.clone());
+                }
+                serde_json::Value::Array(list) => {
+                    paths.extend(list.iter().filter_map(|v| v.as_str().map(str::to_string)));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// The touched list with the app's own recorded writes taken out. What is left
+/// is the job's.
+fn excluding_app_writes(mut touched: Vec<String>, app_writes: &HashSet<String>) -> Vec<String> {
+    touched.retain(|path| !app_writes.contains(path));
+    touched
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 
@@ -500,8 +572,13 @@ pub fn enqueue_lecture_digest(
 
 /// SPEC §10 step 2: sort_proposal job over a class inbox (read-only tools).
 /// The strict JSON it returns on stdout is recorded by sorter::finalize_job.
-pub fn enqueue_sort(app: &AppHandle, class_id: i64, prompt: &str) -> Result<i64> {
-    enqueue(app, "sort_proposal", Some(class_id), None, prompt, None, None)
+pub fn enqueue_sort(
+    app: &AppHandle,
+    class_id: i64,
+    scope: Option<&str>,
+    prompt: &str,
+) -> Result<i64> {
+    enqueue(app, "sort_proposal", Some(class_id), scope, prompt, None, None)
 }
 
 /// SPEC §11: syllabus_scan over a chosen file (scope = its rel path) or the
@@ -692,6 +769,7 @@ fn enqueue(
             id,
             kind: kind.to_string(),
             class_id,
+            scope: scope.map(str::to_string),
             prompt: prompt.to_string(),
             payload,
             resume_session,
@@ -726,6 +804,7 @@ fn enqueue_unique(
             id,
             kind: kind.to_string(),
             class_id,
+            scope: scope.map(str::to_string),
             prompt: prompt.to_string(),
             payload,
             resume_session: None,
@@ -889,6 +968,10 @@ fn run_job(
         .then(|| job.class_id)
         .flatten()
         .and_then(|id| with_conn(&app, |c| crate::scanner::class_dir(c, id)).ok());
+    // The window the guard answers for opens at the first fingerprint, not at
+    // `started_at`: an app move between the two would otherwise be in the
+    // "before" picture and outside the audit window at once.
+    let window_start = now();
     let before = guarded_dir
         .as_deref()
         .map(crate::scanner::fingerprint_sources);
@@ -914,10 +997,43 @@ fn run_job(
 
     // Runs whatever the outcome: a cancelled or failed run had the same tools.
     if let (Some(dir), Some(before)) = (guarded_dir.as_deref(), before) {
-        let touched = crate::scanner::diff_fingerprints(
+        let mut touched = crate::scanner::diff_fingerprints(
             &before,
             &crate::scanner::fingerprint_sources(dir),
         );
+        // The app itself moves files while a job runs — an approved sort, a
+        // drop, a lecture filed into Weeks/ — and none of that is the job's
+        // doing. Each of those writes an audit row, and the row is what
+        // clears a path here: a rename with no row behind it is still the
+        // job's, however much it looks like the app's.
+        if !touched.is_empty() {
+            let app_writes = job
+                .class_id
+                .map(|class_id| {
+                    with_conn(&app, |conn| app_written_paths(conn, class_id, window_start))
+                })
+                .transpose();
+            match app_writes {
+                Ok(Some(app_writes)) => {
+                    let seen = touched.len();
+                    touched = excluding_app_writes(touched, &app_writes);
+                    if touched.len() < seen {
+                        // The only trace the exclusion leaves: a demotion that
+                        // did not happen is invisible otherwise.
+                        eprintln!(
+                            "job {}: {} change(s) in the class folder were the app's own \
+                             audited moves, not the run's",
+                            job.id,
+                            seen - touched.len()
+                        );
+                    }
+                }
+                Ok(None) => {}
+                // Unreadable audit log: the guard stays strict rather than
+                // assuming every change was the app's.
+                Err(e) => eprintln!("job {} could not read the audit log: {e:#}", job.id),
+            }
+        }
         if !touched.is_empty() {
             record_contract_breach(&app, &job, &touched);
             if status == "succeeded" {
@@ -988,6 +1104,7 @@ fn run_job(
                     match crate::sorter::finalize_job(
                         &app,
                         class_id,
+                        job.scope.as_deref(),
                         result_text.as_deref().unwrap_or(""),
                     ) {
                         Ok(recorded) => summary = Some(recorded),
@@ -1861,9 +1978,12 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_unique_job, is_orphan, parse_entries, parse_object, process_alive, recover_orphans,
-        standing_self_check, unescape_fragment, wait_bounded,
+        app_written_paths, excluding_app_writes, insert_unique_job, is_orphan, parse_entries,
+        parse_object, process_alive, recover_orphans, standing_self_check, unescape_fragment,
+        wait_bounded,
     };
+    use crate::db::now;
+    use std::fs;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -2127,6 +2247,82 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 4, "the refused insert left no row behind");
+    }
+
+    /// The write-scope guard (SPEC §6) against the app's own moves: a rename
+    /// during the run's window with an audit row behind it is not the job's,
+    /// while the same rename with no row still is. Exclusion is by row, never
+    /// by the shape of the change — the guard has to keep catching a job that
+    /// moves a source.
+    #[test]
+    fn the_write_guard_excludes_only_the_moves_the_app_recorded() {
+        let dir = std::env::temp_dir().join(format!(
+            "classhub-app-moves-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Module 1")).unwrap();
+        fs::create_dir_all(dir.join("_Inbox")).unwrap();
+        fs::write(dir.join("_Inbox/deck.pdf"), "deck").unwrap();
+        fs::write(dir.join("Module 1/notes.md"), "notes").unwrap();
+
+        let conn = crate::db::memory_db();
+        let window_start = now();
+        let before = crate::scanner::fingerprint_sources(&dir);
+
+        // The window: the app approves a move, a job also rewrites a source.
+        fs::rename(dir.join("_Inbox/deck.pdf"), dir.join("Module 1/deck.pdf")).unwrap();
+        fs::write(dir.join("Module 1/notes.md"), "rewritten by the job").unwrap();
+        let touched =
+            crate::scanner::diff_fingerprints(&before, &crate::scanner::fingerprint_sources(&dir));
+        assert_eq!(
+            touched,
+            vec!["Module 1/deck.pdf", "Module 1/notes.md", "_Inbox/deck.pdf"]
+        );
+
+        // No row yet: the rename is the job's as far as the guard can tell.
+        let none = app_written_paths(&conn, 1, window_start).unwrap();
+        assert_eq!(excluding_app_writes(touched.clone(), &none), touched);
+
+        // The app's row clears both halves of the rename and nothing else.
+        crate::db::audit(
+            &conn,
+            "sort.move",
+            serde_json::json!({
+                "classId": 1, "proposalId": 7,
+                "from": "_Inbox/deck.pdf", "to": "Module 1/deck.pdf",
+            }),
+        )
+        .unwrap();
+        let writes = app_written_paths(&conn, 1, window_start).unwrap();
+        assert_eq!(
+            excluding_app_writes(touched.clone(), &writes),
+            vec!["Module 1/notes.md"],
+            "the job's own rewrite must survive the exclusion"
+        );
+
+        // Another class's row, and a row from before the window, clear nothing.
+        assert!(app_written_paths(&conn, 2, window_start).unwrap().is_empty());
+        assert!(app_written_paths(&conn, 1, window_start + 3600).unwrap().is_empty());
+
+        // A drop stages a list, a note write names one path: both shapes read.
+        crate::db::audit(
+            &conn,
+            "sort.staged",
+            serde_json::json!({ "classId": 1, "staged": ["_Inbox/a.pdf", "_Inbox/b.pdf"] }),
+        )
+        .unwrap();
+        crate::db::audit(
+            &conn,
+            "ui.write_note",
+            serde_json::json!({ "classId": 1, "relPath": "Notes/Today.md", "created": true }),
+        )
+        .unwrap();
+        let writes = app_written_paths(&conn, 1, window_start).unwrap();
+        for path in ["_Inbox/a.pdf", "_Inbox/b.pdf", "Notes/Today.md"] {
+            assert!(writes.contains(path), "{path} missing from {writes:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The launch gate stands on the latest verdict, not the latest success: a

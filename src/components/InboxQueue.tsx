@@ -10,6 +10,7 @@ import {
   INBOX_DIR,
   resolveProposal,
   runSortJob,
+  sortByContent,
   useDragState,
   type MoveProposal,
 } from "@/lib/sorter";
@@ -160,7 +161,15 @@ export function InboxQueue({
 
       <div className="mt-4 space-y-2">
         {proposals.map((p) => (
-          <ProposalCard key={p.id} proposal={p} dirs={dirs} dirSet={dirSet} />
+          <ProposalCard
+            key={p.id}
+            proposal={p}
+            dirs={dirs}
+            dirSet={dirSet}
+            // An explicit SORT BY CONTENT carries the file as the job's scope,
+            // which is how this card knows the running sort is its own.
+            sorting={active !== null && active.scope === p.sourceRelPath}
+          />
         ))}
         {unproposed.map((f) => (
           <div key={f.name} className="flex h-8 items-center gap-2 rounded-md px-2">
@@ -213,17 +222,25 @@ function ProposalCard({
   proposal,
   dirs,
   dirSet,
+  sorting,
 }: {
   proposal: MoveProposal;
   /** null while the tree is loading. */
   dirs: readonly string[] | null;
   dirSet: ReadonlySet<string> | null;
+  /** A SORT BY CONTENT job for this file is queued or running. */
+  sorting: boolean;
 }) {
   // Busy holds until the hub-changed refetch removes the card (or an error
   // re-enables the actions) — a resolved proposal must not be re-clickable.
   const [busy, setBusy] = useState(false);
+  // Held only while the sort command is in flight; once the job exists the
+  // jobs store carries the state, and this card survives the sort as the
+  // same row rewritten — so a held flag would outlive the run.
+  const [sortStarting, setSortStarting] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const held = busy || sorting || sortStarting;
 
   const source = proposal.sourceRelPath;
   const fileName = source.slice(source.lastIndexOf("/") + 1);
@@ -247,6 +264,18 @@ function ProposalCard({
     });
   };
 
+  const sortNow = () => {
+    setSortStarting(true);
+    setError(null);
+    setPickerOpen(false);
+    sortByContent(proposal.id)
+      .then(() => setSortStarting(false))
+      .catch((e) => {
+        setError(String(e));
+        setSortStarting(false);
+      });
+  };
+
   return (
     <div className="rounded-lg border bg-card px-4 py-3">
       <div className="flex items-start justify-between gap-3">
@@ -264,7 +293,7 @@ function ProposalCard({
         <button
           type="button"
           onClick={() => resolve(true)}
-          disabled={busy}
+          disabled={held}
           className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
         >
           {busy ? "WORKING…" : "APPROVE"}
@@ -272,7 +301,7 @@ function ProposalCard({
         <button
           type="button"
           onClick={() => setPickerOpen((open) => !open)}
-          disabled={busy}
+          disabled={held}
           aria-expanded={pickerOpen}
           className={`${monoAction} ${
             pickerOpen
@@ -282,17 +311,41 @@ function ProposalCard({
         >
           MOVE TO…
         </button>
+        {proposal.source === "canvas" &&
+          // Disagreeing with the professor's folder, explicitly: the sort's
+          // destination replaces Canvas's for this one file, and for no other
+          // (SPEC §7.2). The result re-renders here as a sort proposal with
+          // the Canvas folder still named in its reasoning.
+          (sorting || sortStarting ? (
+            <span className="flex items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+              <span
+                aria-hidden
+                className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+              />
+              SORTING BY CONTENT…
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={sortNow}
+              disabled={held}
+              title="Ask a sort job to read the file and propose a folder in place of the one Canvas keeps it in"
+              className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+            >
+              SORT BY CONTENT
+            </button>
+          ))}
         <button
           type="button"
           onClick={() => resolve(false)}
-          disabled={busy}
+          disabled={held}
           className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
         >
           {fromInbox ? "LEAVE IN INBOX" : "DISMISS"}
         </button>
       </div>
 
-      {pickerOpen && !busy && (
+      {pickerOpen && !held && (
         <div className="mt-2 max-h-44 overflow-y-auto rounded-md border p-1">
           {pickerDirs === null ? (
             <p className="px-2 py-1.5 text-[12px] text-muted-foreground">

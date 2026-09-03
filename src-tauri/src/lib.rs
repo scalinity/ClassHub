@@ -475,6 +475,13 @@ fn run_sort_job(app: tauri::AppHandle, class_id: i64) -> Result<i64, String> {
     sorter::run_sort_job(&app, class_id).map_err(|e| format!("{e:#}"))
 }
 
+/// SORT BY CONTENT on a Canvas card: a sort job over that one file, whose
+/// destination replaces the Canvas placement (SPEC §7.2).
+#[tauri::command]
+fn sort_by_content(app: tauri::AppHandle, proposal_id: i64) -> Result<i64, String> {
+    sorter::sort_by_content(&app, proposal_id).map_err(|e| format!("{e:#}"))
+}
+
 /// Steps 3–4: approve (move + index update + audit log, optionally to a
 /// picker-chosen destination) or leave the file where it is.
 #[tauri::command]
@@ -689,6 +696,7 @@ pub fn run() {
             stage_inbox_files,
             get_sort_state,
             run_sort_job,
+            sort_by_content,
             resolve_move_proposal,
             list_jobs,
             cancel_job,

@@ -1588,3 +1588,131 @@ suggestion were addressed as individual commits. What future sessions should kno
   note relocated after the commit, emptied folder removed, session row following,
   the Week 2 row reading `STALE` with VIEW GUIDE while its lecture was away and
   fresh once it returned. Nothing was pushed: the repo has no remote.
+
+## M17 — Proposals that tell the truth (2026-09-02)
+
+### What was built
+
+- **Deadline proposals on the card.** `db::ClassCard` carries
+  `pending_deadline_proposals` (`deadlines::pending_count`, one COUNT per class on
+  every dashboard refetch), the card shows `N PROPOSED` in the badge cluster beside
+  `N TO SORT`, and `tools::overview_text` folds the two confirm queues into one line
+  ("2 file move proposal(s) and 9 deadline proposal(s) awaiting approval"). The
+  `deadlineProposals` hub change now also invalidates `["classes"]`, since the card
+  reads the same queue.
+- **Past-dated proposals.** Client-side, as the brief asked: a card whose `due_at` is
+  before today shows its date in the muted register with a `PAST` tag (not OVERDUE —
+  nothing is overdue until it is a deadline), `ADD ALL` sends only the ids of the
+  rest, the queue's line says "ADD ALL SKIPS 1 PAST DATE", and the button is not
+  rendered once nothing addable is left. The card's own ADD DEADLINE still works.
+  `approve_deadline_proposals` is unchanged: one backend call, filtered ids.
+- **Vanished proposals.** `sorter::dismiss_vanished` runs at the top of both
+  `sort_state` and `pending_count`: every pending proposal of the class — sort job,
+  Canvas or chat — whose `source_rel_path` is not a file on disk is set `dismissed`
+  with a `sort.proposal_vanished` audit row carrying the whole row. A class folder
+  that is not a directory is skipped, because an unmounted volume or a root setting
+  mid-change is not a folder every proposed file has left. Chat's `overview_text`
+  counts the table directly and is the one reader this does not sit in front of.
+- **The write guard ignores the app's own moves.** `jobs::app_written_paths` reads the
+  audit log for the job's window and `excluding_app_writes` subtracts those paths from
+  the fingerprint diff. The window opens at the first fingerprint, not at
+  `started_at`: `execute_job` stamps `started_at` after the "before" picture is taken,
+  so a move between the two would otherwise be in the picture and outside the window
+  at once. `APP_WRITES` is the table of (action, payload keys) the guard understands —
+  `sort.move` (`from`, `to`), `lecture.added` (`relPath`), `canvas.staged_file`
+  (`source`), `chat.write_note` / `ui.write_note` (`relPath`) — and the one unaudited
+  app write into the guard's walk, a drop staged into `_Inbox/`, now writes
+  `sort.staged` with the list. `_Inbox/` and `Notes/` are inside the walk
+  (`fingerprint_walk` excludes only `Study Guides/` and dot-folders), which is why the
+  note actions are on the list. An unreadable audit log leaves the guard strict, and
+  a demotion that did not happen is logged, since it is otherwise invisible.
+- **SORT BY CONTENT.** A Canvas card gains the button; `sorter::sort_by_content`
+  checks the row is a pending Canvas placement of a file still in the inbox, refuses
+  while a sort for the class is active, renders the prompt over that one file
+  (`build_prompt` split into its filter and `render_prompt`) and enqueues a sort job
+  whose `scope` is the file. `QueuedJob` now carries the row's `scope`, and
+  `sorter::finalize_job` receives it: the entry whose source equals the scope goes
+  through `override_canvas_placement`, which rewrites the pending row as a sort
+  proposal with "Canvas files it under \"<folder>\" — " prefixed to the reasoning; a
+  Canvas row resolved by hand while the job ran falls back to the ordinary upsert,
+  which still refuses to replace Canvas. The card reads the running job's scope to
+  show `SORTING BY CONTENT…` and hold its actions, through a flag that is not the
+  card's `busy`: the row survives the sort rewritten in place, so a held flag would
+  outlive the run.
+
+### Verified
+
+- `cargo test`: 140 pass, three new — the guard's exclusion (a rename with an audit
+  row clears both halves and nothing else; without the row it stays the job's; another
+  class's row and a row before the window clear nothing; the list and single-path
+  payload shapes both read), the Canvas override (dest, source, confidence and the
+  prefixed reasoning), and the vanished pass (present file untouched, absent file
+  dismissed with its row on record, missing class folder skipped). `npx tsc --noEmit`
+  clean.
+- Live, on the dev build beside the installed app, through the accessibility driver:
+  the dashboard read `9 PROPOSED` on Fundamentals (the table held nine, the brief
+  said eight: the ninth was Canvas's "Live coding session 08/25", due Aug 25) and
+  `2 PROPOSED` on Design Studio; the Fundamentals queue showed the Aug 25 card with
+  `PAST`, the line "ADD ALL SKIPS 1 PAST DATE" and `ADD ALL 8`; ADD ALL added the
+  seven homeworks and the capstone (deadlines 31–38) and left the past card, whose own
+  ADD DEADLINE then inserted deadline 39 (open, `canvas`); the card badge was gone
+  after a DASHBOARD round trip.
+- Applied Generative AI held two pending proposals whose inbox files were still on
+  disk (12, the Week 01 deck; 13, the parking PDF), so the vanish check was run by
+  moving the parking PDF out of `_Inbox/` from the shell: the badge read `1 TO SORT`,
+  the reopened queue had one card, proposal 13 was `dismissed` and audit row 105
+  carried its row. The file was moved back, where it listed as LEFT IN INBOX.
+- **Fixture, stated plainly.** No pending Canvas placement existed (9–11 were
+  dismissed in the merge for files already sorted by content), so proposal 12 was
+  restored to what Canvas recorded for it on Aug 26 — `Slides/…`, source `canvas`,
+  no confidence (audit row 67 holds the staging; the Aug 26 build's sort job had
+  overwritten it, the case the M13 rule now forbids). The restore is audit row
+  `library.restore_canvas_placement` with the sort job's version kept in its payload.
+  For the Phase 4 check a second approvable move was needed in the same class after
+  the vanish check had dismissed the parking PDF's row, and a fresh drop would have
+  spent a second sort job, so the row was re-proposed by hand to `Syllabus/` (audit
+  row `library.restore_proposal`, proposal 24).
+- **SORT BY CONTENT** (job 288, the one sort run this session): scope
+  `_Inbox/CAI6734_Week01_Course_Overview_Liu.pdf`, 2 turns, 15.6 s, **$0.37**
+  list-equivalent (33k cache-write input, 24k cache-read, 991 output). The card
+  showed `SORTING BY CONTENT…` under `PROPOSING DESTINATIONS…`, then re-rendered as
+  `HIGH` → `Weeks/Week 01/` (NEW FOLDER) with the reasoning opening "Canvas files it
+  under "Slides" — Skimmed the PDF: …" and no SORT BY CONTENT button. APPROVE moved
+  the file to the sort's destination (audit row 107).
+- **The guard.** That move indexed a new PDF, so extract job 289 started two seconds
+  later; the parking move (proposal 24 → `Syllabus/`, audit row 108) was approved
+  eight seconds into its window. Job 289 finished `succeeded` (4 m 15 s, the deck's
+  extract written) with no `job.out_of_contract` row — the same shape that demoted
+  job 4 on 2026-09-01.
+
+### Left as it is
+
+- Deadline 39, "Live coding session 08/25", is open and overdue on the Fundamentals
+  card: adding it was the acceptance check for a past-dated card, and whether it is
+  done or deleted is a one-click decision that belongs to the reader.
+- The parking PDF was indexed while job 289 held the class's extract slot, and the
+  pipeline only re-checks on a scan: the dev build's next launch enqueued it as
+  extract job 290, which succeeded. Nothing to change, but worth knowing that a file
+  moved during an extract waits for the next scan.
+- `fingerprint_walk` skips dot-entries at depth 0 only, so a `.DS_Store` Finder writes
+  inside a subfolder during a run is a change the guard reports. Not touched here:
+  exclusion is by audit row, and that file is nobody's audited write.
+- Exclusion is by path, as the brief specifies. A job that edits a file the app moved
+  in the same window is not caught, because the `to` path is cleared whatever its new
+  signature; comparing the moved file's (size, mtime) at `to` against `from` would
+  close that and was left for the day it matters.
+- The chat overview's move-proposal count reads the table without the vanish pass.
+
+### Gotchas
+
+- The AX driver from M16 was recompiled from that session's scratchpad with one
+  addition, an `AX_NTH` environment variable to press the nth element of a name: a
+  queue's cards all carry APPROVE and ADD DEADLINE, and the section header carries
+  ADD DEADLINE too.
+- A Vite server from the M16 session was still holding port 1420 after its app had
+  gone; `tauri dev` fails on the port rather than reusing it.
+- `perl -pi` with `|` as the substitution delimiter and `|row|` in the pattern
+  matched an empty string and inserted the replacement at a random offset in two
+  files. Both were caught by the compiler; edits went through the editor after that.
+- The page reloaded to the dashboard once mid-session with no rebuild in the log;
+  the workspace was simply reopened.

@@ -140,14 +140,25 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     // drop is a new decision, and the sort job must see it.
     if !staged.is_empty() {
         with_conn(app, |conn| {
-            for name in &staged {
+            let rel_paths: Vec<String> = staged
+                .iter()
+                .map(|name| format!("{INBOX_DIR}/{name}"))
+                .collect();
+            for rel_path in &rel_paths {
                 conn.execute(
                     "DELETE FROM move_proposals
                      WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'dismissed'",
-                    params![class_id, format!("{INBOX_DIR}/{name}")],
+                    params![class_id, rel_path],
                 )?;
             }
-            Ok(())
+            // The inbox sits inside the write-scope guard's walk (SPEC §6), so
+            // a drop during a running job is a change the guard would pin on
+            // the job. The audit log is how it tells the app's own writes apart.
+            crate::db::audit(
+                conn,
+                "sort.staged",
+                json!({ "classId": class_id, "staged": rel_paths }),
+            )
         })?;
     }
 
@@ -203,7 +214,7 @@ fn enqueue_sort_job(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     })?;
     // Enqueued outside the DB lock — the job runner takes the lock itself.
     match prompt {
-        Some(prompt) => Ok(Some(crate::jobs::enqueue_sort(app, class_id, &prompt)?)),
+        Some(prompt) => Ok(Some(crate::jobs::enqueue_sort(app, class_id, None, &prompt)?)),
         None => Ok(None),
     }
 }
@@ -231,7 +242,46 @@ pub fn run_sort_job(app: &AppHandle, class_id: i64) -> Result<i64> {
         build_prompt(conn, class_id, true)
     })?
     .context("the inbox is empty — drop files onto the workspace first")?;
-    crate::jobs::enqueue_sort(app, class_id, &prompt)
+    crate::jobs::enqueue_sort(app, class_id, None, &prompt)
+}
+
+/// SORT BY CONTENT on a Canvas card (SPEC §7.2): a sort job over that one
+/// file, and — because it was asked for — the one case where the sort's
+/// destination replaces the folder Canvas filed the file in. The job's
+/// `scope` carries the file, which is what `finalize_job` reads to know this
+/// run was explicit; an automatic sort keeps deferring to Canvas.
+pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
+    let (class_id, source_rel, prompt) = with_conn(app, |conn| {
+        let (class_id, source_rel, status, source): (i64, String, String, String) = conn
+            .query_row(
+                "SELECT class_id, source_rel_path, status, source
+                 FROM move_proposals WHERE id = ?1",
+                [proposal_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .context("proposal not found")?;
+        if status != "pending" {
+            bail!("this proposal was already resolved");
+        }
+        if source != "canvas" {
+            bail!("only a Canvas placement is sorted by content — this one already was");
+        }
+        if has_active_sort(conn, class_id)? {
+            bail!("a sort job for this class is already queued or running");
+        }
+        let class_dir = crate::scanner::class_dir(conn, class_id)?;
+        let name = source_rel
+            .strip_prefix(&format!("{INBOX_DIR}/"))
+            .context("the proposal's source is not an inbox file")?;
+        let file = list_inbox(&class_dir)
+            .into_iter()
+            .find(|f| f.name == name)
+            .with_context(|| format!("'{source_rel}' is no longer in the inbox"))?;
+        let prompt = render_prompt(conn, class_id, &class_dir, &[file])?;
+        Ok((class_id, source_rel, prompt))
+    })?;
+    crate::jobs::enqueue_sort(app, class_id, Some(&source_rel), &prompt)
 }
 
 fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {
@@ -273,6 +323,16 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
     if inbox.is_empty() {
         return Ok(None);
     }
+    Ok(Some(render_prompt(conn, class_id, &class_dir, &inbox)?))
+}
+
+/// The prompt itself, over whichever inbox files the caller put in scope.
+fn render_prompt(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    inbox: &[InboxFile],
+) -> Result<String> {
     let class_name: String = conn.query_row(
         "SELECT display_name FROM classes WHERE id = ?1",
         [class_id],
@@ -287,7 +347,7 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
                 f.name,
                 crate::tools::format_size(f.size)
             );
-            if let Some(hint) = transcript_hint(&class_dir, &f.name) {
+            if let Some(hint) = transcript_hint(class_dir, &f.name) {
                 line.push_str(&format!("\n  {hint}"));
             }
             line
@@ -297,7 +357,7 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
 
     let mut tree_lines = Vec::new();
     let mut file_count = 0usize;
-    crate::scanner::walk_tree(&class_dir, &class_dir, 0, &mut tree_lines, &mut file_count);
+    crate::scanner::walk_tree(class_dir, class_dir, 0, &mut tree_lines, &mut file_count);
     let tree_block = if tree_lines.is_empty() {
         "(no folders yet — this class has no material)".to_string()
     } else {
@@ -346,14 +406,12 @@ fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option
             .join("\n")
     };
 
-    Ok(Some(
-        PROMPT_TEMPLATE
-            .replace("{class}", &class_name)
-            .replace("{inbox}", &inbox_block)
-            .replace("{tree}", &tree_block)
-            .replace("{weeks}", &weeks_block)
-            .replace("{vocabulary}", &vocabulary_block),
-    ))
+    Ok(PROMPT_TEMPLATE
+        .replace("{class}", &class_name)
+        .replace("{inbox}", &inbox_block)
+        .replace("{tree}", &tree_block)
+        .replace("{weeks}", &weeks_block)
+        .replace("{vocabulary}", &vocabulary_block))
 }
 
 // ---------------------------------------------------------------------------
@@ -455,8 +513,70 @@ fn canvas_placed(conn: &Connection, class_id: i64) -> Result<HashSet<String>> {
     Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
 }
 
+/// Resolves every pending proposal whose file is no longer on disk, so the
+/// queue and the badge agree with the folder rather than with a row.
+///
+/// A proposal names a file the app expects to move; sorted by hand in Finder,
+/// or already moved from another build's queue, it leaves a card whose
+/// APPROVE can only fail. Dismissed rather than deleted: dismissal is terminal
+/// per path (a file that comes back to that inbox path is a fresh drop, which
+/// `stage_files` clears the row for), and the audit row keeps the proposal
+/// itself. Runs before either reader answers, which is what keeps the two in
+/// step — a chat-side count of the table is the one reader this does not sit
+/// in front of.
+fn dismiss_vanished(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<()> {
+    // A class folder that is not there — an unmounted volume, a root setting
+    // mid-change — is not a folder every proposed file has left.
+    if !class_dir.is_dir() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id, source_rel_path, dest_rel_path, reasoning, confidence, source, created_at
+         FROM move_proposals WHERE class_id = ?1 AND status = 'pending'",
+    )?;
+    let vanished: Vec<(i64, serde_json::Value)> = stmt
+        .query_map([class_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                json!({
+                    "proposalId": row.get::<_, i64>(0)?,
+                    "classId": class_id,
+                    "sourceRelPath": row.get::<_, String>(1)?,
+                    "destRelPath": row.get::<_, String>(2)?,
+                    "reasoning": row.get::<_, String>(3)?,
+                    "confidence": row.get::<_, Option<String>>(4)?,
+                    "proposedBy": row.get::<_, String>(5)?,
+                    "createdAt": row.get::<_, i64>(6)?,
+                }),
+            ))
+        })?
+        .filter_map(|row| match row {
+            Ok((id, source_rel, payload)) if !class_dir.join(&source_rel).is_file() => {
+                Some(Ok((id, payload)))
+            }
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if vanished.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for (id, payload) in vanished {
+        tx.execute(
+            "UPDATE move_proposals SET status = 'dismissed', resolved_at = ?1 WHERE id = ?2",
+            params![now(), id],
+        )?;
+        crate::db::audit(&tx, "sort.proposal_vanished", payload)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    dismiss_vanished(conn, class_id, &class_dir)?;
     let (_, dismissed) = proposal_sources(conn, class_id)?;
     let inbox = list_inbox(&class_dir)
         .into_iter()
@@ -490,6 +610,7 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
 /// dismissed. A dismissed file is a decision already made; it stops counting.
 pub fn pending_count(conn: &Connection, class_id: i64) -> Result<i64> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    dismiss_vanished(conn, class_id, &class_dir)?;
     let (pending, dismissed) = proposal_sources(conn, class_id)?;
     let fresh = list_inbox(&class_dir)
         .iter()
@@ -519,7 +640,16 @@ struct RawProposal {
 
 /// Parses and records the job's proposals. Returns the job summary; zero
 /// recorded proposals is an error the caller demotes to job failure.
-pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
+///
+/// `scope` is the one file an explicit SORT BY CONTENT was pressed for, or
+/// None for a run over the inbox; only that file's entry may replace a Canvas
+/// placement.
+pub fn finalize_job(
+    app: &AppHandle,
+    class_id: i64,
+    scope: Option<&str>,
+    result_text: &str,
+) -> Result<String> {
     let entries = crate::jobs::parse_entries(result_text)?;
     let summary = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
@@ -536,6 +666,10 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                 }
             };
             match validate_entry(&class_dir, &entry) {
+                Ok(valid) if scope == Some(valid.source_rel.as_str()) => {
+                    override_canvas_placement(conn, class_id, &valid)?;
+                    recorded += 1;
+                }
                 Ok(valid) => {
                     upsert_proposal(
                         conn,
@@ -690,7 +824,9 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 ///
 /// Chat is not that exception: a chat move is the user asking for one, which is
 /// a decision rather than a guess. Either way the card's own "Change
-/// destination" remains the way to retarget.
+/// destination" remains the way to retarget, and SORT BY CONTENT
+/// (`override_canvas_placement`) is the explicit request that lets a sort's
+/// destination stand in for Canvas's.
 pub(crate) fn upsert_proposal(
     conn: &Connection,
     class_id: i64,
@@ -710,18 +846,7 @@ pub(crate) fn upsert_proposal(
         .optional()?;
     match held.as_deref() {
         Some("canvas") if source == "sort_job" => Ok(()),
-        Some(_) => {
-            // source and confidence reset too: replacing a sort job's pending
-            // row must not leave its HIGH chip attributed to a chat destination.
-            conn.execute(
-                "UPDATE move_proposals
-                 SET dest_rel_path = ?1, reasoning = ?2, confidence = ?3,
-                     source = ?4, created_at = ?5
-                 WHERE class_id = ?6 AND source_rel_path = ?7 AND status = 'pending'",
-                params![dest_rel, reasoning, confidence, source, now(), class_id, source_rel],
-            )?;
-            Ok(())
-        }
+        Some(_) => replace_pending(conn, class_id, source, source_rel, dest_rel, reasoning, confidence),
         None => {
             conn.execute(
                 "INSERT INTO move_proposals
@@ -733,6 +858,71 @@ pub(crate) fn upsert_proposal(
             Ok(())
         }
     }
+}
+
+/// Rewrites the pending row for a source in place. Source and confidence reset
+/// too: replacing a sort job's pending row must not leave its HIGH chip
+/// attributed to a chat destination.
+fn replace_pending(
+    conn: &Connection,
+    class_id: i64,
+    source: &str,
+    source_rel: &str,
+    dest_rel: &str,
+    reasoning: &str,
+    confidence: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE move_proposals
+         SET dest_rel_path = ?1, reasoning = ?2, confidence = ?3,
+             source = ?4, created_at = ?5
+         WHERE class_id = ?6 AND source_rel_path = ?7 AND status = 'pending'",
+        params![dest_rel, reasoning, confidence, source, now(), class_id, source_rel],
+    )?;
+    Ok(())
+}
+
+/// The sort's destination in place of Canvas's, for the one file SORT BY
+/// CONTENT was pressed for. The professor's folder moves onto the card's
+/// reasoning, so the override reads as a disagreement with a placement rather
+/// than as Canvas never having said anything. A Canvas row resolved by hand
+/// while the job ran leaves nothing to override, and the entry is recorded the
+/// ordinary way.
+fn override_canvas_placement(conn: &Connection, class_id: i64, valid: &ValidEntry) -> Result<()> {
+    let canvas_dest: Option<String> = conn
+        .query_row(
+            "SELECT dest_rel_path FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2
+               AND status = 'pending' AND source = 'canvas'",
+            params![class_id, valid.source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(canvas_dest) = canvas_dest else {
+        return upsert_proposal(
+            conn,
+            class_id,
+            "sort_job",
+            &valid.source_rel,
+            &valid.dest_rel,
+            &valid.reasoning,
+            valid.confidence.as_deref(),
+        );
+    };
+    let canvas_dir = canvas_dest
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("the class folder");
+    let reasoning = format!("Canvas files it under \"{canvas_dir}\" — {}", valid.reasoning);
+    replace_pending(
+        conn,
+        class_id,
+        "sort_job",
+        &valid.source_rel,
+        &valid.dest_rel,
+        &reasoning,
+        valid.confidence.as_deref(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,5 +1260,90 @@ mod tests {
             held(&conn),
             ("Readings/deck.pdf".into(), "sort_job".into(), 1)
         );
+    }
+
+    /// SORT BY CONTENT is the one explicit request that lets a sort's
+    /// destination replace Canvas's — and the professor's folder stays on the
+    /// card, in the reasoning, so the override reads as a disagreement.
+    #[test]
+    fn an_explicit_content_sort_replaces_the_canvas_placement_and_names_its_folder() {
+        let conn = crate::db::memory_db();
+        propose(&conn, "canvas", "Slides/deck.pdf");
+        let valid = ValidEntry {
+            source_rel: format!("{INBOX_DIR}/deck.pdf"),
+            dest_rel: "Module 2/Slides/deck.pdf".into(),
+            reasoning: "the deck covers Module 2's topics".into(),
+            confidence: Some("high".into()),
+        };
+        override_canvas_placement(&conn, 1, &valid).expect("override");
+        assert_eq!(
+            held(&conn),
+            ("Module 2/Slides/deck.pdf".into(), "sort_job".into(), 1)
+        );
+        let (reasoning, confidence): (String, Option<String>) = conn
+            .query_row(
+                "SELECT reasoning, confidence FROM move_proposals WHERE class_id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(
+            reasoning,
+            "Canvas files it under \"Slides\" — the deck covers Module 2's topics"
+        );
+        assert_eq!(confidence.as_deref(), Some("high"));
+    }
+
+    /// A pending proposal whose file has left the inbox is resolved with its
+    /// row on record, and one whose file is still there is left alone — the
+    /// badge and the queue then agree with the disk.
+    #[test]
+    fn a_proposal_whose_file_is_gone_is_dismissed_with_its_row_on_record() {
+        let dir = std::env::temp_dir().join(format!("classhub-vanished-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(INBOX_DIR)).expect("inbox");
+        fs::write(dir.join(INBOX_DIR).join("still-here.pdf"), "x").expect("file");
+
+        let conn = crate::db::memory_db();
+        for name in ["still-here.pdf", "sorted-by-hand.pdf"] {
+            upsert_proposal(
+                &conn,
+                1,
+                "canvas",
+                &format!("{INBOX_DIR}/{name}"),
+                &format!("Slides/{name}"),
+                "Canvas files it under \"Slides\"",
+                None,
+            )
+            .expect("propose");
+        }
+        dismiss_vanished(&conn, 1, &dir).expect("pass");
+
+        let status = |name: &str| -> String {
+            conn.query_row(
+                "SELECT status FROM move_proposals WHERE source_rel_path = ?1",
+                [format!("{INBOX_DIR}/{name}")],
+                |r| r.get(0),
+            )
+            .expect("row")
+        };
+        assert_eq!(status("still-here.pdf"), "pending");
+        assert_eq!(status("sorted-by-hand.pdf"), "dismissed");
+        let audit: String = conn
+            .query_row(
+                "SELECT payload FROM audit_log WHERE action = 'sort.proposal_vanished'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("one audit row");
+        let payload: serde_json::Value = serde_json::from_str(&audit).expect("json");
+        assert_eq!(payload["sourceRelPath"], format!("{INBOX_DIR}/sorted-by-hand.pdf"));
+        assert_eq!(payload["destRelPath"], "Slides/sorted-by-hand.pdf");
+        assert_eq!(payload["proposedBy"], "canvas");
+
+        // A folder that is not there is not a folder every file has left.
+        let _ = fs::remove_dir_all(&dir);
+        dismiss_vanished(&conn, 1, &dir).expect("pass");
+        assert_eq!(status("still-here.pdf"), "pending");
     }
 }

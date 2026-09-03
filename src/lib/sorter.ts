@@ -54,6 +54,13 @@ export function runSortJob(classId: number): Promise<number> {
   return invoke<number>("run_sort_job", { classId });
 }
 
+/** SORT BY CONTENT on a Canvas card: a sort job over that one file, whose
+ *  destination replaces the folder Canvas filed it in. The job's scope is the
+ *  file's inbox path, which is how the card knows the sort is its own. */
+export function sortByContent(proposalId: number): Promise<number> {
+  return invoke<number>("sort_by_content", { proposalId });
+}
+
 /** Approve the move (optionally to a picked folder) or leave the file put. */
 export function resolveProposal(
   proposalId: number,

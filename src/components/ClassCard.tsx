@@ -113,6 +113,16 @@ export function ClassCard({
                 {formatPercent(info.currentGrade)}
               </span>
             )}
+            {info.pendingDeadlineProposals > 0 && (
+              <span
+                title="Proposed deadlines waiting for your decision in the workspace"
+                className="rounded bg-(--accent)/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-(--accent)"
+              >
+                {info.pendingDeadlineProposals === 1
+                  ? "1 PROPOSED"
+                  : `${info.pendingDeadlineProposals} PROPOSED`}
+              </span>
+            )}
             {info.inboxPending > 0 && (
               <span
                 title="Files waiting in the drop-to-sort inbox"
