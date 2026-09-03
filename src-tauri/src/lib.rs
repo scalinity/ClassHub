@@ -111,17 +111,18 @@ fn read_class_file(
 
 /// SPEC §12: what the viewer frames for a PDF or a slide deck — the absolute
 /// path its `asset:` URL is built from, inside the scope `allow_asset_root`
-/// granted. A deck answers with its converted twin, or an error the tree turns
-/// into an open in the default app.
+/// granted. A deck answers with its converted twin, or `None` while it has no
+/// current one, which the tree turns into an open in the default app; an
+/// error is a failure the tree shows.
 #[tauri::command(async)]
 fn pdf_view_path(
     state: tauri::State<Db>,
     class_id: i64,
     rel_path: String,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let conn = db::lock(&state.0);
     extract::pdf_view_path(&conn, class_id, &rel_path)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| p.map(|p| p.to_string_lossy().into_owned()))
         .map_err(|e| format!("{e:#}"))
 }
 

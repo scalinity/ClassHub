@@ -661,12 +661,12 @@ fn convert(
 
 /// SPEC §12: the absolute path the viewer's PDF frame loads through the asset
 /// protocol — a PDF itself, or a deck's converted twin when the twin was made
-/// from the deck as it is now. An unconverted deck is refused, and the tree
-/// opens it in its default app instead.
-pub fn pdf_view_path(conn: &Connection, class_id: i64, rel_path: &str) -> Result<PathBuf> {
+/// from the deck as it is now. `None` is a deck with no current twin, which
+/// the tree opens in its default app; an error is something that went wrong.
+pub fn pdf_view_path(conn: &Connection, class_id: i64, rel_path: &str) -> Result<Option<PathBuf>> {
     let source = crate::scanner::resolve_rel(conn, class_id, rel_path)?;
     match crate::scanner::kind_for(&source) {
-        "pdf" => Ok(source),
+        "pdf" => Ok(Some(source)),
         "pptx" => {
             let sha256: String = conn
                 .query_row(
@@ -678,10 +678,7 @@ pub fn pdf_view_path(conn: &Connection, class_id: i64, rel_path: &str) -> Result
                 .context("not indexed yet — rescan the class")?;
             let class_dir = crate::scanner::class_dir(conn, class_id)?;
             let twin = ConversionPaths::of(&class_dir, rel_path, &PPTX_TO_PDF);
-            if !twin.is_current(&sha256) {
-                bail!("not converted to PDF yet — the next scan converts it");
-            }
-            Ok(twin.abs)
+            Ok(twin.is_current(&sha256).then_some(twin.abs))
         }
         kind => bail!("a {kind} file has no PDF to show"),
     }
@@ -944,25 +941,29 @@ mod tests {
 
         assert_eq!(
             pdf_view_path(&conn, class_id, "Slides/paper.pdf").expect("pdf"),
-            class_dir.join("Slides/paper.pdf")
+            Some(class_dir.join("Slides/paper.pdf"))
         );
-        let err = pdf_view_path(&conn, class_id, "Slides/deck.pptx").unwrap_err();
-        assert!(err.to_string().contains("not converted"), "{err:#}");
+        // No twin yet is not an error: the tree opens the deck elsewhere.
+        assert_eq!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").expect("deck"), None);
 
         let twin = class_dir.join(".classhub/extracts/Slides/deck.pptx.pdf");
         std::fs::write(&twin, b"pdf").unwrap();
         std::fs::write(class_dir.join(".classhub/extracts/Slides/deck.pptx.pdf.sha256"), "abc").unwrap();
-        assert_eq!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").expect("twin"), twin);
+        assert_eq!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").expect("twin"), Some(twin));
 
         // The deck changed since the twin was made: back to the default app
         // until the next scan converts it again.
         conn.execute("UPDATE files SET sha256 = 'abd' WHERE rel_path = 'Slides/deck.pptx'", [])
             .expect("edit");
-        assert!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").is_err());
+        assert_eq!(pdf_view_path(&conn, class_id, "Slides/deck.pptx").expect("stale twin"), None);
 
+        // Something wrong, as against something not there, is an error.
         let err = pdf_view_path(&conn, class_id, "Slides/notes.md").unwrap_err();
         assert!(err.to_string().contains("no PDF"), "{err:#}");
         assert!(pdf_view_path(&conn, class_id, "../etc/passwd").is_err());
+        std::fs::write(class_dir.join("Slides/loose.pptx"), b"pptx").unwrap();
+        let err = pdf_view_path(&conn, class_id, "Slides/loose.pptx").unwrap_err();
+        assert!(err.to_string().contains("not indexed"), "{err:#}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

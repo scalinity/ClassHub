@@ -44,7 +44,6 @@ import {
   listLectureContributions,
 } from "@/lib/lectures";
 import {
-  extractPath,
   listNotes,
   listPractice,
   openInDefaultApp,
@@ -165,46 +164,59 @@ export function ClassWorkspace({
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
   const [addingLecture, setAddingLecture] = useState(false);
-  // A job the Materials tree asked for and the backend turned down — a folder
-  // guide or a practice exam — as the line to show under that heading.
-  const [synthError, setSynthError] = useState<string | null>(null);
-  // Its own, because the only render site for synthError is the Materials
+  // Something the Materials tree asked for and the backend turned down — a
+  // folder guide, a practice exam, or a file to frame — as the line to show
+  // under that heading.
+  const [materialsError, setMaterialsError] = useState<string | null>(null);
+  // Its own, because the only render site for materialsError is the Materials
   // header — a failed distillation surfaced there, above the fold, under a
   // heading about synthesis.
   const [digestError, setDigestError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
-    setSynthError(null);
+    setMaterialsError(null);
     synthesizeModule(info.id, scope).catch((e) =>
-      setSynthError(`SYNTHESIS NOT STARTED — ${String(e)}`),
+      setMaterialsError(`SYNTHESIS NOT STARTED — ${String(e)}`),
     );
   };
   const handlePractice = (scope: string) => {
-    setSynthError(null);
+    setMaterialsError(null);
     generatePractice(info.id, scope).catch((e) =>
-      setSynthError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+      setMaterialsError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
     );
   };
   /**
    * A Materials row asked to be read in-app (SPEC §12). A PDF is framed
    * from its own path and a deck from its converted twin; a deck the pipeline
-   * has not converted yet opens in its default app instead. A notebook opens
-   * its extract — the flattened form chat reads — and everything else its
+   * has not converted yet opens in its default app instead, and a lookup that
+   * failed outright says so under the heading. A notebook opens its extract —
+   * the flattened form chat reads — while the index holds one made from the
+   * file as it is now, and itself until then; everything else opens as its
    * own text.
    */
   const openMaterial = (node: TreeNode) => {
     const kind = node.kind ?? "other";
     const file = { relPath: node.relPath, name: node.name, kind };
+    const inDefaultApp = () =>
+      openInDefaultApp(info.id, node.relPath).catch(() => refetch());
     if (kind === "pdf" || kind === "pptx") {
+      setMaterialsError(null);
       pdfViewPath(info.id, node.relPath)
-        .then((pdfPath) => setViewFile({ ...file, pdfPath }))
-        .catch(() =>
-          openInDefaultApp(info.id, node.relPath).catch(() => refetch()),
+        .then((pdfPath) =>
+          pdfPath === null
+            ? inDefaultApp()
+            : setViewFile({ ...file, pdfPath }),
+        )
+        .catch((e) =>
+          setMaterialsError(`COULD NOT OPEN ${node.name} — ${String(e)}`),
         );
       return;
     }
-    setViewFile(
-      kind === "ipynb" ? { ...file, source: extractPath(node.relPath) } : file,
-    );
+    if (kind === "ipynb") {
+      if (node.extractRelPath === undefined) void inDefaultApp();
+      else setViewFile({ ...file, source: node.extractRelPath });
+      return;
+    }
+    setViewFile(file);
   };
   const viewedGuide = viewScope ? (guideMap.get(viewScope) ?? null) : null;
 
@@ -323,9 +335,9 @@ export function ClassWorkspace({
           </div>
         </div>
 
-        {synthError && (
+        {materialsError && (
           <p className="mt-3 font-mono text-[11px] text-destructive">
-            {synthError}
+            {materialsError}
           </p>
         )}
 

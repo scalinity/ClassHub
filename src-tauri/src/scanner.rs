@@ -24,6 +24,11 @@ pub struct TreeNode {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
+    /// The file's extract, when the index holds one made from the file as it
+    /// is now — what a notebook opens as in the viewer (SPEC §12). Absent for
+    /// a file the pipeline has not reached yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_rel_path: Option<String>,
     pub children: Vec<TreeNode>,
 }
 
@@ -35,8 +40,17 @@ struct ScannedFile {
     kind: String,
 }
 
-/// Previously indexed (size, mtime, sha256) per rel_path, to skip re-hashing unchanged files.
-type ExistingIndex = HashMap<String, (i64, i64, String)>;
+/// What the index already knows about a file, so an unchanged one is not
+/// re-hashed and a current extract can be named on its tree node.
+struct Indexed {
+    size: i64,
+    mtime: i64,
+    sha256: String,
+    extract_rel_path: Option<String>,
+    extracted_sha256: Option<String>,
+}
+
+type ExistingIndex = HashMap<String, Indexed>;
 
 pub fn class_dir(conn: &Connection, class_id: i64) -> Result<PathBuf> {
     let folder: String = conn
@@ -278,13 +292,21 @@ pub fn diff_fingerprints(
 }
 
 fn load_existing(conn: &Connection, class_id: i64) -> Result<ExistingIndex> {
-    let mut stmt =
-        conn.prepare("SELECT rel_path, size, mtime, sha256 FROM files WHERE class_id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT rel_path, size, mtime, sha256, extract_rel_path, extracted_sha256
+         FROM files WHERE class_id = ?1",
+    )?;
     let rows = stmt
         .query_map([class_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?),
+                Indexed {
+                    size: row.get(1)?,
+                    mtime: row.get(2)?,
+                    sha256: row.get(3)?,
+                    extract_rel_path: row.get(4)?,
+                    extracted_sha256: row.get(5)?,
+                },
             ))
         })?
         .collect::<rusqlite::Result<ExistingIndex>>()?;
@@ -329,6 +351,7 @@ fn walk_dir(
                 dir: true,
                 kind: None,
                 size: None,
+                extract_rel_path: None,
                 children,
             });
         } else {
@@ -340,11 +363,17 @@ fn walk_dir(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let kind = kind_for(&path).to_string();
-            let sha256 = match existing.get(&rel_path) {
-                Some((s, m, hash)) if *s == size && *m == mtime => hash.clone(),
+            let indexed = existing.get(&rel_path);
+            let sha256 = match indexed {
+                Some(i) if i.size == size && i.mtime == mtime => i.sha256.clone(),
                 _ => hash_file(&path)
                     .with_context(|| format!("hashing {}", path.display()))?,
             };
+            // An extract counts only while it was made from this very content;
+            // a changed file's extract is the previous version's.
+            let extract_rel_path = indexed
+                .filter(|i| i.extracted_sha256.as_deref() == Some(sha256.as_str()))
+                .and_then(|i| i.extract_rel_path.clone());
             out.push(ScannedFile {
                 rel_path: rel_path.clone(),
                 sha256,
@@ -358,6 +387,7 @@ fn walk_dir(
                 dir: false,
                 kind: Some(kind),
                 size: Some(size),
+                extract_rel_path,
                 children: Vec::new(),
             });
         }

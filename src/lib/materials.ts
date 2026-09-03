@@ -6,6 +6,8 @@ export interface TreeNode {
   dir: boolean;
   kind?: string; // pptx | pdf | docx | rmd | r | py | ipynb | html | md | csv | caption | media | other
   size?: number;
+  /** Class-relative extract made from the file as it is now; absent until the pipeline has written one. */
+  extractRelPath?: string;
   children: TreeNode[];
 }
 
@@ -30,16 +32,15 @@ export function readClassFile(classId: number, relPath: string): Promise<string>
 
 /**
  * The absolute path the viewer frames for a PDF, or for a slide deck its
- * converted twin — rejected while the twin is missing or made from an older
- * deck, which is when the deck opens in its default app instead.
+ * converted twin — `null` while the twin is missing or made from an older
+ * deck, which is when the deck opens in its default app instead. A rejection
+ * is a failure, not a missing twin.
  */
-export function pdfViewPath(classId: number, relPath: string): Promise<string> {
-  return invoke<string>("pdf_view_path", { classId, relPath });
-}
-
-/** A source's markdown extract, class-relative (SPEC §4). */
-export function extractPath(relPath: string): string {
-  return `.classhub/extracts/${relPath}.md`;
+export function pdfViewPath(
+  classId: number,
+  relPath: string,
+): Promise<string | null> {
+  return invoke<string | null>("pdf_view_path", { classId, relPath });
 }
 
 /** A file in an app-managed directory (notes, practice exams); disk is truth. */
