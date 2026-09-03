@@ -996,6 +996,48 @@ mod tests {
         assert!(super::MIRROR_SUFFIXES.contains(&".md"));
     }
 
+    /// `remove_mirror` deletes only under the mirror and only what the
+    /// pipeline writes there: a plain class-relative path's entries and the
+    /// folders they emptied — never the root, never a folder a sibling still
+    /// uses, and nothing at all for a path that is not plain.
+    #[test]
+    fn the_mirror_is_removed_only_at_a_plain_path_under_the_root() {
+        let class_dir =
+            std::env::temp_dir().join(format!("classhub-remove-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&class_dir);
+        let root = class_dir.join(super::EXTRACTS_DIR);
+        let write = |rel: &str| {
+            let path = class_dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, "made from a source").expect("write");
+            path
+        };
+
+        // A sibling's extract keeps the folder both share.
+        let a = write(".classhub/extracts/Weeks/Week 04/a.pdf.md");
+        let b = write(".classhub/extracts/Weeks/Week 04/b.pdf.md");
+        super::remove_mirror(&class_dir, "Weeks/Week 04/a.pdf");
+        assert!(!a.exists() && b.is_file(), "a sibling's entry went");
+        assert!(root.join("Weeks/Week 04").is_dir(), "a folder still in use was pruned");
+        // The last entry takes the folders it emptied with it, up to the root.
+        super::remove_mirror(&class_dir, "Weeks/Week 04/b.pdf");
+        assert!(!root.join("Weeks").exists() && root.is_dir());
+
+        // A top-level source's parent is the root, which stays.
+        let top = write(".classhub/extracts/syllabus.pdf.md");
+        super::remove_mirror(&class_dir, "syllabus.pdf");
+        assert!(!top.exists() && root.is_dir(), "the root was pruned");
+
+        // Nothing but a plain relative path is acted on.
+        let inside = write(".classhub/extracts/keep.md");
+        let outside = write("keep.md");
+        for rel in ["", "../../keep", "./keep", "/keep", "Weeks/../keep"] {
+            super::remove_mirror(&class_dir, rel);
+            assert!(inside.is_file() && outside.is_file(), "{rel:?} removed something");
+        }
+        let _ = std::fs::remove_dir_all(&class_dir);
+    }
+
     #[test]
     fn a_csv_within_the_cap_is_kept_whole() {
         let lines = ["a,b", "1,2", "3,4"].map(String::from);
