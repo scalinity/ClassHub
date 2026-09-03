@@ -2103,3 +2103,65 @@ individual commits. What future sessions should know:
 - The chat textarea has no accessible name; `ax <pid> focus role:AXTextArea`
   and `setvalue role:AXTextArea <text>` reach it, and the controlled React
   input takes the value.
+
+## Post-M19 — Review fixes (2026-09-02)
+
+A two-agent review of the M19 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 0 critical, 5 warnings
+and 8 suggestions on the change plus one pre-existing warning, 2 of them
+corroborated by both reviewers; all were addressed as individual commits.
+What future sessions should know:
+
+- **The overview reads the move queue directly.** `class_block` went
+  through `sort_state` for a class's pending move proposals, which re-ran
+  the vanish reconciliation the overview had already run for every class
+  and listed the inbox directory only to discard it, on every chat send.
+  `waiting_block` selects the pending rows itself.
+- **A folder leaves the scope candidates on exact name equality only.**
+  `resolve_scope` dropped a folder whenever its squashed name equalled a
+  division's, but `attach_rel_path` joins the two on the exact name; a
+  folder `module 1` beside a division `Module 1` was dropped without ever
+  having been attached, leaving it unreachable as a scope and the division
+  without its files. The comparison is now the attach's own, and a query
+  hitting a near-match folder and its division is refused as ambiguous.
+- **Scoped jobs check and insert in one transaction.** Guide, master,
+  practice and digest enqueues ran `has_active_job` under the lock,
+  released it, and inserted under a fresh one; `jobs::enqueue_unique_scoped`
+  is the per-(class, scope) form of the IMMEDIATE check-and-insert the
+  extract and sort enqueues already used. The callers' earlier check stays
+  as the specific message; the transaction is the guard.
+- **A practice exam's name avoids the ones still being written.** The
+  folder `Module 1` and a division called `Module 1` label their exams the
+  same, and the active-job guard keys on scope, so both could run at once;
+  the naming loop only looked at the disk, where neither file existed yet.
+  `practice_output_rel` also skips the paths claimed by the class's queued
+  and running practice jobs (`claimed_practice_paths`, from their payloads).
+- **The master strip keeps its practice action during a master run**, and
+  a division row keeps its `GENERATING EXAM…` pulse after losing its
+  sources; the strip takes `practiceActive` from the workspace's
+  `activePracticeScopes` rather than filtering the jobs store itself.
+- **The compact `Lectures:` line counts.** It had named every division
+  with a lecture, which would grow the line that rides every turn by about
+  a name a week; it now carries the counts and the current division's share
+  (`1 in the current division (1 distilled)`), and the detailed form names
+  the rest.
+- **`class_block` is split**: `division_rows`, `lectures_block`,
+  `material_line`, `guides_line` and `waiting_block` stand beside
+  `divisions_line`. `Scope` derives `Clone`, its `Unit` carries `kind` and
+  `ordinal` so the matcher's `week3` key needs no second lookup, and
+  `generate_practice` takes an optional unit id the chat trigger passes
+  instead of the name lookup; the Tauri command passes none. The Master
+  arms of the matcher's closures are `unreachable!`, since master is
+  answered by name before the candidates are built.
+- The round-usage log inserts `output_tokens` through the object map:
+  indexing a non-object `Value` panics, and the stream thread has nothing to
+  catch one. `markdown_twin` and `document_stem` use `strip_suffix`.
+- **Tests**: `unit_context`'s four cases — nothing, filed but not distilled,
+  a note on disk, a folder — against an in-memory database and a temp root;
+  the practice naming loop against the disk and the queue; the overview's
+  twin/stem/proposer helpers, `divisions_line` across sources and kinds,
+  `Scope::key` for master and folders; `open_class_line` for a workspace,
+  the dashboard and a stale id. `cargo test`: 157 pass. `npx tsc --noEmit`
+  clean. The rebuilt dev build showed the Fundamentals strip and rows with
+  the same clusters and the exam listing. Nothing was pushed: the repo has
+  no remote.
