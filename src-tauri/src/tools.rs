@@ -1193,6 +1193,11 @@ fn run_rg(query: &str, dirs: &[PathBuf], fixed: bool) -> Result<std::process::Ou
         // the match. Module and master guides are HTML-only and unaffected.
         "--glob",
         "!Sessions/*.html",
+        // A docx's conversion twin sits in the mirror beside its extract
+        // (SPEC §4): the same prose through LibreOffice markup, plus every
+        // figure as a base64 line.
+        "--glob",
+        "!*.docx.html",
     ]);
     if fixed {
         cmd.arg("--fixed-strings");
@@ -1251,6 +1256,13 @@ fn read_material(conn: &Connection, input: &Value) -> Result<Outcome> {
                  {class_folder}/{EXTRACTS_DIR}/{inside}.md"
             ),
             None => bail!("{ext} files cannot be read as text"),
+        }
+    }
+    // The conversion twin is an intermediate, not a copy worth reading: the
+    // extract beside it is the same document as prose.
+    if let Some(stem) = rel_path.strip_suffix(".docx.html") {
+        if rel_path.contains(&format!("/{EXTRACTS_DIR}/")) {
+            bail!("that is the docx's conversion twin — read the extract instead: {stem}.docx.md");
         }
     }
     if meta.len() as usize > MAX_READ_BYTES {
