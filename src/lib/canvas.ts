@@ -22,9 +22,15 @@ export interface Unit {
   ordinal: number;
   kind: "module" | "week" | "part";
   name: string;
+  /** The course's own number for it, read from its label (`Week 7` is 7);
+   *  null for a row named without one. */
+  number: number | null;
   relPath: string | null;
   startsOn: string | null;
   endsOn: string | null;
+  /** The weeks it spans where the course said so — a Part's `(Weeks 1-8)`. */
+  firstWeek: number | null;
+  lastWeek: number | null;
   source: UnitSource;
 }
 
