@@ -1485,6 +1485,10 @@ fn sync_pages(
     let dir = class_dir.join(canvas_texts_dir());
 
     let mut written = 0usize;
+    // Titles that appear more than once in the listing, so every page sharing
+    // one gets its slug in its file name and the name is the page's rather
+    // than the listing order's — a re-sync must find the same files.
+    let duplicated = duplicated_titles(&pages);
     let mut taken: HashSet<String> = HashSet::new();
     taken.insert(SYLLABUS_STEM.to_lowercase());
     // What this sync wrote or confirmed, so the folder can be reconciled to
@@ -1506,8 +1510,12 @@ fn sync_pages(
         if text.trim().is_empty() {
             continue;
         }
-        let Some(stem) = page_file_stem(title, page["url"].as_str().unwrap_or_default(), &mut taken)
-        else {
+        let Some(stem) = page_file_stem(
+            title,
+            page["url"].as_str().unwrap_or_default(),
+            &duplicated,
+            &mut taken,
+        ) else {
             outcome.notes.push(format!("the Canvas page \"{title}\" could not be given a file name"));
             continue;
         };
@@ -1591,18 +1599,44 @@ fn plural_pages(count: usize) -> String {
     }
 }
 
-/// A file stem for a Page, unique within the course: its title as a path
-/// segment, with Canvas's own URL slug appended when another page already
-/// took that name. Names are compared case-insensitively, since the disk is.
-fn page_file_stem(title: &str, url: &str, taken: &mut HashSet<String>) -> Option<String> {
-    let base = sanitize_name(title)?;
-    let candidates = [base.clone(), format!("{base} ({url})")];
-    for stem in candidates {
-        if taken.insert(stem.to_lowercase()) {
-            return Some(stem);
+/// The sanitized titles that more than one page in the listing shares,
+/// lowercased the way file names are compared.
+fn duplicated_titles(pages: &[Value]) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut duplicated: HashSet<String> = HashSet::new();
+    for page in pages {
+        let Some(name) = page["title"].as_str().and_then(sanitize_name) else {
+            continue;
+        };
+        let key = name.to_lowercase();
+        if !seen.insert(key.clone()) {
+            duplicated.insert(key);
         }
     }
-    None
+    duplicated
+}
+
+/// A file stem for a Page, unique within the course and a function of the
+/// page alone: its title as a path segment, with Canvas's own URL slug
+/// appended — sanitized the same way, since it becomes part of a file name —
+/// when another page shares the title or the title is the syllabus page's.
+/// Deciding by the listing rather than by arrival order is what keeps two
+/// pages named `Home` on the same two files from one sync to the next.
+/// Names are compared case-insensitively, since the disk is.
+fn page_file_stem(
+    title: &str,
+    url: &str,
+    duplicated: &HashSet<String>,
+    taken: &mut HashSet<String>,
+) -> Option<String> {
+    let base = sanitize_name(title)?;
+    let key = base.to_lowercase();
+    let stem = if duplicated.contains(&key) || key == SYLLABUS_STEM.to_lowercase() {
+        format!("{base} ({})", sanitize_name(url).unwrap_or_default())
+    } else {
+        base
+    };
+    taken.insert(stem.to_lowercase()).then_some(stem)
 }
 
 /// The markdown a Canvas text is mirrored as: its title, one line saying
@@ -2024,24 +2058,61 @@ mod tests {
         assert!(list_announcements(&conn, 3).expect("other class").is_empty());
     }
 
-    /// Two pages with one title get two files, a page titled like the
-    /// syllabus lands beside it, and a title that is not a path segment is
-    /// made one.
+    /// Two pages with one title get two files whatever order Canvas lists
+    /// them in, a page titled like the syllabus lands beside it, a title or
+    /// slug that is not a path segment is made one, and a name that cannot
+    /// be made a segment is skipped.
     #[test]
-    fn page_file_stems_stay_unique_within_a_course() {
+    fn page_file_stems_are_unique_and_independent_of_listing_order() {
+        let listing = vec![
+            json!({"title": "Home", "url": "home-2"}),
+            json!({"title": "home", "url": "home-3"}),
+            json!({"title": "Module 2", "url": "module-2-2"}),
+        ];
+        let duplicated = duplicated_titles(&listing);
+        let stems = |order: &[usize]| -> Vec<String> {
+            let mut taken: HashSet<String> = HashSet::new();
+            taken.insert(SYLLABUS_STEM.to_lowercase());
+            order
+                .iter()
+                .map(|&i| {
+                    let page = &listing[i];
+                    page_file_stem(
+                        page["title"].as_str().unwrap(),
+                        page["url"].as_str().unwrap(),
+                        &duplicated,
+                        &mut taken,
+                    )
+                    .expect("a stem")
+                })
+                .collect()
+        };
+        assert_eq!(stems(&[0, 1, 2]), ["Home (home-2)", "home (home-3)", "Module 2"]);
+        // Reversed, each page still lands on its own file.
+        assert_eq!(stems(&[1, 0, 2]), ["home (home-3)", "Home (home-2)", "Module 2"]);
+
+        let none = HashSet::new();
         let mut taken: HashSet<String> = HashSet::new();
         taken.insert(SYLLABUS_STEM.to_lowercase());
-        assert_eq!(page_file_stem("Home", "home-2", &mut taken).as_deref(), Some("Home"));
-        assert_eq!(page_file_stem("home", "home-3", &mut taken).as_deref(), Some("home (home-3)"));
         assert_eq!(
-            page_file_stem("Syllabus", "syllabus", &mut taken).as_deref(),
+            page_file_stem("Syllabus", "syllabus", &none, &mut taken).as_deref(),
             Some("Syllabus (syllabus)")
         );
         assert_eq!(
-            page_file_stem("Module 1/2: Intro", "module-1-2", &mut taken).as_deref(),
+            page_file_stem("Module 1/2: Intro", "module-1-2", &none, &mut taken).as_deref(),
             Some("Module 1-2: Intro")
         );
-        assert_eq!(page_file_stem("..", "dots", &mut taken), None);
+        // The slug becomes part of a file name too, so it is made a segment:
+        // the separator becomes a dash and the leading dots go.
+        let dup: HashSet<String> = ["week 3".to_string()].into_iter().collect();
+        assert_eq!(
+            page_file_stem("Week 3", "../week-3", &dup, &mut taken).as_deref(),
+            Some("Week 3 (-week-3)")
+        );
+        assert_eq!(page_file_stem("..", "dots", &none, &mut taken), None);
+        // A repeat of a stem already claimed this sync is refused rather
+        // than written over.
+        assert_eq!(page_file_stem("Module 1/2: Intro", "again", &none, &mut taken), None);
     }
 
     /// The mirrored file is text with a header, and an unchanged page is not
