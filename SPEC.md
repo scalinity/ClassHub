@@ -1021,18 +1021,26 @@ and apply it. Non-negotiable per project owner.
   policy must keep `script-src 'unsafe-inline'` or those frames go inert. The window CSP
   is therefore an anti-exfiltration control (no external script origin, no external
   connect-src, no object/base/form), not the thing that blocks `javascript:` URLs.
-- **The asset protocol reaches the AIBHS root and nothing else.** The material viewer frames
-  a PDF on an `asset:` URL (§12), so `frame-src` in both window policies admits
+- **The asset protocol reaches the AIBHS root and nothing outside it.** The material viewer
+  frames a PDF on an `asset:` URL (§12), so `frame-src` in both window policies admits
   `asset: http://asset.localhost` beside what `img-src` already carried. The scope is not
   written in `tauri.conf.json` — the root is a setting, and a static list could not follow
   it — so it starts empty there and is granted at launch to the root the database names,
-  and again when the setting changes; the old root stays allowed until relaunch. The scope
-  matches dot-directories deliberately (`requireLiteralLeadingDot: false`), because a
-  deck's converted twin lives under `.classhub/`. WebKit's PDF view is a plugin, which a
+  and again when the setting changes. A root the setting has left stays allowed until
+  relaunch: forbidding it would also forbid a new root chosen inside it, and a forbid
+  cannot be lifted without a relaunch either, so for the one session a root change
+  happens in, the scope is the roots the setting has named. The scope matches
+  dot-directories deliberately (`requireLiteralLeadingDot: false`), because a deck's
+  converted twin lives under `.classhub/`. WebKit's PDF view is a plugin, which a
   sandboxed frame has none of, so the PDF frame carries no `sandbox` attribute and is
   cross-origin by scheme instead. Measured 2026-09-02 on a hand-written PDF carrying a URI
   `OpenAction`, a URI link annotation and an image with a remote file specification, all
-  pointed at a local listener: the page rendered and the listener saw nothing.
+  pointed at a local listener: the page rendered and the listener saw nothing. The DOCX
+  conversion is the one parse of foreign content that runs outside any CSP, so it was
+  measured the same way on 2026-09-03: a docx whose only image was an external
+  relationship (`TargetMode="External"`, an `http` URL at the listener) converted with
+  `EmbedImages` to an `<img>` with an empty payload, and the listener, which logged a
+  request before and after the run, saw nothing from LibreOffice.
 - **One database for every build.** The data directory is Tauri's own `app_data_dir()`
   (`~/Library/Application Support/com.danny.classhub`), resolved by `lib.rs::data_dir` for
   every caller — the database, job logs, the LibreOffice profile, Zoom downloads and the
