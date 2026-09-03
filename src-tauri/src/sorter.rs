@@ -570,7 +570,16 @@ fn dismiss_vanished(conn: &Connection, class_id: i64, class_dir: &Path) -> Resul
             ))
         })?
         .filter_map(|row| match row {
-            Ok((id, source_rel, payload)) if file_is_gone(&class_dir.join(&source_rel)) => {
+            // A stored path is read through the same hygiene a new one gets:
+            // every producer validated it on the way in, and a row that would
+            // not pass now is one to leave alone rather than stat outside the
+            // class folder. Stats are per proposal because a listing could not
+            // tell a missing file from an unreadable one (`file_is_gone`).
+            Ok((id, source_rel, payload))
+                if clean_rel(&source_rel)
+                    .map(|rel| file_is_gone(&class_dir.join(rel)))
+                    .unwrap_or(false) =>
+            {
                 Some(Ok((id, payload)))
             }
             Ok(_) => None,
