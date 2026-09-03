@@ -459,25 +459,7 @@ fn build_prompt(
             dismissed_rows.join("\n")
         ));
     }
-    // The category names the syllabus breakdown is mapped onto — names only,
-    // so the model reads the weights out of the document rather than echoing
-    // what was typed. Canvas supplied most of them (§7.2), so its wording is
-    // what the syllabus's has to be matched to.
-    let mut stmt = conn.prepare(
-        "SELECT name FROM grade_categories WHERE class_id = ?1 ORDER BY id",
-    )?;
-    let category_rows = stmt
-        .query_map([class_id], |row| Ok(format!("- {}", row.get::<_, String>(0)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let categories = if category_rows.is_empty() {
-        "The class has no grade categories yet.".to_string()
-    } else {
-        format!(
-            "Grade categories the class already tracks (map the syllabus breakdown onto \
-             these names where they mean the same thing):\n\n{}",
-            category_rows.join("\n")
-        )
-    };
+    let categories = categories_block(conn, class_id)?;
 
     Ok(PROMPT_TEMPLATE
         .replace("{class}", &class_name)
@@ -486,6 +468,28 @@ fn build_prompt(
         .replace("{target}", &target)
         .replace("{existing}", &existing)
         .replace("{categories}", &categories))
+}
+
+/// The prompt's block of category names the syllabus breakdown is mapped
+/// onto — names only, so the model reads the weights out of the document
+/// rather than echoing what was typed. Canvas supplied most of them (§7.2),
+/// so its wording is what the syllabus's has to be matched to.
+fn categories_block(conn: &Connection, class_id: i64) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM grade_categories WHERE class_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| Ok(format!("- {}", row.get::<_, String>(0)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(if rows.is_empty() {
+        "The class has no grade categories yet.".to_string()
+    } else {
+        format!(
+            "Grade categories the class already tracks (map the syllabus breakdown onto \
+             these names where they mean the same thing):\n\n{}",
+            rows.join("\n")
+        )
+    })
 }
 
 /// "Fall 2026" from a YYYY-MM-DD. Month-level precision is all the prompt
@@ -1721,6 +1725,93 @@ mod tests {
         );
         assert_eq!(audits(&conn), 0);
         assert_eq!(weights(&conn, 3)[0].1, 50.0, "the typed weight stands");
+    }
+
+    /// The shapes a model writes a share in, and the one it must not.
+    #[test]
+    fn a_weight_is_a_number_of_percent_however_it_is_written() {
+        assert_eq!(percent_of(&json!(50)), Some(50.0));
+        assert_eq!(percent_of(&json!(100)), Some(100.0));
+        assert_eq!(percent_of(&json!("20%")), Some(20.0));
+        assert_eq!(percent_of(&json!(" 20 % ")), Some(20.0));
+        assert_eq!(percent_of(&json!("0.5%")), Some(0.5), "explicit is what it says");
+        assert_eq!(percent_of(&json!(0.5)), None, "a bare fraction is a share, not a percent");
+        assert_eq!(percent_of(&json!("0.5")), None);
+        assert_eq!(percent_of(&json!(0)), Some(0.0));
+        // Out of range is the write's refusal, not the parser's.
+        assert_eq!(percent_of(&json!(-5)), Some(-5.0));
+        assert_eq!(percent_of(&json!("thirty")), None);
+        assert_eq!(percent_of(&json!({ "value": 50 })), None);
+        assert_eq!(percent_of(&json!(null)), None);
+    }
+
+    /// The edges of the write, through the pass: the name bound, the weight
+    /// bounds, and the folding rule both layers share.
+    #[test]
+    fn a_scan_keeps_names_and_weights_within_the_category_rules() {
+        let conn = db();
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight) VALUES (4, 'Übungen', 0);",
+        )
+        .expect("fixture");
+        let long = "Weekly Live Coding Sessions ".repeat(4); // 112 chars
+        let raw = vec![
+            json!({ "name": long, "weight": 100 }),
+            json!({ "name": "Attendance", "weight": -5 }),
+            json!({ "name": "übungen", "weight": 10 }),
+            json!({ "name": "ÜBUNGEN", "weight": 10 }),
+        ];
+        let recorded = apply_weights(&conn, 4, &raw).expect("apply");
+        let capped = format!("{}…", &long[..80]);
+        // The summary names the category as stored, capped at the column's
+        // bound, and the stored row is exactly that.
+        assert_eq!(
+            recorded.set,
+            vec![
+                format!("{capped} 100 (new)"),
+                "übungen 10 (new)".to_string(),
+                "ÜBUNGEN 10".to_string(),
+            ]
+        );
+        assert_eq!(
+            recorded.skipped,
+            vec!["Attendance (a weight is a percentage between 0 and 100)".to_string()]
+        );
+        let rows = weights(&conn, 4);
+        assert_eq!(rows[1].0, capped);
+        assert_eq!(rows[1].0.chars().count(), 81);
+        // Both layers fold ASCII only, the deadline part's rule for titles:
+        // `ÜBUNGEN` is the fixture's `Übungen` to the lookup and to the repeat
+        // check alike, and `übungen` is a second category to both.
+        assert_eq!(rows[0], ("Übungen".to_string(), 10.0, None));
+        assert_eq!(rows[2], ("übungen".to_string(), 10.0, None));
+        assert!(recorded.unweighted.is_empty());
+
+        // A second pass of the same breakdown finds the capped name and
+        // writes nothing.
+        let again = apply_weights(&conn, 4, &raw[..1]).expect("again");
+        assert!(again.set.is_empty());
+        assert_eq!(again.unchanged, 1);
+        assert_eq!(weights(&conn, 4).len(), 3);
+    }
+
+    /// The prompt names the class's categories, or says there are none.
+    #[test]
+    fn the_prompt_lists_the_categories_the_class_tracks() {
+        let conn = db();
+        assert_eq!(
+            categories_block(&conn, 2).expect("block"),
+            "The class has no grade categories yet."
+        );
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight) VALUES
+               (2, 'Studio Participation', 0), (2, 'Quizzes', 0), (3, 'Project', 30);",
+        )
+        .expect("fixture");
+        let block = categories_block(&conn, 2).expect("block");
+        assert!(block.ends_with("- Studio Participation\n- Quizzes"), "{block}");
+        assert!(!block.contains("Project"), "another class's category is not listed");
+        assert!(PROMPT_TEMPLATE.contains("{categories}"), "the template has the slot");
     }
 
     use super::valid_due_at;
