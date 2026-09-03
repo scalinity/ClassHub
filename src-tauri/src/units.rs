@@ -1170,4 +1170,41 @@ mod tests {
         assert_eq!(name("2026-12-04").as_deref(), Some("Week 16 \u{2014} Reading Days"));
         assert_eq!(name("2026-12-11").as_deref(), Some("Week 16 \u{2014} Final Exam"));
     }
+
+    /// Two divisions starting on one day: the week wins over a coarser
+    /// division it sits inside, and between two weeks the later one does.
+    /// A rule rather than a reading of the syllabus — what matters is that
+    /// the answer is one row, the same one every time.
+    #[test]
+    fn a_shared_start_date_goes_to_the_week_then_to_the_later_one() {
+        let conn = crate::db::memory_db();
+        for (ordinal, kind, name, on) in [
+            (1, "part", "Part I (Weeks 1-8)", "2026-08-25"),
+            (1, "week", "Week 1 \u{2014} Intro", "2026-08-25"),
+            (3, "week", "Week 3 \u{2014} Later", "2026-09-01"),
+            (2, "week", "Week 2 \u{2014} Earlier", "2026-09-01"),
+        ] {
+            upsert(
+                &conn,
+                2,
+                &NewUnit {
+                    ordinal,
+                    kind: kind.into(),
+                    name: name.into(),
+                    canvas_id: None,
+                    rel_path: None,
+                    starts_on: Some(on.into()),
+                    ends_on: None,
+                    source: "syllabus",
+                },
+            )
+            .expect("insert");
+        }
+        let name = |today: &str| {
+            current_unit(&conn, 2, today).expect("resolve").map(|u| u.name)
+        };
+        assert_eq!(name("2026-08-25").as_deref(), Some("Week 1 \u{2014} Intro"));
+        // Inserted after Week 3, so the later ordinal wins and not the later row.
+        assert_eq!(name("2026-09-01").as_deref(), Some("Week 3 \u{2014} Later"));
+    }
 }
