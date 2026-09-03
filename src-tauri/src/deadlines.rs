@@ -992,14 +992,23 @@ fn still_at_zero(conn: &Connection, class_id: i64) -> Result<Vec<String>> {
 }
 
 /// A weight as the scan reported it: a number, or the `50%` the syllabus's
-/// own table prints when the model copies it as a string.
+/// own table prints when the model copies it as a string. A bare value
+/// between 0 and 1 is a share written the other way round (`0.5` for 50%)
+/// rather than half a percent, and is refused so the summary names it; with
+/// an explicit `%` it is what it says.
 fn percent_of(value: &serde_json::Value) -> Option<f64> {
-    match value {
-        serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => s.trim().trim_end_matches('%').trim().parse().ok(),
-        _ => None,
-    }
-    .filter(|w| w.is_finite())
+    let (explicit, weight) = match value {
+        serde_json::Value::Number(n) => (false, n.as_f64()),
+        serde_json::Value::String(s) => {
+            let text = s.trim();
+            let bare = text.strip_suffix('%');
+            (bare.is_some(), bare.unwrap_or(text).trim().parse().ok())
+        }
+        _ => (false, None),
+    };
+    weight
+        .filter(|w| w.is_finite())
+        .filter(|w| explicit || !(0.0 < *w && *w < 1.0))
 }
 
 /// The day half of a validated ISO timestamp. `valid_due_at` guarantees at
