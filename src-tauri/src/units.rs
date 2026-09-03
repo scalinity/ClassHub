@@ -113,17 +113,6 @@ fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
     })
 }
 
-fn unit_by_id(conn: &Connection, id: i64) -> Result<Option<UnitInfo>> {
-    Ok(conn
-        .query_row(
-            "SELECT id, ordinal, kind, name, rel_path, starts_on, ends_on, source
-             FROM units WHERE id = ?1",
-            [id],
-            read_unit,
-        )
-        .optional()?)
-}
-
 /// The course's word for this division, taken from how it named it.
 ///
 /// Only the three SPEC §5 kinds exist, so an unrecognized name falls back to
@@ -467,44 +456,42 @@ pub fn nearest_week(slots: &[WeekSlot], date: &str) -> Option<i64> {
         .map(|(week, _)| week)
 }
 
-/// The week a course is in on `today`: the one whose published meeting date
-/// is the latest on or before it — a week runs from its meeting to the next
-/// one's, so that is the slot containing today.
+/// The division a course is in on `today` (SPEC §8.5): the dated division
+/// whose published start is the latest on or before it — a division runs
+/// from its start to the next one's, so that is the one containing today —
+/// whatever the course calls it. A syllabus row the scan stored as `module`
+/// because its name opens with neither "Week" nor "Part" (`Reading Days — No
+/// Class`) is no less a division than one it called a week, so the read is
+/// over every dated row rather than over `week_slots`.
 ///
-/// `None` before the first published date, and `None` throughout for a course
-/// that published none: the alternative is a week number from arithmetic,
-/// which SPEC §1 forbids. Past the last published date the last week stays
-/// current, because nothing the course published says it has ended.
-pub fn current_week(slots: &[WeekSlot], today: &str) -> Option<i64> {
-    let day = |iso: &str| NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok();
-    let target = day(today)?;
-    slots
-        .iter()
-        .filter_map(|slot| {
-            let meets = day(slot.meets_on.as_deref()?)?;
-            (meets <= target).then_some((meets, slot.week))
-        })
-        // Two weeks published for one date: the later is where the course is.
-        .max()
-        .map(|(_, week)| week)
-}
-
-/// The division a course is in on `today` — SPEC §8.5's join run against the
-/// calendar instead of a filed lecture: the current week's own unit where the
-/// course numbers its weeks, or the Part whose range contains that week.
-///
-/// A Part-numbered course resolves through the same slots, and its slots
-/// carry no dates (the ranges name weeks, not days), so today it has no
-/// current division and the UI says nothing.
+/// `None` before the first published date, `None` for a string that is not a
+/// date, and `None` throughout for a course that published none: Applied
+/// Generative AI's Parts name week ranges and no days, and the alternative is
+/// a week number from arithmetic, which SPEC §1 forbids. Past the last
+/// published date the last division stays current, because nothing the course
+/// published says it has ended. Two divisions starting on one day: a week wins
+/// over a coarser division it sits inside, then the later ordinal, then the
+/// later row — a rule so the answer is one row, not a claim about the syllabus.
 pub fn current_unit(conn: &Connection, class_id: i64, today: &str) -> Result<Option<UnitInfo>> {
-    let slots = week_slots(conn, class_id)?;
-    let Some(week) = current_week(&slots, today) else {
+    let day = |iso: &str| NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok();
+    let Some(target) = day(today) else {
         return Ok(None);
     };
-    let Some(slot) = slots.iter().find(|slot| slot.week == week) else {
-        return Ok(None);
-    };
-    unit_by_id(conn, slot.unit_id)
+    let mut stmt = conn.prepare(
+        "SELECT id, ordinal, kind, name, rel_path, starts_on, ends_on, source
+         FROM units WHERE class_id = ?1 AND starts_on IS NOT NULL",
+    )?;
+    let dated = stmt
+        .query_map([class_id], read_unit)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(dated
+        .into_iter()
+        .filter_map(|unit| {
+            let starts = day(unit.starts_on.as_deref()?)?;
+            (starts <= target).then_some((starts, unit))
+        })
+        .max_by_key(|(starts, unit)| (*starts, unit.kind == "week", unit.ordinal, unit.id))
+        .map(|(_, unit)| unit))
 }
 
 /// `Part I: … (Weeks 1-8)` → `Some((1, 8))`.
@@ -1087,10 +1074,18 @@ mod tests {
             (3, "Week 3 \u{2014} Data Exploration, Processing, and Quality", "2026-09-03"),
             (14, "Week 14 \u{2014} Project preparation", "2026-11-19"),
             (15, "Week 15 \u{2014} No Class (Thanksgiving Week)", "2026-11-26"),
-            (16, "Reading Days \u{2014} No Class (Reading Days)", "2026-12-03"),
         ] {
             upsert(&conn, 3, &unit(ordinal, "week", name, Some(on))).expect("insert");
         }
+        // A row the scan stores as `module` when the model omits the kind,
+        // since its name opens with neither "Week" nor "Part". Dated, so it is
+        // still where the course is on that day.
+        upsert(
+            &conn,
+            3,
+            &unit(16, "module", "Reading Days \u{2014} No Class (Reading Days)", Some("2026-12-03")),
+        )
+        .expect("insert");
         // Applied Generative AI: three Parts naming their week ranges, no dates.
         for (ordinal, name) in [
             (1, "Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
@@ -1121,6 +1116,8 @@ mod tests {
             (1, "2026-12-01", Some("Week 14 \u{2014} Introduction to Deep Learning and Course Synthesis")),
             // A week the syllabus declared as no class reads as it wrote it.
             (3, "2026-11-26", Some("Week 15 \u{2014} No Class (Thanksgiving Week)")),
+            // The `module`-kind row: on its day the course is there, not still
+            // in the last row the scan happened to call a week.
             (3, "2026-12-04", Some("Reading Days \u{2014} No Class (Reading Days)")),
             // Past the last published date the last week stays current.
             (1, "2026-12-20", Some("Week 14 \u{2014} Introduction to Deep Learning and Course Synthesis")),
@@ -1132,11 +1129,45 @@ mod tests {
         ] {
             assert_eq!(now(class_id, today).as_deref(), expected, "class {class_id} on {today}");
         }
-        // The card labels the line with the course's own word.
+        // The whole row comes back, so a caller can match on its id.
         let week = current_unit(&conn, 1, "2026-09-02").expect("resolve").expect("a week");
         assert_eq!(week.kind, "week");
         assert_eq!(week.ordinal, 2);
         // A class with no divisions at all has no answer either.
         assert_eq!(now(2, "2026-09-02"), None);
+    }
+
+    /// `units` is unique on (class, name), not on ordinal — the scan numbers a
+    /// row by its position when the model omits the ordinal, so a rescan that
+    /// renames a week leaves two rows sharing a number. The date decides, not
+    /// the number and not which row was inserted first.
+    #[test]
+    fn a_duplicate_ordinal_does_not_hide_the_row_whose_date_won() {
+        let conn = crate::db::memory_db();
+        for (name, on) in [
+            ("Week 16 \u{2014} Reading Days", "2026-12-03"),
+            ("Week 16 \u{2014} Final Exam", "2026-12-10"),
+        ] {
+            upsert(
+                &conn,
+                2,
+                &NewUnit {
+                    ordinal: 16,
+                    kind: "week".into(),
+                    name: name.into(),
+                    canvas_id: None,
+                    rel_path: None,
+                    starts_on: Some(on.into()),
+                    ends_on: None,
+                    source: "syllabus",
+                },
+            )
+            .expect("insert");
+        }
+        let name = |today: &str| {
+            current_unit(&conn, 2, today).expect("resolve").map(|u| u.name)
+        };
+        assert_eq!(name("2026-12-04").as_deref(), Some("Week 16 \u{2014} Reading Days"));
+        assert_eq!(name("2026-12-11").as_deref(), Some("Week 16 \u{2014} Final Exam"));
     }
 }
