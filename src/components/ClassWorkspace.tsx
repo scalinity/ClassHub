@@ -20,7 +20,12 @@ import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { StructureSection } from "@/components/Structure";
-import { CLASS_ACCENTS, listClasses, type ClassInfo } from "@/lib/classes";
+import {
+  CLASS_ACCENTS,
+  currentUnitLabel,
+  listClasses,
+  type ClassInfo,
+} from "@/lib/classes";
 import {
   formatGeneratedAt,
   listGuides,
@@ -175,7 +180,7 @@ export function ClassWorkspace({
       (m) =>
         `${weekdayLabel(m.weekday)} ${formatTimeRange(m.startTime, m.endTime)}`,
     ),
-    ...(info.currentUnit ? [info.currentUnit.name] : []),
+    ...(info.currentUnit ? [currentUnitLabel(info.currentUnit.name)] : []),
     info.room,
     `${info.credits} CR`,
   ].join(" · ");
