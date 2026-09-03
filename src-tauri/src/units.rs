@@ -842,29 +842,33 @@ pub fn declared_weeks(kind: &str, name: &str, stated: Option<(i64, i64)>) -> Opt
 /// that row. A Canvas or syllabus unit knows its name and dates but not where
 /// its material lives; this is what tells it, so §8.1's guide has something to
 /// read.
-pub fn attach_folder_paths(conn: &Connection, class_id: i64, folders: &[String]) -> Result<()> {
+pub fn attach_folder_paths(conn: &Connection, class_id: i64, folders: &[String]) -> Result<bool> {
+    let mut attached = false;
     for name in folders {
         // One odd folder name must not cost the rest of the tree.
-        if let Err(e) = attach_rel_path(conn, class_id, name, name) {
-            eprintln!("units: could not attach '{name}' for class {class_id}: {e:#}");
+        match attach_rel_path(conn, class_id, name, name) {
+            Ok(joined) => attached |= joined,
+            Err(e) => eprintln!("units: could not attach '{name}' for class {class_id}: {e:#}"),
         }
     }
-    Ok(())
+    Ok(attached)
 }
 
-/// Attaches a folder to a unit that was declared without one.
+/// Attaches a folder to a unit that was declared without one, and says
+/// whether a row took it — a division pointed at a new, still empty folder
+/// changes what its guide is built from with no file changing.
 ///
 /// A Canvas or syllabus unit knows its name and dates but not where its
 /// material lives; the folder knows only the path. When both describe the
 /// same division this is what joins them, so §8.1's guide can find the
 /// unit's files.
-pub fn attach_rel_path(conn: &Connection, class_id: i64, name: &str, rel_path: &str) -> Result<()> {
-    conn.execute(
+pub fn attach_rel_path(conn: &Connection, class_id: i64, name: &str, rel_path: &str) -> Result<bool> {
+    let rows = conn.execute(
         "UPDATE units SET rel_path = ?1
          WHERE class_id = ?2 AND name = ?3 AND rel_path IS NULL",
         params![rel_path, class_id, name],
     )?;
-    Ok(())
+    Ok(rows > 0)
 }
 
 // ---------------------------------------------------------------------------

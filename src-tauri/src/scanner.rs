@@ -198,7 +198,7 @@ pub fn scan_class(
         .filter(|node| node.dir)
         .map(|node| node.name.clone())
         .collect();
-    crate::units::attach_folder_paths(&tx, class_id, &folders)?;
+    changed |= crate::units::attach_folder_paths(&tx, class_id, &folders)?;
     tx.commit()?;
     for effect in effects {
         effect.apply();
