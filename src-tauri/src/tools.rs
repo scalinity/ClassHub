@@ -2431,7 +2431,7 @@ mod tests {
             first_week: None,
             last_week: None,
             source: source.into(),
-            materials: 0,
+            materials: None,
         };
         assert_eq!(divisions_line(&[]), "Divisions: none declared\n");
         assert_eq!(divisions_line(&[unit("week", "syllabus")]), "Divisions: 1 week from the syllabus\n");

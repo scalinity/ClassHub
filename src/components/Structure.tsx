@@ -237,7 +237,7 @@ function UnitRow({
   // that already exists is shown regardless: a lecture refiled out of this
   // week leaves its guide behind and stale, and that is exactly what the row
   // must not hide — viewable, without an action the backend would turn down.
-  const canBuild = distilled > 0 || unit.materials > 0;
+  const canBuild = distilled > 0 || (unit.materials ?? 0) > 0;
   const hasGuideCluster =
     canBuild || guide !== undefined || controls.activePracticeScopes.has(scope);
 

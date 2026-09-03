@@ -74,9 +74,9 @@ pub struct UnitInfo {
     /// (SPEC §8.5): under its folder and under the week folders its weeks
     /// name, the transcripts left out since they reach a guide through their
     /// notes. What the Structure row offers a guide on, beside the notes.
-    /// Filled by `list_units`, which the workspace and the overview read; a
-    /// row read on its own carries zero, since nothing there asks.
-    pub materials: i64,
+    /// Counted by `list_units`, which the workspace and the overview read;
+    /// `None` on a row read on its own, where nothing asked.
+    pub materials: Option<i64>,
 }
 
 /// One division on its way into the table, from either source.
@@ -136,7 +136,7 @@ pub fn list_units(conn: &Connection, class_id: i64) -> Result<Vec<UnitInfo>> {
     let slots = week_slots(conn, class_id)?;
     let filed = crate::extract::filed_under_weeks(conn, class_id)?;
     for unit in &mut rows {
-        unit.materials = materials(conn, class_id, unit, &slots, &filed)?;
+        unit.materials = Some(materials(conn, class_id, unit, &slots, &filed)?);
     }
     Ok(rows)
 }
@@ -181,7 +181,7 @@ fn read_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnitInfo> {
         first_week: row.get(8)?,
         last_week: row.get(9)?,
         source: row.get(10)?,
-        materials: 0,
+        materials: None,
     })
 }
 
@@ -1260,8 +1260,10 @@ mod tests {
         .expect("row");
         let units = list_units(&conn, 4).expect("list");
         let materials = |id: i64| units.iter().find(|u| u.id == id).expect("unit").materials;
-        assert_eq!(materials(37), 1, "the deck, and not the transcript");
-        assert_eq!(materials(38), 0, "nothing under Part II's weeks");
+        assert_eq!(materials(37), Some(1), "the deck, and not the transcript");
+        assert_eq!(materials(38), Some(0), "nothing under Part II's weeks");
+        // A row read on its own was never counted.
+        assert_eq!(current_unit(&conn, 4, "2026-09-03").expect("current").and_then(|u| u.materials), None);
     }
 
     fn unit(ordinal: i64, kind: &str, name: &str, starts_on: Option<&str>) -> NewUnit {
