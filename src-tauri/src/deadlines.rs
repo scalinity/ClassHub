@@ -1525,6 +1525,43 @@ mod tests {
         assert_eq!(settle_canvas_deadline(&conn, 3, &unknown).expect("none"), None);
     }
 
+    /// A card whose assignment already sits on the list under another title —
+    /// a syllabus row the sync linked by day after the card was proposed — is
+    /// refused at approval: one row per assignment is what lets a submission
+    /// find the deadline it closes, and a second quiz row is what the reader
+    /// would otherwise see.
+    #[test]
+    fn approval_refuses_a_card_for_an_assignment_already_on_the_list() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deadlines
+               (class_id, title, kind, due_at, status, source, canvas_assignment_id)
+             VALUES (3, 'Week 3 quiz', 'quiz', '2026-09-03', 'open', 'syllabus', '5001')",
+            [],
+        )
+        .expect("linked deadline");
+        conn.execute(
+            "INSERT INTO deadline_proposals
+               (class_id, title, kind, due_at, status, created_at, source, canvas_assignment_id)
+             VALUES (3, 'Quiz 1', 'quiz', '2026-09-03T23:59', 'pending', 0, 'canvas', '5001')",
+            [],
+        )
+        .expect("card");
+        let id: i64 = conn
+            .query_row("SELECT id FROM deadline_proposals", [], |r| r.get(0))
+            .expect("id");
+        let err = resolve_in_conn(&conn, id, true).unwrap_err().to_string();
+        assert!(err.contains("already on the list"), "{err}");
+        let deadlines: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deadlines", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(deadlines, 1, "a second row landed");
+        let status: String = conn
+            .query_row("SELECT status FROM deadline_proposals WHERE id = ?1", [id], |r| r.get(0))
+            .expect("status");
+        assert_eq!(status, "pending", "the card can still be skipped");
+    }
+
     /// Two rows sharing a title and a day — one already done by hand, one
     /// open — and the open one is the one Canvas's submission has something
     /// to close, so it is the one that takes the id.

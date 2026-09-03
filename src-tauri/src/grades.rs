@@ -969,6 +969,36 @@ mod tests {
         assert!(upsert_canvas_item(&conn, 3, category_id, &pointless).is_err());
     }
 
+    /// The category is Canvas's placement too: an assignment moved between
+    /// groups moves its item, in one write with one audit row.
+    #[test]
+    fn an_assignment_moved_between_groups_moves_its_item() {
+        let conn = crate::db::memory_db();
+        let (quizzes, _) =
+            place(&conn, 3, &CanvasGroup { id: "901", name: "Quizzes", weight: None }).expect("category");
+        let (homework, _) =
+            place(&conn, 3, &CanvasGroup { id: "902", name: "Homework", weight: None }).expect("category");
+        let score = CanvasScore {
+            assignment_id: "5001",
+            name: "Quiz 1",
+            score: 9.0,
+            max_score: 10.0,
+            graded_at: None,
+        };
+        assert_eq!(upsert_canvas_item(&conn, 3, quizzes, &score).expect("first"), CanvasWrite::Created);
+        let audits = count(&conn, "SELECT COUNT(*) FROM audit_log");
+        assert_eq!(upsert_canvas_item(&conn, 3, homework, &score).expect("moved"), CanvasWrite::Updated);
+        let (rows, category): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(category_id) FROM grade_items WHERE canvas_assignment_id = '5001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((rows, category), (1, homework));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM audit_log"), audits + 1);
+    }
+
     /// A score typed from the returned paper before the professor posted it is
     /// the same score: the sync claims that row rather than counting the quiz
     /// twice, and another class's row for the same assignment is refused.
