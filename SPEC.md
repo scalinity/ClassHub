@@ -659,10 +659,11 @@ counts as covering (§8.5). The week comes from the course's own schedule
 on Dec 1. The Add lecture form shows the resolved week and lets it be corrected. A course whose
 divisions name week ranges and no days — Applied Generative AI — has sixteen weeks to file into
 and no date to resolve one against, so the form asks outright, each week's option naming the
-Part it feeds, and files nowhere until one is picked. Two lectures of one Part on one date need
-titles of their own: a note is keyed by its division and its transcript's name (§8.5), so a
-filing whose note path another transcript of the class already holds is refused before the
-capture, and the refusal names the title field as the way out.
+Part it feeds; left unpicked, the session goes to `_Inbox/` for the sorter, as any unresolved
+week does. Two lectures of one Part on one date need titles of their own: a note is keyed by its
+division and its transcript's name (§8.5), so a filing whose note path another transcript of the
+class already holds — or whose note already exists on disk — is refused before the capture, and
+the refusal names the title as the way out.
 
 A transcript whose week cannot be resolved lands in `_Inbox/` and the §10 sorter proposes one.
 A transcript's *name* carries no routing signal — they are all a date and "Lecture" — so the
