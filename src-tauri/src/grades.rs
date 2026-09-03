@@ -468,7 +468,9 @@ pub(crate) fn upsert_canvas_category(
         .optional()?;
     if let Some((id, current_name, current_weight)) = owned {
         let weight = weight.unwrap_or(current_weight);
-        if current_name == name && (current_weight - weight).abs() < f64::EPSILON {
+        // Exact: a REAL round-trips an f64 bit for bit, and the question is
+        // whether Canvas's number differs from the stored one at all.
+        if current_name == name && current_weight == weight {
             return Ok((id, CanvasWrite::Unchanged));
         }
         let tx = conn.unchecked_transaction()?;
@@ -604,21 +606,27 @@ pub(crate) fn upsert_canvas_item(
             )
             .optional()?,
     };
-    // A claim always writes: the id is what changes.
+    // A claim always writes: the id is what changes. An owned row that already
+    // says what Canvas says is left before any transaction opens — this is
+    // every already-recorded grade on every sync. Exact comparison, as above.
     let claiming = owned.is_none();
+    if let Some((_, _, category, current_name, current_score, current_max, current_graded)) =
+        owned.as_ref()
+    {
+        if *category == category_id
+            && *current_name == name
+            && *current_score == score.score
+            && *current_max == score.max_score
+            && current_graded.as_deref() == score.graded_at
+        {
+            return Ok(CanvasWrite::Unchanged);
+        }
+    }
     let tx = conn.unchecked_transaction()?;
     let outcome = match (owned, claimed) {
         (Some(row), _) | (None, Some(row)) => {
             let (id, _, current_category, current_name, current_score, current_max, current_graded) =
                 row;
-            let same = current_category == category_id
-                && current_name == name
-                && (current_score - score.score).abs() < f64::EPSILON
-                && (current_max - score.max_score).abs() < f64::EPSILON
-                && current_graded.as_deref() == score.graded_at;
-            if same && !claiming {
-                return Ok(CanvasWrite::Unchanged);
-            }
             tx.execute(
                 "UPDATE grade_items
                  SET canvas_assignment_id = ?1, category_id = ?2, name = ?3, score = ?4,
@@ -890,7 +898,8 @@ mod tests {
             .query_row("SELECT score FROM grade_items WHERE canvas_assignment_id = '5001'", [], |r| r.get(0))
             .expect("score");
         assert_eq!(stored, 9.0);
-        assert_eq!(weighted_grade(&conn, 3).expect("grade"), Some(90.0));
+        let grade = weighted_grade(&conn, 3).expect("grade").expect("something graded");
+        assert!((grade - 90.0).abs() < 1e-9, "{grade}");
 
         // What the CHECK would refuse is refused a step earlier, by name.
         let pointless = CanvasScore { max_score: 0.0, ..score };
@@ -938,7 +947,8 @@ mod tests {
             )
             .expect("row");
         assert_eq!((rows, name.as_str(), score, id.as_deref()), (1, "Quiz 2", 17.0, Some("5002")));
-        assert_eq!(weighted_grade(&conn, 3).expect("grade"), Some(85.0), "counted once");
+        let grade = weighted_grade(&conn, 3).expect("grade").expect("something graded");
+        assert!((grade - 85.0).abs() < 1e-9, "counted twice: {grade}");
         assert_eq!(
             upsert_canvas_item(&conn, 3, quizzes, &posted).expect("again"),
             CanvasWrite::Unchanged
