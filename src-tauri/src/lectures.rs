@@ -141,16 +141,24 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     }
 
     // SPEC §8.5: the filing decision is the join, so it is recorded here rather
-    // than inferred later. Bailing on failure the way the index does below —
-    // the transcript is on disk either way, and a lecture that silently feeds
-    // no guide is the failure this milestone exists to prevent.
+    // than inferred later. A lecture that silently feeds no guide is the
+    // failure this milestone exists to prevent, so a refusal here fails the
+    // run — and takes the file with it: the name was free when the form asked
+    // (`resolve_filing`) and a row took it during the capture, and a file
+    // left in the week folder would be indexed by the next scan as a lecture
+    // no division reads, beside the retry under a title.
     if let Some(slot) = &slot {
-        with_conn(app, |conn| {
+        let recorded = with_conn(app, |conn| {
             record_contribution(conn, req.class_id, &class_dir, slot, &rel_path, &markdown)
-        })
-        .with_context(|| {
-            format!("filed {rel_path}, but mapping it to {} failed", slot.unit_name)
-        })?;
+        });
+        if let Err(e) = recorded {
+            if let Err(rm) = fs::remove_file(class_dir.join(&rel_path)) {
+                eprintln!("could not remove the refused transcript {rel_path}: {rm}");
+            }
+            return Err(e).with_context(|| {
+                format!("{rel_path} was not filed — mapping it to {} failed", slot.unit_name)
+            });
+        }
     }
 
     // Index it before anything downstream looks for it: the digest job's
