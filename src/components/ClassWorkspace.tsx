@@ -47,12 +47,23 @@ import { formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { useDragState } from "@/lib/sorter";
 
 export function ClassWorkspace({
-  info,
+  info: snapshot,
   onBack,
 }: {
   info: ClassInfo;
   onBack: () => void;
 }) {
+  // The card the dashboard handed over is a snapshot from navigation time. A
+  // syllabus scan run from here rewrites the divisions, and the `units` hub
+  // change refetches ["classes"], so everything below reads the live card —
+  // one source for the header and the Structure marker alike — with the
+  // snapshot standing in until the first fetch lands.
+  const { data: classes } = useQuery({
+    queryKey: ["classes"],
+    queryFn: listClasses,
+  });
+  const info = classes?.find((c) => c.id === snapshot.id) ?? snapshot;
+
   const {
     data: tree,
     error,
@@ -159,23 +170,12 @@ export function ClassWorkspace({
     "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
-  // Where the course is today (SPEC §8.5), read from the live classes query
-  // rather than the snapshot the dashboard handed over: a syllabus scan run
-  // from this workspace rewrites the divisions, and the `units` hub change
-  // refetches ["classes"], so the header and the Structure marker follow it.
-  const { data: classes } = useQuery({
-    queryKey: ["classes"],
-    queryFn: listClasses,
-  });
-  const currentUnit = (classes?.find((c) => c.id === info.id) ?? info)
-    .currentUnit;
-
   const meetingLine = [
     ...info.meetings.map(
       (m) =>
         `${weekdayLabel(m.weekday)} ${formatTimeRange(m.startTime, m.endTime)}`,
     ),
-    ...(currentUnit ? [currentUnit.name] : []),
+    ...(info.currentUnit ? [info.currentUnit.name] : []),
     info.room,
     `${info.credits} CR`,
   ].join(" · ");
@@ -238,7 +238,7 @@ export function ClassWorkspace({
 
       <StructureSection
         classId={info.id}
-        currentUnitId={currentUnit?.id ?? null}
+        currentUnitId={info.currentUnit?.id ?? null}
         controls={{
           guides: guideMap,
           activeScopes,
