@@ -1474,8 +1474,9 @@ fn sync_pages(
 ) -> Result<()> {
     let course_id = course["id"].as_i64().context("the Canvas course has no id")?;
     // `include[]=body` puts each page's HTML on the listing, so a course's
-    // Pages cost one request however many there are (the rate limit is
-    // 700 / 10 min, and a per-page loop is the one shape that could reach it).
+    // Pages cost one request per hundred rather than one per page (the rate
+    // limit is 700 / 10 min, and a per-page loop is the one shape that could
+    // reach it).
     let pages = session.get_all(
         &format!("/api/v1/courses/{course_id}/pages?include[]=body"),
         on_stage,
@@ -1486,6 +1487,10 @@ fn sync_pages(
     let mut written = 0usize;
     let mut taken: HashSet<String> = HashSet::new();
     taken.insert(SYLLABUS_STEM.to_lowercase());
+    // What this sync wrote or confirmed, so the folder can be reconciled to
+    // it afterwards. Separate from `taken`, which reserves the syllabus stem
+    // whether or not a syllabus page exists.
+    let mut kept: HashSet<String> = HashSet::new();
     for page in &pages {
         // The API answers with what the reader may see, but both flags are
         // cheap to honour and a hidden page is not course content.
@@ -1516,6 +1521,7 @@ fn sync_pages(
         if write_if_changed(&dir.join(format!("{stem}.md")), &content)? {
             written += 1;
         }
+        kept.insert(stem.to_lowercase());
     }
 
     // The syllabus page, from the course object the listing carried it on.
@@ -1533,10 +1539,56 @@ fn sync_pages(
                 .notes
                 .push("the Canvas syllabus page was mirrored — SCAN SYLLABUS can read it".into());
         }
+        kept.insert(SYLLABUS_STEM.to_lowercase());
+    }
+
+    // The one thing a sync removes is a file it wrote itself. A page retitled
+    // or unpublished on Canvas would otherwise leave its old text beside the
+    // new, and chat reads both as the course's own words.
+    let removed = prune_stale_texts(&dir, &kept)?;
+    if removed > 0 {
+        outcome.notes.push(format!(
+            "{} no longer on Canvas — removed from the extract cache",
+            plural_pages(removed)
+        ));
     }
 
     outcome.pages_written = written;
     Ok(())
+}
+
+/// Removes the `.md` files in the Canvas texts folder whose stem this sync did
+/// not write or confirm, and returns how many. The folder is the sync's own —
+/// nothing else writes there, and no `files` row points into it — which is
+/// what makes deleting here compatible with never deleting source material.
+fn prune_stale_texts(dir: &Path, kept: &HashSet<String>) -> Result<usize> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if kept.contains(&stem.to_lowercase()) {
+            continue;
+        }
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn plural_pages(count: usize) -> String {
+    if count == 1 {
+        "1 Canvas page".to_string()
+    } else {
+        format!("{count} Canvas pages")
+    }
 }
 
 /// A file stem for a Page, unique within the course: its title as a path
@@ -2018,6 +2070,27 @@ mod tests {
         assert!(write_if_changed(&path, &content).expect("first write"));
         assert!(!write_if_changed(&path, &content).expect("same content"));
         assert!(write_if_changed(&path, "# Module 2\n\nchanged\n").expect("changed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A page retitled or unpublished on Canvas loses its file; what the sync
+    /// wrote or confirmed stays, and so does anything that is not a page.
+    #[test]
+    fn a_page_canvas_no_longer_lists_is_removed_from_the_cache() {
+        let dir = std::env::temp_dir().join(format!("classhub-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        for name in ["Home.md", "Module 2.md", "Syllabus.md", "notes.txt"] {
+            std::fs::write(dir.join(name), "x").expect("file");
+        }
+        let kept: HashSet<String> = ["home", "syllabus"].into_iter().map(String::from).collect();
+        assert_eq!(prune_stale_texts(&dir, &kept).expect("prune"), 1);
+        assert!(dir.join("Home.md").is_file());
+        assert!(dir.join("Syllabus.md").is_file());
+        assert!(!dir.join("Module 2.md").exists(), "the retitled page's old file");
+        assert!(dir.join("notes.txt").is_file(), "not a page, not the sync's to remove");
+        // A folder no sync has written yet is nothing to reconcile.
+        assert_eq!(prune_stale_texts(&dir.join("missing"), &kept).expect("absent"), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

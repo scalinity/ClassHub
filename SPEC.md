@@ -826,9 +826,12 @@ without a new root and chat cites them by path. A page's file name is its title 
 segment, with Canvas's URL slug appended when another page already holds that name, and
 `Syllabus` is reserved for the syllabus page. They are not `files` rows: nothing on disk is
 their source, so they take no part in a guide's manifest. A file is rewritten only when its
-content changed, and a page Canvas has since removed keeps its file, since the sync deletes
-nothing. The syllabus scan's picker offers the mirrored syllabus page as a source when it
-exists (§11).
+content changed, and the folder is reconciled to what Canvas lists: a page retitled or
+unpublished on Canvas loses its file rather than lingering beside its replacement as the
+course's own words. That is the one thing a sync removes, and it is a file the sync itself
+wrote — `.classhub/extracts/Canvas/` is the sync's own folder, with no `files` row pointing
+into it, which is what keeps this compatible with never deleting source material. The
+syllabus scan's picker offers the mirrored syllabus page as a source when it exists (§11).
 
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
