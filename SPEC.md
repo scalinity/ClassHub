@@ -1093,9 +1093,12 @@ its meetings.
   chat tools. **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
   class folder) once and returns three things as one JSON object: deadlines → confirm cards →
   insert with `source='syllabus'`; the course's own divisions, recorded directly (§7.2); and
-  the grade breakdown, recorded directly as category weights (Grades below). Each half is
-  independent of the others — a malformed schedule costs the scan its schedule, never its
-  deadlines — and a bare array is still read as the deadline list alone.
+  the grade breakdown, recorded directly as category weights (Grades below). Each part
+  tolerates a malformed entry on its own — a bad week costs the scan that week, never its
+  deadlines — while a part that is present and not a list fails the scan, and a bare array
+  is still read as the deadline list alone. The divisions and the weights are recorded
+  before the deadlines, and a scan demoted for an unusable deadline list still reports
+  what those two parts wrote.
   The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `CANVAS SYLLABUS PAGE`
   when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
   so a scan of it finds no dates and says so.
