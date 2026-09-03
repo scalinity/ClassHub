@@ -66,10 +66,26 @@ export interface JobsSnapshot {
   panelOpen: boolean;
   /** Unix seconds, ticked every second while a job is active (for elapsed labels). */
   nowSec: number;
+  /** The gaps the ticker slept through while a job was active — the lid
+   *  closed on a running extract — so an elapsed label counts the time a
+   *  job actually had rather than the wall clock across the sleep. Cleared
+   *  once nothing is active. */
+  sleeps: readonly Sleep[];
   /** Set when the job list could not be refreshed, so the panel says so
    *  instead of quietly showing stale rows forever. */
   error: string | null;
 }
+
+/** One stretch the one-second ticker missed: when it began, and how long. */
+interface Sleep {
+  at: number;
+  seconds: number;
+}
+
+/** A tick a few seconds late is scheduling — the window occluded, the app
+ *  napping; one this late is the machine asleep. A job that ran fifty minutes
+ *  before the lid closed read as eighty-three on waking, which looks stuck. */
+const SLEEP_GAP_SEC = 30;
 
 // --- External store (push-based Tauri events; no useEffect per workspace rules) ---
 
@@ -80,6 +96,7 @@ let snapshot: JobsSnapshot = {
   tails: new Map(),
   panelOpen: false,
   nowSec: Math.floor(Date.now() / 1000),
+  sleeps: [],
   error: null,
 };
 
@@ -178,13 +195,19 @@ function updateTicker(jobs: JobInfo[]) {
     (j) => j.status === "running" || j.status === "queued",
   );
   if (active && ticker === null) {
-    ticker = setInterval(
-      () => emitChange({ nowSec: Math.floor(Date.now() / 1000) }),
-      1000,
-    );
+    ticker = setInterval(() => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const gap = nowSec - snapshot.nowSec;
+      const sleeps =
+        gap > SLEEP_GAP_SEC
+          ? [...snapshot.sleeps, { at: snapshot.nowSec, seconds: gap }]
+          : snapshot.sleeps;
+      emitChange({ nowSec, sleeps });
+    }, 1000);
   } else if (!active && ticker !== null) {
     clearInterval(ticker);
     ticker = null;
+    emitChange({ sleeps: [] });
   }
 }
 
@@ -294,8 +317,15 @@ export function rerunAuthCheck(): Promise<number> {
 
 // --- Formatting helpers ---
 
+/** `MM:SS` a job has run — the wall clock since it started, less the sleeps
+ *  the store saw begin after that (a sleep the job started after is not
+ *  its). Read off the store rather than threaded through as a prop: it only
+ *  ever changes together with `nowSec`, which every caller already has. */
 export function formatElapsed(startSec: number, nowSec: number): string {
-  const total = Math.max(0, nowSec - startSec);
+  const slept = snapshot.sleeps
+    .filter((s) => s.at >= startSec)
+    .reduce((sum, s) => sum + s.seconds, 0);
+  const total = Math.max(0, nowSec - startSec - slept);
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;

@@ -3428,3 +3428,21 @@ should know:
 - The launch scan of any build enqueues whatever is stale in every class,
   so a dev build brought up for a migration check may start an extract job
   of the owner's; wait for it before stopping the build.
+
+### After the review — the elapsed label across a sleep (2026-09-03)
+
+- Extract job 308 — the owner's seven Biostatistics PDFs, picked up by the
+  migration-check dev build's launch scan at 13:38 — was running when the
+  lid closed at 14:28; the machine woke at 15:02 and the job finished at
+  15:06 with every extract recorded. Fourteen seconds after the wake the
+  pill read `EXTRACT 83:34` for a job that had run fifty minutes, and
+  nothing on screen told a suspended job from a hung one.
+- The job store's one-second ticker now records a tick that arrives more
+  than thirty seconds after the previous one as a sleep — when it began and
+  for how long — and `formatElapsed` subtracts the sleeps that began after
+  a job started, so the label reads the time the job actually had. The
+  list is cleared once nothing is active. Thirty seconds is above anything
+  App Nap's timer coalescing produces and below any lid-close worth
+  noticing; a relaunch forgets the sleeps, which is the rare case.
+- The Job Center's live output remains the way to tell a hung job from a
+  suspended one; nothing here changes what the runner does.
