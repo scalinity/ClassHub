@@ -831,8 +831,13 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 }
             }
         }
-        // A claim is decided by what this pass wrote, so it is said here, once.
-        let claims = crate::units::week_claims(conn, class_id)?;
+        // A claim is decided by what a pass wrote, so it is said once, by the
+        // pass that changed a row; a rescan that wrote nothing repeats nothing.
+        let claims = if added > 0 || updated > 0 {
+            crate::units::week_claims(conn, class_id)?
+        } else {
+            Vec::new()
+        };
         Ok((added, updated, seen, collapsed, skipped, batch, claims))
     });
     match recorded {

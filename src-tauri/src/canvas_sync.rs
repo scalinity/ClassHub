@@ -482,6 +482,7 @@ fn sync_units(
 
     let (added, skipped, batch, claims) = with_conn(app, |conn| {
         let mut added = 0usize;
+        let mut updated = 0usize;
         let mut skipped: Vec<String> = Vec::new();
         let mut batch = units::Batch::default();
         for (index, module) in modules.iter().enumerate() {
@@ -511,7 +512,8 @@ fn sync_units(
                     units::Outcome::Claimed => {
                         skipped.push(format!("{name} (shares a label with an earlier module)"))
                     }
-                    units::Outcome::Updated | units::Outcome::Unchanged => {}
+                    units::Outcome::Updated => updated += 1,
+                    units::Outcome::Unchanged => {}
                 },
                 // Counted rather than only printed: a module that did not land
                 // shows up as a lower total, which is indistinguishable from
@@ -522,8 +524,13 @@ fn sync_units(
                 }
             }
         }
-        // A claim is decided by what this pass wrote, so it is said here, once.
-        let claims = units::week_claims(conn, class.id)?;
+        // A claim is decided by what a pass wrote, so it is said once, by the
+        // pass that changed a row; a sync that wrote nothing repeats nothing.
+        let claims = if added > 0 || updated > 0 {
+            units::week_claims(conn, class.id)?
+        } else {
+            Vec::new()
+        };
         Ok((added, skipped, batch, claims))
     })?;
     // A renamed module's corpus folder and guide follow it, once the rows are
