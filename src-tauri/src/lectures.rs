@@ -648,16 +648,24 @@ fn refile_session(
     let Some((id, manifest)) = row else {
         return Ok(orphaned);
     };
-    let mut entries: Vec<crate::extract::ManifestEntry> =
-        serde_json::from_str(&manifest).context("reading the session's manifest")?;
-    for entry in &mut entries {
-        if entry.rel_path == source_rel {
-            entry.rel_path = dest_rel.to_string();
+    // An unreadable manifest is read the way `manifest_is_stale` reads one: as
+    // stale, never as an error. Failing here would roll back the whole move
+    // over one corrupt row; the scope still follows, and the digest shows as
+    // stale, which is the honest answer.
+    let manifest = match serde_json::from_str::<Vec<crate::extract::ManifestEntry>>(&manifest) {
+        Ok(mut entries) => {
+            for entry in &mut entries {
+                if entry.rel_path == source_rel {
+                    entry.rel_path = dest_rel.to_string();
+                }
+            }
+            serde_json::to_string(&entries)?
         }
-    }
+        Err(_) => manifest,
+    };
     conn.execute(
         "UPDATE guides SET scope = ?1, source_manifest = ?2 WHERE id = ?3",
-        rusqlite::params![new_scope, serde_json::to_string(&entries)?, id],
+        rusqlite::params![new_scope, manifest, id],
     )?;
     Ok(orphaned)
 }
@@ -1701,6 +1709,25 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rel_path, to, "the manifest still names the old path");
         assert_eq!(entries[0].sha256, "abc");
+
+        // A manifest that does not parse is left as it is — stale, the way
+        // `manifest_is_stale` already reads it — rather than failing the move.
+        let back = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
+        conn.execute(
+            "UPDATE guides SET source_manifest = 'not json' WHERE class_id = 1",
+            [],
+        )
+        .expect("corrupt");
+        refile_contribution(&conn, 1, &dir, to, back).expect("refile despite it").apply();
+        let (scope, manifest): (String, String) = conn
+            .query_row(
+                "SELECT scope, source_manifest FROM guides WHERE class_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("one row");
+        assert_eq!(scope, session_scope(back));
+        assert_eq!(manifest, "not json");
     }
 
     /// A digested transcript deleted in Finder with no rescan leaves its
