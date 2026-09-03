@@ -332,22 +332,20 @@ fn sync_class(
             if let Err(e) =
                 sync_grades(app, session, class, course, &assignments, outcome, on_stage)
             {
-                if let Err(e) = note_or_fail(outcome, e, "grades") {
-                    outcome
-                        .notes
-                        .push(format!("Canvas grades were not read this time — {e:#}"));
-                }
+                note_or_carry_on(outcome, e, "grades")?;
             }
         }
         Err(e) => note_or_fail(outcome, e, "assignments")?,
     }
     // Before the files, which are the slow read and the one that downloads:
-    // a deck that will not come across must not cost the notices.
+    // a deck that will not come across must not cost the notices. And like
+    // the grades, neither read is worth the class — a failure here is a line
+    // in the report, and the file sync and the sync stamp still follow.
     if let Err(e) = sync_announcements(app, session, class, course_id, outcome, on_stage) {
-        note_or_fail(outcome, e, "announcements")?;
+        note_or_carry_on(outcome, e, "announcements")?;
     }
     if let Err(e) = sync_pages(app, session, class, course, outcome, on_stage) {
-        note_or_fail(outcome, e, "pages")?;
+        note_or_carry_on(outcome, e, "pages")?;
     }
     if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "files")?;
@@ -381,6 +379,22 @@ fn note_or_fail(outcome: &mut ClassOutcome, error: anyhow::Error, what: &str) ->
         return Ok(());
     }
     Err(error)
+}
+
+/// A pass that is not worth the class: a refusal is a line, and any other
+/// failure is a line saying the read did not happen this time, so the reads
+/// after it and the sync stamp still follow. The one exception is a sign-in
+/// the session needs — that is the sync's to answer, not one class's line.
+fn note_or_carry_on(outcome: &mut ClassOutcome, error: anyhow::Error, what: &str) -> Result<()> {
+    if error.chain().any(|cause| cause.is::<SignInNeeded>()) {
+        return Err(error);
+    }
+    if let Err(e) = note_or_fail(outcome, error, what) {
+        outcome
+            .notes
+            .push(format!("Canvas {what} were not read this time — {e:#}"));
+    }
+    Ok(())
 }
 
 /// Maps a `classes` row to a Canvas course by course code, exactly.
@@ -1314,6 +1328,8 @@ fn sync_announcements(
     // objects with no window on them.
     let path = format!("/api/v1/courses/{course_id}/discussion_topics?only_announcements=true");
     let topics = session.get_all(&path, on_stage)?;
+    // The count lands on the outcome as each row does, so a failure partway
+    // reports what reached the table rather than zero.
     let recorded = with_conn(app, |conn| {
         let mut recorded = 0usize;
         for topic in &topics {
@@ -1337,14 +1353,16 @@ fn sync_announcements(
                 posted_at: &posted_at,
             };
             match record_announcement(conn, class.id, &announcement) {
-                Ok(true) => recorded += 1,
+                Ok(true) => {
+                    recorded += 1;
+                    outcome.announcements_recorded = recorded;
+                }
                 Ok(false) => {}
                 Err(e) => eprintln!("canvas: skipping announcement '{title}': {e:#}"),
             }
         }
         Ok(recorded)
     })?;
-    outcome.announcements_recorded = recorded;
     if recorded > 0 {
         emit_hub_change(app, "announcements");
     }
@@ -1526,8 +1544,18 @@ fn sync_pages(
             page["html_url"].as_str(),
             &text,
         );
-        if write_if_changed(&dir.join(format!("{stem}.md")), &content)? {
-            written += 1;
+        // One page that will not write is a line, not the end of the pass —
+        // and the page is still on Canvas, so whatever copy is on disk is
+        // kept rather than pruned as stale.
+        match write_if_changed(&dir.join(format!("{stem}.md")), &content) {
+            Ok(true) => {
+                written += 1;
+                outcome.pages_written = written;
+            }
+            Ok(false) => {}
+            Err(e) => outcome
+                .notes
+                .push(format!("the Canvas page \"{title}\" could not be written — {e:#}")),
         }
         kept.insert(stem.to_lowercase());
     }
@@ -1541,11 +1569,18 @@ fn sync_pages(
         );
         let content =
             page_markdown(SYLLABUS_STEM, "Canvas syllabus page", None, Some(&url), &syllabus);
-        if write_if_changed(&dir.join(format!("{SYLLABUS_STEM}.md")), &content)? {
-            written += 1;
-            outcome
+        match write_if_changed(&dir.join(format!("{SYLLABUS_STEM}.md")), &content) {
+            Ok(true) => {
+                written += 1;
+                outcome.pages_written = written;
+                outcome
+                    .notes
+                    .push("the Canvas syllabus page was mirrored — SCAN SYLLABUS can read it".into());
+            }
+            Ok(false) => {}
+            Err(e) => outcome
                 .notes
-                .push("the Canvas syllabus page was mirrored — SCAN SYLLABUS can read it".into());
+                .push(format!("the Canvas syllabus page could not be written — {e:#}")),
         }
         kept.insert(SYLLABUS_STEM.to_lowercase());
     }
@@ -1560,8 +1595,6 @@ fn sync_pages(
             plural_pages(removed)
         ));
     }
-
-    outcome.pages_written = written;
     Ok(())
 }
 
@@ -1616,12 +1649,17 @@ fn duplicated_titles(pages: &[Value]) -> HashSet<String> {
     duplicated
 }
 
+/// How much of a Page's title goes into its file name. Canvas allows 255
+/// characters, and with the slug and `.md` behind it that is past what the
+/// file system takes; a stem this long still reads as the page.
+const MAX_STEM_CHARS: usize = 120;
+
 /// A file stem for a Page, unique within the course and a function of the
-/// page alone: its title as a path segment, with Canvas's own URL slug
-/// appended — sanitized the same way, since it becomes part of a file name —
-/// when another page shares the title or the title is the syllabus page's.
-/// Deciding by the listing rather than by arrival order is what keeps two
-/// pages named `Home` on the same two files from one sync to the next.
+/// page alone: its title as a path segment, capped, with Canvas's own URL
+/// slug appended — sanitized the same way, since it becomes part of a file
+/// name — when another page shares the title or the title is the syllabus
+/// page's. Deciding by the listing rather than by arrival order is what keeps
+/// two pages named `Home` on the same two files from one sync to the next.
 /// Names are compared case-insensitively, since the disk is.
 fn page_file_stem(
     title: &str,
@@ -1629,7 +1667,7 @@ fn page_file_stem(
     duplicated: &HashSet<String>,
     taken: &mut HashSet<String>,
 ) -> Option<String> {
-    let base = sanitize_name(title)?;
+    let base = crate::db::truncate(&sanitize_name(title)?, MAX_STEM_CHARS);
     let key = base.to_lowercase();
     let stem = if duplicated.contains(&key) || key == SYLLABUS_STEM.to_lowercase() {
         format!("{base} ({})", sanitize_name(url).unwrap_or_default())
@@ -2113,6 +2151,11 @@ mod tests {
         // A repeat of a stem already claimed this sync is refused rather
         // than written over.
         assert_eq!(page_file_stem("Module 1/2: Intro", "again", &none, &mut taken), None);
+        // A title at Canvas's limit still fits a file name.
+        let long = "Week 3 ".repeat(40);
+        let stem = page_file_stem(&long, "week-3", &none, &mut taken).expect("a stem");
+        assert!(stem.chars().count() <= MAX_STEM_CHARS + 1, "{stem}");
+        assert!(stem.starts_with("Week 3 Week 3"), "{stem}");
     }
 
     /// The mirrored file is text with a header, and an unchanged page is not
