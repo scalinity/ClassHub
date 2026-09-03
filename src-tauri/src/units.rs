@@ -194,14 +194,16 @@ pub fn label_number(name: &str) -> Option<i64> {
 }
 
 /// `II` → 2, `IX` → 9, read up to a non-letter; nothing for a run that is not
-/// a numeral, so `Part Introduction` has no number.
+/// a numeral in its standard form. `Part Civil` scores as a number letter by
+/// letter, and the round trip through `roman` is what tells a word from a
+/// numeral: only a run that writes back as itself counts.
 fn roman_number(s: &str) -> Option<i64> {
     let end = s.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(s.len());
-    let run = &s[..end];
+    let run = s[..end].to_ascii_uppercase();
     if run.is_empty() || run.len() > 8 {
         return None;
     }
-    let value = |c: char| match c.to_ascii_uppercase() {
+    let value = |c: char| match c {
         'I' => Some(1),
         'V' => Some(5),
         'X' => Some(10),
@@ -218,7 +220,34 @@ fn roman_number(s: &str) -> Option<i64> {
             total += d;
         }
     }
-    (total >= 1).then_some(total)
+    (total >= 1 && roman(total) == run).then_some(total)
+}
+
+/// The standard numeral for `n`, for the round trip in `roman_number`.
+fn roman(mut n: i64) -> String {
+    const GLYPHS: [(i64, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    for (value, glyph) in GLYPHS {
+        while n >= value {
+            out.push_str(glyph);
+            n -= value;
+        }
+    }
+    out
 }
 
 /// What `upsert` did with a division.
@@ -1090,7 +1119,14 @@ mod tests {
         assert_eq!(label_number("Part II: Reinforcement Learning and Alignment"), Some(2));
         assert_eq!(label_number("Part IV"), Some(4));
         assert_eq!(label_number("Part ix"), Some(9));
+        assert_eq!(label_number("Part XIV: Deployment"), Some(14));
         assert_eq!(label_number("Part 3"), Some(3));
+        // A word spelled in numeral letters is not a numeral: only the
+        // standard form counts, so `Civil` (153 letter by letter) and `IIII`
+        // are words.
+        assert_eq!(label_number("Part Civil Engineering"), None);
+        assert_eq!(label_number("Part IIII"), None);
+        assert_eq!(label_number("Part VX"), None);
         assert_eq!(label_number("Module #2"), Some(2));
         // A number glued to the word is the same label as a spaced one, so
         // the two spellings cannot fork a row.
