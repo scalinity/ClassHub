@@ -437,18 +437,21 @@ fn contribution_for(
     Ok(Some((slot.unit_id, slot.unit_name, corpus_rel)))
 }
 
-/// Moves a lecture's contribution with the lecture, for a transcript relocated
-/// through the §10 confirm queue. Called inside the move's own transaction.
+/// Moves everything keyed by a transcript's path along with the transcript,
+/// for one relocated through the §10 confirm queue. Called inside the move's
+/// own transaction; what it hands back is applied after the commit.
 ///
-/// Refiling to a different week is the correction affordance (SPEC §8.5), so
-/// this has to re-resolve the unit rather than only rewrite the path. The
-/// distilled note travels with the row: it holds the transcript's content,
-/// which the move did not change, and leaving it behind would price every
-/// correction at a fresh digest of a three-hour lecture. Only when the new
-/// home is not a week is the row cleared and the note removed, because a
-/// contribution naming a transcript that has left `Weeks/` maps a guide to
-/// something no longer there.
-pub fn refile_contribution(
+/// Two things are keyed that way. The session document's row (`refile_session`)
+/// follows the path so the digest neither drops out of the listing nor reads
+/// stale over a rename. The contribution is re-resolved rather than only
+/// rewritten, because refiling to a different week is the correction affordance
+/// (SPEC §8.5), and the distilled note travels with it: it holds the
+/// transcript's content, which the move did not change, and leaving it behind
+/// would price every correction at a fresh digest of a three-hour lecture. Only
+/// when the new home is not a week is the row cleared and the note removed,
+/// because a contribution naming a transcript that has left `Weeks/` maps a
+/// guide to something no longer there.
+pub fn refile_lecture(
     conn: &Connection,
     class_id: i64,
     class_dir: &Path,
@@ -1527,7 +1530,7 @@ mod tests {
         // move is decided now and performed after the commit: until it is
         // applied, the note is exactly where the rolled-back row would say.
         fs::rename(dir.join(&from), dir.join(&to)).expect("move");
-        let effects = refile_contribution(&conn, 1, &dir, &from, &to).expect("refile");
+        let effects = refile_lecture(&conn, 1, &dir, &from, &to).expect("refile");
         assert!(effects.note.is_some(), "a note to move");
         assert!(dir.join(&corpus).is_file(), "the note moved before the commit");
         effects.apply();
@@ -1556,7 +1559,7 @@ mod tests {
         let out = "Module 1/2026-08-27 — Lecture.md".to_string();
         fs::create_dir_all(dir.join("Module 1")).expect("module dir");
         fs::rename(dir.join(&to), dir.join(&out)).expect("move out");
-        let effects = refile_contribution(&conn, 1, &dir, &to, &out).expect("refile out");
+        let effects = refile_lecture(&conn, 1, &dir, &to, &out).expect("refile out");
         assert!(matches!(effects.note, Some(NoteMove::Remove(_))), "a note to remove");
         effects.apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty());
@@ -1597,7 +1600,7 @@ mod tests {
         fs::write(dir.join(&corpus), "# note").expect("note");
 
         fs::rename(dir.join(from), dir.join(to)).expect("move");
-        let effects = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        let effects = refile_lecture(&conn, 1, &dir, from, to).expect("refile");
         assert!(effects.note.is_none(), "an undeclared week is not a reason to touch the note");
         effects.apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty(), "nothing maps yet");
@@ -1605,7 +1608,7 @@ mod tests {
 
         // Back to the declared week: the row returns and finds its note.
         fs::rename(dir.join(to), dir.join(from)).expect("move back");
-        let effects = refile_contribution(&conn, 1, &dir, to, from).expect("refile back");
+        let effects = refile_lecture(&conn, 1, &dir, to, from).expect("refile back");
         assert!(effects.note.is_none());
         effects.apply();
         let rows = list_contributions(&conn, 1).expect("list");
@@ -1659,7 +1662,7 @@ mod tests {
         }
 
         fs::rename(dir.join(a), dir.join(a_moved)).expect("move");
-        let err = refile_contribution(&conn, 1, &dir, a, a_moved).expect_err("a collision");
+        let err = refile_lecture(&conn, 1, &dir, a, a_moved).expect_err("a collision");
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
         // B's distillation is untouched either way.
         let b_note = list_contributions(&conn, 1)
@@ -1695,7 +1698,7 @@ mod tests {
         .expect("session row");
 
         // No units declared, so nothing maps — the session still follows.
-        refile_contribution(&conn, 1, &dir, from, to).expect("refile").apply();
+        refile_lecture(&conn, 1, &dir, from, to).expect("refile").apply();
         let (scope, manifest): (String, String) = conn
             .query_row(
                 "SELECT scope, source_manifest FROM guides WHERE class_id = 1",
@@ -1718,7 +1721,7 @@ mod tests {
             [],
         )
         .expect("corrupt");
-        refile_contribution(&conn, 1, &dir, to, back).expect("refile despite it").apply();
+        refile_lecture(&conn, 1, &dir, to, back).expect("refile despite it").apply();
         let (scope, manifest): (String, String) = conn
             .query_row(
                 "SELECT scope, source_manifest FROM guides WHERE class_id = 1",
@@ -1755,7 +1758,7 @@ mod tests {
         .expect("stale row");
 
         // The incoming transcript has no session row of its own.
-        let effects = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        let effects = refile_lecture(&conn, 1, &dir, from, to).expect("refile");
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM guides WHERE class_id = 1", [], |row| row.get(0))
             .expect("count");

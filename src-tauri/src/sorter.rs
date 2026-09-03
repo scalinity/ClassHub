@@ -867,7 +867,7 @@ fn record_move(
     // is corrected, so the map has to travel with the file rather than being
     // left naming a path nothing is at.
     let effects =
-        crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
+        crate::lectures::refile_lecture(&tx, class_id, class_dir, source_rel, dest_rel)?;
     tx.execute(
         "INSERT INTO audit_log (action, payload, created_at)
          VALUES ('sort.move', ?1, ?2)",
