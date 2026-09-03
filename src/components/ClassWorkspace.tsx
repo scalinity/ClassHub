@@ -54,7 +54,7 @@ import {
   type TreeNode,
 } from "@/lib/materials";
 import { formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
-import { useDragState } from "@/lib/sorter";
+import { getSortState, useDragState } from "@/lib/sorter";
 
 export function ClassWorkspace({
   info: snapshot,
@@ -137,13 +137,24 @@ export function ClassWorkspace({
     (contributions ?? []).map((c) => [c.relPath, c.unitName]),
   );
   // The weeks the course declares, for a file named for one to offer its week
-  // folder from its row (SPEC §10) — the form's own read, keyed on today so
-  // the two share a cache entry, and invalidated with the divisions.
+  // folder from its row (SPEC §10) — the form's own read, keyed on today, so
+  // the two usually share a cache entry (the form keys on the date it shows,
+  // which a dated file name can move), and invalidated with the divisions.
   const { data: weeks } = useQuery({
     queryKey: ["lectureWeeks", info.id, todayIso()],
     queryFn: () => lectureWeeks(info.id, todayIso()),
     placeholderData: (prev) => prev,
   });
+  // Which files have a card waiting in the queue, read from the query the
+  // queue itself renders, so a row's PROPOSED follows a dismissal there.
+  const { data: sortState } = useQuery({
+    queryKey: ["sortState", info.id],
+    queryFn: () => getSortState(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const pendingSources = new Set(
+    (sortState?.proposals ?? []).map((p) => p.sourceRelPath),
+  );
 
   // Practice exams and notes (M8): both chat-written, both listed from disk.
   // The practice query re-runs when a practice job settles (finalize verifies
@@ -370,6 +381,7 @@ export function ClassWorkspace({
               onEntryMissing={() => refetch()}
               onViewFile={openMaterial}
               weekSlots={weeks?.slots ?? []}
+              pendingSources={pendingSources}
               guideControls={{
                 guides: guideMap,
                 activeScopes,

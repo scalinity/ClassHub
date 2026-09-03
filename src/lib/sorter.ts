@@ -27,7 +27,8 @@ export interface MoveProposal {
   /** null on chat proposals — sort jobs and Canvas always fill it in. */
   confidence: Confidence | null;
   /** Where the proposal came from: chat, a sort job reading the file's
-   *  contents, or Canvas telling the app which folder it filed the file in. */
+   *  contents, Canvas telling the app which folder it filed the file in, or
+   *  the file's own name carrying a week, clicked on its Materials row. */
   source: "chat" | "sort_job" | "canvas" | "by_name";
   createdAt: number;
 }

@@ -22,7 +22,7 @@ import {
 
 import { PracticeAction } from "@/components/PracticeAction";
 import type { GuideInfo } from "@/lib/guides";
-import type { WeekSlot } from "@/lib/lectures";
+import { WEEKS_DIR, type WeekSlot } from "@/lib/lectures";
 import {
   countFiles,
   formatSize,
@@ -67,6 +67,7 @@ export function FileTree({
   onEntryMissing,
   onViewFile,
   weekSlots,
+  pendingSources,
   guideControls,
 }: {
   classId: number;
@@ -78,6 +79,9 @@ export function FileTree({
   /** The weeks the course declares, for a file named for one to offer its
    *  week folder (SPEC §10). */
   weekSlots: readonly WeekSlot[];
+  /** Sources of the pending move proposals — the queue's own fact, so a row
+   *  reads PROPOSED exactly while its card waits. */
+  pendingSources: ReadonlySet<string>;
   guideControls?: ModuleGuideControls;
 }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -103,6 +107,7 @@ export function FileTree({
           onEntryMissing={onEntryMissing}
           onViewFile={onViewFile}
           weekSlots={weekSlots}
+          pendingSources={pendingSources}
           guideControls={guideControls}
         />
       ))}
@@ -119,6 +124,7 @@ interface NodeProps {
   onEntryMissing: () => void;
   onViewFile: (node: TreeNode) => void;
   weekSlots: readonly WeekSlot[];
+  pendingSources: ReadonlySet<string>;
   guideControls?: ModuleGuideControls;
 }
 
@@ -136,6 +142,7 @@ function DirNode({
   onEntryMissing,
   onViewFile,
   weekSlots,
+  pendingSources,
   guideControls,
 }: NodeProps) {
   const isCollapsed = collapsed.has(node.relPath);
@@ -205,6 +212,7 @@ function DirNode({
               onEntryMissing={onEntryMissing}
               onViewFile={onViewFile}
               weekSlots={weekSlots}
+              pendingSources={pendingSources}
               guideControls={guideControls}
             />
           ))}
@@ -308,6 +316,7 @@ function FileRow({
   onEntryMissing,
   onViewFile,
   weekSlots,
+  pendingSources,
 }: NodeProps) {
   const Icon = KIND_ICONS[node.kind ?? ""] ?? File;
   const viewable = VIEWABLE_KINDS.has(node.kind ?? "");
@@ -315,16 +324,21 @@ function FileRow({
   // folder, offers the one move that puts it among a division's sources
   // (SPEC §10): the week folder is where the division that reads the week
   // counts it. Proposed from here, approved in the inbox queue above — an
-  // explicit ask, since Canvas may have placed the file where it is.
+  // explicit ask, since Canvas may have placed the file where it is. The
+  // prefix rule is the affordance; the backend enforces the same rule.
   const weekSlot =
     node.week === undefined
       ? undefined
       : weekSlots.find((s) => s.week === node.week);
   const filing =
-    weekSlot && !node.relPath.startsWith(`Weeks/${weekSlot.folder}/`)
+    weekSlot && !node.relPath.startsWith(`${WEEKS_DIR}/${weekSlot.folder}/`)
       ? weekSlot
       : undefined;
-  const [proposed, setProposed] = useState(false);
+  // Whether a card is waiting is the queue's fact, read from the same query
+  // the queue renders: a dismissal or an approval changes it there, and a
+  // card left pending from an earlier session shows as pending here.
+  const proposed = pendingSources.has(node.relPath);
+  const [proposing, setProposing] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
 
   const run = (action: Promise<void>) => {
@@ -333,75 +347,77 @@ function FileRow({
 
   const propose = () => {
     setFilingError(null);
+    setProposing(true);
     proposeWeekFiling(classId, node.relPath)
-      .then(() => setProposed(true))
-      .catch((e) => setFilingError(String(e)));
+      .catch((e) => setFilingError(String(e)))
+      .finally(() => setProposing(false));
   };
 
   return (
-    <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
-      <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
-      <button
-        type="button"
-        title={viewable ? `View ${node.name}` : `Open ${node.name} in its default app`}
-        onClick={() =>
-          viewable
-            ? onViewFile(node)
-            : run(openInDefaultApp(classId, node.relPath))
-        }
-        className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
-      >
-        {node.name}
-      </button>
-
-      <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-        {filing &&
-          (proposed ? (
-            <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-              PROPOSED — SEE INBOX
-            </span>
-          ) : (
-            <button
-              type="button"
-              title={
-                filingError ??
-                `Propose moving it into Weeks/${filing.folder}, where ${filing.unitName} reads it`
-              }
-              onClick={propose}
-              className={`${monoAction} ${
-                filingError
-                  ? "text-destructive hover:bg-destructive/10"
-                  : "text-(--accent) hover:bg-(--accent)/12"
-              }`}
-            >
-              {filingError
-                ? "NOT PROPOSED"
-                : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
-            </button>
-          ))}
+    <div>
+      <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
+        <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
         <button
           type="button"
-          title="Show in Finder"
-          aria-label={`Show ${node.name} in Finder`}
-          onClick={() => run(revealInFinder(classId, node.relPath))}
-          className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          title={viewable ? `View ${node.name}` : `Open ${node.name} in its default app`}
+          onClick={() =>
+            viewable
+              ? onViewFile(node)
+              : run(openInDefaultApp(classId, node.relPath))
+          }
+          className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
         >
-          <FolderSearch size={13} aria-hidden />
+          {node.name}
         </button>
-        <button
-          type="button"
-          title="Open in default app"
-          aria-label={`Open ${node.name} in its default app`}
-          onClick={() => run(openInDefaultApp(classId, node.relPath))}
-          className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
-        >
-          <ArrowUpRight size={13} aria-hidden />
-        </button>
-      </span>
 
-      <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
-        {formatSize(node.size ?? 0)}
-      </span>
+        <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+          {filing &&
+            (proposed ? (
+              <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
+                PROPOSED — SEE INBOX
+              </span>
+            ) : (
+              <button
+                type="button"
+                title={`Propose moving it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it`}
+                onClick={propose}
+                disabled={proposing}
+                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+              >
+                {proposing
+                  ? "PROPOSING…"
+                  : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
+              </button>
+            ))}
+          <button
+            type="button"
+            title="Show in Finder"
+            aria-label={`Show ${node.name} in Finder`}
+            onClick={() => run(revealInFinder(classId, node.relPath))}
+            className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          >
+            <FolderSearch size={13} aria-hidden />
+          </button>
+          <button
+            type="button"
+            title="Open in default app"
+            aria-label={`Open ${node.name} in its default app`}
+            onClick={() => run(openInDefaultApp(classId, node.relPath))}
+            className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          >
+            <ArrowUpRight size={13} aria-hidden />
+          </button>
+        </span>
+
+        <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
+          {formatSize(node.size ?? 0)}
+        </span>
+      </div>
+      {filingError && (
+        <p className="ml-8 pb-1 font-mono text-[11px] text-destructive">
+          NOT PROPOSED — {filingError}
+        </p>
+      )}
     </div>
   );
 }
