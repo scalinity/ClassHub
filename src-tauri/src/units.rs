@@ -35,7 +35,7 @@
 //! (SPEC §7.2): a mid-semester reshuffle must not silently orphan a guide.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use chrono::NaiveDate;
@@ -258,19 +258,45 @@ pub enum Outcome {
     Updated,
     /// Already recorded exactly so, or outranked by what a higher source said.
     Unchanged,
+    /// The row this division matches was already written by an earlier entry
+    /// of the same batch — two "Week 7" entries in one scan, or one topic
+    /// twice under no label — so the entry was set aside rather than written
+    /// over the row.
+    Claimed,
 }
 
-/// The row a division landed on, what happened to it, and what the rename —
-/// if it was one — leaves for the filesystem.
-#[must_use = "a rename's effects move nothing until applied"]
+/// The row a division landed on, and what happened to it.
 #[derive(Debug)]
 pub struct Upserted {
     pub id: i64,
     pub outcome: Outcome,
-    pub effects: RenameEffects,
 }
 
-/// Everything a renamed division leaves for the filesystem, decided inside the
+/// One reader's pass over a course's divisions — a scan's list, a sync's
+/// modules. It holds the rows the pass has written so far, so `upsert` sets a
+/// second entry for one row aside instead of renaming the row onto it, and
+/// the moves the pass's renames leave for the filesystem, so a folder an
+/// earlier rename vacates counts as free for a later one. Applied once, after
+/// the pass has let go of the database.
+#[derive(Debug, Default)]
+pub struct Batch {
+    claimed: Vec<i64>,
+    effects: RenameEffects,
+}
+
+impl Batch {
+    /// Whether any rename in this pass left something to move.
+    pub fn moves_anything(&self) -> bool {
+        !self.effects.is_empty()
+    }
+
+    /// Performs the pass's moves; see `RenameEffects::apply`.
+    pub fn apply(self) {
+        self.effects.apply();
+    }
+}
+
+/// Everything renamed divisions leave for the filesystem, decided inside the
 /// write's transaction and performed once it has committed — a refile's rule
 /// (`lectures::RefileEffects`). Two things are named for a division on disk:
 /// its corpus folder under `.classhub/corpus/` and its guide under
@@ -283,13 +309,18 @@ pub struct RenameEffects {
 }
 
 impl RenameEffects {
-    /// Folds another division's effects in, for a caller writing a whole list.
-    pub fn extend(&mut self, other: RenameEffects) {
+    fn extend(&mut self, other: RenameEffects) {
         self.moves.extend(other.moves);
     }
 
     pub fn is_empty(&self) -> bool {
         self.moves.is_empty()
+    }
+
+    /// Whether one of these moves empties `path` — a folder or file a later
+    /// rename may then take, since the moves run in the order they were made.
+    fn vacates(&self, path: &Path) -> bool {
+        self.moves.iter().any(|(from, _)| from == path)
     }
 
     /// Applied after the commit, so a failure is logged rather than
@@ -415,13 +446,6 @@ fn find_held(conn: &Connection, class_id: i64, unit: &NewUnit, incoming: &Incomi
         .optional()?)
 }
 
-/// The row `upsert` would write this division to, if one exists — what lets a
-/// scan claim each row once, before anything is written.
-pub fn find(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Option<i64>> {
-    let incoming = incoming(unit)?;
-    Ok(find_held(conn, class_id, unit, &incoming)?.map(|held| held.id))
-}
-
 /// The number a row may carry: its own, unless another row of the same class,
 /// source and kind already holds it — the label index is unique — in which
 /// case none, said on stderr. A clean table never gets here; a table holding
@@ -455,12 +479,41 @@ fn free_number(
     }
 }
 
-/// Inserts or refreshes one division, honouring source precedence.
+/// Inserts or refreshes one division, honouring source precedence, inside
+/// one IMMEDIATE transaction: the match, the checks and the write are one
+/// decision, so a second process writing the same course — the installed app
+/// and a dev build share the database — cannot rename the row between the
+/// read and the write and leave this one planning moves from a name that is
+/// already gone.
 ///
 /// Reports what it did, so a sync can say "3 new, 11 unchanged" rather than
-/// claiming to have written what was already there, and hands back the moves
-/// a rename leaves for the caller to apply once its own work is committed.
-pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upserted> {
+/// claiming to have written what was already there. The batch records the row
+/// and the moves a rename leaves, for the caller to apply once it has let go
+/// of the database.
+pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit, batch: &mut Batch) -> Result<Upserted> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let (written, effects) = write(&tx, class_id, unit, batch)?;
+    tx.commit()?;
+    // Recorded only once the write is real: a commit that fails leaves the
+    // batch as if the entry had never been seen.
+    if written.outcome != Outcome::Claimed {
+        batch.claimed.push(written.id);
+    }
+    batch.effects.extend(effects);
+    Ok(written)
+}
+
+fn settled(id: i64, outcome: Outcome) -> Result<(Upserted, RenameEffects)> {
+    Ok((Upserted { id, outcome }, RenameEffects::default()))
+}
+
+/// The decision and the row write, inside `upsert`'s transaction.
+fn write(
+    conn: &Connection,
+    class_id: i64,
+    unit: &NewUnit,
+    batch: &Batch,
+) -> Result<(Upserted, RenameEffects)> {
     let incoming = incoming(unit)?;
     let held = find_held(conn, class_id, unit, &incoming)?;
     let Incoming { name, kind, number } = incoming;
@@ -487,21 +540,18 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upsert
                 unit.source
             ],
         )?;
-        return Ok(Upserted {
-            id: conn.last_insert_rowid(),
-            outcome: Outcome::Inserted,
-            effects: RenameEffects::default(),
-        });
+        return settled(conn.last_insert_rowid(), Outcome::Inserted);
     };
 
+    // An earlier entry of this pass already wrote the row: the second is set
+    // aside and named, rather than renaming the row onto it.
+    if batch.claimed.contains(&held.id) {
+        return settled(held.id, Outcome::Claimed);
+    }
     // A syllabus "Module 1" must not overwrite what Canvas says Module 1 is —
     // including its dates.
     if rank(unit.source) < rank(&held.source) {
-        return Ok(Upserted {
-            id: held.id,
-            outcome: Outcome::Unchanged,
-            effects: RenameEffects::default(),
-        });
+        return settled(held.id, Outcome::Unchanged);
     }
     // Found by name, and the name belongs to a different Canvas module. Two
     // divisions really can share a topic name — a term with four "Project
@@ -565,21 +615,15 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upsert
         && held.first_week == first_week
         && held.last_week == last_week;
     if unchanged {
-        return Ok(Upserted {
-            id: held.id,
-            outcome: Outcome::Unchanged,
-            effects: RenameEffects::default(),
-        });
+        return settled(held.id, Outcome::Unchanged);
     }
 
-    // One transaction for the row and everything a rename rewrites beside it.
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let effects = if held.name != name {
-        rename_effects(&tx, class_id, held.id, &held.name, &name)?
+        rename_effects(conn, class_id, held.id, &held.name, &name, &batch.effects)?
     } else {
         RenameEffects::default()
     };
-    tx.execute(
+    conn.execute(
         "UPDATE units
          SET ordinal = ?1, kind = ?2, name = ?3, number = ?4, canvas_id = ?5, rel_path = ?6,
              starts_on = ?7, ends_on = ?8, first_week = ?9, last_week = ?10, source = ?11
@@ -599,12 +643,7 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upsert
             held.id
         ],
     )?;
-    tx.commit()?;
-    Ok(Upserted {
-        id: held.id,
-        outcome: Outcome::Updated,
-        effects,
-    })
+    Ok((Upserted { id: held.id, outcome: Outcome::Updated }, effects))
 }
 
 /// What a rename carries with it: every contribution row's corpus path and the
@@ -613,15 +652,22 @@ pub fn upsert(conn: &Connection, class_id: i64, unit: &NewUnit) -> Result<Upsert
 ///
 /// A target already on disk refuses the rename rather than overwriting — the
 /// refile's rule for a note — so a folder or a guide left behind by an earlier
-/// fork is never silently replaced. The class folder is resolved only when
-/// there is something to move, so a division with neither notes nor a guide
-/// renames without touching the tree.
+/// fork is never silently replaced; a target an earlier rename of the same
+/// pass is about to vacate is free, since the moves run in the order they
+/// were made. The class folder is resolved only when there is something to
+/// move, so a division with neither notes nor a guide renames without
+/// touching the tree.
+///
+/// The naming rules live with the artifacts' owners — `lectures::corpus_folder`
+/// and `guides::unit_guide_rel_path` — and this is the one place that reads
+/// both; a third thing named for a division on disk would be a third call here.
 fn rename_effects(
     conn: &Connection,
     class_id: i64,
     unit_id: i64,
     old_name: &str,
     new_name: &str,
+    pending: &RenameEffects,
 ) -> Result<RenameEffects> {
     let mut effects = RenameEffects::default();
     let mut stmt = conn.prepare(
@@ -643,6 +689,7 @@ fn rename_effects(
         return Ok(effects);
     }
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let free = |to: &Path| !to.exists() || pending.vacates(to);
 
     let old_folder = crate::lectures::corpus_folder(old_name);
     let new_folder = crate::lectures::corpus_folder(new_name);
@@ -656,7 +703,7 @@ fn rename_effects(
         let from = class_dir.join(&old_folder);
         if from.is_dir() {
             let to = class_dir.join(&new_folder);
-            if to.exists() {
+            if !free(&to) {
                 bail!("a corpus folder already exists at {new_folder} — renaming would overwrite it");
             }
             effects.moves.push((from, to));
@@ -669,7 +716,7 @@ fn rename_effects(
             let from = class_dir.join(&rel_path);
             if from.is_file() {
                 let to = class_dir.join(&new_rel);
-                if to.exists() {
+                if !free(&to) {
                     bail!("a guide already exists at {new_rel} — renaming would overwrite it");
                 }
                 effects.moves.push((from, to));
@@ -1087,9 +1134,25 @@ mod tests {
 
     /// `upsert` for a test that wants the outcome and nothing on disk.
     fn write(conn: &Connection, class_id: i64, unit: &NewUnit) -> Outcome {
-        let written = upsert(conn, class_id, unit).expect("upsert");
-        assert!(written.effects.is_empty(), "nothing here should move on disk");
+        let mut batch = Batch::default();
+        let written = upsert(conn, class_id, unit, &mut batch).expect("upsert");
+        assert!(!batch.moves_anything(), "nothing here should move on disk");
         written.outcome
+    }
+
+    /// A scratch AIBHS root for the tests that move files, removed on drop.
+    struct Root(PathBuf);
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn scratch_root(conn: &Connection, tag: &str) -> (Root, PathBuf) {
+        let root = std::env::temp_dir().join(format!("classhub-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        crate::db::set_setting(conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = root.join("Fundamentals of Artificial Intelligence in Medicine I");
+        (Root(root), class_dir)
     }
 
     #[test]
@@ -1338,21 +1401,12 @@ mod tests {
     #[test]
     fn a_renamed_week_carries_its_corpus_folder_and_its_guide() {
         let conn = db();
-        let root = std::env::temp_dir().join(format!("classhub-unit-rename-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(root.clone());
-        let class_dir = root.join("Fundamentals of Artificial Intelligence in Medicine I");
-        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let (_root, class_dir) = scratch_root(&conn, "unit-rename");
 
         let old_name = "Week 2 — Responsible AI, Ethics, and Governance";
         let new_name = "Week 2 — Responsible AI and Governance";
-        let written = upsert(&conn, 1, &unit(2, "week", old_name, Some("2026-09-01"))).expect("insert");
+        let written = upsert(&conn, 1, &unit(2, "week", old_name, Some("2026-09-01")), &mut Batch::default())
+            .expect("insert");
         let unit_id = written.id;
         let transcript = "Weeks/Week 02 — Responsible AI, Ethics, and Governance/2026-09-01 — Lecture.md";
         let old_note = crate::lectures::corpus_rel_path(old_name, transcript);
@@ -1377,10 +1431,11 @@ mod tests {
             fs::write(&path, "content").expect("file");
         }
 
-        let written = upsert(&conn, 1, &unit(2, "week", new_name, Some("2026-09-01"))).expect("rename");
+        let mut batch = Batch::default();
+        let written = upsert(&conn, 1, &unit(2, "week", new_name, Some("2026-09-01")), &mut batch).expect("rename");
         assert_eq!((written.id, written.outcome), (unit_id, Outcome::Updated));
-        assert!(!written.effects.is_empty(), "nothing was moved");
-        written.effects.apply();
+        assert!(batch.moves_anything(), "nothing was moved");
+        batch.apply();
 
         let units = list_units(&conn, 1).expect("list");
         assert_eq!(units.len(), 1, "the rename forked the week");
@@ -1406,9 +1461,54 @@ mod tests {
         // A target already on disk refuses the rename rather than overwriting.
         let taken = "Week 2 — Ethics";
         fs::create_dir_all(class_dir.join(crate::lectures::corpus_folder(taken))).expect("stray");
-        let err = upsert(&conn, 1, &unit(2, "week", taken, Some("2026-09-01"))).unwrap_err();
+        let err = upsert(&conn, 1, &unit(2, "week", taken, Some("2026-09-01")), &mut Batch::default())
+            .unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err:#}");
         assert_eq!(list_units(&conn, 1).expect("list")[0].name, new_name, "a refused rename wrote");
+    }
+
+    /// A rename chain inside one pass: a Canvas module takes the folder
+    /// another module of the same sync is leaving. Planned against the disk
+    /// as it stands, the second rename would find its target occupied; a
+    /// target an earlier rename of the pass vacates counts as free, and the
+    /// moves run in the order they were planned.
+    #[test]
+    fn a_rename_chain_within_one_pass_finds_the_vacated_folder() {
+        let conn = db();
+        let (_root, class_dir) = scratch_root(&conn, "unit-chain");
+        let mut ids = Vec::new();
+        for (canvas_id, name) in [("55", "Module 1"), ("56", "Module 2")] {
+            let written = upsert(&conn, 1, &canvas_unit(1, name, canvas_id), &mut Batch::default())
+                .expect("insert");
+            ids.push(written.id);
+            let transcript = format!("Weeks/Week 01/{name}.md");
+            let note = crate::lectures::corpus_rel_path(name, &transcript);
+            conn.execute(
+                "INSERT INTO lecture_contributions
+                 (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+                  corpus_rel_path, summary, confidence, status, created_at)
+                 VALUES (1, ?1, ?2, 0, 1, 1, 1, ?3, 'Whole session', 'high', 'applied', 1)",
+                params![written.id, transcript, note],
+            )
+            .expect("contribution");
+            let path = class_dir.join(&note);
+            fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            fs::write(&path, name).expect("note");
+        }
+
+        // The course renumbers: Module 2 becomes Module 3, then Module 1
+        // becomes Module 2, into the folder the first rename is leaving.
+        let mut batch = Batch::default();
+        let first = upsert(&conn, 1, &canvas_unit(2, "Module 3", "56"), &mut batch).expect("first");
+        assert_eq!((first.id, first.outcome), (ids[1], Outcome::Updated));
+        let second = upsert(&conn, 1, &canvas_unit(1, "Module 2", "55"), &mut batch).expect("second");
+        assert_eq!((second.id, second.outcome), (ids[0], Outcome::Updated));
+        batch.apply();
+
+        let folder = |name: &str| class_dir.join(crate::lectures::corpus_folder(name));
+        assert!(folder("Module 3").join("Module 2.md").is_file(), "Module 2's note did not reach Module 3");
+        assert!(folder("Module 2").join("Module 1.md").is_file(), "Module 1's note did not reach Module 2");
+        assert!(!folder("Module 1").exists(), "the vacated folder lingers");
     }
 
     /// A rename must not land on a name another row holds: a Canvas module
@@ -1419,24 +1519,35 @@ mod tests {
         let conn = db();
         assert_eq!(write(&conn, 1, &canvas_unit(1, "Module 1", "55")), Outcome::Inserted);
         assert_eq!(write(&conn, 1, &unit(2, "module", "Module 2", None)), Outcome::Inserted);
-        let err = upsert(&conn, 1, &canvas_unit(1, "Module 2", "55")).unwrap_err();
+        let err = upsert(&conn, 1, &canvas_unit(1, "Module 2", "55"), &mut Batch::default()).unwrap_err();
         assert!(err.to_string().contains("already called"), "{err:#}");
         let names: Vec<String> = list_units(&conn, 1).expect("list").into_iter().map(|u| u.name).collect();
         assert_eq!(names, ["Module 1", "Module 2"]);
     }
 
-    /// `find` answers the row a division would write to, which is what lets a
-    /// scan claim each row once: two entries under one label go to one row.
+    /// A pass writes each row once: a second entry under one label, or one
+    /// topic twice under no label, is set aside rather than written over the
+    /// row the first entry just wrote — while the next pass finds the row
+    /// again and renames it, as a rescan does.
     #[test]
-    fn two_entries_under_one_label_resolve_to_one_row() {
+    fn a_batch_writes_each_row_once() {
         let conn = db();
-        let written = upsert(&conn, 1, &unit(7, "week", "Week 7 — A", None)).expect("insert");
-        assert_eq!(find(&conn, 1, &unit(7, "week", "Week 7 — B", None)).expect("find"), Some(written.id));
-        assert_eq!(find(&conn, 1, &unit(8, "week", "Week 8 — C", None)).expect("find"), None);
+        let mut batch = Batch::default();
+        let first = upsert(&conn, 1, &unit(7, "week", "Week 7 — A", None), &mut batch).expect("insert");
+        let second = upsert(&conn, 1, &unit(7, "week", "Week 7 — B", None), &mut batch).expect("second");
+        assert_eq!((second.id, second.outcome), (first.id, Outcome::Claimed));
+        let other = upsert(&conn, 1, &unit(8, "week", "Week 8 — C", None), &mut batch).expect("insert");
+        assert_eq!(other.outcome, Outcome::Inserted);
         // Unlabelled rows resolve by name alone.
-        let reading = upsert(&conn, 1, &unit(16, "week", "Reading Days", None)).expect("insert");
-        assert_eq!(find(&conn, 1, &unit(17, "week", "Reading Days", None)).expect("find"), Some(reading.id));
-        assert_eq!(find(&conn, 1, &unit(17, "week", "Finals week", None)).expect("find"), None);
+        let reading = upsert(&conn, 1, &unit(16, "week", "Reading Days", None), &mut batch).expect("insert");
+        let again = upsert(&conn, 1, &unit(17, "week", "Reading Days", None), &mut batch).expect("again");
+        assert_eq!((again.id, again.outcome), (reading.id, Outcome::Claimed));
+        let names: Vec<String> = list_units(&conn, 1).expect("list").into_iter().map(|u| u.name).collect();
+        assert_eq!(names, ["Week 7 — A", "Week 8 — C", "Reading Days"]);
+        assert_eq!(list_units(&conn, 1).expect("list")[0].name, "Week 7 — A", "the second entry renamed the row");
+
+        let rescan = upsert(&conn, 1, &unit(7, "week", "Week 7 — B", None), &mut Batch::default()).expect("rescan");
+        assert_eq!((rescan.id, rescan.outcome), (first.id, Outcome::Updated));
     }
 
     /// Re-syncing changes nothing (M13 acceptance): no duplicates, and the

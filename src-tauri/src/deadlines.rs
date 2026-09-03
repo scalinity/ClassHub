@@ -772,15 +772,14 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
         let mut added = 0usize;
         let mut updated = 0usize;
         let mut seen = 0usize;
-        // Rows claimed by this scan. A division is matched on its label
-        // (SPEC §7.2), and a model can report two entries under one — two
-        // "Week 7" rows, or one topic twice under no label. The second would
-        // find the row the first just wrote and rename it, so the scan claims
-        // each row once and names the entries it set aside.
-        let mut claimed: Vec<i64> = Vec::new();
+        // A division is matched on its label (SPEC §7.2), and a model can
+        // report two entries under one — two "Week 7" rows, or one topic twice
+        // under no label. The second would find the row the first just wrote
+        // and rename it, so the batch claims each row once and the entries it
+        // set aside are named.
         let mut collapsed: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
-        let mut effects = crate::units::RenameEffects::default();
+        let mut batch = crate::units::Batch::default();
         for (index, value) in raw.iter().enumerate() {
             let Ok(entry) = serde_json::from_value::<RawUnit>(value.clone()) else {
                 continue;
@@ -819,44 +818,29 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 ends_on: entry.ends_on.filter(|d| valid_due_at(d)).map(day_of),
                 source: "syllabus",
             };
-            match crate::units::find(conn, class_id, &unit) {
-                Ok(Some(id)) if claimed.contains(&id) => {
-                    collapsed.push(name.to_string());
-                    continue;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("syllabus: skipping unit '{name}': {e:#}");
-                    skipped.push(format!("{name} ({e})"));
-                    continue;
-                }
-            }
-            match crate::units::upsert(conn, class_id, &unit) {
-                Ok(written) => {
-                    claimed.push(written.id);
-                    effects.extend(written.effects);
-                    match written.outcome {
-                        crate::units::Outcome::Inserted => added += 1,
-                        crate::units::Outcome::Updated => updated += 1,
-                        crate::units::Outcome::Unchanged => {}
-                    }
-                }
+            match crate::units::upsert(conn, class_id, &unit, &mut batch) {
+                Ok(written) => match written.outcome {
+                    crate::units::Outcome::Inserted => added += 1,
+                    crate::units::Outcome::Updated => updated += 1,
+                    crate::units::Outcome::Unchanged => {}
+                    crate::units::Outcome::Claimed => collapsed.push(name.to_string()),
+                },
                 Err(e) => {
                     eprintln!("syllabus: skipping unit '{name}': {e:#}");
                     skipped.push(format!("{name} ({e})"));
                 }
             }
         }
-        Ok((added, updated, seen, collapsed, skipped, effects))
+        Ok((added, updated, seen, collapsed, skipped, batch))
     });
     match recorded {
         Ok((_, _, 0, ..)) => None,
-        Ok((added, updated, seen, collapsed, skipped, effects)) => {
+        Ok((added, updated, seen, collapsed, skipped, batch)) => {
             // A renamed division's corpus folder and guide follow it once the
             // rows are committed and the lock is released; `files` is what
             // refreshes the guides and the lecture listing that name them.
-            let moved = !effects.is_empty();
-            effects.apply();
+            let moved = batch.moves_anything();
+            batch.apply();
             if added > 0 || updated > 0 {
                 crate::db::emit_hub_change(app, "units");
             }

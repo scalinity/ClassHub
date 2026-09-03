@@ -480,10 +480,10 @@ fn sync_units(
         return Ok(());
     }
 
-    let (added, skipped, effects) = with_conn(app, |conn| {
+    let (added, skipped, batch) = with_conn(app, |conn| {
         let mut added = 0usize;
         let mut skipped: Vec<String> = Vec::new();
-        let mut effects = units::RenameEffects::default();
+        let mut batch = units::Batch::default();
         for (index, module) in modules.iter().enumerate() {
             let Some(name) = module["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -503,13 +503,16 @@ fn sync_units(
                 weeks: units::declared_weeks(kind, name, None),
                 source: "canvas",
             };
-            match units::upsert(conn, class.id, &unit) {
-                Ok(written) => {
-                    if written.outcome == units::Outcome::Inserted {
-                        added += 1;
+            match units::upsert(conn, class.id, &unit, &mut batch) {
+                Ok(written) => match written.outcome {
+                    units::Outcome::Inserted => added += 1,
+                    // A second module on a row this sync already wrote — the
+                    // same label twice — is named rather than written over it.
+                    units::Outcome::Claimed => {
+                        skipped.push(format!("{name} (shares a label with an earlier module)"))
                     }
-                    effects.extend(written.effects);
-                }
+                    units::Outcome::Updated | units::Outcome::Unchanged => {}
+                },
                 // Counted rather than only printed: a module that did not land
                 // shows up as a lower total, which is indistinguishable from
                 // Canvas having published less.
@@ -519,11 +522,11 @@ fn sync_units(
                 }
             }
         }
-        Ok((added, skipped, effects))
+        Ok((added, skipped, batch))
     })?;
     // A renamed module's corpus folder and guide follow it, once the rows are
     // committed and the lock is released.
-    effects.apply();
+    batch.apply();
     outcome.units_added = added;
     if !skipped.is_empty() {
         outcome.notes.push(format!(
