@@ -1686,10 +1686,10 @@ mod tests {
 
         let text = overview_text(&conn, false, "2026-09-02").expect("overview");
         let block = |name: &str| {
-            let start = text.find(&format!("## {name}")).expect("class block");
-            let rest = &text[start + 3..];
-            let end = rest.find("\n## ").map(|at| at + 3).unwrap_or(rest.len());
-            text[start..start + end].to_string()
+            text.split("\n## ")
+                .find(|block| block.starts_with(name))
+                .expect("class block")
+                .to_string()
         };
         assert!(
             block("Biostatistics for AI").contains("\nNow: Week 2 \u{2014} Study Designs\n"),
