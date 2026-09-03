@@ -450,8 +450,9 @@ pub fn refile_contribution(
     class_dir: &Path,
     source_rel: &str,
     dest_rel: &str,
-) -> Result<Option<NoteMove>> {
-    refile_session(conn, class_id, source_rel, dest_rel)?;
+) -> Result<RefileEffects> {
+    let orphaned = refile_session(conn, class_id, class_dir, source_rel, dest_rel)?;
+    let mut effects = RefileEffects { note: None, orphaned };
 
     let old_corpus: Option<String> = conn
         .query_row(
@@ -462,7 +463,7 @@ pub fn refile_contribution(
         )
         .optional()?;
     if old_corpus.is_none() && !is_filed_transcript(dest_rel) {
-        return Ok(None);
+        return Ok(effects);
     }
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
@@ -471,14 +472,14 @@ pub fn refile_contribution(
     let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
 
     let Some(old) = old_corpus else {
-        return Ok(None);
+        return Ok(effects);
     };
     let from = class_dir.join(&old);
     if !from.is_file() {
         // Never distilled, or the note is already gone: nothing to carry.
-        return Ok(None);
+        return Ok(effects);
     }
-    Ok(match moved {
+    effects.note = match moved {
         // A different unit's corpus: the note goes with the lecture, so that
         // unit's guide reads it and the old unit's guide stops reading it.
         Some((_, _, new)) if new != old => {
@@ -501,15 +502,46 @@ pub fn refile_contribution(
         None if is_filed_transcript(dest_rel) => None,
         // Out of `Weeks/`: no unit reads it any more.
         None => Some(NoteMove::Remove(from)),
-    })
+    };
+    Ok(effects)
 }
 
-/// The filesystem half of a refile, decided inside the move's transaction and
-/// performed once it has committed. Nothing on disk changes while the database
-/// can still roll back, so a failed commit leaves the note exactly where the
-/// row still says it is — the sorter's undo path reverses the transcript's own
-/// rename and needs to know nothing about notes.
-#[must_use = "the note has not moved until this is applied"]
+/// Everything a refile leaves for the filesystem, decided inside the move's
+/// transaction and performed once it has committed. Nothing on disk changes
+/// while the database can still roll back, so a failed commit leaves the note
+/// and the documents exactly where the rows still say they are — the sorter's
+/// undo path reverses the transcript's own rename and needs to know nothing
+/// about either.
+#[must_use = "nothing on disk changes until this is applied"]
+#[derive(Debug)]
+pub struct RefileEffects {
+    /// The corpus note's move, when the lecture carries one.
+    note: Option<NoteMove>,
+    /// Session documents of a row cleared at the destination scope: chat's
+    /// search walks `Study Guides/`, so a pair nothing points at would go on
+    /// answering for a lecture that is not there.
+    orphaned: Vec<PathBuf>,
+}
+
+impl RefileEffects {
+    /// Applied after the commit, so a failure is logged rather than
+    /// propagated: the database has already recorded the move, and undoing the
+    /// transcript's rename against it would be worse than a note that stayed
+    /// put — which the Lectures listing shows as undistilled, and a redistill
+    /// repairs.
+    pub fn apply(self) {
+        for path in self.orphaned {
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("orphaned session document removal failed ({}): {e}", path.display());
+            }
+        }
+        if let Some(note) = self.note {
+            note.apply();
+        }
+    }
+}
+
+/// The corpus note's part of a refile (see `RefileEffects`).
 #[derive(Debug)]
 pub enum NoteMove {
     /// The note follows the lecture into another unit's corpus folder.
@@ -519,12 +551,7 @@ pub enum NoteMove {
 }
 
 impl NoteMove {
-    /// Applied after the commit, so a failure is logged rather than
-    /// propagated: the database has already recorded the move, and undoing the
-    /// transcript's rename against it would be worse than a note that stayed
-    /// put — which the Lectures listing shows as undistilled, and a redistill
-    /// repairs.
-    pub fn apply(self) {
+    fn apply(self) {
         match self {
             NoteMove::Relocate { from, to } => {
                 let moved = to
@@ -560,7 +587,37 @@ impl NoteMove {
 /// so left alone a refiled lecture's digest would drop out of the Lectures
 /// listing and read as stale over a move that changed no content — inviting a
 /// redistill to buy back nothing.
-fn refile_session(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: &str) -> Result<()> {
+///
+/// Returns the documents of any row already at the destination scope, for the
+/// caller to remove once the move has committed.
+fn refile_session(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    dest_rel: &str,
+) -> Result<Vec<PathBuf>> {
+    let new_scope = session_scope(dest_rel);
+    // A row already at the new scope can only be a leftover from a transcript
+    // that vanished without a move — the destination itself was checked to be
+    // free on disk. Cleared whether or not the incoming transcript brings a
+    // row of its own: left standing it would read as the newcomer's session
+    // document, and its pair would open the other lecture. The documents go
+    // with it, as `record_session` does with a superseded pair, once the
+    // caller has committed.
+    let mut stmt = conn.prepare("SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2")?;
+    let orphaned: Vec<PathBuf> = stmt
+        .query_map(rusqlite::params![class_id, &new_scope], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .flat_map(|html| [html.clone(), format!("{}.md", html.trim_end_matches(".html"))])
+        .filter_map(|rel| session_path(class_dir, &rel))
+        .collect();
+    conn.execute(
+        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2",
+        rusqlite::params![class_id, &new_scope],
+    )?;
+
     let old_scope = session_scope(source_rel);
     let row: Option<(i64, String)> = conn
         .query_row(
@@ -570,7 +627,7 @@ fn refile_session(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: 
         )
         .optional()?;
     let Some((id, manifest)) = row else {
-        return Ok(());
+        return Ok(orphaned);
     };
     let mut entries: Vec<crate::extract::ManifestEntry> =
         serde_json::from_str(&manifest).context("reading the session's manifest")?;
@@ -579,19 +636,11 @@ fn refile_session(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: 
             entry.rel_path = dest_rel.to_string();
         }
     }
-    let new_scope = session_scope(dest_rel);
-    // A row already at the new scope can only be a leftover from a transcript
-    // that vanished without a move; the destination itself was checked to be
-    // free on disk. Cleared so the rewrite cannot hit UNIQUE(class_id, scope).
-    conn.execute(
-        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2 AND id != ?3",
-        rusqlite::params![class_id, &new_scope, id],
-    )?;
     conn.execute(
         "UPDATE guides SET scope = ?1, source_manifest = ?2 WHERE id = ?3",
         rusqlite::params![new_scope, serde_json::to_string(&entries)?, id],
     )?;
-    Ok(())
+    Ok(orphaned)
 }
 
 /// Every lecture that feeds one of this class's divisions.
@@ -1445,11 +1494,10 @@ mod tests {
         // move is decided now and performed after the commit: until it is
         // applied, the note is exactly where the rolled-back row would say.
         fs::rename(dir.join(&from), dir.join(&to)).expect("move");
-        let note = refile_contribution(&conn, 1, &dir, &from, &to)
-            .expect("refile")
-            .expect("a note to move");
+        let effects = refile_contribution(&conn, 1, &dir, &from, &to).expect("refile");
+        assert!(effects.note.is_some(), "a note to move");
         assert!(dir.join(&corpus).is_file(), "the note moved before the commit");
-        note.apply();
+        effects.apply();
 
         let rows = list_contributions(&conn, 1).expect("list");
         assert_eq!(rows.len(), 1, "the refile duplicated the contribution");
@@ -1474,10 +1522,9 @@ mod tests {
         let out = "Module 1/2026-08-27 — Lecture.md".to_string();
         fs::create_dir_all(dir.join("Module 1")).expect("module dir");
         fs::rename(dir.join(&to), dir.join(&out)).expect("move out");
-        refile_contribution(&conn, 1, &dir, &to, &out)
-            .expect("refile out")
-            .expect("a note to remove")
-            .apply();
+        let effects = refile_contribution(&conn, 1, &dir, &to, &out).expect("refile out");
+        assert!(matches!(effects.note, Some(NoteMove::Remove(_))), "a note to remove");
+        effects.apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty());
         assert!(!dir.join(&moved_note).exists(), "a note survived with no unit reading it");
 
@@ -1516,15 +1563,17 @@ mod tests {
         fs::write(dir.join(&corpus), "# note").expect("note");
 
         fs::rename(dir.join(from), dir.join(to)).expect("move");
-        let note = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
-        assert!(note.is_none(), "an undeclared week is not a reason to touch the note");
+        let effects = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        assert!(effects.note.is_none(), "an undeclared week is not a reason to touch the note");
+        effects.apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty(), "nothing maps yet");
         assert_eq!(fs::read_to_string(dir.join(&corpus)).expect("note"), "# note");
 
         // Back to the declared week: the row returns and finds its note.
         fs::rename(dir.join(to), dir.join(from)).expect("move back");
-        let note = refile_contribution(&conn, 1, &dir, to, from).expect("refile back");
-        assert!(note.is_none());
+        let effects = refile_contribution(&conn, 1, &dir, to, from).expect("refile back");
+        assert!(effects.note.is_none());
+        effects.apply();
         let rows = list_contributions(&conn, 1).expect("list");
         assert_eq!(rows.len(), 1);
         assert!(rows[0].distilled, "the note was there to be found");
@@ -1612,7 +1661,7 @@ mod tests {
         .expect("session row");
 
         // No units declared, so nothing maps — the session still follows.
-        refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        refile_contribution(&conn, 1, &dir, from, to).expect("refile").apply();
         let (scope, manifest): (String, String) = conn
             .query_row(
                 "SELECT scope, source_manifest FROM guides WHERE class_id = 1",
@@ -1626,6 +1675,44 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rel_path, to, "the manifest still names the old path");
         assert_eq!(entries[0].sha256, "abc");
+    }
+
+    /// A digested transcript deleted in Finder with no rescan leaves its
+    /// session row behind. A transcript later moved onto that exact path must
+    /// not inherit it — the row would show the newcomer as digested and open
+    /// the other lecture's document — and the pair goes with the row, after
+    /// the commit, so chat's search stops finding it.
+    #[test]
+    fn a_stale_session_row_at_the_destination_is_cleared_with_its_documents() {
+        let conn = crate::db::memory_db();
+        let dir = std::env::temp_dir().join("classhub-refile-stale-session");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(SESSIONS_DIR)).expect("sessions dir");
+        let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
+        let to = "Weeks/Week 03 — Data Exploration/2026-08-27 — Lecture.md";
+        let html = "Study Guides/Sessions/2026-08-27 — Vanished.html";
+        let md = "Study Guides/Sessions/2026-08-27 — Vanished.md";
+        fs::write(dir.join(html), "<html></html>").expect("html");
+        fs::write(dir.join(md), "# Vanished").expect("md");
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+             VALUES (1, ?1, ?2, 1, '[]')",
+            rusqlite::params![session_scope(to), html],
+        )
+        .expect("stale row");
+
+        // The incoming transcript has no session row of its own.
+        let effects = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM guides WHERE class_id = 1", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 0, "the stale row survived the refile");
+        assert!(dir.join(html).is_file(), "documents removed before the commit");
+        assert_eq!(effects.orphaned.len(), 2);
+        effects.apply();
+        assert!(!dir.join(html).exists() && !dir.join(md).exists(), "the pair outlived its row");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A slide deck the sorter files under a week is not a lecture, and a

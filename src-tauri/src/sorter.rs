@@ -866,7 +866,8 @@ fn record_move(
     // SPEC §8.5: refiling a lecture into a different week is how a wrong unit
     // is corrected, so the map has to travel with the file rather than being
     // left naming a path nothing is at.
-    let note = crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
+    let effects =
+        crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
     tx.execute(
         "INSERT INTO audit_log (action, payload, created_at)
          VALUES ('sort.move', ?1, ?2)",
@@ -893,9 +894,7 @@ fn record_move(
     // against a record that already says it moved. Before the commit it stays
     // put, which is what keeps the caller's undo path — the transcript rename
     // and the extract artifacts — the whole of what a failure has to reverse.
-    if let Some(note) = note {
-        note.apply();
-    }
+    effects.apply();
     Ok(())
 }
 
