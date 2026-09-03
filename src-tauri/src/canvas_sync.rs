@@ -241,10 +241,17 @@ fn sync_class(
             if let Err(e) = sync_assignments(app, class, &assignments, outcome) {
                 note_or_fail(outcome, e, "assignments")?;
             }
+            // One extra request's worth of trouble, and the file sync behind
+            // it does not depend on it — so a failure here is a line in the
+            // report, never the class's failure and never a skipped file sync.
             if let Err(e) =
                 sync_grades(app, session, class, course, &assignments, outcome, on_stage)
             {
-                note_or_fail(outcome, e, "grades")?;
+                if let Err(e) = note_or_fail(outcome, e, "grades") {
+                    outcome
+                        .notes
+                        .push(format!("Canvas grades were not read this time — {e:#}"));
+                }
             }
         }
         Err(e) => note_or_fail(outcome, e, "assignments")?,
