@@ -504,6 +504,12 @@ const DOCX_TO_HTML: Conversion = Conversion {
     ext: "html",
 };
 
+/// Every suffix the mirror can hold for one source — its extract, and each
+/// conversion's output with its sidecar — so a source moved by the sorter
+/// takes all of them along (SPEC §10 step 4). Kept beside the conversions
+/// it is derived from; a test holds the two together.
+pub const MIRROR_SUFFIXES: [&str; 5] = [".md", ".pdf", ".pdf.sha256", ".html", ".html.sha256"];
+
 /// The mirror path of a source's conversion, and the sidecar that records
 /// which source hash it was made from.
 fn conversion_paths(class_dir: &Path, rel_path: &str, how: &Conversion) -> (String, PathBuf, PathBuf) {
@@ -780,6 +786,19 @@ mod tests {
             "… 701 more lines not extracted (1001 in the file, header included) — read the source for the rest."
         );
         assert!(!capped.contains("\n300,"), "{capped}");
+    }
+
+    /// The sorter moves a source's whole mirror by this list; a conversion
+    /// added without its suffixes here would leave its twin orphaned.
+    #[test]
+    fn the_mirror_suffixes_cover_every_conversion() {
+        for how in [&super::PPTX_TO_PDF, &super::DOCX_TO_HTML] {
+            let twin = format!(".{}", how.ext);
+            let sidecar = format!(".{}.sha256", how.ext);
+            assert!(super::MIRROR_SUFFIXES.contains(&twin.as_str()), "{twin}");
+            assert!(super::MIRROR_SUFFIXES.contains(&sidecar.as_str()), "{sidecar}");
+        }
+        assert!(super::MIRROR_SUFFIXES.contains(&".md"));
     }
 
     #[test]

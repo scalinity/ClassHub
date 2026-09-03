@@ -1231,7 +1231,7 @@ fn record_move(
 /// failure path: each relocated extract file goes back to its source mirror.
 fn undo_artifact_moves(class_dir: &Path, source_rel: &str, dest_rel: &str) {
     let extracts = class_dir.join(EXTRACTS_DIR);
-    for suffix in [".md", ".pdf", ".pdf.sha256"] {
+    for suffix in crate::extract::MIRROR_SUFFIXES {
         let new = extracts.join(format!("{dest_rel}{suffix}"));
         let old = extracts.join(format!("{source_rel}{suffix}"));
         if new.is_file() && !old.exists() {
@@ -1261,10 +1261,10 @@ fn update_index(
         .optional()?;
 
     if let Some(file_id) = existing {
-        // The markdown extract plus any PPTX-conversion sidecars mirror the
-        // source rel_path — move them along so nothing goes stale.
+        // The markdown extract plus any conversion twin and its sidecar mirror
+        // the source rel_path — move them along so nothing goes stale.
         let extracts = class_dir.join(EXTRACTS_DIR);
-        for suffix in [".md", ".pdf", ".pdf.sha256"] {
+        for suffix in crate::extract::MIRROR_SUFFIXES {
             let old = extracts.join(format!("{source_rel}{suffix}"));
             if old.is_file() {
                 let new = extracts.join(format!("{dest_rel}{suffix}"));
