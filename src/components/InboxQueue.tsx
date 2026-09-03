@@ -104,15 +104,19 @@ export function InboxQueue({
         </h2>
         <div className="flex items-center gap-4">
           {active ? (
-            <span className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-              <span
-                aria-hidden
-                className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-              />
-              {active.status === "running"
-                ? "PROPOSING DESTINATIONS…"
-                : "SORT QUEUED"}
-            </span>
+            // A scoped sort is one card's: that card carries the state, and a
+            // second signal in the header would announce the same run twice.
+            active.scope === null && (
+              <span className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+                <span
+                  aria-hidden
+                  className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+                />
+                {active.status === "running"
+                  ? "PROPOSING DESTINATIONS…"
+                  : "SORT QUEUED"}
+              </span>
+            )
           ) : (
             (unproposed.length > 0 || dismissed.length > 0) && (
               <button
