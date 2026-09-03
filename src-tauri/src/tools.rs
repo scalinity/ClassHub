@@ -2273,6 +2273,49 @@ mod tests {
         }
     }
 
+    /// The overview's small helpers: the session document's twin and stem,
+    /// who proposed what, each scope's storage key, and the divisions line
+    /// across sources and kinds.
+    #[test]
+    fn the_overview_s_helpers_name_things_the_way_the_app_does() {
+        use super::{divisions_line, document_stem, markdown_twin, proposer};
+        assert_eq!(
+            markdown_twin("Study Guides/Sessions/2026-09-01 \u{2014} Topic.html"),
+            "Study Guides/Sessions/2026-09-01 \u{2014} Topic.md"
+        );
+        assert_eq!(markdown_twin("Study Guides/Sessions/odd.html.html"), "Study Guides/Sessions/odd.html.md");
+        assert_eq!(document_stem("Study Guides/Sessions/2026-09-01 \u{2014} Topic.html"), "2026-09-01 \u{2014} Topic");
+        assert_eq!(document_stem("bare"), "bare");
+        assert_eq!(proposer("canvas"), "Canvas");
+        assert_eq!(proposer("syllabus"), "the syllabus scan");
+        assert_eq!(proposer("sort_job"), "a sort job");
+        assert_eq!(proposer("chat"), "chat");
+        assert_eq!(proposer("?"), "an unknown reader");
+        assert_eq!(Scope::Master.key(), "master");
+        assert_eq!(Scope::Folder("Module 1".into()).key(), "Module 1");
+
+        let unit = |kind: &str, source: &str| crate::units::UnitInfo {
+            id: 1,
+            ordinal: 1,
+            kind: kind.into(),
+            name: "x".into(),
+            rel_path: None,
+            starts_on: None,
+            ends_on: None,
+            source: source.into(),
+        };
+        assert_eq!(divisions_line(&[]), "Divisions: none declared\n");
+        assert_eq!(divisions_line(&[unit("week", "syllabus")]), "Divisions: 1 week from the syllabus\n");
+        assert_eq!(
+            divisions_line(&[unit("module", "canvas"), unit("module", "canvas")]),
+            "Divisions: 2 modules from Canvas\n"
+        );
+        assert_eq!(
+            divisions_line(&[unit("part", "canvas"), unit("week", "syllabus")]),
+            "Divisions: 2 divisions from Canvas and the syllabus\n"
+        );
+    }
+
     /// The one new line of user-facing prose in the overview: nothing when
     /// nothing waits, each queue named only when it holds something, both
     /// joined when both do.

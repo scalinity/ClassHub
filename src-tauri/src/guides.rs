@@ -784,4 +784,91 @@ mod tests {
         assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base} (3).html"));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// The refusal the unit guide and the unit exam share (SPEC §8.5): a
+    /// division builds from its folder or from its distilled notes. One whose
+    /// lectures are filed but not distilled has a manifest — the transcripts
+    /// are what staleness watches — and nothing a job could read; one with
+    /// neither has nothing at all. Both are refused before anything is made.
+    #[test]
+    fn a_division_builds_from_its_folder_or_its_notes_and_from_nothing_else() {
+        let conn = crate::db::memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-unit-context-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let class_dir = root.join("Biostatistics for AI");
+        fs::create_dir_all(&class_dir).expect("class dir");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let name = "Week 2 \u{2014} Study Designs";
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, source)
+             VALUES (3, 2, 'week', ?1, 'syllabus')",
+            [name],
+        )
+        .expect("unit");
+        let unit_id: i64 = conn
+            .query_row("SELECT id FROM units WHERE class_id = 3", [], |row| row.get(0))
+            .expect("id");
+        let scope = unit_scope(name);
+        let refused = |conn: &Connection| match unit_context(conn, 3, unit_id, name, &scope) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("built a division from nothing"),
+        };
+
+        // Neither a folder nor a lecture.
+        assert!(refused(&conn).starts_with("nothing to build Week 2"), "{}", refused(&conn));
+
+        // Filed but not distilled.
+        let transcript = "Weeks/Week 02 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md";
+        let note_rel = ".classhub/corpus/Week 2 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md";
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (3, ?1, 'abc', 1, 1, 'md')",
+            [transcript],
+        )
+        .expect("file");
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (3, ?1, ?2, 0, 1, 1, 1, ?3, 'Whole session', 'high', 'applied', 1)",
+            params![unit_id, transcript, note_rel],
+        )
+        .expect("contribution");
+        assert!(refused(&conn).starts_with("nothing to build Week 2"), "{}", refused(&conn));
+
+        // Distilled: the note is the source, named with its transcript, and
+        // the transcript stays in the manifest.
+        let note = class_dir.join(note_rel);
+        fs::create_dir_all(note.parent().expect("parent")).expect("corpus dir");
+        fs::write(&note, "# distilled").expect("note");
+        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope).expect("builds from the note");
+        assert!(ctx.files_block.is_empty(), "{}", ctx.files_block);
+        assert!(
+            corpus.contains(&format!("- {note_rel}\n  transcript: {transcript}")),
+            "{corpus}"
+        );
+        assert!(ctx.manifest.iter().any(|e| e.rel_path == transcript), "{:?}", ctx.manifest_block);
+
+        // Folder only: a division with material and no lecture.
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, rel_path, source)
+             VALUES (3, 1, 'module', 'Module 1', 'Module 1', 'canvas')",
+            [],
+        )
+        .expect("unit");
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (3, 'Module 1/Slides/deck.pptx', 'def', 1, 1, 'pptx')",
+            [],
+        )
+        .expect("file");
+        let module_id: i64 = conn
+            .query_row("SELECT id FROM units WHERE name = 'Module 1'", [], |row| row.get(0))
+            .expect("id");
+        let (ctx, corpus) = unit_context(&conn, 3, module_id, "Module 1", &unit_scope("Module 1"))
+            .expect("builds from the folder");
+        assert!(ctx.files_block.contains("- source: Module 1/Slides/deck.pptx"), "{}", ctx.files_block);
+        assert!(corpus.starts_with("(none"), "{corpus}");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

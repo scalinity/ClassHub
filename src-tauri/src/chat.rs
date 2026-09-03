@@ -1197,3 +1197,20 @@ fn stream_turn(
     Ok(turn)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::open_class_line;
+
+    /// The open workspace names itself; the dashboard, and an id no class
+    /// has, read as no class in particular rather than failing the turn.
+    #[test]
+    fn the_open_class_line_names_the_workspace_or_the_dashboard() {
+        let conn = crate::db::memory_db();
+        let line = open_class_line(&conn, Some(3)).expect("line");
+        assert!(line.contains("**Biostatistics for AI** workspace"), "{line}");
+        let dashboard = "Daniel is on the dashboard, looking at no class in particular.";
+        assert_eq!(open_class_line(&conn, None).expect("line"), dashboard);
+        assert_eq!(open_class_line(&conn, Some(999)).expect("line"), dashboard);
+    }
+}
