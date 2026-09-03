@@ -692,28 +692,24 @@ fn class_block(
             out.push_str(&format!("- {rel_path} · mapped to no division\n"));
         }
     } else {
+        // Counts only, plus the current division's share: the compact form
+        // rides every turn, and naming every division that has a lecture
+        // would grow it by the semester. The detailed form names them.
         let distilled = contributions.iter().filter(|c| c.distilled).count();
         let mut line = format!(
             "Lectures: {} filed, {distilled} distilled, {}",
             filed.len().max(contributions.len()),
             plural(sessions.len(), "session document")
         );
-        let mut per_unit: Vec<(&str, usize)> = Vec::new();
-        for c in &contributions {
-            match per_unit.iter_mut().find(|(name, _)| *name == c.unit_name) {
-                Some((_, count)) => *count += 1,
-                None => per_unit.push((&c.unit_name, 1)),
+        if let Some(unit) = &current {
+            let here: Vec<_> = contributions.iter().filter(|c| c.unit_id == unit.id).collect();
+            if !here.is_empty() {
+                line.push_str(&format!(
+                    " · {} in the current division ({} distilled)",
+                    here.len(),
+                    here.iter().filter(|c| c.distilled).count()
+                ));
             }
-        }
-        if !per_unit.is_empty() {
-            line.push_str(" — ");
-            line.push_str(
-                &per_unit
-                    .iter()
-                    .map(|(name, count)| format!("{name} ({count})"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
         }
         let unmapped = filed
             .iter()
@@ -2110,10 +2106,12 @@ mod tests {
         );
         assert!(
             compact.contains(
-                "\nLectures: 1 filed, 0 distilled, 0 session documents \u{2014} Week 2 \u{2014} Study Designs (1)\n"
+                "\nLectures: 1 filed, 0 distilled, 0 session documents · 1 in the current division (0 distilled)\n"
             ),
             "{compact}"
         );
+        // Names of divisions with lectures belong to the detailed form.
+        assert!(!compact.contains("Study Designs (1)"), "{compact}");
         assert!(
             compact.contains("folders: Module 1 (2), Module 2 (1), Weeks (1)\n"),
             "{compact}"
