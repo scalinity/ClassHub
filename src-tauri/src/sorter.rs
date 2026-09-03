@@ -552,7 +552,7 @@ fn dismiss_vanished(conn: &Connection, class_id: i64, class_dir: &Path) -> Resul
             ))
         })?
         .filter_map(|row| match row {
-            Ok((id, source_rel, payload)) if !class_dir.join(&source_rel).is_file() => {
+            Ok((id, source_rel, payload)) if file_is_gone(&class_dir.join(&source_rel)) => {
                 Some(Ok((id, payload)))
             }
             Ok(_) => None,
@@ -564,6 +564,17 @@ fn dismiss_vanished(conn: &Connection, class_id: i64, class_dir: &Path) -> Resul
     }
     dismiss_rows(conn, vanished)?;
     Ok(())
+}
+
+/// Whether a proposed file has definitely left: nothing at the path, or
+/// something that is not a file. "Cannot tell" — a permission or I/O error, an
+/// unreadable folder on the way — is not "gone", because a dismissal is
+/// terminal per path and a transient failure must not become one.
+fn file_is_gone(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => !meta.is_file(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Dismisses the rows the vanish pass selected, in one transaction, and says
@@ -1320,8 +1331,13 @@ mod tests {
         fs::create_dir_all(dir.join(INBOX_DIR)).expect("inbox");
         fs::write(dir.join(INBOX_DIR).join("still-here.pdf"), "x").expect("file");
 
+        // A file the pass cannot stat — its folder is unreadable — is not gone.
+        let locked = dir.join(INBOX_DIR).join("locked");
+        fs::create_dir_all(&locked).expect("locked");
+        fs::write(locked.join("unreadable.pdf"), "x").expect("file");
+
         let conn = crate::db::memory_db();
-        for name in ["still-here.pdf", "sorted-by-hand.pdf"] {
+        for name in ["still-here.pdf", "sorted-by-hand.pdf", "locked/unreadable.pdf"] {
             upsert_proposal(
                 &conn,
                 1,
@@ -1333,7 +1349,16 @@ mod tests {
             )
             .expect("propose");
         }
-        dismiss_vanished(&conn, 1, &dir).expect("pass");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+        }
+        let pass = dismiss_vanished(&conn, 1, &dir);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+        }
+        pass.expect("pass");
 
         let status = |name: &str| -> String {
             conn.query_row(
@@ -1345,6 +1370,11 @@ mod tests {
         };
         assert_eq!(status("still-here.pdf"), "pending");
         assert_eq!(status("sorted-by-hand.pdf"), "dismissed");
+        assert_eq!(
+            status("locked/unreadable.pdf"),
+            "pending",
+            "a file that cannot be read was treated as gone"
+        );
         let audit: String = conn
             .query_row(
                 "SELECT payload FROM audit_log WHERE action = 'sort.proposal_vanished'",
