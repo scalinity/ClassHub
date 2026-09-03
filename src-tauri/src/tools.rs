@@ -1637,7 +1637,7 @@ fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
 }
 
 /// What a synthesis or practice trigger can be pointed at (SPEC §8.1–§8.3).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Scope {
     /// The semester master, or the whole class for a practice exam.
     Master,
@@ -1731,24 +1731,21 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
             .map(|u| format!("{}{}", u.kind, u.ordinal))
             .unwrap_or_default()
     };
+    // Master never enters the candidates — it was answered above by name.
     let Some(tier) = best_match(&candidates, &needle, |c| match c {
         Scope::Unit { id, name } => vec![squash(name), kind_key(*id)],
         Scope::Folder(rel) => vec![squash(rel)],
-        Scope::Master => Vec::new(),
+        Scope::Master => unreachable!("master is resolved before matching"),
     }) else {
         bail!("nothing in {} matches '{scope}' — {}", class.display_name, list());
     };
     let describe = |c: &Scope| match c {
         Scope::Unit { name, .. } => name.clone(),
         Scope::Folder(rel) => format!("folder {rel}"),
-        Scope::Master => "master".to_string(),
+        Scope::Master => unreachable!("master is resolved before matching"),
     };
     match tier.as_slice() {
-        [only] => Ok(match only {
-            Scope::Unit { id, name } => Scope::Unit { id: *id, name: name.clone() },
-            Scope::Folder(rel) => Scope::Folder(rel.clone()),
-            Scope::Master => Scope::Master,
-        }),
+        [only] => Ok((*only).clone()),
         many => bail!(
             "'{scope}' matches {} scopes ({}) — be specific",
             many.len(),
