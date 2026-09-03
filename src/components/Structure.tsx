@@ -238,7 +238,8 @@ function UnitRow({
   // that is exactly what the row must not hide — viewable, without an action
   // the backend would turn down.
   const canBuild = distilled > 0 || unit.relPath !== null;
-  const hasGuideCluster = canBuild || guide !== undefined;
+  const hasGuideCluster =
+    canBuild || guide !== undefined || controls.activePracticeScopes.has(scope);
 
   return (
     <li
@@ -320,12 +321,17 @@ function UnitGuideCluster({
   onSynthesize: (unitId: number) => void;
   onPractice: (scope: string) => void;
 }) {
-  const practice = canBuild ? (
-    <PracticeAction
-      active={controls.activePracticeScopes.has(scope)}
-      onSelect={() => onPractice(scope)}
-    />
-  ) : null;
+  // The button needs sources to start from; the pulse only needs the job.
+  // An exam already being written for a division that has since lost its
+  // sources is still being written, and the row should say so.
+  const practiceActive = controls.activePracticeScopes.has(scope);
+  const practice =
+    practiceActive || canBuild ? (
+      <PracticeAction
+        active={practiceActive}
+        onSelect={() => onPractice(scope)}
+      />
+    ) : null;
 
   if (controls.activeScopes.has(scope)) {
     return (
