@@ -96,11 +96,12 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
       break;
     case "index":
-      // A scan changed the file index — a file added, changed or removed on
-      // disk, or a transcript deleted or moved in Finder forgotten or refiled
-      // (SPEC §8.5). Staleness, the divisions' counts, the lectures and the
-      // card's stale count read what the scan rewrote; the tree itself is the
-      // scan's own result, so it is not run again.
+      // A scan asked for from the workspace changed the file index — a file
+      // added, changed or removed on disk, or a transcript deleted or moved
+      // in Finder forgotten or refiled (SPEC §8.5). Staleness, the divisions'
+      // counts, the lectures and the card's stale count read what the scan
+      // rewrote; the tree is that scan's own result, so it is not run again.
+      // The launch scan, whose tree reaches no one, emits `files` instead.
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
       void queryClient.invalidateQueries({ queryKey: ["units"] });
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });

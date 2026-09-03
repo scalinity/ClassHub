@@ -693,8 +693,10 @@ fn scan_and_extract_all(app: &tauri::AppHandle) {
     for class_id in class_ids {
         match scanner::scan_class(&db.0, class_id) {
             Ok(scan) => {
+                // `files` rather than `index`: this scan's tree reaches no
+                // one, so an open workspace has to fetch it as well.
                 if scan.changed {
-                    db::emit_hub_change(app, "index");
+                    db::emit_hub_change(app, "files");
                 }
                 extract::spawn_pipeline(app, class_id)
             }
