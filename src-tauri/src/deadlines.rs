@@ -862,20 +862,27 @@ pub(crate) fn record_proposal(
         if on_list > 0 {
             return Ok(Recorded::AlreadyDeadline);
         }
-        let card: Option<(i64, String)> = conn
+        let card: Option<(i64, String, String)> = conn
             .query_row(
-                "SELECT id, status FROM deadline_proposals
+                "SELECT id, status, source FROM deadline_proposals
                  WHERE class_id = ?1 AND canvas_assignment_id = ?2",
                 params![class_id, canvas_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        match card.as_ref().map(|(id, status)| (*id, status.as_str())) {
-            Some((_, "dismissed")) => return Ok(Recorded::DismissedBefore),
-            // The card is waiting: Canvas's current reading of the assignment
+        match card
+            .as_ref()
+            .map(|(id, status, held)| (*id, status.as_str(), held.as_str()))
+        {
+            Some((_, "dismissed", _)) => return Ok(Recorded::DismissedBefore),
+            // The card is waiting: the current reading of the assignment
             // replaces the last one, title and day included, since the id is
-            // what says they are the same item.
-            Some((id, "pending")) => {
+            // what says they are the same item — under the same rank rule the
+            // (title, day) path keeps below, so the guard lives in both.
+            Some((_, "pending", held)) if source_rank(source) < source_rank(held) => {
+                return Ok(Recorded::Refreshed);
+            }
+            Some((id, "pending", _)) => {
                 conn.execute(
                     "UPDATE deadline_proposals
                      SET title = ?1, kind = ?2, due_at = ?3, notes = ?4, created_at = ?5,
@@ -888,7 +895,7 @@ pub(crate) fn record_proposal(
             // Approved once, and the deadline it made is gone — deleted by
             // hand. The row is reused as a fresh card rather than a second row
             // under the same id, which one row per (class, assignment) forbids.
-            Some((id, _)) => {
+            Some((id, _, _)) => {
                 conn.execute(
                     "UPDATE deadline_proposals
                      SET title = ?1, kind = ?2, due_at = ?3, notes = ?4, created_at = ?5,
@@ -1616,6 +1623,14 @@ mod tests {
         };
         assert!(matches!(propose("2026-09-07T23:59"), Recorded::Proposed));
         assert!(matches!(propose("2026-09-09T23:59"), Recorded::Refreshed));
+        assert_eq!(rows(), (1, "2026-09-09T23:59".to_string(), "pending".to_string()));
+        // The rank rule holds on the id path too: a lower-ranked reader with
+        // the same id leaves the card as Canvas wrote it.
+        assert!(matches!(
+            record_proposal(&conn, 1, "Homework 1", "assignment", "2026-09-10", None, "syllabus", Some("7001"))
+                .expect("record"),
+            Recorded::Refreshed
+        ));
         assert_eq!(rows(), (1, "2026-09-09T23:59".to_string(), "pending".to_string()));
 
         let id: i64 = conn
