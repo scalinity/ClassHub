@@ -606,25 +606,28 @@ pub fn refile_lecture(
     let Some(old) = old_corpus else {
         return Ok(effects);
     };
-    let from = class_dir.join(&old);
-    if !from.is_file() {
-        // Never distilled, or the note is already gone: nothing to carry.
+    let Some(from) = corpus_note_path(class_dir, &old).filter(|path| path.is_file()) else {
+        // Never distilled, the note already gone, or a row naming something
+        // that is not a corpus note: nothing to carry.
         return Ok(effects);
-    }
+    };
     effects.note = match moved {
         // A different unit's corpus: the note goes with the lecture, so that
         // unit's guide reads it and the old unit's guide stops reading it.
-        Some((_, _, new)) if new != old => {
-            let to = class_dir.join(&new);
-            // Notes are keyed by unit and transcript name, and a unit spanning
-            // several weeks can hold two transcripts with one name. Refused
-            // here, inside the transaction, so the move rolls back cleanly
-            // instead of one distillation silently replacing another.
-            if to.exists() {
-                bail!("a distilled note already exists at {new} — refiling would overwrite it");
+        Some((_, _, new)) if new != old => match corpus_note_path(class_dir, &new) {
+            Some(to) => {
+                // Notes are keyed by unit and transcript name, and a unit
+                // spanning several weeks can hold two transcripts with one
+                // name. Refused here, inside the transaction, so the move
+                // rolls back cleanly instead of one distillation silently
+                // replacing another.
+                if to.exists() {
+                    bail!("a distilled note already exists at {new} — refiling would overwrite it");
+                }
+                Some(NoteMove::Relocate { from, to })
             }
-            Some(NoteMove::Relocate { from, to })
-        }
+            None => None,
+        },
         Some(_) => None,
         // Still under `Weeks/`, but in a week the course has not declared or a
         // folder that is not a week: no unit reads the note for now, and it
@@ -842,7 +845,7 @@ pub fn lecture_left(
         rusqlite::params![class_id, rel_path],
     )?;
     let note = note
-        .map(|rel| class_dir.join(rel))
+        .and_then(|rel| corpus_note_path(class_dir, &rel))
         .filter(|path| path.is_file())
         .map(NoteMove::Remove);
     eprintln!("lectures: {rel_path} is gone; its row, its note and its session document go with it");
@@ -1310,6 +1313,20 @@ fn session_scope(transcript_rel_path: &str) -> String {
     format!("{SESSION_SCOPE_PREFIX}{transcript_rel_path}")
 }
 
+/// The absolute path of a corpus note, or `None` when the stored path is not
+/// one: every component plain, under `.classhub/corpus/`, and exactly a
+/// division folder and a file deep — the shape `corpus_rel_path` writes. A
+/// note is removed and its emptied folder pruned by this path, so the shape
+/// is what keeps both inside the corpus whatever a row holds.
+fn corpus_note_path(class_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let path = Path::new(rel);
+    let plain = path
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    let depth = path.components().count();
+    (plain && path.starts_with(CORPUS_DIR) && depth == 4).then(|| class_dir.join(path))
+}
+
 /// Verifies the two contracted documents exist where the job says it put them,
 /// then records the digest. Both halves are checked because "wrote the HTML,
 /// skipped the markdown" would otherwise pass as success and quietly leave the
@@ -1421,6 +1438,54 @@ mod tests {
     /// side by side cannot rename or delete each other's fixtures.
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+    }
+
+    /// A note is removed, and its emptied folder pruned, by the path on its
+    /// row — so the path has to have a corpus note's shape whatever the row
+    /// holds, and a row naming anything else removes nothing.
+    #[test]
+    fn a_note_is_removed_only_at_a_corpus_note_s_path() {
+        let root = scratch("classhub-note-guard");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join("Biostatistics for AI");
+        for (rel, is_note) in [
+            (".classhub/corpus/Week 2 — X/2026-09-01 — Lecture.md", true),
+            (".classhub/corpus/2026-09-01 — Lecture.md", false),
+            (".classhub/corpus/Week 2/deeper/2026-09-01 — Lecture.md", false),
+            (".classhub/extracts/Week 2/2026-09-01 — Lecture.md", false),
+            ("../.classhub/corpus/Week 2/2026-09-01 — Lecture.md", false),
+            ("Notes/keep.md", false),
+        ] {
+            assert_eq!(corpus_note_path(&dir, rel).is_some(), is_note, "{rel}");
+        }
+
+        let transcript = "Weeks/Week 02 — X/2026-09-01 — Lecture.md";
+        let keep = dir.join("Notes/keep.md");
+        fs::create_dir_all(keep.parent().expect("parent")).expect("notes dir");
+        fs::write(&keep, "a note of the reader's own").expect("note");
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, number, source)
+             VALUES (2, 3, 2, 'week', 'Week 2 — X', 2, 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (3, 2, ?1, 0, 0, 1, 1, 'Notes/keep.md', 's', 'high', 'applied', 0)",
+            [transcript],
+        )
+        .expect("row");
+        lecture_left(&conn, 3, &dir, transcript, None)
+            .expect("settled")
+            .expect("keyed")
+            .apply();
+        assert!(keep.is_file(), "a file outside the corpus was removed on a row's say-so");
+        assert!(list_contributions(&conn, 3).expect("list").is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
