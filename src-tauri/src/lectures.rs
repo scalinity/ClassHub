@@ -311,7 +311,7 @@ fn resolve_filing(
     // sorter, which places an unpicked one, has no week folder to propose:
     // refused before the capture, naming the scan that declares them as the
     // way out (SPEC §7.1).
-    if slot.is_none() && week.is_none() && crate::units::week_slots(conn, class_id)?.is_empty() {
+    if week.is_none() && crate::units::week_slots(conn, class_id)?.is_empty() {
         bail!(
             "this course declares no weeks yet, so there is nowhere to file the session — \
              scan its syllabus from the Deadlines tab first"
