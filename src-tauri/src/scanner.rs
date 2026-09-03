@@ -39,6 +39,11 @@ pub struct TreeNode {
     /// top-level ones, which are the rows that carry a guide.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labelled: bool,
+    /// The week the file's name carries (`units::week_in_name`), for its
+    /// Materials row to offer the week's folder (SPEC §10). Absent on a folder
+    /// and on a file named for no week.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<i64>,
     pub children: Vec<TreeNode>,
 }
 
@@ -483,6 +488,7 @@ fn walk_dir(
                 size: None,
                 extract_rel_path: None,
                 labelled,
+                week: None,
                 children,
             });
         } else {
@@ -512,6 +518,7 @@ fn walk_dir(
                 mtime,
                 kind: kind.clone(),
             });
+            let week = crate::units::week_in_name(&name);
             files.push(TreeNode {
                 name,
                 rel_path,
@@ -520,6 +527,7 @@ fn walk_dir(
                 size: Some(size),
                 extract_rel_path,
                 labelled: false,
+                week,
                 children: Vec::new(),
             });
         }
@@ -822,6 +830,7 @@ mod tests {
         let (db, dir) = part_numbered_class("classhub-scan-labelled");
         write(dir.join("Module 1/notes.pdf"), "%PDF");
         write(dir.join("Slides/deck.pdf"), "%PDF");
+        write(dir.join("Slides/CAI6734_Week2_Foundations.pdf"), "%PDF");
         write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF");
         let tree = scan_class(&db, 4).expect("scan").tree;
         let labelled = |name: &str| tree.iter().find(|n| n.name == name).expect(name).labelled;
@@ -830,6 +839,13 @@ mod tests {
         assert!(!labelled("Weeks"));
         let file = &tree.iter().find(|n| n.name == "Module 1").expect("folder").children[0];
         assert!(!file.dir && !file.labelled, "a file carries no label");
+        // A file named for a week carries it; a folder and a file named for
+        // none carry nothing.
+        assert_eq!(file.week, None);
+        let slides = tree.iter().find(|n| n.name == "Slides").expect("Slides");
+        assert_eq!(slides.week, None, "a folder carries no week");
+        let deck = slides.children.iter().find(|n| n.name == "CAI6734_Week2_Foundations.pdf").expect("deck");
+        assert_eq!(deck.week, Some(2));
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 

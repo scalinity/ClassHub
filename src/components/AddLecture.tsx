@@ -125,6 +125,10 @@ export function AddLecture({
   // on the default: a date the field cannot parse resolves to no default
   // either, and that is not the course's doing.
   const asked = slots.length > 0 && slots.every((s) => s.meetsOn === null);
+  // No weeks at all: nowhere to file, said above and refused by the backend
+  // before any capture (SPEC §7.1). Only once the schedule has answered, so
+  // the button is not withheld while the query is in flight.
+  const noWeeks = weeks !== undefined && slots.length === 0;
 
   const submit = () => {
     setError(null);
@@ -243,7 +247,7 @@ export function AddLecture({
                   follows the file.
                 </>
               ) : slots.length === 0 ? (
-                "This course publishes no weekly schedule, so ClassHub can't place the session itself. It goes to the inbox and the sorter proposes a week from what the lecture covers."
+                "This course declares no weeks yet, so there is nowhere to file the session. Scan its syllabus from the Deadlines tab first — the form then resolves the week from the course's own dates."
               ) : asked ? (
                 "This course publishes no dates for its weeks, so pick the one the session fell in. Left unpicked, it goes to the inbox and the sorter proposes a week."
               ) : (
@@ -297,7 +301,7 @@ export function AddLecture({
               <button
                 type="button"
                 onClick={submit}
-                disabled={source.trim() === ""}
+                disabled={source.trim() === "" || noWeeks}
                 className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-40`}
               >
                 ADD LECTURE

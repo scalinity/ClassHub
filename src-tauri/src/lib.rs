@@ -565,6 +565,17 @@ fn resolve_move_proposal(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// A file named for a week, proposed into that week's folder from its row in
+/// Materials (SPEC §10); the destination comes back for the row to say.
+#[tauri::command]
+fn propose_week_filing(
+    app: tauri::AppHandle,
+    class_id: i64,
+    rel_path: String,
+) -> Result<String, String> {
+    sorter::propose_week_filing(&app, class_id, &rel_path).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command(async)]
 fn list_jobs(state: tauri::State<Db>) -> Result<Vec<jobs::JobInfo>, String> {
     let conn = db::lock(&state.0);
@@ -790,6 +801,7 @@ pub fn run() {
             run_sort_job,
             sort_by_content,
             resolve_move_proposal,
+            propose_week_filing,
             list_jobs,
             cancel_job,
             get_job_events,

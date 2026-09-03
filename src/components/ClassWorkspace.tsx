@@ -41,6 +41,7 @@ import {
   collectTranscripts,
   dateFromFileName,
   digestLecture,
+  lectureWeeks,
   listLectureContributions,
 } from "@/lib/lectures";
 import {
@@ -135,6 +136,14 @@ export function ClassWorkspace({
   const unitFor = new Map(
     (contributions ?? []).map((c) => [c.relPath, c.unitName]),
   );
+  // The weeks the course declares, for a file named for one to offer its week
+  // folder from its row (SPEC §10) — the form's own read, keyed on today so
+  // the two share a cache entry, and invalidated with the divisions.
+  const { data: weeks } = useQuery({
+    queryKey: ["lectureWeeks", info.id, todayIso()],
+    queryFn: () => lectureWeeks(info.id, todayIso()),
+    placeholderData: (prev) => prev,
+  });
 
   // Practice exams and notes (M8): both chat-written, both listed from disk.
   // The practice query re-runs when a practice job settles (finalize verifies
@@ -360,6 +369,7 @@ export function ClassWorkspace({
               nodes={tree}
               onEntryMissing={() => refetch()}
               onViewFile={openMaterial}
+              weekSlots={weeks?.slots ?? []}
               guideControls={{
                 guides: guideMap,
                 activeScopes,

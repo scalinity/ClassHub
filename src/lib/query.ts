@@ -61,6 +61,9 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // the sync also stamps when each class last read from Canvas.
       void queryClient.invalidateQueries({ queryKey: ["units"] });
       void queryClient.invalidateQueries({ queryKey: ["canvasStatus"] });
+      // The weeks a lecture or a file can be filed into are read off the
+      // same rows.
+      void queryClient.invalidateQueries({ queryKey: ["lectureWeeks"] });
       // The card and the workspace header name the current division, which
       // is resolved from those same rows.
       void queryClient.invalidateQueries({ queryKey: ["classes"] });

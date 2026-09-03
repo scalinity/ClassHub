@@ -307,6 +307,16 @@ fn resolve_filing(
         Some(week) => crate::units::slot_for_week(conn, class_id, week)?,
         None => None,
     };
+    // A course that declares no weeks has nowhere to file the session, and the
+    // sorter, which places an unpicked one, has no week folder to propose:
+    // refused before the capture, naming the scan that declares them as the
+    // way out (SPEC §7.1).
+    if slot.is_none() && week.is_none() && crate::units::week_slots(conn, class_id)?.is_empty() {
+        bail!(
+            "this course declares no weeks yet, so there is nowhere to file the session — \
+             scan its syllabus from the Deadlines tab first"
+        );
+    }
     let dir_rel = match &slot {
         Some(slot) => format!("{WEEKS_DIR}/{}", slot.folder),
         None => INBOX_DIR.to_string(),
@@ -2225,5 +2235,28 @@ mod tests {
         ));
         assert!(!crate::db::is_session_scope("Module 1"));
         assert!(!crate::db::is_session_scope("master"));
+    }
+    /// A course with no weeks is refused before anything is fetched: the
+    /// inbox route exists for a session left unpicked, and a sorter with no
+    /// week folder to propose would spend a job to leave it there.
+    #[test]
+    fn a_course_with_no_weeks_is_refused_before_the_capture() {
+        let root = scratch("classhub-no-weeks");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let name = "2026-09-09 — Lecture.md";
+        let err = resolve_filing(&conn, 2, None, name).err().expect("no weeks");
+        assert!(format!("{err:#}").contains("declares no weeks"), "{err:#}");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (2, 1, 'week', 'Week 1 — Introduction', 1, '2026-08-26', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let inbox = resolve_filing(&conn, 2, None, name).expect("unpicked, with weeks");
+        assert!(inbox.slot.is_none());
+        assert_eq!(inbox.dir_rel, "_Inbox");
+        let _ = fs::remove_dir_all(&root);
     }
 }

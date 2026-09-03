@@ -65,7 +65,14 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   output tokens), the digest of the Sept 1 caption's 1 h 52 m stretch 8.8 min over 5 turns for
   $2.11 (49k), and the Part I guide built from those two notes ran 21.5 min over 36 turns for
   $7.86, 118k output tokens, 194 KB through one `Write` and ten `Edit`s — reading each note
-  once, the week folders' deck and notebook, and neither transcript.
+  once, the week folders' deck and notebook, and neither transcript. Measured 2026-09-03 on
+  Biostatistics' Week 3 session, a 2 h 06 m caption of 910 unnamed cues that a UF cloud
+  recording again served to an anonymous GET, `ccUrl` ready in 4.6 s: the digest ran 12.4 min
+  over 5 turns for $2.99 (70k output tokens). The Week 3 guide, built from that one note with
+  no file listed — nothing but the transcript sits under its week folder — ran 20.9 min over 46
+  turns for $7.86, 117k output tokens, 201 KB through one `Write` and nineteen `Edit`s; told
+  the note alone, it found the Week 3 readings, the Week 3 coding material and the Module 3
+  deck through `--add-dir` and read them, none of which its manifest names.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
@@ -89,10 +96,11 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   | Fundamentals of AI in Medicine I | 14 weekly topics, no grouping | yes (Aug 25 …) |
   | Biostatistics for AI | 15 weekly topics, no grouping | yes (08/20 …) |
   | Applied Generative AI in Medicine | 3 Parts spanning 16 weeks | no |
-  | AI in Health Design Studio I | none published | — |
+  | AI in Health Design Studio I | 15 weekly topics, no grouping | yes (Aug 26 …) |
 
-  So there is no uniform "weeks 1–15" and no universal module layer: 14 / 15 / 16 / unknown.
-  Two of the four declare no grouping above the weekly topic at all. The app therefore reads
+  So there is no uniform "weeks 1–15" and no universal module layer: 14 / 15 / 16 / 15.
+  Three of the four declare no grouping above the weekly topic at all (Design Studio's
+  weeks were read by its syllabus scan, 2026-09-03). The app therefore reads
   each course's own structure (§7.2) rather than imposing one, and never assumes a hand-made
   folder is the course's real division.
 - **Weeks are not uniformly spaced.** Fundamentals runs Week 13 on Nov 17 and Week 14 on Dec 1,
@@ -442,7 +450,7 @@ move_proposals(id INTEGER PK, class_id INTEGER FK,
                dest_rel_path TEXT,         -- class-relative target incl. filename
                reasoning TEXT,
                confidence TEXT NULL,       -- high|medium|low from sort jobs; NULL from chat
-               source TEXT,                -- chat|sort_job|canvas
+               source TEXT,                -- chat|sort_job|canvas|by_name
                status TEXT,                -- pending|approved|dismissed
                created_at INTEGER, resolved_at INTEGER NULL);
 
@@ -670,7 +678,9 @@ on Dec 1. The Add lecture form shows the resolved week and lets it be corrected.
 divisions name week ranges and no days — Applied Generative AI — has sixteen weeks to file into
 and no date to resolve one against, so the form asks outright, each week's option naming the
 Part it feeds; left unpicked, the session goes to `_Inbox/` for the sorter, as any unresolved
-week does. Two lectures of one Part on one date need titles of their own: a note is keyed by its
+week does. A course that declares no weeks at all has nowhere to file a session and no
+week folder for the sorter to propose, so the form says so and the filing is refused before
+the capture, naming the syllabus scan as the way out. Two lectures of one Part on one date need titles of their own: a note is keyed by its
 division and its transcript's name (§8.5), so a filing whose note path another transcript of the
 class already holds — or whose note already exists on disk — is refused before the capture, and
 the refusal names the title as the way out.
@@ -1016,7 +1026,9 @@ week-numbered course the week it happened in, and for a Part-numbered one the Pa
 contains that week. A week row's week is its own number, the course's, not its position in the
 list; a row named without one (`Reading Days — No Class`) takes its ordinal unless a numbered
 row already holds that week, so Fundamentals' Thanksgiving row, which a rescan inserted at
-ordinal 14, gets no week and Week 14 keeps week 14. Nothing has to infer the mapping, because
+ordinal 14, gets no week and Week 14 keeps week 14. A row that loses its week that way is
+named once, by the scan or sync that wrote the divisions — on stderr and in its summary — and
+never by a listing. Nothing has to infer the mapping, because
 filing the transcript already decided it.
 
 Resolving a lecture's week is the one step with any judgement in it, and it comes from `units`
@@ -1073,7 +1085,10 @@ professor's exact words when the distillation is not enough. The prompt lists th
 their extracts and the transcripts only through their notes, and the Structure row offers a
 guide exactly when a file or a note exists (§8.3) — the backend's own refusal, read the other
 way. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so chat
-retrieves it too.
+retrieves it too. A file named for a week that sits outside its week folder — Applied's Week 2
+deck under `Slides/`, where Canvas filed it — reaches the division through a move into that
+folder, proposed from the file's own row (§10, §12), never through a widening of the sources to
+files named for a week.
 
 A contribution is recorded as applied when it is written, because the filing decision it follows
 is the user's own rather than a model's reading. Correcting one means refiling the lecture into
@@ -1178,6 +1193,13 @@ its meetings.
    so both agree with the disk. Dismissal is terminal per path: a file that comes back to that
    inbox path through a drop is a fresh proposal, and a Canvas re-sync, which matches files by
    name and size against the tree, never re-proposes one.
+ 7. A file whose name carries a week the course declares — `CAI6734_Week2_….pdf` — offers
+   `FILE UNDER WEEK 02` on its row in Materials while it sits outside that week's folder.
+   The click proposes the move into `Weeks/<week folder>/` with source `by_name` and a reason
+   naming the division that reads the folder; the card carries a `BY NAME` chip and is
+   approved, redirected or left like any other, and approval is the ordinary move, so the
+   extract travels with the file and nothing is re-extracted. Explicit by design: Canvas may
+   have placed the file where it is (§7.2), and an automatic sort never overrides that.
 
 ## 11. Hub features
 
@@ -1265,6 +1287,9 @@ and apply it. Non-negotiable per project owner.
   pill expanding to a panel with live logs) · Settings.
 - Empty states matter: a class with no modules yet (3 of 4 classes today) shows a friendly
   drop-target hero, not a blank pane.
+- A file row in Materials offers `FILE UNDER WEEK NN` when its name carries a week the
+  course declares and it sits outside that week's folder (§10). The Add lecture form says
+  when a course declares no weeks and keeps ADD LECTURE off, naming the syllabus scan (§7.1).
 
 ## 13. Engineering conventions
 
@@ -1336,7 +1361,9 @@ and apply it. Non-negotiable per project owner.
   that is not there is silent until a guide reads it), what a vanished file leaves in the
   mirror (§7 — an extract nothing points at is silent until chat cites it), and which folders
   the tree marks as a guide's scope (§8.3 — a guide offered on `Weeks` is a second guide,
-  quietly). UI and job plumbing are exercised by running the app.
+  quietly), a file's week read off its name and a by-name proposal's destination (§10 — a deck
+  proposed into the wrong week is silent until a guide reads it), and a claimed week named once
+  by the scan that wrote it (§8.5). UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1565,6 +1592,20 @@ Mark the checkbox when the acceptance criteria pass.
   in Finder leaves no extract after a rescan, and, where the Sept 8 recordings exist, both sessions
   are in `Weeks/Week 03…` with notes and session documents, the Part I guide's manifest and prompt
   name three notes, the deck and the notebook, and Fundamentals' Week 3 guide is built from its note.
+
+- [x] **M27 — The week of Sept 8.** (`milestones/M27-the-week-of-sept-8.md`)
+  The first week all four courses meet with the installed app on the current tree. Every
+  recording that exists goes through the form, the digest and the guide — the Part I guide
+  rebuilt from three notes with the deck and the notebook listed in its prompt, Fundamentals'
+  and Biostatistics' guides from their notes — with the cost of a guide whose files are listed
+  recorded in §1. A course with no declared weeks is refused at the form rather than routed to
+  a sorter told to leave it; a claimed week is said once, where the divisions are written; a
+  file named for a week reaches its week folder through a proposal asked for from its row.
+  *Accepted when:* the four forms resolve each course's meeting day to its week, a filing for a
+  course with no weeks is refused before the capture, a RESCAN logs no claims line, the Applied
+  deck reaches `Weeks/Week 02/` through an approved by-name proposal and Part I's manifest names
+  it, and, where the recordings exist, each session is filed with a note and a session
+  document and the three guides are built with their costs in §1.
 
 ## 15. Risks & trade-offs (accepted)
 

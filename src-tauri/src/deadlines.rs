@@ -831,11 +831,13 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 }
             }
         }
-        Ok((added, updated, seen, collapsed, skipped, batch))
+        // A claim is decided by what this pass wrote, so it is said here, once.
+        let claims = crate::units::week_claims(conn, class_id)?;
+        Ok((added, updated, seen, collapsed, skipped, batch, claims))
     });
     match recorded {
         Ok((_, _, 0, ..)) => None,
-        Ok((added, updated, seen, collapsed, skipped, batch)) => {
+        Ok((added, updated, seen, collapsed, skipped, batch, claims)) => {
             // A renamed division's corpus folder and guide follow it once the
             // rows are committed and the lock is released; `files` is what
             // refreshes the guides and the lecture listing that name them.
@@ -865,6 +867,16 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                     " · {} could not be recorded: {}",
                     skipped.len(),
                     skipped.join("; ")
+                ));
+            }
+            for claim in &claims {
+                eprintln!("units: {claim}");
+            }
+            if !claims.is_empty() {
+                summary.push_str(&format!(
+                    " · {} week(s) claimed twice: {}",
+                    claims.len(),
+                    claims.join("; ")
                 ));
             }
             Some(summary)

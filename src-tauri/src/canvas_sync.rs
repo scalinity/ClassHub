@@ -480,7 +480,7 @@ fn sync_units(
         return Ok(());
     }
 
-    let (added, skipped, batch) = with_conn(app, |conn| {
+    let (added, skipped, batch, claims) = with_conn(app, |conn| {
         let mut added = 0usize;
         let mut skipped: Vec<String> = Vec::new();
         let mut batch = units::Batch::default();
@@ -522,11 +522,23 @@ fn sync_units(
                 }
             }
         }
-        Ok((added, skipped, batch))
+        // A claim is decided by what this pass wrote, so it is said here, once.
+        let claims = units::week_claims(conn, class.id)?;
+        Ok((added, skipped, batch, claims))
     })?;
     // A renamed module's corpus folder and guide follow it, once the rows are
     // committed and the lock is released.
     batch.apply();
+    for claim in &claims {
+        eprintln!("units: {claim}");
+    }
+    if !claims.is_empty() {
+        outcome.notes.push(format!(
+            "{} week(s) claimed twice: {}",
+            claims.len(),
+            claims.join("; ")
+        ));
+    }
     outcome.units_added = added;
     if !skipped.is_empty() {
         outcome.notes.push(format!(

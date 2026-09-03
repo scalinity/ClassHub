@@ -28,7 +28,7 @@ export interface MoveProposal {
   confidence: Confidence | null;
   /** Where the proposal came from: chat, a sort job reading the file's
    *  contents, or Canvas telling the app which folder it filed the file in. */
-  source: "chat" | "sort_job" | "canvas";
+  source: "chat" | "sort_job" | "canvas" | "by_name";
   createdAt: number;
 }
 
@@ -59,6 +59,16 @@ export function runSortJob(classId: number): Promise<number> {
  *  file's inbox path, which is how the card knows the sort is its own. */
 export function sortByContent(proposalId: number): Promise<number> {
   return invoke<number>("sort_by_content", { proposalId });
+}
+
+/** A file named for a week, proposed into that week's folder from its row in
+ *  Materials (SPEC §10). Resolves to the destination; the card lands in the
+ *  inbox queue and approval is the ordinary move. */
+export function proposeWeekFiling(
+  classId: number,
+  relPath: string,
+): Promise<string> {
+  return invoke<string>("propose_week_filing", { classId, relPath });
 }
 
 /** Approve the move (optionally to a picked folder) or leave the file put. */

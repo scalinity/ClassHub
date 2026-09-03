@@ -500,6 +500,16 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
       </span>
     );
   }
+  if (proposal.source === "by_name") {
+    return (
+      <span
+        title="Its name carries the week — proposed from its row in Materials"
+        className={`${chipBase} bg-(--accent)/12 text-(--accent)`}
+      >
+        BY NAME
+      </span>
+    );
+  }
   switch (proposal.confidence) {
     case "high":
       return (

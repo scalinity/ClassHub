@@ -22,6 +22,7 @@ import {
 
 import { PracticeAction } from "@/components/PracticeAction";
 import type { GuideInfo } from "@/lib/guides";
+import type { WeekSlot } from "@/lib/lectures";
 import {
   countFiles,
   formatSize,
@@ -30,6 +31,7 @@ import {
   VIEWABLE_KINDS,
   type TreeNode,
 } from "@/lib/materials";
+import { proposeWeekFiling } from "@/lib/sorter";
 import { monoAction } from "@/lib/styles";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
@@ -64,6 +66,7 @@ export function FileTree({
   nodes,
   onEntryMissing,
   onViewFile,
+  weekSlots,
   guideControls,
 }: {
   classId: number;
@@ -72,6 +75,9 @@ export function FileTree({
   onEntryMissing: () => void;
   /** Open a renderable file in the in-app viewer. */
   onViewFile: (node: TreeNode) => void;
+  /** The weeks the course declares, for a file named for one to offer its
+   *  week folder (SPEC §10). */
+  weekSlots: readonly WeekSlot[];
   guideControls?: ModuleGuideControls;
 }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -96,6 +102,7 @@ export function FileTree({
           onToggle={toggle}
           onEntryMissing={onEntryMissing}
           onViewFile={onViewFile}
+          weekSlots={weekSlots}
           guideControls={guideControls}
         />
       ))}
@@ -111,6 +118,7 @@ interface NodeProps {
   onToggle: (relPath: string) => void;
   onEntryMissing: () => void;
   onViewFile: (node: TreeNode) => void;
+  weekSlots: readonly WeekSlot[];
   guideControls?: ModuleGuideControls;
 }
 
@@ -127,6 +135,7 @@ function DirNode({
   onToggle,
   onEntryMissing,
   onViewFile,
+  weekSlots,
   guideControls,
 }: NodeProps) {
   const isCollapsed = collapsed.has(node.relPath);
@@ -195,6 +204,7 @@ function DirNode({
               onToggle={onToggle}
               onEntryMissing={onEntryMissing}
               onViewFile={onViewFile}
+              weekSlots={weekSlots}
               guideControls={guideControls}
             />
           ))}
@@ -292,12 +302,40 @@ function GuideCluster({
   );
 }
 
-function FileRow({ node, classId, onEntryMissing, onViewFile }: NodeProps) {
+function FileRow({
+  node,
+  classId,
+  onEntryMissing,
+  onViewFile,
+  weekSlots,
+}: NodeProps) {
   const Icon = KIND_ICONS[node.kind ?? ""] ?? File;
   const viewable = VIEWABLE_KINDS.has(node.kind ?? "");
+  // A file named for a week the course declares, sitting outside that week's
+  // folder, offers the one move that puts it among a division's sources
+  // (SPEC §10): the week folder is where the division that reads the week
+  // counts it. Proposed from here, approved in the inbox queue above — an
+  // explicit ask, since Canvas may have placed the file where it is.
+  const weekSlot =
+    node.week === undefined
+      ? undefined
+      : weekSlots.find((s) => s.week === node.week);
+  const filing =
+    weekSlot && !node.relPath.startsWith(`Weeks/${weekSlot.folder}/`)
+      ? weekSlot
+      : undefined;
+  const [proposed, setProposed] = useState(false);
+  const [filingError, setFilingError] = useState<string | null>(null);
 
   const run = (action: Promise<void>) => {
     action.catch(onEntryMissing);
+  };
+
+  const propose = () => {
+    setFilingError(null);
+    proposeWeekFiling(classId, node.relPath)
+      .then(() => setProposed(true))
+      .catch((e) => setFilingError(String(e)));
   };
 
   return (
@@ -317,6 +355,30 @@ function FileRow({ node, classId, onEntryMissing, onViewFile }: NodeProps) {
       </button>
 
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        {filing &&
+          (proposed ? (
+            <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
+              PROPOSED — SEE INBOX
+            </span>
+          ) : (
+            <button
+              type="button"
+              title={
+                filingError ??
+                `Propose moving it into Weeks/${filing.folder}, where ${filing.unitName} reads it`
+              }
+              onClick={propose}
+              className={`${monoAction} ${
+                filingError
+                  ? "text-destructive hover:bg-destructive/10"
+                  : "text-(--accent) hover:bg-(--accent)/12"
+              }`}
+            >
+              {filingError
+                ? "NOT PROPOSED"
+                : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
+            </button>
+          ))}
         <button
           type="button"
           title="Show in Finder"

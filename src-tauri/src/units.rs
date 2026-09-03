@@ -933,9 +933,21 @@ pub struct WeekSlot {
 /// numbers none — it declares three Parts spanning week ranges — so its weeks
 /// are read out of those ranges, held on the rows of the divisions that group
 /// weeks, and each maps to the Part that contains it. A
-/// course that declares neither gets no weeks, and a lecture for it routes
-/// through `_Inbox/` for the sorter to place (SPEC §7.1).
+/// course that declares neither gets no weeks, and the Add lecture form refuses
+/// a lecture for it before the capture (SPEC §7.1).
 pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
+    Ok(slots_and_claims(conn, class_id)?.0)
+}
+
+/// Each week a row loses to another, in the words the skip is decided by. A
+/// claim is decided when the divisions are written, so the two writers — the
+/// syllabus scan and the Canvas sync — say it once after their batch, on
+/// stderr and in the job's summary, and every listing reads silently.
+pub fn week_claims(conn: &Connection, class_id: i64) -> Result<Vec<String>> {
+    Ok(slots_and_claims(conn, class_id)?.1)
+}
+
+fn slots_and_claims(conn: &Connection, class_id: i64) -> Result<(Vec<WeekSlot>, Vec<String>)> {
     let mut stmt = conn.prepare(
         "SELECT id, ordinal, number, name, starts_on FROM units
          WHERE class_id = ?1 AND kind = 'week'
@@ -953,17 +965,18 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut slots: Vec<WeekSlot> = Vec::new();
+    let mut claims: Vec<String> = Vec::new();
     for (unit_id, ordinal, number, unit_name, meets_on) in weeks {
         let week = number.unwrap_or(ordinal);
-        // Said out loud, because the week decides what the division files
-        // and which folders its guide reads: a row that loses its week to
-        // another gets neither.
+        // Named, because the week decides what the division files and which
+        // folders its guide reads: a row that loses its week to another gets
+        // neither.
         if let Some(holder) = slots.iter().find(|s| s.week == week) {
-            eprintln!(
-                "units: {unit_name} claims week {week}, which {} already holds; it files no \
+            claims.push(format!(
+                "{unit_name} claims week {week}, which {} already holds; it files no \
                  lecture and counts no week folder",
                 holder.unit_name
-            );
+            ));
             continue;
         }
         slots.push(WeekSlot {
@@ -977,7 +990,7 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
     }
     if !slots.is_empty() {
         slots.sort_by_key(|s| s.week);
-        return Ok(slots);
+        return Ok((slots, claims));
     }
 
     let mut stmt = conn.prepare(
@@ -1001,13 +1014,13 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
         for week in first..=last {
             // Ranges should not overlap, but if a syllabus says they do, the
             // earlier Part keeps the week rather than the later one taking
-            // it, and the overlap is said out loud.
+            // it, and the overlap is named.
             if let Some(holder) = slots.iter().find(|s| s.week == week) {
-                eprintln!(
-                    "units: {unit_name} claims week {week}, which {} already holds; that week \
+                claims.push(format!(
+                    "{unit_name} claims week {week}, which {} already holds; that week \
                      files into and counts for the earlier one",
                     holder.unit_name
-                );
+                ));
                 continue;
             }
             slots.push(WeekSlot {
@@ -1021,7 +1034,7 @@ pub fn week_slots(conn: &Connection, class_id: i64) -> Result<Vec<WeekSlot>> {
         }
     }
     slots.sort_by_key(|s| s.week);
-    Ok(slots)
+    Ok((slots, claims))
 }
 
 /// The division a lecture filed into `week` contributes to, if the course
@@ -1173,6 +1186,38 @@ pub fn week_from_rel_path(rel_path: &str) -> Option<i64> {
         return None;
     }
     parse_week_range(folder).map(|(first, _)| first)
+}
+
+/// The week a file's name carries: `CAI6734_Week2_Foundations.pdf` is 2,
+/// `Week01_Course_Overview.pdf` is 1, `Week 3 2017 Feder.pdf` is 3. Read at
+/// a word boundary and only for the word `week`, so `Weekly Readings.pdf`,
+/// `Midweek 2.pdf`, a `class2` and a `Module1` carry none; a plural (`Weeks
+/// 1-3`) spans more than one and carries none either. The first such word
+/// decides. The walk sets it on a file (`scanner::TreeNode`) so its Materials
+/// row can offer the week's folder, where the division that reads the week
+/// counts it (SPEC §10).
+pub fn week_in_name(name: &str) -> Option<i64> {
+    let lower = name.to_lowercase();
+    let mut cursor = 0usize;
+    while let Some(at) = lower[cursor..].find("week") {
+        let start = cursor + at;
+        cursor = start + "week".len();
+        let bounded = lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if !bounded {
+            continue;
+        }
+        let rest = lower[cursor..]
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | '#' | '.'));
+        if let Some((week, _)) = leading_number(rest) {
+            if (1..=MAX_WEEK).contains(&week) {
+                return Some(week);
+            }
+        }
+    }
+    None
 }
 
 /// What a unit's name says beyond its own week number.
@@ -1546,6 +1591,11 @@ mod tests {
         // A row named without a label still takes its ordinal where no
         // numbered row holds it, so a session in finals week has a home.
         assert_eq!(by_week(16), Some("Finals week — Capstone Presentations"));
+        // The claim is named once, where the divisions are written; the
+        // listing above said nothing.
+        let claims = week_claims(&conn, 1).expect("claims");
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert!(claims[0].contains("claims week 14, which Week 14"), "{}", claims[0]);
         assert_eq!(nearest_week(&slots, "2026-12-01"), Some(14));
         assert_eq!(
             slots.iter().find(|s| s.week == 14).unwrap().folder,
@@ -1921,6 +1971,7 @@ mod tests {
         assert!(slot_for_week(&conn, 4, 17).unwrap().is_none(), "no Part covers week 17");
         // No dates anywhere, so nothing is defaulted — the form asks.
         assert_eq!(nearest_week(&slots, "2026-09-10"), None);
+        assert!(week_claims(&conn, 4).expect("claims").is_empty(), "the ranges do not overlap");
         // The folder carries no topic, because the Part's name is not the
         // week's name.
         assert_eq!(slots[2].folder, "Week 03");
@@ -2108,5 +2159,18 @@ mod tests {
         assert_eq!(name("2026-08-25").as_deref(), Some("Week 1 \u{2014} Intro"));
         // Inserted after Week 3, so the later ordinal wins and not the later row.
         assert_eq!(name("2026-09-01").as_deref(), Some("Week 3 \u{2014} Later"));
+    }
+    /// A file's name carries its week at a word boundary and nowhere else.
+    #[test]
+    fn reads_a_week_out_of_a_file_name() {
+        assert_eq!(week_in_name("CAI6734_Week2_Foundations_of_Deep_Learning.pdf"), Some(2));
+        assert_eq!(week_in_name("CAI6734_Week01_Course_Overview_Liu.pdf"), Some(1));
+        assert_eq!(week_in_name("Week 3 2017 Feder Data Quality in EHR research.pdf"), Some(3));
+        assert_eq!(week_in_name("week-4 notes.md"), Some(4));
+        assert_eq!(week_in_name("Weekly Readings.pdf"), None);
+        assert_eq!(week_in_name("Midweek 2.pdf"), None);
+        assert_eq!(week_in_name("Biostatistics_Module1_Slides_class2.pptx"), None);
+        assert_eq!(week_in_name("Weeks 1-3 review.pdf"), None);
+        assert_eq!(week_in_name("Week 2026 plan.pdf"), None);
     }
 }

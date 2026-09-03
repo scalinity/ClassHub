@@ -10,6 +10,8 @@ export interface TreeNode {
   extractRelPath?: string;
   /** A folder named the way a division is — `Module 1` — the one kind the tree offers a guide on (SPEC §8.3); absent on storage folders and files. */
   labelled?: boolean;
+  /** The week the file's name carries — `CAI6734_Week2_….pdf` is 2 — for the row to offer its week folder (SPEC §10); absent on folders and on files named for none. */
+  week?: number;
   children: TreeNode[];
 }
 

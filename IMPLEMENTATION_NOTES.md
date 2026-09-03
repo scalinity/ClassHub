@@ -3791,3 +3791,169 @@ frontend files are staged. What future sessions should know:
 - The reviewers' reports arrive truncated near 4,000 characters; asking each
   for the Verdict and a numbered index first, then the rest by section, took
   one follow-up message per agent.
+
+## M27 — The week of Sept 8 (2026-09-03)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database
+(`user_version` 13, 35 file rows, 3 contributions, 7 guides, jobs at 309,
+audit at 163, no active job, every `canvas_synced_at` 2026-09-03) through
+an ignored probe test in `guides.rs`, under the code at b6f5578:
+
+- **Every course has a week to file into.** `week_slots(1)`: 15 slots, all
+  dated, Sept 8 → week 3 (`Week 03 — Biomedical Data Foundations`, unit 25).
+  `week_slots(2)`: 15 slots, all dated, from `Week 1 — Introduction, Overview
+  of AI Design Project` (Aug 26) to Week 15 (Dec 2); Sept 9 → week 3 (`Week
+  03 — HiPerGator and NaviGator II`, unit 42). So Design Studio is not the
+  course without divisions the kickoff and §1's table said it was: its
+  syllabus scan recorded the fifteen weeks before job 297, whose summary
+  read `15 division(s) already recorded`. `week_slots(3)`: 17 slots, Sept 3
+  → week 3 (unit 8) and Sept 10 → week 4 (`Week 04 — Probability and
+  Sampling Distributions`, unit 9). `week_slots(4)`: 16 undated slots, no
+  default, week 3 feeding Part I. No course has the shape "no declared
+  divisions"; the sorter's `{weeks}` block for a Design Studio transcript
+  would have listed fifteen dated week folders, not the no-schedule line.
+- `unit_context(4, 37)`: a four-entry manifest (two transcripts, the Week 01
+  deck, the Week 02 notebook), the deck and the notebook listed, two notes in
+  the corpus block. `unit_context` refused for units 25, 42 and 8: nothing
+  filed, no folder, nothing distilled. Guides: row 7 stale, row 4 fresh, the
+  three session rows fresh.
+- Files outside `Weeks/` carrying a week in their name: Applied's
+  `Slides/CAI6734_Week2_Foundations_of_Deep_Learning.pdf` (Canvas placed it,
+  proposal 37) and Biostatistics' five readings under `Reading Material/`
+  (`Week 1 …`, two `Week 2 …`, two `Week 3 …`, all Canvas-placed).
+  Biostatistics' `Coding Material/Week 3 Coding Material/` carries the week
+  on the folder, not on its three files.
+- **The week-claimed line**, on a dev build (pid 63482) with stderr to a
+  file: 1 line at launch, 3 more on opening the Fundamentals workspace, 0 on
+  a RESCAN that changed nothing, 3 on a RESCAN that indexed a `.csv` fixture
+  in the empty Week 03 folder and 3 on the RESCAN that saw it deleted — the
+  units listing, the guide staleness read and the lectures listing each
+  calling `week_slots`. The fixture's extract and its mirror folder were
+  gone after the second RESCAN; the empty `Weeks/Week 03 — Biomedical Data
+  Foundations/` stayed.
+
+### What was built
+
+- **A course with no weeks is refused before the capture.** `resolve_filing`
+  bails when no week was picked and `week_slots` is empty, naming the
+  syllabus scan; the form's help line says the same and keeps ADD LECTURE off
+  once the schedule has answered empty. A course with weeks and the session
+  left unpicked still goes to `_Inbox/`. Chosen over building a route for a
+  course none of the four is: the old path spent a capture and a sort job to
+  reach a prompt that told the sorter to leave the transcript.
+- **A claimed week is said once, where it is decided.** `week_slots` reads
+  silently through `slots_and_claims`; `units::week_claims` names each week a
+  row loses, and `record_units` (the syllabus scan) and the Canvas modules
+  step report them after their batch — one `units: …` line on stderr each and
+  a ` · N week(s) claimed twice: …` clause in the job summary or a sync note.
+- **A file named for a week reaches its week folder by a proposal.**
+  `units::week_in_name` reads the week at a word boundary (`CAI6734_Week2_…`,
+  `Week01_…`, `Week 3 2017 …`; not `Weekly`, `Midweek`, `class2`, a plural
+  or `Week 2026`); `TreeNode.week` carries it on a file. `FileRow` offers
+  `FILE UNDER WEEK NN` in its hover cluster when the course declares that
+  week and the file is not under its folder; the click runs
+  `sorter::propose_week_filing` → `week_filing`, which validates the
+  destination as every proposal is and upserts a pending row with source
+  `by_name` and a reason naming the division. The queue's chip reads
+  `BY NAME`; approval is the ordinary move. The workspace reads the slots
+  once through the form's own `lectureWeeks` query, keyed on today and
+  invalidated with `units`.
+- SPEC §1 (Design Studio's row and the count of ungrouped courses), §5, §7.1,
+  §8.5, §10 step 7, §12, §13 and §14 state the design.
+
+### Verified
+
+- `cargo test`: 237 pass, three new — `week_in_name`'s shapes, the no-weeks
+  refusal beside the unpicked inbox route, the by-name proposal's
+  destination with its three refusals — and three extended: the walk marks
+  the deck's week and not the folder's, the Fundamentals shape yields one
+  claim from `week_claims`, the Part ranges none. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 64166) beside the installed app efc8505; the
+  launch scan enqueued nothing and logged no claims line, nor did opening
+  the workspaces or any scan. Each form with its course's meeting day typed:
+  Fundamentals Sept 8 → `Week 03 — Biomedical Data Foundations`; Design
+  Studio Sept 9 → `Week 03 — HiPerGator and NaviGator II`, "Filed under
+  Weeks/Week 03 — HiPerGator and NaviGator II, feeding Week 3 — …";
+  Biostatistics Sept 3 → `Week 03 — Data Exploration, Processing, and
+  Quality` and Sept 10 → `Week 04 — Probability and Sampling
+  Distributions`; Applied Sept 8 → `Sort it into a week` under "publishes no
+  dates for its weeks".
+- The Applied tree offered exactly one `FILE UNDER WEEK 02`, on the deck
+  under `Slides/`; the Week 01 deck and the Week 02 notebook, already under
+  their folders, offered none. The click put a `BY NAME` card in INBOX —
+  "Its name carries Week 2. Under Weeks/Week 02, it counts among the sources
+  of Part I: Deep Learning to Large Language Models." — and the row read
+  `PROPOSED — SEE INBOX`. APPROVE moved the deck and its extract under
+  `Weeks/Week 02/`, files row 24 kept its id with the extract fresh, audit
+  row 164 (`sort.move`, `proposedBy: by_name`), proposal 40 approved, jobs
+  still at 309, Part I's row `STALE — RESYNTHESIZE`. Biostatistics' tree
+  offered five: Week 01 once, Weeks 02 and 03 twice each, none clicked.
+- **The recording that existed.** Asked before the filing phase: today's
+  Biostatistics session (Sept 3, Week 3) had a Zoom link; the Sept 8–10
+  sessions had not happened. Through the Biostatistics form on the dev
+  build, the link in RECORDING, the date left at Sept 3, WEEK reading
+  `Week 03 — Data Exploration, Processing, and Quality`, the digest on:
+  the capture went `waiting` 1.5 s → `fetching` 3.0 s → `ready` 4.6 s on an
+  anonymous page with `ccUrl`, 111 KB, 910 cues, no names. Filed as
+  `Weeks/Week 03 — Data Exploration, Processing, and Quality/2026-09-03 —
+  Lecture.md` (81 KB, 2 h 06 m, 24 anchors from `00:13`), files row 36,
+  contribution row 4 on unit 8, audit row 165 (`lecture.added`), the form
+  reading `TRANSCRIPT FILED` with the digest and the Week 3 note "being
+  written". Digest job 310: 12.4 min, 5 turns, $2.99, 69.8k output tokens;
+  it named itself `Outliers, Missingness, and EDA in R`, wrote the 75 KB
+  HTML and 57 KB Markdown pair under `Study Guides/Sessions/`, the 24 KB
+  note at the contribution's corpus path, guides row 8, and the row's
+  summary. The Week 3 Structure row then offered `SYNTHESIZE GUIDE`.
+- **The Week 3 guide** (job 311, from the row): 20.9 min, 46 turns, $7.86,
+  116.7k output tokens, one `Write` and nineteen `Edit`s, 201 KB with the
+  six sections and no external request — the SVG namespace and two
+  `tinyurl` links the lecture named are the only URLs in it. `unit_context
+  (3, 8)` gave a one-entry manifest (the transcript), an empty files block
+  and the one note in the corpus block, so the prompt listed the note
+  alone; the job read it once, then found `Reading Material/Week 3 …`
+  (both), `Coding Material/Week 3 Coding Material/` (all three) and
+  `Slides/Biostatistics_Module3_Slides_class.pptx` through `--add-dir` and
+  read every extract. Guides row 9 (`unit:8`) fresh; the manifest names the
+  transcript only, so a changed reading leaves it fresh — M24's finding
+  again, on a week-numbered course. `unit_context(4, 37)` after the deck's
+  move: five entries, both decks and the notebook in the files block, two
+  notes; row 7 stale, waiting for the Sept 8 lecture.
+- Not run: any chat turn, a second digest or guide. Session cost: two
+  subscription jobs, $2.99 + $7.86 list-equivalent; nothing on credits.
+
+### Left as it is
+
+- The Sept 8–10 lectures: Fundamentals' Week 3, Applied's Week 3 (the Part
+  I guide, row 7, stays stale until it lands and the guide is rebuilt from
+  three notes with two decks and the notebook listed) and Design Studio's
+  Week 3, whose guide is a button away once its lecture is filed. Every
+  form resolves its day.
+- **A guide reads past its manifest.** Told one note, the Week 3 job read
+  five Week 3 files that sit outside `Weeks/` — the readings Canvas filed
+  under `Reading Material/`, the coding folder named `Week 3 Coding
+  Material`, and a deck whose name says `Module3` — and none is in the
+  manifest, so a corrected reading leaves the guide fresh. The by-name
+  action offers the two readings a way in (their rows read `FILE UNDER
+  WEEK 03`); the folder-named coding material and the module-named deck are
+  outside its rule, and on this course "Module 3" is week 3.
+- Biostatistics' five readings offer the action and were not moved: that
+  is the reader's call, one row at a time.
+- The emptied `Slides/` folder under Applied stays, with `0 FILES` on its
+  row: the app never removes a source folder.
+- The `PROPOSED — SEE INBOX` state is the row's own and lives in the hover
+  cluster, so it shows on hover until the tree refetches after approval.
+
+### Gotchas
+
+- The AX tree needs a warm-up after `raise`: the first `press` after a
+  raise found nothing; a `dump` first, then the press, worked every time.
+- A RESCAN that changes nothing refetches nothing, so it logs nothing —
+  the Post-M25 "seven lines per RESCAN" was a RESCAN that changed the index.
+- `perl -0pi` with `/e` needs `$new.$1`, not `$new$1`; a `cd` into
+  `src-tauri` persists across calls, so a second `cd src-tauri` fails.
+- The dev build's stderr goes wherever `npm run tauri dev` was started; a
+  file redirect is what made the claims count measurable.
+- A capture window on a UF cloud recording needed no sign-in for the third
+  time; the `waiting → fetching → ready` timings match §1's.
