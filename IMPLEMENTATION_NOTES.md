@@ -3735,3 +3735,49 @@ fallback branch applied.
   keystroke; zsh does not word-split an unquoted variable, so a `for` over
   "month 09" pairs needs explicit arguments.
 - Killing the app pid ended `tauri dev` and freed :1420 within seconds.
+
+## Post-M26 — Review fixes (2026-09-03)
+
+A two-agent review of the M26 changeset since 4aabfa6 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, four warnings, eight suggestions and one pre-existing finding both
+reviewers raised. Each was addressed as its own commit through
+`scripts/gate.sh`, which runs `cargo test` directly and `tsc` when
+frontend files are staged. What future sessions should know:
+
+- **An extract recorded for a row that is gone is removed.** The scan
+  takes no pipeline lock, so a source deleted between `stale_files` and
+  the write of its extract has no row when `record` runs; the update
+  matched nothing and the extract stayed as an orphan chat's search still
+  walked. `record` reads the row count and clears the mirror when no row
+  took it.
+- **The Canvas texts folder is never cleared as a source's mirror** (both
+  reviewers, pre-existing): a top-level source folder named `Canvas`
+  mirrors into the sync's own `.classhub/extracts/Canvas/`, and the
+  clearing had turned a write collision into a delete collision.
+  `remove_mirror` skips that folder; the write collision itself is
+  recorded here rather than built for, since no class folder is named
+  `Canvas`.
+- **`remove_mirror` is tested directly** (both reviewers): the path guard
+  (the empty path, `..`, `./`, an absolute path, a parent mid-path), a
+  top-level source whose parent is the root, a folder a sibling's extract
+  still uses, and the parked branch's clearing.
+- **The connection guard is released before the post-commit effects**;
+  the prune loop's unreachable clause went; the list is
+  `mirrors_to_clear`; `labelled`'s doc says it is read on the top-level
+  rows; `extract::mirror_entry` is the one writer of a mirror entry's
+  path, used by the sorter's move, its undo and the remover.
+- **A folder with a job in flight keeps its cluster**: the tree's gate
+  counts a running guide or exam job beside a built guide, applied once
+  where the controls are narrowed; SPEC §8.3 and the cluster's docstring
+  state the design.
+- **Not changed.** The gate's reach: a top-level folder named `Unit 1` or
+  `Module 0` gets no cluster from the tree, and chat's `trigger_synthesis`
+  by name is the route — the guide it builds puts the cluster on the row —
+  while a wider gate would serve a folder scheme none of the four courses
+  uses. A source replaced by a symlink reads as vanished and loses its
+  mirror with its row: the walk never followed symlinks, so a symlinked
+  source is not material, and a mirror kept for a row that is gone is the
+  orphan the feature removes.
+- **Tests**: 234 pass, three new; `npx tsc --noEmit` clean. Nothing was
+  pushed.

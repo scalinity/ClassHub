@@ -962,8 +962,9 @@ Triggered from chat, or from the `PRACTICE EXAM` action that sits beside `VIEW G
 every guide cluster of the workspace — a folder's row in Materials, a division's row in the
 Structure list, and the semester-master strip. A folder's row carries the cluster when the
 folder is named the way a division is — a kind and a number, `Module 1`, the read §7.2
-matches a folder to a division by — or once a guide has been built for it, so nothing built
-goes unreachable; a folder named for a kind of file or for the calendar (`Slides`,
+matches a folder to a division by — or once a guide has been built or a job is running for
+it, so nothing built or in flight goes unreachable; a folder named for a kind of file or for
+the calendar (`Slides`,
 `Syllabus`, `Weeks`) is storage, and what it holds reaches a guide through the division that
 reads it (§8.5). Chat's `trigger_synthesis` still takes any folder by name, because a
 folder asked for is the reader asking. Inputs: scope (a division, a folder, or the
