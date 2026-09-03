@@ -63,6 +63,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The card and the workspace header name the current division, which
       // is resolved from those same rows.
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      // A rescan can rename a division, and its name is the label on its
+      // guide and on the lectures that feed it.
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      void queryClient.invalidateQueries({ queryKey: ["contributions"] });
       break;
     case "announcements":
       // A Canvas sync recorded or updated what the professor said; the
