@@ -446,3 +446,76 @@ mod tests {
         assert!(by_id(1).current_unit.is_none(), "no divisions, no answer");
     }
 }
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// Migration 0012 against rows from before it: a guide and a job scoped
+    /// `unit:<name>` are rescoped to the row's id, one naming a division no
+    /// longer in the table keeps what it has, a folder scope is untouched,
+    /// and every row's label and range are filled in the same transaction.
+    #[test]
+    fn migration_0012_rescopes_old_style_rows() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| *m == UNIT_LABELS_MIGRATION)
+            .expect("the label migration is listed");
+        for sql in &MIGRATIONS[..at] {
+            conn.execute_batch(sql).expect("migration");
+        }
+        conn.pragma_update(None, "user_version", at as i64).expect("version");
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, source) VALUES
+             (24, 1, 2, 'week', 'Week 2 — Responsible AI', 'syllabus'),
+             (37, 4, 1, 'part', 'Part I: Foundations (Weeks 1-8)', 'syllabus')",
+            [],
+        )
+        .expect("units");
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest) VALUES
+             (1, 'unit:Week 2 — Responsible AI', 'Study Guides/Week 2 — Responsible AI.html', 1, '[]'),
+             (1, 'unit:Week 9', 'Study Guides/Week 9.html', 1, '[]'),
+             (3, 'Module 1', 'Study Guides/Module 1.html', 1, '[]')",
+            [],
+        )
+        .expect("guides");
+        conn.execute(
+            "INSERT INTO jobs (kind, class_id, scope, status, created_at, owner_pid) VALUES
+             ('module_guide', 1, 'unit:Week 2 — Responsible AI', 'succeeded', 1, 1),
+             ('practice', 4, 'unit:Part I: Foundations (Weeks 1-8)', 'succeeded', 1, 1),
+             ('module_guide', 1, 'unit:Week 9', 'failed', 1, 1)",
+            [],
+        )
+        .expect("jobs");
+
+        run_migrations(&mut conn).expect("migrate");
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("version");
+        assert_eq!(version as usize, MIGRATIONS.len());
+        let scopes = |table: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("SELECT scope FROM {table} ORDER BY id")).expect("prepare");
+            let rows = stmt.query_map([], |row| row.get(0)).expect("query");
+            rows.collect::<rusqlite::Result<Vec<String>>>().expect("rows")
+        };
+        assert_eq!(scopes("guides"), ["unit:24", "unit:Week 9", "Module 1"]);
+        assert_eq!(scopes("jobs"), ["unit:24", "unit:37", "unit:Week 9"]);
+        let mut stmt = conn
+            .prepare("SELECT id, number, first_week, last_week FROM units ORDER BY id")
+            .expect("prepare");
+        let labels = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows");
+        assert_eq!(labels, [(24, Some(2), None, None), (37, Some(1), Some(1), Some(8))]);
+    }
+}
