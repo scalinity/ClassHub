@@ -962,15 +962,31 @@ fn apply_weights(
             Err(e) => out.skipped.push(format!("{name} ({e})")),
         }
     }
+    // Best-effort: every entry above has committed on its own, so a failure
+    // here costs the summary one line and must not read as "not recorded".
+    match still_at_zero(conn, class_id) {
+        Ok(names) => {
+            out.unweighted = names
+                .into_iter()
+                .filter(|name| !claimed.contains(&name.to_ascii_lowercase()))
+                .collect();
+        }
+        Err(e) => eprintln!(
+            "syllabus: the categories still at zero for class {class_id} were not listed: {e:#}"
+        ),
+    }
+    Ok(out)
+}
+
+/// The class's categories whose weight nobody has stated yet, in list order.
+fn still_at_zero(conn: &Connection, class_id: i64) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT name FROM grade_categories WHERE class_id = ?1 AND weight = 0 ORDER BY id",
     )?;
-    out.unweighted = stmt
-        .query_map([class_id], |row| row.get::<_, String>(0))?
-        .filter_map(|name| name.ok())
-        .filter(|name| !claimed.contains(&name.to_ascii_lowercase()))
-        .collect();
-    Ok(out)
+    let names = stmt
+        .query_map([class_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(names)
 }
 
 /// A weight as the scan reported it: a number, or the `50%` the syllabus's
