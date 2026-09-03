@@ -116,8 +116,10 @@ pub fn fetch_caption(
             // The page's shape is undocumented and the window closes on
             // success, so this line is the only record of which route paid
             // off and how long each gate took.
+            // Quoted: both strings come off the page (a probe error carries
+            // its message), and a log line is no place for a raw newline.
             eprintln!(
-                "zoom capture: {state} after {:.1}s · page had: {}",
+                "zoom capture: {state:?} after {:.1}s · page had: {:?}",
                 started.elapsed().as_secs_f64(),
                 if last_found.is_empty() { "nothing recognizable" } else { &last_found }
             );
@@ -153,7 +155,7 @@ pub fn fetch_caption(
         Outcome::Caption(text) => {
             let _ = window.close();
             eprintln!(
-                "zoom capture: caption via [{last_found}] in {:.1}s — {}",
+                "zoom capture: caption via {last_found:?} in {:.1}s — {}",
                 started.elapsed().as_secs_f64(),
                 describe_caption(&text)
             );
@@ -162,7 +164,7 @@ pub fn fetch_caption(
         }
         Outcome::Media(media_url) => {
             eprintln!(
-                "zoom capture: no caption via [{last_found}] after {:.1}s — downloading the recording",
+                "zoom capture: no caption via {last_found:?} after {:.1}s — downloading the recording",
                 started.elapsed().as_secs_f64()
             );
             on_stage("No transcript published — downloading the recording…");
@@ -197,18 +199,24 @@ fn is_zoom_host(host: &str) -> bool {
         .any(|z| host == *z || host.ends_with(&format!(".{z}")))
 }
 
-/// Size, cue count and the first cue of a captured track, for the log line:
-/// whether Zoom sent speaker names is the one thing the filed transcript
-/// cannot show, because the merger attributes nothing it did not find.
+/// What the log says about a captured track: its size, how many cues the
+/// parser reads out of it, and the first cue as the parser sees it — speaker
+/// included when the track carried one, which is what the filed transcript
+/// cannot show once the merger has attributed nothing. (The probe's `named:`
+/// entry is the same signal for the `transcriptList` route.)
 fn describe_caption(text: &str) -> String {
-    let mut lines = text.lines();
-    let cues = text.lines().filter(|l| l.contains("-->")).count();
-    let first = lines
-        .find(|l| l.contains("-->"))
-        .and_then(|_| lines.next())
-        .map(|l| l.chars().take(80).collect::<String>())
-        .unwrap_or_default();
-    format!("{} bytes, {cues} cues, first cue: {first:?}", text.len())
+    let cues = crate::transcripts::parse(text);
+    let first: String = cues
+        .first()
+        .map(|cue| match &cue.speaker {
+            Some(who) => format!("{who}: {}", cue.text),
+            None => cue.text.clone(),
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(80)
+        .collect();
+    format!("{} bytes, {} cues, first cue: {first:?}", text.len(), cues.len())
 }
 
 fn stage_label(state: &str) -> &'static str {
@@ -563,6 +571,22 @@ mod tests {
         assert!(!is_zoom_host("evilzoom.com"));
         assert!(!is_zoom_host("zoom.us.example.com"));
         assert!(!is_zoom_host(""));
+    }
+
+    /// The log line counts what the parser will read, not every arrow in the
+    /// text, and shows the first cue with its speaker when there was one.
+    #[test]
+    fn describes_a_caption_as_the_parser_reads_it() {
+        let named = "WEBVTT\n\n00:00:01.500 --> 00:00:04.000\nEsra Adiyeke: The mean --> and the median.\n\n\
+            00:00:04.000 --> 00:00:06.000\nEsra Adiyeke: Next.\n";
+        let line = describe_caption(named);
+        assert!(line.contains("2 cues"), "{line}");
+        assert!(line.contains("first cue: \"Esra Adiyeke: The mean --> and the median.\""), "{line}");
+
+        let bare = "WEBVTT\n\n00:00:00.080 --> 00:00:03.360\nThey're muted.\n";
+        let line = describe_caption(bare);
+        assert!(line.contains("1 cues") && line.contains("first cue: \"They're muted.\""), "{line}");
+        assert!(describe_caption("").contains("0 cues"));
     }
 
     #[test]

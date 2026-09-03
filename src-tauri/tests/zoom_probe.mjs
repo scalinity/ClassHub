@@ -79,6 +79,8 @@ await scenario("A", async () => {
     out.text.includes("00:00:04.000 --> 00:00:04.000\nEsra Adiyeke: And the median."),
     JSON.stringify(out.text));
   check("A converts bare seconds", out.text.includes("00:00:09.000 --> 00:00:12.000"), JSON.stringify(out.text));
+  // The diagnostic that tells a nameless page from a merger that dropped names.
+  check("A counts the rows Zoom attributed", out.found.includes("named:3"), JSON.stringify(out.found));
 });
 
 // An untimed list keeps its turns as blank-line blocks.
