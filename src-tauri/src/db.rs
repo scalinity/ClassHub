@@ -193,6 +193,15 @@ pub struct DeadlineChip {
     pub due_at: String,
 }
 
+/// The division a course is in today (SPEC §8.5), in the course's own words.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentUnit {
+    pub name: String,
+    /// module | week | part — the course's word for it.
+    pub kind: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassCard {
@@ -222,6 +231,10 @@ pub struct ClassCard {
     /// ISO start of the final exam, when scheduled — the dashboard's
     /// countdown chips (SPEC §11).
     pub final_exam_start: Option<String>,
+    /// Where the course is today, resolved from `units` and never from
+    /// arithmetic (SPEC §8.5) — so a course that published no dates has none,
+    /// and the card says nothing rather than guessing.
+    pub current_unit: Option<CurrentUnit>,
     pub meetings: Vec<Meeting>,
 }
 
@@ -282,7 +295,9 @@ pub fn aibhs_root(conn: &Connection) -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
-pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
+/// `today` is YYYY-MM-DD from the client's clock — the same clock the card's
+/// meeting and deadline labels are measured against.
+pub fn list_classes(conn: &Connection, today: &str) -> Result<Vec<ClassCard>> {
     let root = aibhs_root(conn)?;
 
     let mut class_stmt = conn.prepare(
@@ -344,6 +359,10 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             )
             .optional()?;
         let current_grade = crate::grades::weighted_grade(conn, id)?;
+        let current_unit = crate::units::current_unit(conn, id, today)?.map(|unit| CurrentUnit {
+            name: unit.name,
+            kind: unit.kind,
+        });
         cards.push(ClassCard {
             id,
             display_name,
@@ -359,8 +378,43 @@ pub fn list_classes(conn: &Connection) -> Result<Vec<ClassCard>> {
             next_deadline,
             current_grade,
             final_exam_start,
+            current_unit,
             meetings,
         });
     }
     Ok(cards)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card carries the division the course is in today, in the course's
+    /// own words, and nothing for a course that published no dates.
+    #[test]
+    fn a_card_names_the_current_division() {
+        let conn = memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-cards-{}", std::process::id()));
+        set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        for (class_id, ordinal, kind, name, starts_on) in [
+            (3, 14, "week", "Week 14 \u{2014} Project preparation", Some("2026-11-19")),
+            (3, 15, "week", "Week 15 \u{2014} No Class (Thanksgiving Week)", Some("2026-11-26")),
+            (4, 1, "part", "Part I: Deep Learning (Weeks 1-8)", None),
+        ] {
+            conn.execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, starts_on, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'syllabus')",
+                rusqlite::params![class_id, ordinal, kind, name, starts_on],
+            )
+            .expect("unit");
+        }
+
+        let cards = list_classes(&conn, "2026-11-26").expect("cards");
+        let by_id = |id: i64| cards.iter().find(|c| c.id == id).expect("seeded class");
+        let now = by_id(3).current_unit.as_ref().expect("Biostatistics is dated");
+        assert_eq!(now.name, "Week 15 \u{2014} No Class (Thanksgiving Week)");
+        assert_eq!(now.kind, "week");
+        assert!(by_id(4).current_unit.is_none(), "no dates, no answer");
+        assert!(by_id(1).current_unit.is_none(), "no divisions, no answer");
+    }
 }

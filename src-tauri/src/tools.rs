@@ -333,7 +333,9 @@ pub fn definitions() -> Value {
 /// errors — the model can correct a bad path or a thin query on its own.
 pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Outcome {
     let result = match name {
-        "get_overview" => with_conn(app, |conn| overview_text(conn, true)).map(Outcome::ok),
+        "get_overview" => {
+            with_conn(app, |conn| overview_text(conn, true, ctx.today_iso)).map(Outcome::ok)
+        }
         "list_material" => with_conn(app, |conn| list_material(conn, input)),
         "search_material" => search_material(app, input),
         "read_material" => with_conn(app, |conn| read_material(conn, input)),
@@ -476,8 +478,9 @@ fn waiting_line(pending_moves: i64, pending_deadlines: i64) -> Option<String> {
 }
 
 /// The hub in text. `detailed` adds per-class inventories and guide dates; the
-/// compact form is what rides in the system prompt.
-pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
+/// compact form is what rides in the system prompt. `today_iso` is what each
+/// class's current division is resolved against (SPEC §8.5).
+pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Result<String> {
     let root = crate::db::aibhs_root(conn)?;
     let classes = class_rows(conn)?;
     let open_deadlines: i64 = conn.query_row(
@@ -558,6 +561,11 @@ pub fn overview_text(conn: &Connection, detailed: bool) -> Result<String> {
                 meetings.join(", ")
             }
         ));
+        // Where the course is today, from its own schedule; a course that
+        // published no dates gets no line rather than a computed week.
+        if let Some(unit) = crate::units::current_unit(conn, class.id, today_iso)? {
+            out.push_str(&format!("Now: {}\n", unit.name));
+        }
         if let (Some(start), Some(end)) = (&exam_start, &exam_end) {
             out.push_str(&format!("Final exam: {start} to {end}\n"));
         }
@@ -1654,7 +1662,42 @@ pub fn format_size(bytes: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::waiting_line;
+    use super::{overview_text, waiting_line};
+
+    /// Each dated course's block names where it is today; a course that
+    /// published no dates gets no such line rather than a computed one.
+    #[test]
+    fn the_overview_names_the_current_division_per_class() {
+        let conn = crate::db::memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-overview-{}", std::process::id()));
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        for (class_id, ordinal, kind, name, starts_on) in [
+            (3, 2, "week", "Week 2 \u{2014} Study Designs", Some("2026-08-27")),
+            (3, 3, "week", "Week 3 \u{2014} Data Exploration", Some("2026-09-03")),
+            (4, 1, "part", "Part I: Deep Learning (Weeks 1-8)", None),
+        ] {
+            conn.execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, starts_on, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'syllabus')",
+                rusqlite::params![class_id, ordinal, kind, name, starts_on],
+            )
+            .expect("unit");
+        }
+
+        let text = overview_text(&conn, false, "2026-09-02").expect("overview");
+        let block = |name: &str| {
+            let start = text.find(&format!("## {name}")).expect("class block");
+            let rest = &text[start + 3..];
+            let end = rest.find("\n## ").map(|at| at + 3).unwrap_or(rest.len());
+            text[start..start + end].to_string()
+        };
+        assert!(
+            block("Biostatistics for AI").contains("\nNow: Week 2 \u{2014} Study Designs\n"),
+            "{text}"
+        );
+        assert!(!block("Applied Generative AI in Medicine").contains("Now:"), "{text}");
+        assert!(!block("Fundamentals of AI in Medicine I").contains("Now:"), "{text}");
+    }
 
     /// The one new line of user-facing prose in the overview: nothing when
     /// nothing waits, each queue named only when it holds something, both

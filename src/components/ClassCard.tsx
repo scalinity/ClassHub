@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 import { Card } from "@/components/ui/card";
-import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
+import { CLASS_ACCENTS, currentUnitLabel, type ClassInfo } from "@/lib/classes";
 import { formatPercent } from "@/lib/grades";
 import {
   formatDueDate,
@@ -90,6 +90,14 @@ export function ClassCard({
             </span>
           )}
         </div>
+        {/* Where the course is in its own sequence (SPEC §8.5). One line that
+            truncates rather than wraps: the deadline under it is the more
+            urgent line and keeps its space. */}
+        {info.currentUnit && (
+          <p className="mt-1.5 truncate text-[11px] font-medium tracking-[0.06em] text-(--accent)">
+            {currentUnitLabel(info.currentUnit.name)}
+          </p>
+        )}
         {info.nextDeadline && (
           <p className="mt-1.5 flex items-baseline gap-2 text-[11.5px]">
             <span className="shrink-0 font-medium tracking-[0.06em] text-(--accent)">

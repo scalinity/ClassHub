@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { todayIso } from "./schedule";
+
 export interface Meeting {
   weekday: number; // 1=Mon .. 7=Sun
   startTime: string; // "16:05"
@@ -27,11 +29,28 @@ export interface ClassInfo {
   currentGrade: number | null;
   /** ISO start of the final exam, when scheduled (dashboard countdown chip). */
   finalExamStart: string | null;
+  /**
+   * Where the course is today, in its own words (SPEC §8.5) — resolved from
+   * its published schedule, never computed, so a course that publishes no
+   * dates has none.
+   */
+  currentUnit: { name: string; kind: "module" | "week" | "part" } | null;
   meetings: Meeting[];
 }
 
+/** Today rides along so the current division is measured against the same
+ *  clock as the card's meeting and deadline labels. */
 export function listClasses(): Promise<ClassInfo[]> {
-  return invoke<ClassInfo[]>("list_classes");
+  return invoke<ClassInfo[]>("list_classes", { today: todayIso() });
+}
+
+/** A division's own separator between its number and its topic — an em or en
+ *  dash, a spaced hyphen, or the colon a Part uses. */
+const DIVISION_SEPARATOR = /\s+[—–-]\s+|:\s+/;
+
+/** `Week 3 — Data Exploration` → `WEEK 3 · DATA EXPLORATION`: the card's line. */
+export function currentUnitLabel(name: string): string {
+  return name.replace(DIVISION_SEPARATOR, " · ").toUpperCase();
 }
 
 /** Class color name -> the CSS accent token (per-card `--accent` pattern). */

@@ -40,9 +40,13 @@ export interface UnitGuideControls {
  */
 export function StructureSection({
   classId,
+  currentUnit,
   controls,
 }: {
   classId: number;
+  /** The name of the division the course is in today (SPEC §8.5), unique
+   *  per class — null where the course published no dates. */
+  currentUnit: string | null;
   controls: UnitGuideControls;
 }) {
   const { data: units, error } = useQuery({
@@ -163,6 +167,7 @@ export function StructureSection({
                 <UnitRow
                   key={unit.id}
                   unit={unit}
+                  current={unit.name === currentUnit}
                   distilled={distilledPerUnit.get(unit.id) ?? 0}
                   controls={controls}
                   onSynthesize={synthesize}
@@ -195,11 +200,14 @@ function SyncNotes({ outcome }: { outcome: ClassOutcome | undefined }) {
 
 function UnitRow({
   unit,
+  current,
   distilled,
   controls,
   onSynthesize,
 }: {
   unit: Unit;
+  /** This is the division the course is in today. */
+  current: boolean;
   distilled: number;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
@@ -216,7 +224,10 @@ function UnitRow({
   const hasGuideCluster = canBuild || guide !== undefined;
 
   return (
-    <li className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60">
+    <li
+      aria-current={current ? "true" : undefined}
+      className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60"
+    >
       <span
         aria-hidden
         className="w-5 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground/60"
@@ -224,6 +235,14 @@ function UnitRow({
         {unit.ordinal}
       </span>
       <span className="min-w-0 flex-1 truncate text-[13px]">{unit.name}</span>
+      {/* The list marks where the course is; it does not scroll there. A
+          still dot, because nothing is running — the pulse means a job. */}
+      {current && (
+        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+          <span aria-hidden className="size-1.5 rounded-full bg-(--accent)" />
+          NOW
+        </span>
+      )}
       {distilled > 0 && (
         <span
           title={

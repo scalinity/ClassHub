@@ -1786,3 +1786,91 @@ individual commits. What future sessions should know:
   build launched beside the installed app with the dashboard and the Applied
   Generative AI workspace rendering as they were left (no card, no badge).
   Nothing was pushed: the repo has no remote.
+
+## M18 — This week (2026-09-02)
+
+### What was built
+
+- **The current division.** `units::current_week` picks, from the `WeekSlot`s
+  `week_slots` already builds for the Add lecture form, the slot whose published
+  date is the latest on or before today — a week runs from its meeting to the
+  next one's — and `units::current_unit` loads that slot's unit, so a
+  Part-numbered course would resolve to the Part whose range holds the week
+  through the same join. No slot is dated for Applied Generative AI (its ranges
+  name weeks, not days), so it answers `None`, as does any day before a course's
+  first published date and any string that is not a date. Past the last dated
+  week the last one stays current: `ends_on` is NULL on all 49 rows, so nothing
+  published says a course has ended. `list_units` now reads rows through
+  `read_unit`, which `unit_by_id` shares.
+- **On the card.** `db::ClassCard` carries `current_unit: Option<CurrentUnit>`
+  (`name`, `kind`), and `list_classes(conn, today)` takes the day from the client
+  the way `run_scan` and `chat::send` do — `listClasses()` sends `todayIso()`,
+  so the line is measured against the same clock as the card's `IN 6 DAYS` and
+  `DUE` labels. The card renders `currentUnitLabel(name)` — the name's own
+  separator (em or en dash, spaced hyphen, or a Part's colon) becomes a middle
+  dot and the whole line is uppercased — as one mono accent line under the
+  meeting row, `truncate` so it never takes a second line from the deadline.
+- **In the workspace.** `ClassWorkspace` subscribes to `["classes"]` and reads
+  its own card out of the live result rather than the snapshot the dashboard
+  handed over, because a syllabus scan run from the workspace rewrites the
+  divisions. The eyebrow gains the division's name after the meeting time,
+  keeping its own dash inside the dot-separated line. `StructureSection` takes
+  the current division's name (unique per class) and `UnitRow` marks the match
+  with a still accent dot and `NOW` after the name, plus `aria-current`; the
+  list does not scroll to it. The `units` hub change now also invalidates
+  `["classes"]`, since the card and the header resolve from those rows.
+- **In chat.** `overview_text(conn, detailed, today_iso)` prints `Now: <name>`
+  after each dated class's `Meets` line; the system prompt and `get_overview`
+  both pass the turn's date.
+
+### Verified
+
+- `cargo test`: 147 pass, three new. The date table in `units.rs` runs the
+  seeded syllabi through `current_unit` on the seeded class ids: Aug 19 → none
+  and Aug 20 → Week 1 for Biostatistics (the boundary); Sep 2 → Week 2 for
+  Fundamentals and Biostatistics with Week 3 from Sep 3; Nov 24 → Week 13 of
+  Fundamentals (arithmetic says 14) and Dec 1 → Week 14; Nov 26 → `Week 15 — No
+  Class (Thanksgiving Week)` and Dec 4 → `Reading Days — No Class (Reading
+  Days)`; Dec 20 → Week 14 still; Applied Generative AI → none on both days;
+  `"today"` → none; the undated Design Studio fixture → none. `db.rs` checks the
+  card's `{name, kind}` on Nov 26 and `None` for the Part course and a class
+  with no rows; `tools.rs` checks the `Now:` line lands in the Biostatistics
+  block only. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 23085) beside the installed app, through the
+  accessibility driver: the dashboard read `WEEK 2 · RESPONSIBLE AI, ETHICS, AND
+  GOVERNANCE`, `WEEK 2 · HIPERGATOR AND NAVIGATOR I` and `WEEK 2 · STUDY
+  DESIGNS` under the three meeting rows, above each `DUE` line, and no line on
+  Applied Generative AI. The Biostatistics workspace eyebrow read `THU 11:45
+  AM–1:40 PM · WEEK 2 — STUDY DESIGNS · JAX1 231 · 2 CR` and the Structure row
+  `Week 2 — Study Designs` carried `NOW` beside `AUG 27`; the Applied Generative
+  AI eyebrow was unchanged and its three Parts carried no mark. Screenshots of
+  all three states were taken and read.
+- No job ran, no chat turn was sent (pay-per-token), and no scan or sync was
+  run: the chat line is covered by its test, and the `units` → `["classes"]`
+  invalidation by reading, since exercising it needs a scan.
+
+### Left as it is
+
+- The `today` the cards were fetched with lives in the cached `["classes"]`
+  result, so across midnight the week line lags until the next refetch — window
+  focus or any hub change. The meeting chip recomputes at render and would be
+  ahead of it for that interval.
+- Opening a workspace now refetches `list_classes` (the query with the per-class
+  inbox reads) on mount. Cheap at four classes; noted because `query.ts` already
+  calls it the expensive one.
+- A card line longer than the card truncates with an ellipsis and, under the
+  card's full-surface button, has no tooltip to show the rest — the same is
+  true of every badge title on the card today.
+
+### Gotchas
+
+- The dev window is only 734 px tall on this machine, so the cards sit below
+  the fold: after `ax <pid> raise`, `osascript -e 'tell application "System
+  Events" to key code 119'` (End) scrolls the *frontmost* app without naming a
+  process, so it lands on the raised dev build and not the installed one.
+- `screencapture -x -l <CGWindowID>` shoots one window; the id comes from
+  `CGWindowListCopyWindowInfo` filtered by pid (a ten-line Swift in the
+  scratchpad), since the two builds share a window title.
+- In zsh, `S="perl splice.pl"; $S …` runs a command named `perl splice.pl` —
+  no word splitting on an unquoted scalar. A function does what the alias was
+  meant to.

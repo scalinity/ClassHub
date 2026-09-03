@@ -20,7 +20,7 @@ import { InboxQueue } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { StructureSection } from "@/components/Structure";
-import { CLASS_ACCENTS, type ClassInfo } from "@/lib/classes";
+import { CLASS_ACCENTS, listClasses, type ClassInfo } from "@/lib/classes";
 import {
   formatGeneratedAt,
   listGuides,
@@ -159,11 +159,23 @@ export function ClassWorkspace({
     "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
+  // Where the course is today (SPEC §8.5), read from the live classes query
+  // rather than the snapshot the dashboard handed over: a syllabus scan run
+  // from this workspace rewrites the divisions, and the `units` hub change
+  // refetches ["classes"], so the header and the Structure marker follow it.
+  const { data: classes } = useQuery({
+    queryKey: ["classes"],
+    queryFn: listClasses,
+  });
+  const currentUnit = (classes?.find((c) => c.id === info.id) ?? info)
+    .currentUnit;
+
   const meetingLine = [
     ...info.meetings.map(
       (m) =>
         `${weekdayLabel(m.weekday)} ${formatTimeRange(m.startTime, m.endTime)}`,
     ),
+    ...(currentUnit ? [currentUnit.name] : []),
     info.room,
     `${info.credits} CR`,
   ].join(" · ");
@@ -226,6 +238,7 @@ export function ClassWorkspace({
 
       <StructureSection
         classId={info.id}
+        currentUnit={currentUnit?.name ?? null}
         controls={{
           guides: guideMap,
           activeScopes,

@@ -42,10 +42,11 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> anyhow::Result<std::path::Path
     app.path().app_data_dir().context("resolving app data dir")
 }
 
+/// `today` is client-formatted YYYY-MM-DD, for the current division (SPEC §8.5).
 #[tauri::command(async)]
-fn list_classes(state: tauri::State<Db>) -> Result<Vec<db::ClassCard>, String> {
+fn list_classes(state: tauri::State<Db>, today: String) -> Result<Vec<db::ClassCard>, String> {
     let conn = db::lock(&state.0);
-    db::list_classes(&conn).map_err(|e| format!("{e:#}"))
+    db::list_classes(&conn, &today).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]

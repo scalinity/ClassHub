@@ -635,7 +635,7 @@ pub fn send(
         // SPEC §9: identity, today's date, and the injected hub context.
         let system = SYSTEM_TEMPLATE
             .replace("{today}", today)
-            .replace("{context}", &crate::tools::overview_text(conn, false)?);
+            .replace("{context}", &crate::tools::overview_text(conn, false, today_iso)?);
         insert_message(
             conn,
             session_id,

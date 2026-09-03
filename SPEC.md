@@ -800,6 +800,18 @@ rather than from arithmetic: weeks are not uniformly spaced (§1), so a date can
 into a week number. Where a course publishes no schedule the Add lecture form asks, defaulting
 to the nearest week by date.
 
+The same resolution, run against today instead of a lecture's date, is what tells the app where
+a course *is*. Its **current division** is the week whose published start is the latest on or
+before today — a week runs from its meeting to the next one's, so that is the week containing
+today — resolved through the same slots, so for a Part-numbered course it is the Part whose
+range holds that week. One query answers for every reader: the class card, the workspace
+eyebrow, the Structure list (a `NOW` mark on the row; the list marks it and does not scroll to
+it) and the chat overview's `Now:` line. A course that published no dates has no current
+division and the app shows nothing, because the only alternative is a week from arithmetic;
+Applied Generative AI, whose Parts name week ranges and no days, is that course today. Nothing
+published says when a course ends — no scan has ever filled `ends_on` — so past its last dated
+week the last one stays current.
+
 This is worth stating because the obvious alternative is wrong here. Asking the digest to
 segment a lecture across units would buy nothing — no division is finer than a meeting, so
 every span it produced beyond the first would be an error — and a wrong boundary is the one
@@ -848,7 +860,8 @@ its meetings.
   `tool_result` → continue until end_turn. Stream text deltas and tool-call chips to the
   frontend. Persist full content blocks to `chat_messages`.
 - **System prompt**: identity ("ClassHub agent"), today's date, injected context (classes,
-  schedule, open deadlines, staleness summary), retrieval guidance (search extracts first;
+  schedule, each class's current division, open deadlines, staleness summary), retrieval
+  guidance (search extracts first;
   cite file paths), and write-action policy (file moves are proposals only).
 - **Read tools** (Milestone 7):
   - `get_overview()` — classes, schedule, upcoming deadlines, guide freshness
@@ -914,9 +927,14 @@ and apply it. Non-negotiable per project owner.
   bundled variable font (no CDN fetches).
 - Per-class accent colors: blue, orange, green, amber (matching the enrollment screenshot's
   card edge bars). Class cards show a left accent bar, `display_name` only (never course
-  codes), next meeting, staleness, inbox and proposal badges, current grade, nearest deadline.
+  codes), next meeting, the current division (§8.5) as one mono accent line in the course's
+  own words — `WEEK 3 · DATA EXPLORATION, PROCESSING, AND QUALITY`, and a "No Class" week
+  exactly as the syllabus wrote it — staleness, inbox and proposal badges, current grade,
+  nearest deadline. The division line truncates rather than wraps, so the deadline under it
+  keeps its space; a course with no current division shows no line.
 - **Views**: Dashboard (4 class cards + deadlines strip + exam countdowns + job status pill)
-  · Class Workspace (accent header; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
+  · Class Workspace (accent header whose eyebrow names the current division after the
+  meeting time; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in Browser / Show in Finder)
   · Chat sidebar (global, overlays right side, keyboard shortcut) · Job Center (bottom bar
   pill expanding to a panel with live logs) · Settings.
@@ -961,9 +979,10 @@ and apply it. Non-negotiable per project owner.
   renames that folder: a hand-picked name is not worth a second database.
 - Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
   the streamed-escape decoder, the job-output array and object parsers, the HTML stripper,
-  the source fingerprint diff, and the caption parser and cue merger (§7.1 — a transcript
-  shredded into fake speakers, or left unmerged, fails quietly and downstream). UI and job
-  plumbing are exercised by running the app.
+  the source fingerprint diff, the caption parser and cue merger (§7.1 — a transcript
+  shredded into fake speakers, or left unmerged, fails quietly and downstream), and the
+  current-division resolution against the seeded syllabi (§8.5 — a wrong week on a card is
+  silent). UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1114,7 +1133,7 @@ Mark the checkbox when the acceptance criteria pass.
   longer demotes it, a vanished inbox file leaves no card behind, and a Canvas placement can be
   overridden by an explicit content sort.
 
-- [ ] **M18 — This week.** (`milestones/M18-this-week.md`)
+- [x] **M18 — This week.** (`milestones/M18-this-week.md`)
   The current division per class, resolved from `units` and never from arithmetic, on the card,
   the workspace header, the Structure list and the chat overview.
   *Accepted when:* the dashboard names each dated course's current week for today's date, a
