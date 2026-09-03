@@ -24,6 +24,9 @@ export interface Deadline {
   notes: string | null;
   status: "open" | "done";
   source: DeadlineSource;
+  /** Set when the Canvas sync tracks this row: its due date follows Canvas
+   *  and a submission marks it done, whoever first put it on the list. */
+  canvasAssignmentId: string | null;
 }
 
 /** Who put this on the list: added by hand, by chat, by a syllabus scan, or
@@ -41,16 +44,28 @@ const DEADLINE_SOURCE_COPY: Record<
   agent: { label: "VIA CHAT", title: "Added in chat" },
 };
 
+/** The badge for a deadline the Canvas sync tracks — the same words as the
+ *  grade item's tag, because the same thing is true: an edit here lasts
+ *  until the next sync. It outranks the source, since a syllabus row Canvas
+ *  has claimed is Canvas's now. */
+const CANVAS_TRACKED_COPY = {
+  label: "VIA CANVAS",
+  title:
+    "Tracked from Canvas — its due date follows the next sync, and handing the assignment in marks it done",
+};
+
 /** The badge for a source, or null where there is nothing to say.
  *
  *  `manual` earns no badge — the reader added it and knows. A source this
  *  build does not recognize earns none either: indexing the record directly
  *  threw on the unknown key and took the whole row's render down with it, and
  *  a row that renders without a chip is better than a list that does not
- *  render at all. */
+ *  render at all. A row Canvas tracks says so whatever its source. */
 export function deadlineSourceBadge(
   source: DeadlineSource,
+  canvasAssignmentId: string | null = null,
 ): { label: string; title: string } | null {
+  if (canvasAssignmentId !== null) return CANVAS_TRACKED_COPY;
   return source === "manual" ? null : (DEADLINE_SOURCE_COPY[source] ?? null);
 }
 

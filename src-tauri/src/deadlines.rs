@@ -111,6 +111,10 @@ pub struct DeadlineInfo {
     /// approved, so a due date that turns out wrong can be traced to the reader
     /// that produced it.
     pub source: String,
+    /// Set when the Canvas sync tracks this row (SPEC §7.2): its due date
+    /// follows Canvas and a submission closes it, whatever `source` says
+    /// about who first put it on the list.
+    pub canvas_assignment_id: Option<String>,
 }
 
 /// Every deadline across every class, due-soonest first — the dashboard strip,
@@ -118,7 +122,7 @@ pub struct DeadlineInfo {
 pub fn list_deadlines(conn: &Connection) -> Result<Vec<DeadlineInfo>> {
     let mut stmt = conn.prepare(
         "SELECT d.id, d.class_id, c.display_name, c.color, d.title, d.kind,
-                d.due_at, d.notes, d.status, d.source
+                d.due_at, d.notes, d.status, d.source, d.canvas_assignment_id
          FROM deadlines d JOIN classes c ON c.id = d.class_id
          ORDER BY d.due_at, d.id",
     )?;
@@ -135,6 +139,7 @@ pub fn list_deadlines(conn: &Connection) -> Result<Vec<DeadlineInfo>> {
                 notes: row.get(7)?,
                 status: row.get(8)?,
                 source: row.get(9)?,
+                canvas_assignment_id: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

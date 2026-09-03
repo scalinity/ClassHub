@@ -414,12 +414,12 @@ function DeadlineRow({
           {deadline.kind.toUpperCase()}
         </span>
       )}
-      {deadlineSourceBadge(deadline.source) && (
+      {deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId) && (
         <span
-          title={deadlineSourceBadge(deadline.source)?.title}
+          title={deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId)?.title}
           className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
         >
-          {deadlineSourceBadge(deadline.source)?.label}
+          {deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId)?.label}
         </span>
       )}
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
