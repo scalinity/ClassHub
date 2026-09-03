@@ -10,3 +10,5 @@
 
 - Commit only after all work in the current milestone is completed and its acceptance
   criteria are verified. Do not make partial or mid-milestone commits.
+- After a milestone's commits are in — review fixes included — run `npm run install-app`, so
+  `/Applications/ClassHub.app` is the accepted commit. `CLAUDE.md` carries the session facts.

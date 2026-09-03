@@ -1275,10 +1275,11 @@ and apply it. Non-negotiable per project owner.
   transcription (§7.1) — and one of them happens to be written in Python. That is a property
   of the tool, not of this stack: file in, file out, no shared runtime. The rule is about what
   this project is written in, and it stays absolute there.
-- Dev loop only: `npm run tauri dev`. Never run production builds (`tauri build`) in sessions.
-  The one production build is `npm run install-app` (`scripts/install-app.sh`), which the owner
-  runs after a milestone lands: it quits the installed app, builds the bundle, replaces
-  `/Applications/ClassHub.app` and relaunches it on the current commit.
+- Dev loop: `npm run tauri dev`. The one production build is `npm run install-app`
+  (`scripts/install-app.sh`), run at the end of every milestone or changeset once its commits
+  are in: it quits the installed app, builds the bundle, replaces `/Applications/ClassHub.app`
+  and relaunches it on the current commit, so the app the semester runs on never trails the
+  repository. `tauri build` is never run any other way.
 - Rust: `anyhow` for errors in commands, typed event payloads (serde), no `unwrap()` outside
   tests/startup.
 - Commits: small, per-milestone; no AI attribution lines; existing git config untouched.
@@ -1346,9 +1347,10 @@ Mark the checkbox when the acceptance criteria pass.
 1. Start a fresh session. Read `SPEC.md` in full, then the milestone section.
 2. Read the frontend-design skill if the milestone touches UI (all except M4).
 3. Implement only that milestone. Verify with `npm run tauri dev` against the real AIBHS folder.
-4. Tick the milestone checkbox in §14 (the only permitted SPEC.md edit) and commit.
-5. Run `npm run install-app` (owner). The installed app is the one the semester runs on, and a
-   milestone that only exists in `target/debug` has not shipped.
+4. Tick the milestone checkbox in §14, update the sections whose design changed, and commit.
+5. Review the changes, land the fixes, then run `npm run install-app`. The installed app is
+   the one the semester runs on, and a milestone that only exists in `target/debug` has not
+   shipped.
 
 ---
 
