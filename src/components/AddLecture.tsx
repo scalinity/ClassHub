@@ -47,7 +47,10 @@ const SOURCE_HINT: Record<SourceKind, { icon: typeof Link2; text: string }> = {
  * It also settles the one decision with judgement in it: which week the session
  * belongs to. That is what maps the lecture to a division of the course
  * (SPEC §8.5), so the form resolves it from the course's own schedule, shows
- * what it resolved to and what that division is, and lets it be changed.
+ * what it resolved to and what that division is, and lets it be changed. A
+ * course that publishes no dates for its weeks — Applied Generative AI's Parts
+ * name week ranges and no days — gets no default and is asked outright, each
+ * week's option naming the Part it feeds.
  */
 export function AddLecture({
   classId,
@@ -111,6 +114,13 @@ export function AddLecture({
   const slots = weeks?.slots ?? [];
   const resolvedWeek = week === null ? (weeks?.defaultWeek ?? null) : week;
   const slot = slots.find((s) => s.week === resolvedWeek) ?? null;
+  // A course that groups its weeks — Applied Generative AI's three Parts —
+  // names none of them, so its folders are bare `Week NN` and the option has
+  // to say what the week feeds. A week-numbered course's folder already does.
+  const grouped = new Set(slots.map((s) => s.unitId)).size < slots.length;
+  // Resolved to no default: the course published no dates to measure the
+  // session against, so the week is asked for outright (SPEC §8.5).
+  const asked = slots.length > 0 && weeks?.defaultWeek === null;
 
   const submit = () => {
     setError(null);
@@ -210,7 +220,7 @@ export function AddLecture({
                   </option>
                   {slots.map((s) => (
                     <option key={s.week} value={s.week}>
-                      {s.folder}
+                      {grouped ? `${s.folder} · ${s.unitName}` : s.folder}
                     </option>
                   ))}
                 </select>
@@ -230,6 +240,8 @@ export function AddLecture({
                 </>
               ) : slots.length === 0 ? (
                 "This course publishes no weekly schedule, so ClassHub can't place the session itself. It goes to the inbox and the sorter proposes a week from what the lecture covers."
+              ) : asked ? (
+                "This course publishes no dates for its weeks, so pick the one the session fell in. Left unpicked, it goes to the inbox and the sorter proposes a week."
               ) : (
                 "Pick the week this session belongs to. It goes to the inbox until you do, and the sorter proposes one from what the lecture covers."
               )}

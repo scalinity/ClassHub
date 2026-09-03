@@ -47,14 +47,25 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   WebVTT of 755 sentence-level cues, and the whole capture took 6.1 s. That track carries
   **no speaker names**: the room's one Zoom account recorded everyone, so for a lecture-hall
   recording the professor/student distinction is absent whichever route produced the text,
-  and the digest says so in its header rather than inventing it.
+  and the digest says so in its header rather than inventing it. Measured again 2026-09-03 on
+  two Applied Generative AI recordings: the Aug 25 session exposed no `ccUrl` and the store's
+  `transcriptList` instead — 1,032 cues, every one carrying a name, ready 3.1 s after the
+  window opened — so a room whose speakers sit on their own accounts does carry names; the
+  Sept 1 session went the `ccUrl` route in 4.5 s with 629 unnamed cues, the first at 01:23 of
+  a 3 h 17 m recording, because the caption opens where the captioning did and the transcript
+  says nothing before it.
 - **What one real session costs.** Measured 2026-09-02 on that 2 h 36 m recording, Opus at
   `xhigh`, list-price equivalents from the CLI's own accounting: the digest (§8.4) ran
   12.4 min over 5 turns for $3.06, writing 69k output tokens — the 75 KB session HTML fit in
   one `Write`, so the output cap was never reached; the Week 2 unit guide (§8.1), built from
   that one corpus note, ran 18.2 min over 34 turns for $5.59, 103k output tokens through the
   chunked Write-then-Edit pattern. Both draw on the subscription's rolling limits, not on
-  credits.
+  credits. Measured again 2026-09-03 on Applied Generative AI, same model and effort: the
+  digest of the named 2 h 56 m Aug 25 transcript ran 15.5 min over 8 turns for $3.98 (81k
+  output tokens), the digest of the Sept 1 caption's 1 h 52 m stretch 8.8 min over 5 turns for
+  $2.11 (49k), and the Part I guide built from those two notes ran 21.5 min over 36 turns for
+  $7.86, 118k output tokens, 194 KB through one `Write` and ten `Edit`s — reading each note
+  once, the week folders' deck and notebook, and neither transcript.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
@@ -638,12 +649,20 @@ Speaker attribution is a guess with a corroboration rule: a multi-word `Name:` p
 as a display name, but a single-word one has to recur before it counts, because `Danny:` and
 `Remember:` are the same shape in isolation and only differ across a whole file.
 
-**Filing** puts every transcript at `<Class>/Weeks/Week NN — <topic>/<date> — <title>.md`.
+**Filing** puts every transcript at `<Class>/Weeks/Week NN — <topic>/<date> — <title>.md`, the
+topic being the week's own name where the course names its weeks; a course that groups them
+under Parts and names none files into a bare `Weeks/Week NN/`.
 
 A lecture is filed by *when it happened*, and for these four courses that also settles what it
 counts as covering (§8.5). The week comes from the course's own schedule
 (§7.2), because breaks make arithmetic wrong: Fundamentals runs Week 13 on Nov 17 and Week 14
-on Dec 1. The Add lecture form shows the resolved week and lets it be corrected.
+on Dec 1. The Add lecture form shows the resolved week and lets it be corrected. A course whose
+divisions name week ranges and no days — Applied Generative AI — has sixteen weeks to file into
+and no date to resolve one against, so the form asks outright, each week's option naming the
+Part it feeds, and files nowhere until one is picked. Two lectures of one Part on one date need
+titles of their own: a note is keyed by its division and its transcript's name (§8.5), so a
+filing whose note path another transcript of the class already holds is refused before the
+capture, and the refusal names the title field as the way out.
 
 A transcript whose week cannot be resolved lands in `_Inbox/` and the §10 sorter proposes one.
 A transcript's *name* carries no routing signal — they are all a date and "Lecture" — so the
@@ -1018,6 +1037,13 @@ A long lecture covers many topics;
 the anchors are what let a guide cite the right stretch of one, which is a different problem
 from splitting it across units and is already solved by §8.4's anchored key points.
 
+A division holds one note per transcript name. Within a week folder the never-overwrite rule
+(§7.1) already keeps two transcripts apart, and the note follows the suffixed name; a Part spans
+several week folders, so a transcript whose name another of the Part's transcripts already
+carries would derive that transcript's note path, and the second digest would write over the
+first note with both rows naming it. It is refused instead — at the filing, before the capture,
+and at the sorter's move, inside its transaction — and a title of its own is the way out.
+
 **A unit guide's sources** are therefore: files under the unit's folder when it has one — which
 is what `units.rel_path` records (§7.2) — files Canvas attributed to it (§7.2), and its corpus
 notes, each listed with the transcript path so the job can open the professor's exact words when
@@ -1260,9 +1286,10 @@ and apply it. Non-negotiable per project owner.
   the source fingerprint diff, the caption parser and cue merger (§7.1 — a transcript
   shredded into fake speakers, or left unmerged, fails quietly and downstream), and the
   current-division resolution against the seeded syllabi (§8.5 — a wrong week on a card is
-  silent), and a division's identity across a rescan (§7.2 — a forked row and a shifted week
-  number are both silent until a guide or a filing goes wrong). UI and job plumbing are
-  exercised by running the app.
+  silent), a division's identity across a rescan (§7.2 — a forked row and a shifted week
+  number are both silent until a guide or a filing goes wrong), and a division's one note per
+  transcript name (§8.5 — a second digest writing over the first note is silent). UI and job
+  plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1456,6 +1483,16 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* a rescan that drops a Part's `(Weeks 1-8)` suffix updates the row in place
   and the join still resolves every week, a renamed week keeps its guide row and its corpus note,
   the Fundamentals Dec 1 session files as Week 14, and a second identical rescan writes nothing.
+
+- [x] **M24 — The first lecture in a Part.** (`milestones/M24-the-first-lecture-in-a-part.md`)
+  M16 proved the recording-to-guide path on a week-numbered course. Applied Generative AI
+  declares Parts over week ranges and no dates: its first real lectures file into Part I by
+  range, the Add lecture form asks for the week outright, two weeks' notes share one corpus
+  folder, and one Part guide is built from both.
+  *Accepted when:* the form for Applied Generative AI asks for the week and names the Part each
+  one feeds, a Sept 1 session is in `Weeks/Week 02/`, the Part I corpus and a session document,
+  the Part guide is built from two weeks' notes, and a further transcript filed into the Part
+  makes that guide stale without replacing either note.
 
 ## 15. Risks & trade-offs (accepted)
 

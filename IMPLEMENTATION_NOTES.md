@@ -3224,3 +3224,134 @@ observations under "Left as it is". What future sessions should know:
   tree — the row's text sits inside a button titled "Show output of job N"
   — and the panel shows only the most recent rows; the label join has a
   unit test instead.
+
+## M24 — The first lecture in a Part (2026-09-03)
+
+### Phase 0 — measured
+
+Nothing spent. The form on the dev build (pid 50460) for Applied Generative
+AI with Sept 1 typed in: the WEEK popup read `Sort it into a week` with no
+default, its options the bare folders `Week 01`…`Week 16`, the line under it
+"Pick the week this session belongs to. It goes to the inbox until you do,
+and the sorter proposes one from what the lecture covers.", the digest
+checkbox disabled until a week is picked, and nothing on the form naming a
+Part. Against a `.backup` copy of the live database (`user_version` 12, 51
+units) through the code as it stood: `week_slots(4)` gave 16 slots, weeks
+1–8 on unit 37, 9–12 on 38, 13–16 on 39, `meets_on` empty on every one, and
+`nearest_week` for 2026-09-01 answered nothing; a Week 2 transcript filed to
+`Weeks/Week 02/2026-09-01 — Lecture.md` with its note at `.classhub/corpus/
+Part I- Deep Learning to Large Language Models/2026-09-01 — Lecture.md`, and
+the same name filed into Week 03 derived the same note path; the guide path
+was `Study Guides/Part I- Deep Learning to Large Language Models.html`;
+`current_manifest("unit:37")` and `corpus_notes(37)` were empty. Read off
+`record_contribution`: a second row naming the first row's note path, so the
+second digest would have written over the first note and `corpus_notes`
+listed it twice.
+
+### What was built
+
+- **The form asks.** `AddLecture.tsx` labels each week's option with the
+  division it feeds when a unit spans more than one slot (`grouped`: fewer
+  distinct `unitId`s than slots) — `Week 02 · Part I: Deep Learning to Large
+  Language Models` — and, when slots exist and `defaultWeek` resolved to
+  null, replaces the sorter line with "This course publishes no dates for
+  its weeks, so pick the one the session fell in. Left unpicked, it goes to
+  the inbox and the sorter proposes a week." A week-numbered course's form
+  is unchanged.
+- **One note per name in a division.** `lectures::refuse_held_note` refuses
+  a transcript whose derived note path another transcript of the class
+  already holds, naming the holder and the title field. `add` resolves the
+  slot and the provisional unique name before `fetch`, so the refusal costs
+  nothing rather than a three-hour capture; `record_contribution` checks
+  again at the write, which covers the sorter's path through
+  `contribution_for` and a refile inside its transaction. SPEC §7.1 and §8.5
+  state the rule; §1 carries the two recordings' shapes and the costs.
+
+### Verified
+
+- `cargo test`: 218 pass, two new — a Part's two same-named transcripts
+  refused at the row with the first row and its note untouched, a titled
+  second one recorded at a path of its own, and a re-run of the first not a
+  collision with itself; one week folder's second transcript taking ` (2)`
+  and a note path of its own. The refile collision test asserts the new
+  message. `npx tsc --noEmit` clean.
+- Live on the rebuilt dev build (pid 50718) beside the installed app (8598),
+  which the owner used through the run: the popup offered sixteen weeks each
+  naming its Part (`phase1-popup.png`), no default, the asked-outright line.
+- **Aug 25 → Week 1** (link from the owner): the capture went `waiting`
+  1.6 s → `ready` 3.1 s through the store's `transcriptList` — 1,032 cues,
+  every one named, 161 KB, no `fetching` state and no `ccUrl`. Filed at
+  `Weeks/Week 01/2026-08-25 — Lecture.md` (117 KB, 2 h 56 m, 34 anchors from
+  00:11, 161 paragraphs: 154 Xuefeng Liu, 7 Mombo Ngu), contribution row 2
+  on unit 37, audit 147, the form naming both speakers. Digest job 303:
+  15.5 min, 8 turns, $3.98 list-equivalent, 81k output tokens — "Generate,
+  Align, Act in Medicine", 51 KB md, 68 KB html, a 31 KB note whose header
+  calls the speaker labels unreliable (student turns folded into the
+  instructor's blocks). It read the Week 01 deck's extract, which
+  `lecture_context` lists from the bare week folder.
+- **Sept 1 → Week 2**: `waiting` 1.5 s → `fetching` 3.0 s → `ready` 4.5 s
+  through `ccUrl`, 629 unnamed cues, 70 KB, the first cue at 01:23 of a
+  3 h 17 m recording. Filed at `Weeks/Week 02/2026-09-01 — Lecture.md`
+  (49 KB, 22 anchors 01:23–03:15), row 3 on unit 37, its note beside the
+  first. Digest job 304, alongside 303: 8.8 min, 5 turns, $2.11, 49k output
+  tokens — "Backpropagation, Overfitting, and the MLP Lab", a 16 KB note
+  opening with its coverage limits (the first 1 h 20 m absent, no speaker
+  labels). Both session HTMLs have no external reference; guides rows 5 and
+  6; both summaries replaced.
+- Between the digests the owner approved proposals 37 and 38 (the Week 2
+  deck to `Slides/`, the notebook to `Weeks/Week 02/`) in the same build;
+  the write-scope guard logged the audited moves as the app's own for jobs
+  303, 304 and 305 and demoted nothing.
+- After both: the Part I row `2 LECTURES` with SYNTHESIZE GUIDE and PRACTICE
+  EXAM, `2 SESSIONS`, both rows badged `PART I: DEEP LEARNING TO LARGE
+  LANGUAGE MODELS`. **Guide job 306** (scope `unit:37`, manifest the two
+  transcripts): 21.5 min, 36 turns, $7.86, 118k output tokens, 194 KB through
+  one `Write` and ten `Edit`s, six sections, no `CONTINUE` marker, no external
+  reference. It read each note once, the Week 01 deck PDF paged and the Week
+  02 notebook, and never opened a transcript; 48 citations anchor the Aug 25
+  lecture and 37 the Sept 1 one, the rest the deck's slides and the
+  notebook's sections. Guides row 7; the row read VIEW GUIDE with the quiet
+  resynthesize affordance.
+- **Staleness**: a two-cue caption fixture filed into Week 04 with the digest
+  off (row 4 on unit 37, `2 LECTURES` unchanged) flipped the row to
+  `STALE — RESYNTHESIZE` with both notes at their 12:49 sizes and times. A
+  move proposal out of `Weeks/` (a `chat`-sourced row inserted by hand, the
+  shape `propose_file_moves` writes) was refused at `_Inbox/` — an
+  app-managed destination — and approved at the class root: row 4 cleared,
+  audit 162, the row fresh again. The file and its extract were deleted, the
+  empty `Week 04` folders removed, and RESCAN left 7 file rows, 2
+  contributions, 3 guides, 51 units, jobs at 307, audit at 162.
+- Not run: any chat turn. Session cost on the subscription: $13.95
+  list-equivalent (two digests, one guide). Job 307, a $3.26 Biostatistics
+  extract the owner's own edit demoted, was not this session's.
+
+### Left as it is
+
+- **The week folders' material is not in a Part's manifest.** The guide
+  cited the deck under `Weeks/Week 01/` and the notebook under `Weeks/Week
+  02/` throughout, found through `--add-dir`; neither is the Part's folder
+  (`units.rel_path` is NULL) nor a contribution, so a changed deck leaves the
+  guide reading fresh and the prompt's file listing was empty. The same holds
+  for a week-numbered course's own week folder. Widening `current_manifest`
+  to the week folders a unit's slots name would flip the just-built guide
+  stale, and the budget allowed no rebuild — the next Part I guide, stale
+  anyway once Week 3 lands, is the moment to do it.
+- A transcript deleted in Finder keeps its contribution row and its note
+  (`scan_class` never touches `lecture_contributions`); the refile path is
+  the one that clears them.
+- An edit of the owner's own during an extract job demotes the job (307):
+  the guard excludes audited app moves only, by SPEC §6, while the stream
+  log records every write the job made and could tell the two apart.
+- The Materials tree still offers SYNTHESIZE GUIDE on `Slides` and `Weeks`.
+
+### Gotchas
+
+- Setting the RECORDING field through accessibility re-derives the date, so
+  the date is typed after the source, and the first pass at the segments
+  landed wrong every time (`2026-12-03`, `0002-09-03`, today); a second pass
+  with longer pauses took, except once, which is why the probe is named
+  `2026-09-03`. The WEEK popup takes a typed `Week 02` and Return.
+- The Part I row's SYNTHESIZE GUIDE is the first in tree order; the Materials
+  folders' come after it.
+- The owner used the dev build during the run, so the view moved between
+  dumps; every dump was re-taken after opening the workspace.

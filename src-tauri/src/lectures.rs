@@ -86,22 +86,8 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         bail!("the session date must be YYYY-MM-DD");
     }
 
-    let (caption, source_name) = fetch(app, &req.source, on_stage)?;
-    let cues = crate::transcripts::parse(&caption);
-    if cues.is_empty() {
-        bail!("{source_name} holds no readable speech");
-    }
-
     let title = req.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
     let file_name = transcript_file_name(&req.date, title.unwrap_or("Lecture"))?;
-    let markdown = crate::transcripts::to_markdown(
-        &cues,
-        &crate::transcripts::Meta {
-            title: file_name.trim_end_matches(".md"),
-            date: &req.date,
-            source_name: &source_name,
-        },
-    );
 
     // A lecture is filed by when it happened, and for these four courses that
     // also settles what it covers (SPEC §8.5). A week that resolved to none of
@@ -124,6 +110,34 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         Some(slot) => format!("{WEEKS_DIR}/{}", slot.folder),
         None => INBOX_DIR.to_string(),
     };
+    // The name decides where the note goes, and a division spanning several
+    // weeks holds one note per name (`refuse_held_note`). Settled before the
+    // capture: refused here it costs nothing, refused after a three-hour
+    // capture it costs the capture. `record_contribution` checks again at the
+    // write, against whatever name the folder leaves free by then.
+    if let Some(slot) = &slot {
+        let rel_path = unique_rel_path(&class_dir, &dir_rel, &file_name);
+        let corpus_rel = corpus_rel_path(&slot.unit_name, &rel_path);
+        with_conn(app, |conn| {
+            refuse_held_note(conn, req.class_id, &slot.unit_name, &corpus_rel, &rel_path)
+        })?;
+    }
+
+    let (caption, source_name) = fetch(app, &req.source, on_stage)?;
+    let cues = crate::transcripts::parse(&caption);
+    if cues.is_empty() {
+        bail!("{source_name} holds no readable speech");
+    }
+
+    let markdown = crate::transcripts::to_markdown(
+        &cues,
+        &crate::transcripts::Meta {
+            title: file_name.trim_end_matches(".md"),
+            date: &req.date,
+            source_name: &source_name,
+        },
+    );
+
     let dir = class_dir.join(&dir_rel);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -368,6 +382,7 @@ fn record_contribution(
     markdown: &str,
 ) -> Result<String> {
     let corpus_rel = corpus_rel_path(&slot.unit_name, rel_path);
+    refuse_held_note(conn, class_id, &slot.unit_name, &corpus_rel, rel_path)?;
     let (end_ms, lines) = span_of(markdown);
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
@@ -390,6 +405,43 @@ fn record_contribution(
         ],
     )?;
     Ok(corpus_rel)
+}
+
+/// Refuses a transcript whose note path another transcript of the class
+/// already holds.
+///
+/// A note is keyed by its division and its transcript's name (SPEC §8.5). For
+/// a course that numbers its weeks the division is the week folder, where
+/// `unique_rel_path` keeps two names apart; a division that groups weeks — a
+/// Part spanning eight of them — holds one note per name across all of its
+/// folders, so `2026-09-01 — Lecture.md` under Week 02 and under Week 03
+/// derive one path, and the second digest would write over the first note
+/// with both rows naming it. The refile already refuses that collision
+/// (`refile_lecture`); this is the same line at the filing, and for the
+/// sorter's path through `contribution_for`. A title of its own is the way
+/// out, and the message says so.
+fn refuse_held_note(
+    conn: &Connection,
+    class_id: i64,
+    unit_name: &str,
+    corpus_rel: &str,
+    rel_path: &str,
+) -> Result<()> {
+    let holder: Option<String> = conn
+        .query_row(
+            "SELECT rel_path FROM lecture_contributions
+             WHERE class_id = ?1 AND corpus_rel_path = ?2 AND rel_path != ?3",
+            rusqlite::params![class_id, corpus_rel, rel_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match holder {
+        Some(holder) => bail!(
+            "its note would replace the one for {holder}, which already feeds {unit_name} under \
+             the same name — give this lecture a title of its own"
+        ),
+        None => Ok(()),
+    }
 }
 
 /// A markdown file sitting in a week folder is taken for a lecture — the same
@@ -1680,7 +1732,7 @@ mod tests {
 
         fs::rename(dir.join(a), dir.join(a_moved)).expect("move");
         let err = refile_lecture(&conn, 1, &dir, a, a_moved).expect_err("a collision");
-        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert!(format!("{err:#}").contains("already"), "{err:#}");
         // B's distillation is untouched either way.
         let b_note = list_contributions(&conn, 1)
             .expect("list")
@@ -1694,6 +1746,82 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A note is keyed by its division and its transcript's name, and a Part
+    /// spans several week folders — so two lectures named alike under Week 02
+    /// and Week 03 derive one note path, and the second digest would write
+    /// over the first note with both rows naming it. Refused at the row, so
+    /// the filing and the sorter's path both stop short of that; a title of
+    /// its own is the way out, and a re-run of the first is not a collision
+    /// with itself.
+    #[test]
+    fn a_part_holds_one_note_per_transcript_name() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, first_week, last_week, source)
+             VALUES (4, 1, 'part', 'Part I: Deep Learning to Large Language Models', 1, 8, 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let week2 = crate::units::slot_for_week(&conn, 4, 2).expect("slots").expect("week 2");
+        let week3 = crate::units::slot_for_week(&conn, 4, 3).expect("slots").expect("week 3");
+        assert_eq!(week2.unit_id, week3.unit_id, "both weeks are Part I's");
+        assert_eq!((week2.folder.as_str(), week3.folder.as_str()), ("Week 02", "Week 03"));
+
+        let first = "Weeks/Week 02/2026-09-01 — Lecture.md";
+        let note = record_contribution(&conn, 4, &week2, first, markdown).expect("first");
+        assert_eq!(
+            note,
+            ".classhub/corpus/Part I- Deep Learning to Large Language Models/2026-09-01 — Lecture.md"
+        );
+        let second = "Weeks/Week 03/2026-09-01 — Lecture.md";
+        assert_eq!(corpus_rel_path(&week3.unit_name, second), note, "one path for two names");
+        let err = record_contribution(&conn, 4, &week3, second, markdown).expect_err("held");
+        let message = format!("{err:#}");
+        assert!(message.contains(first) && message.contains("title"), "{message}");
+
+        let rows = || -> Vec<(String, String)> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT rel_path, corpus_rel_path FROM lecture_contributions
+                     WHERE class_id = 4 ORDER BY rel_path",
+                )
+                .expect("prepare");
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("rows")
+        };
+        assert_eq!(rows(), vec![(first.to_string(), note.clone())], "the first row was touched");
+
+        // A title of its own derives a path of its own.
+        let titled = "Weeks/Week 03/2026-09-01 — Guest lecture.md";
+        let other = record_contribution(&conn, 4, &week3, titled, markdown).expect("titled");
+        assert_ne!(other, note);
+        assert_eq!(rows().len(), 2);
+
+        // The first lecture recorded again — a re-run — is not a collision.
+        record_contribution(&conn, 4, &week2, first, markdown).expect("re-record");
+        assert_eq!(rows().len(), 2);
+    }
+
+    /// Within one week folder the never-overwrite rule already keeps two
+    /// transcripts apart, and the note path follows the suffixed name — so a
+    /// week-numbered course never meets the Part's one-note-per-name rule.
+    #[test]
+    fn a_second_lecture_in_one_week_folder_takes_a_suffix() {
+        let dir = scratch("classhub-unique-name");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Weeks/Week 02")).expect("week dir");
+        let first = unique_rel_path(&dir, "Weeks/Week 02", "2026-09-01 — Lecture.md");
+        assert_eq!(first, "Weeks/Week 02/2026-09-01 — Lecture.md");
+        fs::write(dir.join(&first), "x").expect("first");
+        let second = unique_rel_path(&dir, "Weeks/Week 02", "2026-09-01 — Lecture.md");
+        assert_eq!(second, "Weeks/Week 02/2026-09-01 — Lecture (2).md");
+        assert_ne!(corpus_rel_path("Part I", &first), corpus_rel_path("Part I", &second));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A session document is keyed by its transcript's path, so a refile that
