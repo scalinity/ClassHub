@@ -1131,6 +1131,17 @@ pub fn week_folder(week: i64, unit_name: Option<&str>) -> String {
 pub fn week_from_rel_path(rel_path: &str) -> Option<i64> {
     let rest = rel_path.strip_prefix(crate::db::WEEKS_DIR)?.strip_prefix('/')?;
     let folder = rest.split('/').next()?;
+    // A week folder opens with its week, the way `week_folder` writes one. A
+    // folder under `Weeks/` that only mentions weeks somewhere in its name —
+    // `Midterm Review (Weeks 1-6)` — is no week's, and a file loose under
+    // `Weeks/` has no folder at all.
+    let opens_with_week = folder
+        .trim_start()
+        .get(..4)
+        .is_some_and(|s| s.eq_ignore_ascii_case("week"));
+    if !opens_with_week {
+        return None;
+    }
     parse_week_range(folder).map(|(first, _)| first)
 }
 
@@ -1932,6 +1943,10 @@ mod tests {
         }
         assert_eq!(week_from_rel_path("Module 1/Slides/deck.pdf"), None);
         assert_eq!(week_from_rel_path("Weeks/Loose Notes/x.md"), None);
+        // Mentions weeks without being one, or has no folder at all.
+        assert_eq!(week_from_rel_path("Weeks/Midterm Review (Weeks 1-6)/x.pdf"), None);
+        assert_eq!(week_from_rel_path("Weeks/2026-09-10 \u{2014} Lecture.md"), None);
+        assert_eq!(week_from_rel_path("Weeks/week 3/x.md"), Some(3));
     }
 
     /// Where each course is on a given day, read from its own published dates
