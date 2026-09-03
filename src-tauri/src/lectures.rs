@@ -493,6 +493,12 @@ pub fn refile_contribution(
             Some(NoteMove::Relocate { from, to })
         }
         Some(_) => None,
+        // Still under `Weeks/`, but in a week the course has not declared or a
+        // folder that is not a week: no unit reads the note for now, and it
+        // stays where it is. The next syllabus scan or Canvas sync may declare
+        // the week, and a refile back to a declared one finds it again — while
+        // deleting it would charge that correction a fresh digest.
+        None if is_filed_transcript(dest_rel) => None,
         // Out of `Weeks/`: no unit reads it any more.
         None => Some(NoteMove::Remove(from)),
     })
@@ -1474,6 +1480,54 @@ mod tests {
             .apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty());
         assert!(!dir.join(&moved_note).exists(), "a note survived with no unit reading it");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A week the course has not declared yet is not the same as leaving
+    /// `Weeks/`: the row goes, since nothing maps, but the note stays for the
+    /// sync that declares the week or the refile that comes back.
+    #[test]
+    fn keeps_the_note_when_the_destination_week_is_undeclared() {
+        let root = std::env::temp_dir().join("classhub-refile-undeclared");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 1", [], |row| row.get(0))
+            .expect("class");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join(folder);
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, source)
+             VALUES (1, 2, 'week', 'Week 2 — Study Designs', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
+        let to = "Weeks/Week 07/2026-08-27 — Lecture.md";
+        for rel in [from, to] {
+            fs::create_dir_all(dir.join(rel).parent().expect("parent")).expect("week dir");
+        }
+        fs::write(dir.join(from), markdown).expect("transcript");
+        let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
+        let corpus = record_contribution(&conn, 1, &slot, from, markdown).expect("record");
+        fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
+        fs::write(dir.join(&corpus), "# note").expect("note");
+
+        fs::rename(dir.join(from), dir.join(to)).expect("move");
+        let note = refile_contribution(&conn, 1, &dir, from, to).expect("refile");
+        assert!(note.is_none(), "an undeclared week is not a reason to touch the note");
+        assert!(list_contributions(&conn, 1).expect("list").is_empty(), "nothing maps yet");
+        assert_eq!(fs::read_to_string(dir.join(&corpus)).expect("note"), "# note");
+
+        // Back to the declared week: the row returns and finds its note.
+        fs::rename(dir.join(to), dir.join(from)).expect("move back");
+        let note = refile_contribution(&conn, 1, &dir, to, from).expect("refile back");
+        assert!(note.is_none());
+        let rows = list_contributions(&conn, 1).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].distilled, "the note was there to be found");
 
         let _ = fs::remove_dir_all(&root);
     }
