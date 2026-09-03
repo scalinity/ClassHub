@@ -2386,3 +2386,127 @@ were addressed as individual commits. What future sessions should know:
   because a `grep` in the commit pipeline masked `cargo test`'s exit code;
   both were reset and remade once the missing `BufRead` import was in.
   Nothing was pushed: the repo has no remote.
+
+## M21 — Grades from Canvas (2026-09-03)
+
+### What was built
+
+- **Schema.** Migration `0010_canvas_grades.sql` adds
+  `grade_categories.canvas_group_id`, `grade_items.canvas_assignment_id`,
+  `deadlines.canvas_assignment_id` and the same on `deadline_proposals`,
+  each with a partial unique index where set — per class for a group and a
+  deadline, global for an item, since a Canvas assignment id is global and
+  `grade_items` carries no class column. The live database went from
+  `user_version` 9 to 10 the moment the dev build opened it; the installed
+  Aug 25 build skips migrations past its own list and its own inserts name
+  their columns, so it kept working beside the new columns.
+- **Categories and items.** `grades::upsert_canvas_category` finds a
+  category by group id, else claims a category with no id and the same name
+  (case-insensitive, the chat tool's rule), else inserts one; the weight is
+  taken from `group_weight` only when the course applies group weights, and
+  a new category otherwise starts at zero so the ≠100% warning says what is
+  missing. `grades::upsert_canvas_item` finds an item by assignment id and
+  updates category, name, score, max and `graded_at` in place, else inserts.
+  Both write an audit row (`canvas.upsert_grade_category`,
+  `canvas.upsert_grade_item`) only when something changed, so a no-op sync
+  leaves none. `canvas_sync::graded_and_posted` is the predicate: a score,
+  a `posted_at`, not excused, positive `points_possible`.
+- **The sync.** `sync_assignments` reads `/assignments?include[]=submission`
+  and returns the list; `sync_grades` reads `/assignment_groups` and writes
+  categories, then items for every assignment the predicate accepts, keyed
+  through the group id. Grades run only when the assignment read succeeded.
+  `ClassOutcome` carries `grades_recorded` and `deadlines_completed`, and
+  notes name categories created or claimed and whether the course weights
+  them. `hub-changed` fires for `grades` and `deadlines` when either moved.
+- **Deadlines Canvas tracks.** `deadlines::settle_canvas_deadline` finds the
+  deadline for an assignment by id, or — once — by (title, calendar day)
+  among rows with no id, and stamps the id; it then moves the row to
+  Canvas's due date (`canvas.update_deadline`, before and after) and marks
+  it done when the submission carries `submitted_at`
+  (`canvas.complete_deadline`, naming the submission). Nothing reopens. The
+  sync settles before proposing, so a tracked assignment never earns a
+  second card. `record_proposal` takes the Canvas id: a row with that id is
+  the same card whatever its title or day now (pending → refreshed,
+  dismissed → left, approved with its deadline deleted → reused as a fresh
+  card, which is what one row per (class, assignment) requires), and the
+  (title, day) rules that follow ignore rows carrying a *different* id. A
+  syllabus card Canvas recognizes takes the id on refresh. Approval carries
+  the id onto the deadline and refuses a card whose assignment is already on
+  the list under another title.
+- **UI.** `GradeItem` and `GradeCategory` carry their Canvas ids; the
+  Grades section shows `VIA CANVAS` in the deadline row's tag register on
+  categories and items the sync owns, the item's tooltip saying the next
+  sync writes Canvas's score back over an edit. The empty state names the
+  sync. `outcomeSummary` adds `N deadlines done` and `N grades recorded`,
+  and the sync's `done` handler invalidates `grades` and `deadlines` beside
+  what it already refetched.
+
+### Verified
+
+- `cargo test`: 184 pass, 7 new — the predicate (muted, ungraded, excused,
+  zero and null points, no submission, a posted zero), group weights only
+  when applied, the category claim (claimed by name across casing, typed
+  weight kept, found by id after with no audit row, reweighted when the
+  course weights, created at zero, another class's row untouched), the item
+  upsert (created, unchanged with no audit row, a hand edit overwritten, the
+  weighted grade seeing it, zero points refused), the syllabus deadline
+  linked, moved, closed on the submission with an audit row naming it and
+  left alone after, one proposal row per assignment through refresh,
+  approval, deletion and dismissal, and the id joining the two readers.
+  `npx tsc --noEmit` clean.
+- Live on the dev build (pid 33483) beside the installed app, no job running:
+  - **Phase 0**, from a temporary dump of what Canvas answered, removed
+    before the commit: no course applies group weights; Biostatistics has
+    four groups and no assignments; no course had a graded or posted
+    submission. Recorded in SPEC §1.
+  - **Sync 1** (all classes, from Settings; the stored session had expired,
+    so the sign-in window opened and the owner completed SSO): the three
+    typed Biostatistics categories were claimed (`Assignments` 50,
+    `Quizzes` 20, `Project` 30, ids stamped, weights untouched) and six
+    created at zero across the four classes; the four Canvas assignments
+    became cards with their ids, the one already waiting (`Introduction to
+    Python and Version Control`) refreshed with its id rather than
+    duplicated; 12 new course files staged and one loose notebook sent to
+    the sorter (job 294, 11 s). No item, since nothing is graded.
+  - **Sync 2** (Fundamentals, from the workspace, after approving the
+    `Live coding session 09/01` card, which Canvas holds a submission
+    for): the deadline went `done` and the only new audit row was
+    `canvas.complete_deadline` with `submittedAt 2026-09-01T21:57:07Z`.
+    Settings read `1 deadline done`.
+  - **Sync 3** (all classes): `nothing new` for every class, audit log
+    unchanged at id 134, counts unchanged (9 categories, 0 items, 43
+    proposals, 2 done deadlines, jobs still at 294).
+  - The Grades section reads `VIA CANVAS` beside each claimed category.
+- Not exercised live, because Canvas held no posted grade in any course
+  and Quiz 1 is not a Canvas assignment: an item landing under its
+  category and the card's grade chip. That path is `sync_grades` calling
+  `upsert_canvas_item`, covered by the tests above; the first posted grade
+  will be the first live run.
+
+### Left as it is
+
+- A Canvas-owned item or category deleted by hand comes back on the next
+  sync, and a deadline reopened by hand is closed again while Canvas holds
+  the submission. Both follow from Canvas being the source; neither has a
+  tombstone.
+- `omit_from_final_grade` is not read; no assignment sets it today.
+- A linked syllabus deadline keeps `source='syllabus'` and its `VIA
+  SYLLABUS` tag; only the id says Canvas tracks it.
+- `Homework #1` (Canvas) and `Homework 1` (syllabus, same day) are two rows
+  in Fundamentals, because the link is by exact title. The card is still
+  there to skip.
+- Two Canvas groups sharing one name would become two categories with one
+  name, which the category editor's uniqueness check would then refuse to
+  edit.
+
+### Gotchas
+
+- `perl -0pi` with `|` as the delimiter and `|r|` in the replacement: the
+  M17 gotcha again, this time inserting the block at line 1 of
+  `deadlines.rs`. Multi-line Rust edits went through the editor after that.
+- The sign-in window lands on the UF e-Learning page and moves to
+  `login.ufl.edu` on its own; `ax press GatorLink` reported NOT FOUND
+  because the page had already moved.
+- `screencapture` after `End` shoots the bottom of the workspace; the
+  Grades section sits above Materials there, so the tag check came from
+  `ax text`.

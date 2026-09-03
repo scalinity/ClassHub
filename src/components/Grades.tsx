@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
+  CANVAS_CATEGORY_TAG,
+  CANVAS_ITEM_TAG,
   deleteGradeCategory,
   deleteGradeItem,
   formatPercent,
@@ -97,9 +99,9 @@ export function GradesSection({ classId }: { classId: number }) {
 
       {data !== undefined && categories.length === 0 && editing === null && (
         <p className="py-2 text-[13px] text-muted-foreground">
-          No grades tracked yet — add the syllabus categories and their
-          weights, then record scores as they come back. The chat can fill
-          this in too.
+          No grades tracked yet — sync Canvas to bring in the course's
+          categories and every posted score, or add the syllabus categories
+          and record scores by hand. The chat can fill this in too.
         </p>
       )}
 
@@ -193,6 +195,14 @@ function CategoryRow({
       <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
         {category.name}
       </span>
+      {category.canvasGroupId !== null && (
+        <span
+          title={CANVAS_CATEGORY_TAG.title}
+          className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
+        >
+          {CANVAS_CATEGORY_TAG.label}
+        </span>
+      )}
       <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
         {category.percent == null
           ? "NO SCORES YET"
@@ -256,6 +266,14 @@ function ItemRow({
   return (
     <div className="group flex h-8 items-center gap-2.5 rounded-md px-2 transition-colors hover:bg-muted/60">
       <span className="min-w-0 flex-1 truncate text-[13px]">{item.name}</span>
+      {item.canvasAssignmentId !== null && (
+        <span
+          title={CANVAS_ITEM_TAG.title}
+          className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
+        >
+          {CANVAS_ITEM_TAG.label}
+        </span>
+      )}
       <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
         {formatScore(item.score, item.maxScore)}
       </span>

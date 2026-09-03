@@ -1,7 +1,7 @@
 //! SPEC §7.2 — what a Canvas sync actually does with the session `canvas.rs`
 //! establishes.
 //!
-//! Reads only, and never on a timer. Three things come across:
+//! Reads only, and never on a timer. Four things come across:
 //!
 //! 1. **The course's own divisions** → `units` (SPEC §5), from its published
 //!    modules. Today none of the four courses publishes any, so this reads an
@@ -9,16 +9,22 @@
 //!    is what supplies them instead. The reader is written anyway because it
 //!    costs one request and starts working the day a professor adds a module.
 //! 2. **Assignments** → the existing `deadline_proposals` confirm queue, with
-//!    Canvas's true due dates rather than a syllabus PDF's prose.
-//! 3. **Course files** → downloaded into `_Inbox/` and proposed through the
+//!    Canvas's true due dates rather than a syllabus PDF's prose. A deadline
+//!    already on the list is tracked by the assignment's id: its due date
+//!    follows Canvas, and a submission closes it.
+//! 3. **Grades** (SPEC §11) → assignment groups become `grade_categories` and
+//!    graded, posted submissions become `grade_items`, written directly with
+//!    audit rows because a grade is reversible in the Grades section.
+//! 4. **Course files** → downloaded into `_Inbox/` and proposed through the
 //!    §10 move queue, because approval is what places a file, here as
 //!    everywhere.
 //!
 //! Nothing is deleted. A unit that disappears from Canvas is kept (a
 //! mid-semester reshuffle must not orphan a guide), and a re-sync updates in
-//! place rather than duplicating.
+//! place rather than duplicating — every row Canvas wrote carries the Canvas
+//! id it came from, which is what makes the second sync a no-op.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -28,7 +34,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::canvas::Session;
 use crate::db::{audit, emit_hub_change, lock, now, with_conn, INBOX_DIR};
-use crate::deadlines::Recorded;
+use crate::deadlines::{CanvasAssignment, Recorded};
+use crate::grades::{CanvasGroup, CanvasScore, CanvasWrite};
 use crate::units::{self, NewUnit};
 
 pub const PROGRESS_EVENT: &str = "canvas://progress";
@@ -45,7 +52,11 @@ pub struct ClassOutcome {
     pub canvas_course: Option<String>,
     pub units_added: usize,
     pub deadlines_proposed: usize,
+    /// Open deadlines closed because Canvas holds a submission for them.
+    pub deadlines_completed: usize,
     pub files_staged: usize,
+    /// Grade items written or updated from graded, posted submissions.
+    pub grades_recorded: usize,
     /// Plain lines about what Canvas did and did not have. A course that
     /// publishes no modules is the normal case right now, and silence about it
     /// would read as "synced, nothing to do".
@@ -157,7 +168,9 @@ fn run(
             canvas_course: None,
             units_added: 0,
             deadlines_proposed: 0,
+            deadlines_completed: 0,
             files_staged: 0,
+            grades_recorded: 0,
             notes: Vec::new(),
             error: None,
         };
@@ -220,8 +233,18 @@ fn sync_class(
     if let Err(e) = sync_units(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "modules")?;
     }
-    if let Err(e) = sync_assignments(app, session, class, course_id, outcome, on_stage) {
-        note_or_fail(outcome, e, "assignments")?;
+    // Grades are read off the same assignment list, submissions included, so
+    // they come only when that read succeeded — and the groups they sit under
+    // are one more request.
+    match sync_assignments(app, session, class, course_id, outcome, on_stage) {
+        Ok(assignments) => {
+            if let Err(e) =
+                sync_grades(app, session, class, course, &assignments, outcome, on_stage)
+            {
+                note_or_fail(outcome, e, "grades")?;
+            }
+        }
+        Err(e) => note_or_fail(outcome, e, "assignments")?,
     }
     if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "files")?;
@@ -381,8 +404,17 @@ fn local_iso(utc: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Assignments → the deadline confirm queue (SPEC §11)
+// Assignments → the deadline confirm queue (SPEC §11), and the deadlines
+// already on the list that Canvas tracks
 
+/// Reads the course's assignments, each with the reader's own submission, and
+/// returns them for the grade pass to reuse.
+///
+/// An assignment that already has a deadline — approved from an earlier card,
+/// or a syllabus row on the same title and day, which takes the assignment's id
+/// on first contact — is brought up to date in place: Canvas's due date, and
+/// done once a submission exists. Everything else is proposed through the
+/// confirm queue as before.
 fn sync_assignments(
     app: &AppHandle,
     session: &Session,
@@ -390,14 +422,16 @@ fn sync_assignments(
     course_id: i64,
     outcome: &mut ClassOutcome,
     on_stage: &dyn Fn(&str),
-) -> Result<()> {
-    let path = format!("/api/v1/courses/{course_id}/assignments");
+) -> Result<Vec<Value>> {
+    let path = format!("/api/v1/courses/{course_id}/assignments?include[]=submission");
     let assignments = session.get_all(&path, on_stage)?;
 
-    let (proposed, undated, known) = with_conn(app, |conn| {
+    let (proposed, undated, known, completed, moved) = with_conn(app, |conn| {
         let mut proposed = 0usize;
         let mut undated = 0usize;
         let mut known = 0usize;
+        let mut completed = 0usize;
+        let mut moved = 0usize;
         for assignment in &assignments {
             let Some(title) = assignment["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -410,6 +444,32 @@ fn sync_assignments(
                 undated += 1;
                 continue;
             };
+            let canvas_id = assignment["id"].as_i64().map(|id| id.to_string());
+            if let Some(canvas_id) = canvas_id.as_deref() {
+                let submitted_at = assignment["submission"]["submitted_at"]
+                    .as_str()
+                    .filter(|s| !s.is_empty());
+                let tracked = CanvasAssignment {
+                    id: canvas_id,
+                    title,
+                    due_at: &due_at,
+                    submitted_at,
+                };
+                match crate::deadlines::settle_canvas_deadline(conn, class.id, &tracked) {
+                    Ok(Some(settled)) => {
+                        known += 1;
+                        if settled.completed {
+                            completed += 1;
+                        }
+                        if settled.due_moved {
+                            moved += 1;
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("canvas: could not settle '{title}': {e:#}"),
+                }
+            }
             let kind = if assignment["is_quiz_assignment"].as_bool().unwrap_or(false)
                 || assignment["submission_types"]
                     .as_array()
@@ -427,7 +487,14 @@ fn sync_assignments(
                 .unwrap_or_else(|| "From Canvas".to_string());
 
             match crate::deadlines::record_proposal(
-                conn, class.id, title, kind, &due_at, Some(&notes), "canvas",
+                conn,
+                class.id,
+                title,
+                kind,
+                &due_at,
+                Some(&notes),
+                "canvas",
+                canvas_id.as_deref(),
             ) {
                 Ok(Recorded::Proposed) => proposed += 1,
                 // Already a deadline, already waiting, or declined earlier.
@@ -438,10 +505,11 @@ fn sync_assignments(
                 Err(e) => eprintln!("canvas: skipping assignment '{title}': {e:#}"),
             }
         }
-        Ok((proposed, undated, known))
+        Ok((proposed, undated, known, completed, moved))
     })?;
 
     outcome.deadlines_proposed = proposed;
+    outcome.deadlines_completed = completed;
     if undated > 0 {
         outcome.notes.push(format!(
             "{undated} Canvas assignment(s) have no due date set — not proposed"
@@ -452,10 +520,18 @@ fn sync_assignments(
             .notes
             .push(format!("{known} Canvas assignment(s) already accounted for"));
     }
+    if moved > 0 {
+        outcome.notes.push(format!(
+            "{moved} deadline(s) moved to the due date Canvas states"
+        ));
+    }
     if proposed > 0 {
         emit_hub_change(app, "deadlineProposals");
     }
-    Ok(())
+    if completed > 0 || moved > 0 {
+        emit_hub_change(app, "deadlines");
+    }
+    Ok(assignments)
 }
 
 /// `100` rather than `100.0`, since points are almost always whole.
@@ -465,6 +541,164 @@ fn trim_number(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Assignment groups → grade categories, graded submissions → grade items
+// (SPEC §11)
+
+/// Whether the course applies its assignment-group weights — the only case in
+/// which Canvas knows what a category is worth. Otherwise the syllabus does,
+/// and the weight stays the reader's to type.
+fn applies_group_weights(course: &Value) -> bool {
+    course["apply_assignment_group_weights"].as_bool().unwrap_or(false)
+}
+
+/// A graded, posted submission, read off an assignment fetched with
+/// `include[]=submission`.
+#[derive(Debug, PartialEq)]
+struct Graded {
+    assignment_id: String,
+    group_id: String,
+    name: String,
+    score: f64,
+    max_score: f64,
+    /// The local calendar day the grade was given, when Canvas says.
+    graded_at: Option<String>,
+}
+
+/// The predicate that turns a submission into a grade, or refuses to.
+///
+/// Three things have to be true: Canvas holds a score, the professor has
+/// posted it — a muted grade is one the reader is not meant to see yet, and
+/// recording it early is the wrong kind of early — and the submission is not
+/// excused. Points possible has to be positive as well: Canvas reports 0 or
+/// null for an ungraded assignment, and the CHECK on `max_score` would refuse
+/// it a step later.
+fn graded_and_posted(assignment: &Value) -> Option<Graded> {
+    let submission = assignment.get("submission")?;
+    let score = submission["score"].as_f64()?;
+    submission["posted_at"].as_str().filter(|p| !p.is_empty())?;
+    if submission["excused"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let max_score = assignment["points_possible"].as_f64().filter(|p| *p > 0.0)?;
+    Some(Graded {
+        assignment_id: assignment["id"].as_i64()?.to_string(),
+        group_id: assignment["assignment_group_id"].as_i64()?.to_string(),
+        name: assignment["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())?
+            .to_string(),
+        score,
+        max_score,
+        graded_at: iso_date(submission["graded_at"].as_str()),
+    })
+}
+
+/// Categories from the course's assignment groups, items from every graded and
+/// posted submission among `assignments`, each keyed on its Canvas id.
+///
+/// Written directly rather than proposed: a grade is reversible through the
+/// Grades section, which is the app's rule for skipping a confirm step, and
+/// every write leaves an audit row. A second sync of an unchanged course
+/// writes nothing and leaves no row.
+fn sync_grades(
+    app: &AppHandle,
+    session: &Session,
+    class: &ClassRow,
+    course: &Value,
+    assignments: &[Value],
+    outcome: &mut ClassOutcome,
+    on_stage: &dyn Fn(&str),
+) -> Result<()> {
+    let course_id = course["id"].as_i64().context("the Canvas course has no id")?;
+    let groups = session.get_all(
+        &format!("/api/v1/courses/{course_id}/assignment_groups"),
+        on_stage,
+    )?;
+    let weighted = applies_group_weights(course);
+
+    let (categories_landed, recorded, orphans, changed) = with_conn(app, |conn| {
+        let mut by_group: HashMap<String, i64> = HashMap::new();
+        let mut categories_landed = 0usize;
+        let mut changed = false;
+        for group in &groups {
+            let Some(id) = group["id"].as_i64().map(|id| id.to_string()) else {
+                continue;
+            };
+            let Some(name) = group["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            let weight = if weighted { group["group_weight"].as_f64() } else { None };
+            let group = CanvasGroup { id: &id, name, weight };
+            match crate::grades::upsert_canvas_category(conn, class.id, &group) {
+                Ok((category_id, landed)) => {
+                    match landed {
+                        CanvasWrite::Created | CanvasWrite::Claimed => {
+                            categories_landed += 1;
+                            changed = true;
+                        }
+                        CanvasWrite::Updated => changed = true,
+                        CanvasWrite::Unchanged => {}
+                    }
+                    by_group.insert(id, category_id);
+                }
+                Err(e) => eprintln!("canvas: skipping assignment group '{name}': {e:#}"),
+            }
+        }
+
+        let mut recorded = 0usize;
+        let mut orphans = 0usize;
+        for graded in assignments.iter().filter_map(graded_and_posted) {
+            // A group the listing did not carry — deleted between the two
+            // reads, or refused. Counted rather than filed under a guess.
+            let Some(&category_id) = by_group.get(&graded.group_id) else {
+                orphans += 1;
+                continue;
+            };
+            let score = CanvasScore {
+                assignment_id: &graded.assignment_id,
+                name: &graded.name,
+                score: graded.score,
+                max_score: graded.max_score,
+                graded_at: graded.graded_at.as_deref(),
+            };
+            match crate::grades::upsert_canvas_item(conn, category_id, &score) {
+                Ok(CanvasWrite::Unchanged) => {}
+                Ok(_) => {
+                    recorded += 1;
+                    changed = true;
+                }
+                Err(e) => eprintln!("canvas: skipping grade '{}': {e:#}", graded.name),
+            }
+        }
+        Ok((categories_landed, recorded, orphans, changed))
+    })?;
+
+    outcome.grades_recorded = recorded;
+    if categories_landed > 0 {
+        outcome.notes.push(format!(
+            "{categories_landed} grade categor{} from Canvas{}",
+            if categories_landed == 1 { "y" } else { "ies" },
+            if weighted {
+                ", weighted as the course weights them"
+            } else {
+                " — the course does not weight them, so the weights are yours to set"
+            }
+        ));
+    }
+    if orphans > 0 {
+        outcome.notes.push(format!(
+            "{orphans} graded assignment(s) belong to no assignment group Canvas listed — not recorded"
+        ));
+    }
+    if changed {
+        emit_hub_change(app, "grades");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,5 +1411,55 @@ mod tests {
         );
         // Same name, different bytes: a revised deck is not the one on disk.
         assert!(!seen.contains(&("week1.pptx".to_string(), 101)));
+    }
+
+    /// The predicate between a Canvas submission and a grade item. A muted
+    /// grade, an ungraded or excused submission, and an assignment with no
+    /// points possible are all refused; a posted zero is a grade.
+    #[test]
+    fn only_a_graded_posted_unexcused_submission_is_a_grade() {
+        let base = json!({
+            "id": 5001, "name": " Quiz 1 ", "points_possible": 10, "assignment_group_id": 901,
+            "submission": {
+                "score": 9, "posted_at": "2026-09-03T20:00:00Z",
+                "graded_at": "2026-09-03T19:59:00Z", "excused": false, "workflow_state": "graded"
+            }
+        });
+        let graded = graded_and_posted(&base).expect("a grade");
+        assert_eq!(graded.assignment_id, "5001");
+        assert_eq!(graded.group_id, "901");
+        assert_eq!(graded.name, "Quiz 1");
+        assert_eq!((graded.score, graded.max_score), (9.0, 10.0));
+        assert_eq!(graded.graded_at.as_ref().map(String::len), Some(10), "a local calendar day");
+
+        let with = |change: &dyn Fn(&mut Value)| {
+            let mut value = base.clone();
+            change(&mut value);
+            graded_and_posted(&value)
+        };
+        assert!(with(&|v| v["submission"]["posted_at"] = Value::Null).is_none(), "muted");
+        assert!(with(&|v| v["submission"]["score"] = Value::Null).is_none(), "ungraded");
+        assert!(with(&|v| v["submission"]["excused"] = json!(true)).is_none(), "excused");
+        assert!(with(&|v| v["points_possible"] = json!(0)).is_none(), "zero points");
+        assert!(with(&|v| v["points_possible"] = Value::Null).is_none(), "no points");
+        assert!(
+            with(&|v| {
+                v.as_object_mut().expect("object").remove("submission");
+            })
+            .is_none(),
+            "read without include[]=submission"
+        );
+        assert_eq!(
+            with(&|v| v["submission"]["score"] = json!(0)).map(|g| g.score),
+            Some(0.0),
+            "a posted zero is a grade"
+        );
+    }
+
+    #[test]
+    fn group_weights_count_only_when_the_course_applies_them() {
+        assert!(applies_group_weights(&json!({"apply_assignment_group_weights": true})));
+        assert!(!applies_group_weights(&json!({"apply_assignment_group_weights": false})));
+        assert!(!applies_group_weights(&json!({})));
     }
 }

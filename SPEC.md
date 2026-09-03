@@ -149,6 +149,17 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   files organized into the professor's own folders. Assignment due dates arrive as UTC
   instants, and the semester straddles the DST change — a fixed offset puts one of this term's
   two assignments on the wrong day — so they are converted through the machine's real timezone.
+- **No course weights its assignment groups.** Read from all four courses on 2026-09-03:
+  `apply_assignment_group_weights` is false on every course and every group's `group_weight`
+  is 0, so Canvas knows the names of the grading categories and never what they are worth —
+  category weights come from the syllabus, typed by hand, and a Canvas sync leaves them alone
+  (§7.2). The groups themselves: Fundamentals and Applied Generative AI declare one
+  (`Assignments`); Design Studio three (`Studio Participation`, `Quizzes`, `AI Design
+  Project`); Biostatistics four (`Assignments`, `Quizzes`, `Project`, `Survey`). Biostatistics
+  publishes no assignments at all in Canvas — Quiz 1 is not there — and on that date no course
+  had graded or posted a submission, so a grade item had yet to exist for the sync to record.
+  Both submissions on record (Fundamentals' live coding session, Design Studio's Python
+  introduction) carried `submitted_at` and nothing else.
 
   Canvas also exposes **GraphQL** at `POST /api/graphql`, whose permissions mirror REST. It
   would collapse a whole sync into one round trip, but being a POST it needs the `X-CSRF-Token`
@@ -209,7 +220,7 @@ flowchart LR
     Cmds --> Canvas
     Canvas --> CV
     Canvas -->|session cookie| Keychain
-    Canvas -->|units, deadlines| DB
+    Canvas -->|units, deadlines, grades| DB
     Canvas -->|course files| AIBHS
     Jobs --> CLI
     Jobs --> LO
@@ -355,15 +366,28 @@ guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- module rel path | 'ma
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
 
+-- `canvas_assignment_id` is the join between a deadline, a score and the thing
+-- on Canvas (§7.2): set by approval of a Canvas card, or on first contact for a
+-- row the syllabus put here on the same title and day. Unique per class where
+-- set, so a submission finds exactly one deadline to close.
 deadlines(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,  -- assignment|exam|quiz|project|other
           due_at TEXT, notes TEXT NULL, status TEXT,  -- open|done
-          source TEXT);                    -- manual|agent|syllabus|canvas
+          source TEXT,                     -- manual|agent|syllabus|canvas
+          canvas_assignment_id TEXT NULL);
 
+-- A category is a Canvas assignment group when `canvas_group_id` is set, and an
+-- item a graded, posted submission when `canvas_assignment_id` is; the sync
+-- upserts on those ids, so a re-sync updates in place. Rows typed by hand or
+-- recorded by chat carry neither, and a hand-made category with a group's
+-- name is claimed rather than duplicated. Unique where set: per class for a
+-- group, globally for an assignment (Canvas assignment ids are global).
 grade_categories(id INTEGER PK, class_id INTEGER FK, name TEXT,
-                 weight REAL CHECK (weight >= 0 AND weight <= 100));
+                 weight REAL CHECK (weight >= 0 AND weight <= 100),
+                 canvas_group_id TEXT NULL);
 grade_items(id INTEGER PK, category_id INTEGER FK, name TEXT,
             score REAL CHECK (score >= 0), max_score REAL CHECK (max_score > 0),
-            graded_at TEXT NULL);
+            graded_at TEXT NULL,
+            canvas_assignment_id TEXT NULL);
 
 -- The drop-to-sort confirm queue (§10). Nothing here has moved anything;
 -- approval is what performs the move.
@@ -378,12 +402,15 @@ move_proposals(id INTEGER PK, class_id INTEGER FK,
 
 -- The proposed-deadline confirm queue (§11), so proposals survive an app restart
 -- between proposal and confirmation. Both readers land here — the syllabus scan
--- and the Canvas sync — and approval carries the row's own `source` onto the
--- deadline. Nothing here has created a deadline.
+-- and the Canvas sync — and approval carries the row's own `source` and Canvas
+-- id onto the deadline. One row per (class, assignment) where the id is set: a
+-- moved due date refreshes the card, and a card whose deadline was deleted by
+-- hand comes back as the same row. Nothing here has created a deadline.
 deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
                    due_at TEXT, notes TEXT NULL,
                    status TEXT,            -- pending|approved|dismissed
                    source TEXT,            -- syllabus|canvas
+                   canvas_assignment_id TEXT NULL,
                    created_at INTEGER, resolved_at INTEGER NULL);
 
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
@@ -596,7 +623,8 @@ passes through a human loses something. This section removes that hop.
 | `/courses/:id/modules?include[]=items` | **the course's own divisions** → `units` (§5) |
 | `/courses/:id/files` | slides and readings, downloadable into the tree |
 | `/courses/:id/folders` | where the professor filed each file — the destination a move proposal takes |
-| `/courses/:id/assignments` | deadlines with real due dates — no syllabus guesswork |
+| `/courses/:id/assignments?include[]=submission` | deadlines with real due dates — no syllabus guesswork — and, per assignment, the reader's own submission: whether it was handed in, and the score once it is graded and posted |
+| `/courses/:id/assignment_groups` | the course's grading scheme → `grade_categories` (§11), with each group's weight where the course applies them |
 
 The course code is the only field worth matching on. The account is enrolled in a dozen
 "active" courses, orientation shells and years-old org sites among them, and a name match would
@@ -702,6 +730,31 @@ converted through the machine's real timezone (§1). One card per (title, calend
 reader proposed it, and Canvas outranks the syllabus on that card: Canvas returns the
 assignment's own `due_at` while a scan returns a model's reading of prose about it, so a rescan
 never replaces a stated time with a bare date.
+
+**A deadline already on the list is tracked by its assignment.** Approval carries the Canvas
+id onto the deadline, and a row the syllabus scan put there before Canvas could — the same
+title on the same calendar day, carrying no id — takes the assignment's id on first contact
+and is found by it after. A tracked deadline follows Canvas's due date, with an audit row
+holding the one it had, and is marked done the moment Canvas holds a submission for it, with
+an audit row naming the submission. Nothing reopens: a deadline done by hand stays done. The
+ids are also what make a re-sync an update in place rather than a second card — an assignment
+whose due date moved refreshes its card on the new day, and one whose deadline was deleted by
+hand comes back as the same card.
+
+**Grades come from the same read.** Assignment groups become `grade_categories`, keyed on the
+group id; a hand-made category with a group's name (case-insensitive, the chat tool's rule) is
+claimed rather than duplicated, so the categories typed before this existed become Canvas's
+own. A group's weight is taken only when the course applies its group weights
+(`apply_assignment_group_weights` on the course); otherwise the typed weight stands, a new
+category starts at zero, and the ≠100% warning says what is missing. A submission becomes a
+`grade_item` when it is graded, posted and not excused — a muted grade is one the professor
+has not released, and recording it early is the wrong kind of early — and the assignment has
+positive points possible, which Canvas reports as 0 or null for ungraded work. Items are keyed
+on the assignment id, so a regrade updates in place and a hand edit lasts until the next sync
+writes Canvas's number back, which the item's tag says. Grades are written directly with
+audit rows, because a grade is reversible in the Grades section and that is the app's rule for
+skipping a confirm step; a second sync of an unchanged course writes nothing and leaves no
+row. The sync report counts grades recorded and deadlines completed beside what it proposed.
 
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
@@ -955,12 +1008,18 @@ its meetings.
   in the chat overview, since the queue itself lives inside the workspace. A proposal dated
   before today is tagged `PAST` and left out of ADD ALL: a past date may be a real deadline
   entered late or a scan misreading last year's syllabus, and only its own card can say, so it
-  stays individually addable.
+  stays individually addable. A deadline that is a Canvas assignment is closed by the sync
+  once Canvas holds a submission for it, with an audit row naming the submission (§7.2); the
+  row's checkbox still reopens it, and the sync never does.
 - **Notes**: markdown files in `<Class>/Notes/`. Lightweight editor (textarea + live preview,
   no heavy editor dependency). Notes are included in `search_material` scope.
 - **Grades**: weighted categories per class (weights should sum to 100%; show a warning
   otherwise). Items with score/max. Computed: current weighted grade over graded items,
-  displayed on the class card and Grades tab.
+  displayed on the class card and Grades tab. A Canvas sync fills the section without anyone
+  typing (§7.2): the course's assignment groups as categories and every graded, posted score
+  as an item, each tagged `VIA CANVAS` — the deadline row's source tag, reused. A Canvas-owned
+  score can be edited by hand, audited like any edit, and the tag's tooltip says the next sync
+  writes Canvas's number back.
 
 ## 12. UI specification & design language
 
@@ -1225,7 +1284,7 @@ Mark the checkbox when the acceptance criteria pass.
   *Accepted when:* the Biostatistics `.docx` is searchable in chat, a fixture notebook extracts
   with code fences and outputs, a slide PDF opens inline, and no extract job was spawned.
 
-- [ ] **M21 — Grades from Canvas.** (`milestones/M21-grades-from-canvas.md`)
+- [x] **M21 — Grades from Canvas.** (`milestones/M21-grades-from-canvas.md`)
   Assignment groups become categories, graded-and-posted submissions become items, a submitted
   assignment closes its deadline, all keyed on Canvas ids so a re-sync updates in place.
   *Accepted when:* a graded quiz appears under its category with the right score after one sync,

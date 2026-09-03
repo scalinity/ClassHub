@@ -44,7 +44,11 @@ export interface ClassOutcome {
   canvasCourse: string | null;
   unitsAdded: number;
   deadlinesProposed: number;
+  /** Open deadlines closed because Canvas holds a submission for them. */
+  deadlinesCompleted: number;
   filesStaged: number;
+  /** Grade items written or updated from graded, posted submissions. */
+  gradesRecorded: number;
   notes: string[];
   error: string | null;
 }
@@ -112,6 +116,8 @@ function init() {
       void queryClient.invalidateQueries({ queryKey: ["units"] });
       void queryClient.invalidateQueries({ queryKey: ["canvasStatus"] });
       void queryClient.invalidateQueries({ queryKey: ["deadlineProposals"] });
+      void queryClient.invalidateQueries({ queryKey: ["deadlines"] });
+      void queryClient.invalidateQueries({ queryKey: ["grades"] });
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
     }
@@ -158,6 +164,16 @@ export function outcomeSummary(outcome: ClassOutcome): string {
   if (outcome.deadlinesProposed > 0) {
     parts.push(
       `${outcome.deadlinesProposed} deadline${outcome.deadlinesProposed === 1 ? "" : "s"} to review`,
+    );
+  }
+  if (outcome.deadlinesCompleted > 0) {
+    parts.push(
+      `${outcome.deadlinesCompleted} deadline${outcome.deadlinesCompleted === 1 ? "" : "s"} done`,
+    );
+  }
+  if (outcome.gradesRecorded > 0) {
+    parts.push(
+      `${outcome.gradesRecorded} grade${outcome.gradesRecorded === 1 ? "" : "s"} recorded`,
     );
   }
   if (outcome.filesStaged > 0) {

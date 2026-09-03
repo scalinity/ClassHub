@@ -592,6 +592,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
                 due_at,
                 notes.as_deref(),
                 "syllabus",
+                None,
             )? {
                 // A re-proposal of something still waiting counts as recorded
                 // here: the scan did find it, and the card is in the queue.
@@ -812,8 +813,10 @@ fn source_rank(source: &str) -> u8 {
 ///
 /// Both producers — the syllabus scan reading a PDF and the Canvas sync reading
 /// assignments — land here, so the deduplication rules cannot drift apart
-/// between them. Identity is (title, calendar day): the same item proposed from
-/// both sources is one card, not two.
+/// between them. Identity is the Canvas assignment id where the producer has
+/// one, and (title, calendar day) otherwise: the same item proposed from both
+/// sources is one card, not two, and an assignment whose due date moved is the
+/// same card on a new day rather than a second one.
 pub(crate) fn record_proposal(
     conn: &Connection,
     class_id: i64,
@@ -822,6 +825,7 @@ pub(crate) fn record_proposal(
     due_at: &str,
     notes: Option<&str>,
     source: &str,
+    canvas_id: Option<&str>,
 ) -> Result<Recorded> {
     // The untrusted boundary for both producers: a Canvas assignment title is
     // as unbounded as a model-written one, and a stored title feeds the next
@@ -836,11 +840,65 @@ pub(crate) fn record_proposal(
         bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
     }
 
+    if let Some(canvas_id) = canvas_id {
+        let on_list: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deadlines WHERE class_id = ?1 AND canvas_assignment_id = ?2",
+            params![class_id, canvas_id],
+            |row| row.get(0),
+        )?;
+        if on_list > 0 {
+            return Ok(Recorded::AlreadyDeadline);
+        }
+        let card: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, status FROM deadline_proposals
+                 WHERE class_id = ?1 AND canvas_assignment_id = ?2",
+                params![class_id, canvas_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match card.as_ref().map(|(id, status)| (*id, status.as_str())) {
+            Some((_, "dismissed")) => return Ok(Recorded::DismissedBefore),
+            // The card is waiting: Canvas's current reading of the assignment
+            // replaces the last one, title and day included, since the id is
+            // what says they are the same item.
+            Some((id, "pending")) => {
+                conn.execute(
+                    "UPDATE deadline_proposals
+                     SET title = ?1, kind = ?2, due_at = ?3, notes = ?4, created_at = ?5,
+                         source = ?6
+                     WHERE id = ?7",
+                    params![title, kind, due_at, notes, now(), source, id],
+                )?;
+                return Ok(Recorded::Refreshed);
+            }
+            // Approved once, and the deadline it made is gone — deleted by
+            // hand. The row is reused as a fresh card rather than a second row
+            // under the same id, which one row per (class, assignment) forbids.
+            Some((id, _)) => {
+                conn.execute(
+                    "UPDATE deadline_proposals
+                     SET title = ?1, kind = ?2, due_at = ?3, notes = ?4, created_at = ?5,
+                         source = ?6, status = 'pending', resolved_at = NULL
+                     WHERE id = ?7",
+                    params![title, kind, due_at, notes, now(), source, id],
+                )?;
+                return Ok(Recorded::Proposed);
+            }
+            None => {}
+        }
+    }
+
+    // The (title, calendar day) rules. With a Canvas id in hand a row that
+    // already carries a *different* id is a different assignment that happens
+    // to share a title and a day, not this one; without an id every row
+    // matches, so a syllabus rescan still recognizes a Canvas-linked deadline.
     let existing: i64 = conn.query_row(
         "SELECT COUNT(*) FROM deadlines
          WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-           AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
-        params![class_id, title, due_at],
+           AND substr(due_at, 1, 10) = substr(?3, 1, 10)
+           AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+        params![class_id, title, due_at, canvas_id],
         |row| row.get(0),
     )?;
     if existing > 0 {
@@ -850,8 +908,9 @@ pub(crate) fn record_proposal(
         "SELECT COUNT(*) FROM deadline_proposals
          WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
            AND substr(due_at, 1, 10) = substr(?3, 1, 10)
-           AND status = 'dismissed'",
-        params![class_id, title, due_at],
+           AND status = 'dismissed'
+           AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+        params![class_id, title, due_at, canvas_id],
         |row| row.get(0),
     )?;
     if dismissed_before > 0 {
@@ -861,8 +920,9 @@ pub(crate) fn record_proposal(
         .query_row(
             "SELECT id, source FROM deadline_proposals
              WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-               AND substr(due_at, 1, 10) = substr(?3, 1, 10) AND status = 'pending'",
-            params![class_id, title, due_at],
+               AND substr(due_at, 1, 10) = substr(?3, 1, 10) AND status = 'pending'
+               AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+            params![class_id, title, due_at, canvas_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -876,21 +936,133 @@ pub(crate) fn record_proposal(
         if source_rank(source) < source_rank(&held) {
             return Ok(Recorded::Refreshed);
         }
+        // A card the syllabus put there and Canvas now recognizes takes the
+        // id, so the next sync finds it by identity rather than by name.
         conn.execute(
             "UPDATE deadline_proposals
-             SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4, source = ?5
-             WHERE id = ?6",
-            params![kind, due_at, notes, now(), source, id],
+             SET kind = ?1, due_at = ?2, notes = ?3, created_at = ?4, source = ?5,
+                 canvas_assignment_id = COALESCE(?6, canvas_assignment_id)
+             WHERE id = ?7",
+            params![kind, due_at, notes, now(), source, canvas_id, id],
         )?;
         return Ok(Recorded::Refreshed);
     }
     conn.execute(
         "INSERT INTO deadline_proposals
-         (class_id, title, kind, due_at, notes, status, created_at, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
-        params![class_id, title, kind, due_at, notes, now(), source],
+         (class_id, title, kind, due_at, notes, status, created_at, source, canvas_assignment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
+        params![class_id, title, kind, due_at, notes, now(), source, canvas_id],
     )?;
     Ok(Recorded::Proposed)
+}
+
+// ---------------------------------------------------------------------------
+// Deadlines Canvas tracks (SPEC §11)
+
+/// A Canvas assignment as the sync reads it, for the deadline it corresponds to.
+pub(crate) struct CanvasAssignment<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    /// Local wall-clock ISO, already converted (canvas_sync::local_iso).
+    pub due_at: &'a str,
+    /// The submission's `submitted_at`, when the reader has handed it in.
+    pub submitted_at: Option<&'a str>,
+}
+
+/// What settling a Canvas-tracked deadline changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Settled {
+    pub due_moved: bool,
+    pub completed: bool,
+}
+
+/// Brings the deadline for a Canvas assignment up to date, if there is one.
+///
+/// The deadline is found by its assignment id, or — once — by (title, calendar
+/// day) among rows that carry no id, which is how a deadline the syllabus scan
+/// proposed before this existed becomes the same item Canvas reports on; it
+/// takes the id then and is found by it after. Canvas's due date replaces the
+/// row's, since the assignment's own `due_at` outranks a reading of prose
+/// about it, and a submission closes the deadline with an audit row naming it.
+/// Nothing reopens: a deadline done by hand stays done, and a submission
+/// Canvas later un-submits is still a decision the reader made.
+///
+/// `None` when no deadline corresponds — the caller proposes one instead.
+pub(crate) fn settle_canvas_deadline(
+    conn: &Connection,
+    class_id: i64,
+    assignment: &CanvasAssignment,
+) -> Result<Option<Settled>> {
+    type Row = (i64, String, String, String, Option<String>);
+    let read = |row: &rusqlite::Row| -> rusqlite::Result<Row> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+    };
+    let title = truncate(assignment.title.trim(), MAX_TITLE_CHARS);
+    if title.is_empty() || !valid_due_at(assignment.due_at) {
+        return Ok(None);
+    }
+    let by_id: Option<Row> = conn
+        .query_row(
+            "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
+             WHERE class_id = ?1 AND canvas_assignment_id = ?2",
+            params![class_id, assignment.id],
+            read,
+        )
+        .optional()?;
+    let row = match by_id {
+        Some(row) => row,
+        None => {
+            let legacy: Option<Row> = conn
+                .query_row(
+                    "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
+                     WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
+                       AND substr(due_at, 1, 10) = substr(?3, 1, 10)
+                       AND canvas_assignment_id IS NULL
+                     ORDER BY id LIMIT 1",
+                    params![class_id, title, assignment.due_at],
+                    read,
+                )
+                .optional()?;
+            let Some(row) = legacy else {
+                return Ok(None);
+            };
+            conn.execute(
+                "UPDATE deadlines SET canvas_assignment_id = ?1 WHERE id = ?2",
+                params![assignment.id, row.0],
+            )?;
+            row
+        }
+    };
+    let (id, title, due_at, status, _) = row;
+
+    let mut settled = Settled::default();
+    let tx = conn.unchecked_transaction()?;
+    if due_at != assignment.due_at {
+        tx.execute(
+            "UPDATE deadlines SET due_at = ?1 WHERE id = ?2",
+            params![assignment.due_at, id],
+        )?;
+        audit(
+            &tx,
+            "canvas.update_deadline",
+            json!({ "id": id, "classId": class_id, "canvasAssignmentId": assignment.id,
+                    "title": title, "before": { "dueAt": due_at },
+                    "after": { "dueAt": assignment.due_at } }),
+        )?;
+        settled.due_moved = true;
+    }
+    if let Some(submitted_at) = assignment.submitted_at.filter(|_| status == "open") {
+        tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
+        audit(
+            &tx,
+            "canvas.complete_deadline",
+            json!({ "id": id, "classId": class_id, "canvasAssignmentId": assignment.id,
+                    "title": title, "submittedAt": submitted_at }),
+        )?;
+        settled.completed = true;
+    }
+    tx.commit()?;
+    Ok(Some(settled))
 }
 
 // ---------------------------------------------------------------------------
@@ -945,7 +1117,7 @@ pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchO
 fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result<String> {
     let row = conn
         .query_row(
-            "SELECT class_id, title, kind, due_at, notes, status, source
+            "SELECT class_id, title, kind, due_at, notes, status, source, canvas_assignment_id
              FROM deadline_proposals WHERE id = ?1",
             [proposal_id],
             |r| {
@@ -957,12 +1129,13 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
         .optional()?
         .context("proposal not found")?;
-    let (class_id, title, kind, due_at, notes, status, source) = row;
+    let (class_id, title, kind, due_at, notes, status, source, canvas_id) = row;
     if status != "pending" {
         bail!("this proposal was already resolved");
     }
@@ -991,19 +1164,33 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
     if existing > 0 {
         bail!("'{title}' is already recorded for that date — skip this card instead");
     }
+    // The same assignment may already be on the list under another title — a
+    // syllabus row the sync linked by day — and one row per assignment is what
+    // lets a submission find the deadline it closes.
+    let linked: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM deadlines
+         WHERE class_id = ?1 AND canvas_assignment_id IS NOT NULL AND canvas_assignment_id = ?2",
+        params![class_id, canvas_id],
+        |row| row.get(0),
+    )?;
+    if linked > 0 {
+        bail!("'{title}' is already on the list as its Canvas assignment — skip this card instead");
+    }
     // The deadline records which reader proposed it, so a due date that turns
-    // out to be wrong can be traced to the syllabus PDF or to Canvas.
+    // out to be wrong can be traced to the syllabus PDF or to Canvas, and the
+    // Canvas id that lets a submission close it.
     tx.execute(
-        "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)",
-        params![class_id, title, kind, due_at, notes, source],
+        "INSERT INTO deadlines
+         (class_id, title, kind, due_at, notes, status, source, canvas_assignment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7)",
+        params![class_id, title, kind, due_at, notes, source, canvas_id],
     )?;
     audit(
         &tx,
         &format!("{source}.insert_deadline"),
         json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
                 "classId": class_id, "title": title, "kind": kind,
-                "dueAt": due_at, "notes": notes }),
+                "dueAt": due_at, "notes": notes, "canvasAssignmentId": canvas_id }),
     )?;
     tx.execute(
         "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
@@ -1024,7 +1211,7 @@ mod tests {
     }
 
     fn propose(conn: &rusqlite::Connection, due_at: &str, source: &str) -> Recorded {
-        record_proposal(conn, 1, "Problem Set 2", "assignment", due_at, None, source)
+        record_proposal(conn, 1, "Problem Set 2", "assignment", due_at, None, source, None)
             .expect("record")
     }
 
@@ -1084,8 +1271,9 @@ mod tests {
         let conn = db();
         assert_eq!(pending_count(&conn, 1).unwrap(), 0);
         propose(&conn, "2026-09-07", "syllabus");
-        record_proposal(&conn, 1, "Quiz 1", "quiz", "2026-09-03", None, "canvas").unwrap();
-        record_proposal(&conn, 2, "Form Teams", "project", "2026-09-02", None, "syllabus")
+        record_proposal(&conn, 1, "Quiz 1", "quiz", "2026-09-03", None, "canvas", Some("7"))
+            .unwrap();
+        record_proposal(&conn, 2, "Form Teams", "project", "2026-09-02", None, "syllabus", None)
             .unwrap();
         assert_eq!(pending_count(&conn, 1).unwrap(), 2);
         assert_eq!(pending_count(&conn, 2).unwrap(), 1);
@@ -1193,5 +1381,169 @@ mod tests {
         assert!(!valid_due_at("2026-09-03T23:60"));
         assert!(!valid_due_at("2026-09-03T23:59:60"));
         assert!(valid_due_at("2026-09-03T00:00:00"));
+    }
+
+    /// A deadline the syllabus scan put on the list before Canvas could is the
+    /// same item Canvas now reports on: it takes the assignment's id on first
+    /// contact, follows the due date Canvas states, closes on the submission,
+    /// and a second sync leaves it — and the audit log — alone.
+    #[test]
+    fn a_syllabus_deadline_is_linked_closed_and_left_alone_after() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, status, source)
+             VALUES (3, 'Quiz 1', 'quiz', '2026-09-03', 'open', 'syllabus'),
+                    (1, 'Quiz 1', 'quiz', '2026-09-03', 'open', 'manual')",
+            [],
+        )
+        .expect("fixture");
+        let row = || -> (Option<String>, String, String) {
+            conn.query_row(
+                "SELECT canvas_assignment_id, due_at, status FROM deadlines WHERE class_id = 3",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("the row")
+        };
+        let unsubmitted = CanvasAssignment {
+            id: "5001",
+            title: "quiz 1",
+            due_at: "2026-09-03T23:59",
+            submitted_at: None,
+        };
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &unsubmitted).expect("settle"),
+            Some(Settled { due_moved: true, completed: false })
+        );
+        assert_eq!(
+            row(),
+            (Some("5001".to_string()), "2026-09-03T23:59".to_string(), "open".to_string())
+        );
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &unsubmitted).expect("again"),
+            Some(Settled::default())
+        );
+
+        let submitted = CanvasAssignment {
+            submitted_at: Some("2026-09-03T18:12:00Z"),
+            ..unsubmitted
+        };
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &submitted).expect("submitted"),
+            Some(Settled { due_moved: false, completed: true })
+        );
+        assert_eq!(row().2, "done");
+        let named: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'canvas.complete_deadline'
+                   AND payload LIKE '%2026-09-03T18:12:00Z%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("audit");
+        assert_eq!(named, 1, "the audit row names the submission");
+
+        let audits: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &submitted).expect("third"),
+            Some(Settled::default())
+        );
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(after, audits, "a second sync left a row");
+
+        // The other class's same-titled deadline was never this one's.
+        let elsewhere: Option<String> = conn
+            .query_row(
+                "SELECT canvas_assignment_id FROM deadlines WHERE class_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(elsewhere, None);
+        // Nothing on the list for it means the caller proposes instead.
+        let unknown = CanvasAssignment {
+            id: "5002",
+            title: "Quiz 2",
+            due_at: "2026-09-24T23:59",
+            submitted_at: None,
+        };
+        assert_eq!(settle_canvas_deadline(&conn, 3, &unknown).expect("none"), None);
+    }
+
+    /// A Canvas card is one row per assignment: a moved due date refreshes it
+    /// rather than stacking a second one, approval carries the id onto the
+    /// deadline, and a deadline deleted by hand comes back as the same card.
+    #[test]
+    fn a_canvas_card_is_one_row_per_assignment() {
+        let conn = db();
+        let propose = |due: &str| {
+            record_proposal(&conn, 1, "Homework 1", "assignment", due, None, "canvas", Some("7001"))
+                .expect("record")
+        };
+        let rows = || -> (i64, String, String) {
+            conn.query_row(
+                "SELECT COUNT(*), MIN(due_at), MIN(status) FROM deadline_proposals
+                 WHERE canvas_assignment_id = '7001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("rows")
+        };
+        assert!(matches!(propose("2026-09-07T23:59"), Recorded::Proposed));
+        assert!(matches!(propose("2026-09-09T23:59"), Recorded::Refreshed));
+        assert_eq!(rows(), (1, "2026-09-09T23:59".to_string(), "pending".to_string()));
+
+        let id: i64 = conn
+            .query_row("SELECT id FROM deadline_proposals", [], |r| r.get(0))
+            .expect("id");
+        resolve_in_conn(&conn, id, true).expect("approve");
+        let linked: Option<String> = conn
+            .query_row("SELECT canvas_assignment_id FROM deadlines", [], |r| r.get(0))
+            .expect("deadline");
+        assert_eq!(linked.as_deref(), Some("7001"));
+        assert!(matches!(propose("2026-09-09T23:59"), Recorded::AlreadyDeadline));
+
+        conn.execute("DELETE FROM deadlines", []).expect("delete by hand");
+        assert!(matches!(propose("2026-09-09T23:59"), Recorded::Proposed));
+        assert_eq!(rows(), (1, "2026-09-09T23:59".to_string(), "pending".to_string()));
+
+        conn.execute("UPDATE deadline_proposals SET status = 'dismissed'", []).expect("skip");
+        assert!(matches!(propose("2026-09-09T23:59"), Recorded::DismissedBefore));
+    }
+
+    /// The id joins the two readers rather than splitting them: a syllabus card
+    /// Canvas recognizes takes the id, a syllabus rescan still sees the
+    /// Canvas-linked deadline as recorded, and a different assignment that
+    /// happens to share a title and a day is its own card.
+    #[test]
+    fn the_id_joins_the_readers_rather_than_splitting_them() {
+        let conn = db();
+        let quiz = |due: &str, source: &str, canvas_id: Option<&str>| {
+            record_proposal(&conn, 3, "Quiz 1", "quiz", due, None, source, canvas_id).expect("record")
+        };
+        assert!(matches!(quiz("2026-09-03", "syllabus", None), Recorded::Proposed));
+        assert!(matches!(
+            quiz("2026-09-03T23:59", "canvas", Some("5001")),
+            Recorded::Refreshed
+        ));
+        let (id, due_at, canvas_id): (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT id, due_at, canvas_assignment_id FROM deadline_proposals",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("one card");
+        assert_eq!((due_at.as_str(), canvas_id.as_deref()), ("2026-09-03T23:59", Some("5001")));
+
+        resolve_in_conn(&conn, id, true).expect("approve");
+        assert!(matches!(quiz("2026-09-03", "syllabus", None), Recorded::AlreadyDeadline));
+        assert!(matches!(
+            quiz("2026-09-03T23:59", "canvas", Some("5002")),
+            Recorded::Proposed
+        ));
     }
 }

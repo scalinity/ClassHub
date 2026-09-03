@@ -53,6 +53,9 @@ pub struct GradeItem {
     pub score: f64,
     pub max_score: f64,
     pub graded_at: Option<String>,
+    /// Set when a Canvas sync recorded it. The next sync overwrites the score
+    /// with Canvas's number, so a hand edit is a correction until then.
+    pub canvas_assignment_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +67,8 @@ pub struct GradeCategory {
     /// Points earned across this category's items, when any exist.
     pub percent: Option<f64>,
     pub items: Vec<GradeItem>,
+    /// Set when this category is a Canvas assignment group.
+    pub canvas_group_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -77,11 +82,11 @@ pub struct GradesInfo {
 
 pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
     let mut cat_stmt = conn.prepare(
-        "SELECT id, name, weight FROM grade_categories
+        "SELECT id, name, weight, canvas_group_id FROM grade_categories
          WHERE class_id = ?1 ORDER BY id",
     )?;
     let mut item_stmt = conn.prepare(
-        "SELECT id, name, score, max_score, graded_at FROM grade_items
+        "SELECT id, name, score, max_score, graded_at, canvas_assignment_id FROM grade_items
          WHERE category_id = ?1 ORDER BY id",
     )?;
     let heads = cat_stmt
@@ -90,6 +95,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, f64>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -97,7 +103,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
     let mut categories = Vec::with_capacity(heads.len());
     let mut weight_total = 0.0;
     let mut grade = GradeAccumulator::default();
-    for (id, name, weight) in heads {
+    for (id, name, weight, canvas_group_id) in heads {
         let items = item_stmt
             .query_map([id], |row| {
                 Ok(GradeItem {
@@ -106,6 +112,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
                     score: row.get(2)?,
                     max_score: row.get(3)?,
                     graded_at: row.get(4)?,
+                    canvas_assignment_id: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<GradeItem>>>()?;
@@ -121,6 +128,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
             weight,
             percent,
             items,
+            canvas_group_id,
         });
     }
     Ok(GradesInfo {
@@ -385,6 +393,244 @@ pub fn delete_item(app: &AppHandle, id: i64) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// What a Canvas sync writes (SPEC §7.2): categories from assignment groups and
+// items from graded, posted submissions — direct, audited, keyed on Canvas ids
+// so a re-sync is an update in place. Direct rather than proposed because a
+// grade is reversible through the Grades section, which is the app's rule for
+// skipping a confirm step.
+
+/// One assignment group as the sync reads it.
+pub(crate) struct CanvasGroup<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    /// Set only when the course applies its group weights; otherwise the
+    /// category's weight is the reader's to type, and the ≠100% warning says
+    /// when it is missing.
+    pub weight: Option<f64>,
+}
+
+/// One graded, posted submission as the sync reads it.
+pub(crate) struct CanvasScore<'a> {
+    pub assignment_id: &'a str,
+    pub name: &'a str,
+    pub score: f64,
+    pub max_score: f64,
+    pub graded_at: Option<&'a str>,
+}
+
+/// What an upsert did, so the sync can count what changed and say nothing
+/// about what did not.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum CanvasWrite {
+    Created,
+    /// A hand-made category with the same name now carries the Canvas id.
+    Claimed,
+    Updated,
+    Unchanged,
+}
+
+/// A Canvas name in the column's own bounds. Truncated rather than refused:
+/// the assignment is real whatever its name's length, and the sync must not
+/// lose a score over a long title.
+fn canvas_name(name: &str) -> Result<String> {
+    let name = crate::db::truncate(name.trim(), MAX_NAME_CHARS);
+    if name.is_empty() {
+        bail!("a Canvas name is empty");
+    }
+    Ok(name)
+}
+
+/// Upserts a category for an assignment group, returning its row id.
+///
+/// Identity is the group id. A category with no id and the same name
+/// (case-insensitive, the chat tool's rule) is claimed rather than duplicated,
+/// which is what lets the three categories typed for Biostatistics before this
+/// existed become Canvas's own without a second "Quizzes" beside them. A
+/// weight arrives only when the course applies group weights; otherwise the
+/// existing weight stands and a new category starts at zero.
+pub(crate) fn upsert_canvas_category(
+    conn: &Connection,
+    class_id: i64,
+    group: &CanvasGroup,
+) -> Result<(i64, CanvasWrite)> {
+    let name = canvas_name(group.name)?;
+    let weight = group.weight.filter(|w| (0.0..=100.0).contains(w));
+    let read = |row: &rusqlite::Row| -> rusqlite::Result<(i64, String, f64)> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    };
+    let owned: Option<(i64, String, f64)> = conn
+        .query_row(
+            "SELECT id, name, weight FROM grade_categories
+             WHERE class_id = ?1 AND canvas_group_id = ?2",
+            params![class_id, group.id],
+            read,
+        )
+        .optional()?;
+    if let Some((id, current_name, current_weight)) = owned {
+        let weight = weight.unwrap_or(current_weight);
+        if current_name == name && (current_weight - weight).abs() < f64::EPSILON {
+            return Ok((id, CanvasWrite::Unchanged));
+        }
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
+            params![name, weight, id],
+        )?;
+        audit(
+            &tx,
+            "canvas.upsert_grade_category",
+            json!({ "id": id, "classId": class_id, "canvasGroupId": group.id,
+                    "before": { "name": current_name, "weight": current_weight },
+                    "after": { "name": name, "weight": weight } }),
+        )?;
+        tx.commit()?;
+        return Ok((id, CanvasWrite::Updated));
+    }
+
+    let unclaimed: Option<(i64, String, f64)> = conn
+        .query_row(
+            "SELECT id, name, weight FROM grade_categories
+             WHERE class_id = ?1 AND LOWER(name) = LOWER(?2) AND canvas_group_id IS NULL",
+            params![class_id, name],
+            read,
+        )
+        .optional()?;
+    let tx = conn.unchecked_transaction()?;
+    let outcome = match unclaimed {
+        Some((id, current_name, current_weight)) => {
+            let weight = weight.unwrap_or(current_weight);
+            tx.execute(
+                "UPDATE grade_categories SET canvas_group_id = ?1, name = ?2, weight = ?3
+                 WHERE id = ?4",
+                params![group.id, name, weight, id],
+            )?;
+            audit(
+                &tx,
+                "canvas.upsert_grade_category",
+                json!({ "id": id, "classId": class_id, "canvasGroupId": group.id,
+                        "claimed": true,
+                        "before": { "name": current_name, "weight": current_weight },
+                        "after": { "name": name, "weight": weight } }),
+            )?;
+            (id, CanvasWrite::Claimed)
+        }
+        None => {
+            let weight = weight.unwrap_or(0.0);
+            tx.execute(
+                "INSERT INTO grade_categories (class_id, name, weight, canvas_group_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![class_id, name, weight, group.id],
+            )?;
+            let id = tx.last_insert_rowid();
+            audit(
+                &tx,
+                "canvas.upsert_grade_category",
+                json!({ "id": id, "classId": class_id, "canvasGroupId": group.id,
+                        "name": name, "weight": weight, "created": true }),
+            )?;
+            (id, CanvasWrite::Created)
+        }
+    };
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Upserts the item for a graded, posted submission under `category_id`.
+///
+/// Identity is the assignment id, so a regrade updates the row and a hand
+/// edit is overwritten with Canvas's number — the item says so in the UI. An
+/// assignment moved between groups moves its item, since the category is
+/// Canvas's placement too.
+pub(crate) fn upsert_canvas_item(
+    conn: &Connection,
+    category_id: i64,
+    score: &CanvasScore,
+) -> Result<CanvasWrite> {
+    let name = canvas_name(score.name)?;
+    if score.max_score <= 0.0 {
+        bail!("{name} has no points possible");
+    }
+    if score.score < 0.0 {
+        bail!("{name} has a negative score");
+    }
+    type Row = (i64, i64, String, f64, f64, Option<String>);
+    let existing: Option<Row> = conn
+        .query_row(
+            "SELECT id, category_id, name, score, max_score, graded_at FROM grade_items
+             WHERE canvas_assignment_id = ?1",
+            [score.assignment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let tx = conn.unchecked_transaction()?;
+    let outcome = match existing {
+        Some((id, current_category, current_name, current_score, current_max, current_graded)) => {
+            let same = current_category == category_id
+                && current_name == name
+                && (current_score - score.score).abs() < f64::EPSILON
+                && (current_max - score.max_score).abs() < f64::EPSILON
+                && current_graded.as_deref() == score.graded_at;
+            if same {
+                return Ok(CanvasWrite::Unchanged);
+            }
+            tx.execute(
+                "UPDATE grade_items
+                 SET category_id = ?1, name = ?2, score = ?3, max_score = ?4, graded_at = ?5
+                 WHERE id = ?6",
+                params![category_id, name, score.score, score.max_score, score.graded_at, id],
+            )?;
+            audit(
+                &tx,
+                "canvas.upsert_grade_item",
+                json!({ "id": id, "canvasAssignmentId": score.assignment_id,
+                        "before": { "categoryId": current_category, "name": current_name,
+                                    "score": current_score, "maxScore": current_max,
+                                    "gradedAt": current_graded },
+                        "after": { "categoryId": category_id, "name": name,
+                                   "score": score.score, "maxScore": score.max_score,
+                                   "gradedAt": score.graded_at } }),
+            )?;
+            CanvasWrite::Updated
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO grade_items
+                 (category_id, name, score, max_score, graded_at, canvas_assignment_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    category_id,
+                    name,
+                    score.score,
+                    score.max_score,
+                    score.graded_at,
+                    score.assignment_id
+                ],
+            )?;
+            audit(
+                &tx,
+                "canvas.upsert_grade_item",
+                json!({ "id": tx.last_insert_rowid(), "categoryId": category_id,
+                        "canvasAssignmentId": score.assignment_id, "name": name,
+                        "score": score.score, "maxScore": score.max_score,
+                        "gradedAt": score.graded_at, "created": true }),
+            )?;
+            CanvasWrite::Created
+        }
+    };
+    tx.commit()?;
+    Ok(outcome)
+}
+
+// ---------------------------------------------------------------------------
 // The math — one implementation for every surface (chat, UI, class card).
 
 /// "Weights now: Homework 30% + Exams 40% = 70% — 30% unassigned."
@@ -493,5 +739,110 @@ pub(crate) fn trim_num(v: f64) -> String {
         format!("{}", v.round() as i64)
     } else {
         format!("{v:.1}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).expect("count")
+    }
+
+    fn category(conn: &Connection, id: i64) -> (String, f64, Option<String>) {
+        conn.query_row(
+            "SELECT name, weight, canvas_group_id FROM grade_categories WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the category")
+    }
+
+    /// The categories typed for Biostatistics before Canvas could supply them
+    /// become Canvas's own on the first sync — one row, not a second "Quizzes"
+    /// beside the first — and a second sync writes nothing.
+    #[test]
+    fn a_hand_made_category_is_claimed_by_name_rather_than_duplicated() {
+        let conn = crate::db::memory_db();
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight) VALUES
+               (3, 'Quizzes', 20), (3, 'Project', 30), (1, 'Project', 40);",
+        )
+        .expect("fixture");
+
+        let group = CanvasGroup { id: "901", name: "quizzes", weight: None };
+        let (id, landed) = upsert_canvas_category(&conn, 3, &group).expect("claim");
+        assert_eq!(landed, CanvasWrite::Claimed);
+        // The typed weight stands when the course does not weight its groups;
+        // the name takes Canvas's own spelling.
+        assert_eq!(category(&conn, id), ("quizzes".to_string(), 20.0, Some("901".to_string())));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_categories WHERE class_id = 3"), 2);
+
+        // Found by id the second time: nothing changes and no audit row lands.
+        let audits = count(&conn, "SELECT COUNT(*) FROM audit_log");
+        assert_eq!(
+            upsert_canvas_category(&conn, 3, &group).expect("again"),
+            (id, CanvasWrite::Unchanged)
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM audit_log"), audits);
+
+        // A course that applies its group weights replaces the typed one.
+        let weighted = CanvasGroup { id: "901", name: "Quizzes", weight: Some(25.0) };
+        assert_eq!(
+            upsert_canvas_category(&conn, 3, &weighted).expect("reweight"),
+            (id, CanvasWrite::Updated)
+        );
+        assert_eq!(category(&conn, id).1, 25.0);
+
+        // A group nothing was typed for starts at zero, so the ≠100% warning
+        // says the weight is missing rather than a number pretending otherwise.
+        let fresh = CanvasGroup { id: "902", name: "Homework", weight: None };
+        let (new_id, landed) = upsert_canvas_category(&conn, 3, &fresh).expect("create");
+        assert_eq!(landed, CanvasWrite::Created);
+        assert_eq!(category(&conn, new_id).1, 0.0);
+
+        // Another class's category with the same name is not this class's.
+        let elsewhere = CanvasGroup { id: "903", name: "Project", weight: None };
+        let (other, landed) = upsert_canvas_category(&conn, 1, &elsewhere).expect("other class");
+        assert_eq!(landed, CanvasWrite::Claimed);
+        assert_eq!(category(&conn, other).1, 40.0, "claimed class 1's row, not class 3's");
+        assert_eq!(category(&conn, 2).2, None, "class 3's Project is still unclaimed");
+    }
+
+    /// Identity is the assignment id, so a regrade — or a hand edit — is
+    /// overwritten in place rather than recorded a second time.
+    #[test]
+    fn an_item_is_keyed_on_its_assignment_so_a_regrade_updates_in_place() {
+        let conn = crate::db::memory_db();
+        let group = CanvasGroup { id: "901", name: "Quizzes", weight: Some(20.0) };
+        let (category_id, _) = upsert_canvas_category(&conn, 3, &group).expect("category");
+        let score = CanvasScore {
+            assignment_id: "5001",
+            name: "Quiz 1",
+            score: 9.0,
+            max_score: 10.0,
+            graded_at: Some("2026-09-03"),
+        };
+        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("first"), CanvasWrite::Created);
+
+        let audits = count(&conn, "SELECT COUNT(*) FROM audit_log");
+        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("second"), CanvasWrite::Unchanged);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM audit_log"), audits, "a no-op left a row");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_items"), 1);
+
+        // A hand edit is a correction until the next sync, which is Canvas's.
+        conn.execute("UPDATE grade_items SET score = 10 WHERE canvas_assignment_id = '5001'", [])
+            .expect("hand edit");
+        assert_eq!(upsert_canvas_item(&conn, category_id, &score).expect("third"), CanvasWrite::Updated);
+        let stored: f64 = conn
+            .query_row("SELECT score FROM grade_items WHERE canvas_assignment_id = '5001'", [], |r| r.get(0))
+            .expect("score");
+        assert_eq!(stored, 9.0);
+        assert_eq!(weighted_grade(&conn, 3).expect("grade"), Some(90.0));
+
+        // What the CHECK would refuse is refused a step earlier, by name.
+        let pointless = CanvasScore { max_score: 0.0, ..score };
+        assert!(upsert_canvas_item(&conn, category_id, &pointless).is_err());
     }
 }
