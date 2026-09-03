@@ -1012,18 +1012,25 @@ pub(crate) fn settle_canvas_deadline(
             read,
         )
         .optional()?;
+    // One transaction from the link on: taking the id is an ownership
+    // transfer — from here the sync moves the row's date and can close it —
+    // so it lands with its own audit row and never without the move that
+    // follows it.
+    let tx = conn.unchecked_transaction()?;
     let row = match (by_id, canvas_due) {
         (Some(row), _) => row,
         // Without a day there is no (title, day) to match a legacy row on.
         (None, None) => return Ok(None),
         (None, Some(canvas_due)) => {
-            let legacy: Option<Row> = conn
+            // An open row over a done one, when two share a title and a day:
+            // the open one is the one a submission has something to close.
+            let legacy: Option<Row> = tx
                 .query_row(
                     "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
                      WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
                        AND substr(due_at, 1, 10) = substr(?3, 1, 10)
                        AND canvas_assignment_id IS NULL
-                     ORDER BY id LIMIT 1",
+                     ORDER BY (status = 'open') DESC, id LIMIT 1",
                     params![class_id, title, canvas_due],
                     read,
                 )
@@ -1031,9 +1038,15 @@ pub(crate) fn settle_canvas_deadline(
             let Some(row) = legacy else {
                 return Ok(None);
             };
-            conn.execute(
+            tx.execute(
                 "UPDATE deadlines SET canvas_assignment_id = ?1 WHERE id = ?2",
                 params![assignment.id, row.0],
+            )?;
+            audit(
+                &tx,
+                "canvas.link_deadline",
+                json!({ "id": row.0, "classId": class_id, "canvasAssignmentId": assignment.id,
+                        "title": row.1, "dueAt": row.2, "status": row.3 }),
             )?;
             row
         }
@@ -1041,7 +1054,6 @@ pub(crate) fn settle_canvas_deadline(
     let (id, title, due_at, status, _) = row;
 
     let mut settled = Settled::default();
-    let tx = conn.unchecked_transaction()?;
     if let Some(canvas_due) = canvas_due.filter(|d| *d != due_at) {
         tx.execute(
             "UPDATE deadlines SET due_at = ?1 WHERE id = ?2",
@@ -1424,6 +1436,15 @@ mod tests {
             row(),
             (Some("5001".to_string()), "2026-09-03T23:59".to_string(), "open".to_string())
         );
+        let linked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'canvas.link_deadline'
+                   AND payload LIKE '%\"canvasAssignmentId\":\"5001\"%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("audit");
+        assert_eq!(linked, 1, "the link leaves its own row");
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &unsubmitted).expect("again"),
             Some(Settled::default())
@@ -1477,6 +1498,39 @@ mod tests {
             submitted_at: None,
         };
         assert_eq!(settle_canvas_deadline(&conn, 3, &unknown).expect("none"), None);
+    }
+
+    /// Two rows sharing a title and a day — one already done by hand, one
+    /// open — and the open one is the one Canvas's submission has something
+    /// to close, so it is the one that takes the id.
+    #[test]
+    fn the_open_row_is_linked_when_two_share_a_title_and_day() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, status, source)
+             VALUES (3, 'Quiz 1', 'quiz', '2026-09-03', 'done', 'manual'),
+                    (3, 'Quiz 1', 'quiz', '2026-09-03T11:45', 'open', 'syllabus')",
+            [],
+        )
+        .expect("fixture");
+        let submitted = CanvasAssignment {
+            id: "5001",
+            title: "Quiz 1",
+            due_at: Some("2026-09-03T23:59"),
+            submitted_at: Some("2026-09-03T12:30"),
+        };
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &submitted).expect("settle"),
+            Some(Settled { due_moved: true, completed: true })
+        );
+        let (source, status): (String, String) = conn
+            .query_row(
+                "SELECT source, status FROM deadlines WHERE canvas_assignment_id = '5001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the linked row");
+        assert_eq!((source.as_str(), status.as_str()), ("syllabus", "done"));
     }
 
     /// An assignment Canvas dates nothing for still closes the deadline it is
