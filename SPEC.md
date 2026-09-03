@@ -733,28 +733,40 @@ never replaces a stated time with a bare date.
 
 **A deadline already on the list is tracked by its assignment.** Approval carries the Canvas
 id onto the deadline, and a row the syllabus scan put there before Canvas could — the same
-title on the same calendar day, carrying no id — takes the assignment's id on first contact
-and is found by it after. A tracked deadline follows Canvas's due date, with an audit row
-holding the one it had, and is marked done the moment Canvas holds a submission for it, with
-an audit row naming the submission. Nothing reopens: a deadline done by hand stays done. The
-ids are also what make a re-sync an update in place rather than a second card — an assignment
-whose due date moved refreshes its card on the new day, and one whose deadline was deleted by
-hand comes back as the same card.
+title on the same calendar day, carrying no id, an open row before a done one — takes the
+assignment's id on first contact, with an audit row of its own, and is found by it after. A
+tracked deadline follows Canvas's due date, with an audit row holding the one it had, and is
+marked done the moment Canvas holds a submission for it, with an audit row naming the
+submission — an assignment Canvas has stopped dating still closes the deadline it is tracked
+by. From then on the row's badge reads `VIA CANVAS` whoever first put it on the list, the same
+words the grade item's tag uses, since the same thing is true of both: an edit lasts until
+the next sync. Nothing reopens: a deadline done by hand stays done. The ids are also what
+make a re-sync an update in place rather than a second card — an assignment whose due date
+moved refreshes its card on the new day, and one whose deadline was deleted by hand comes back
+as the same card.
 
 **Grades come from the same read.** Assignment groups become `grade_categories`, keyed on the
 group id; a hand-made category with a group's name (case-insensitive, the chat tool's rule) is
 claimed rather than duplicated, so the categories typed before this existed become Canvas's
-own. A group's weight is taken only when the course applies its group weights
-(`apply_assignment_group_weights` on the course); otherwise the typed weight stands, a new
-category starts at zero, and the ≠100% warning says what is missing. A submission becomes a
-`grade_item` when it is graded, posted and not excused — a muted grade is one the professor
-has not released, and recording it early is the wrong kind of early — and the assignment has
+own. Names stay unique within the class whatever Canvas sends: a group renamed on Canvas onto
+a name another category holds keeps its current name, and a second group arriving under a
+held name is recorded with a numbered suffix, each said in the sync report — two rows under
+one name would leave both weights uneditable. A group's weight is taken only when the course
+applies its group weights (`apply_assignment_group_weights` on the course); otherwise the
+typed weight stands, a new category starts at zero, and the ≠100% warning says what is
+missing. A submission becomes a `grade_item` when it is graded, posted and not excused — a
+muted grade is one the professor has not released, and recording it early is the wrong kind
+of early, so the report counts the grades Canvas is holding instead — and the assignment has
 positive points possible, which Canvas reports as 0 or null for ungraded work. Items are keyed
 on the assignment id, so a regrade updates in place and a hand edit lasts until the next sync
-writes Canvas's number back, which the item's tag says. Grades are written directly with
-audit rows, because a grade is reversible in the Grades section and that is the app's rule for
-skipping a confirm step; a second sync of an unchanged course writes nothing and leaves no
-row. The sync report counts grades recorded and deadlines completed beside what it proposed.
+writes Canvas's number back, which the item's tag says; an item typed by hand with the same
+name anywhere in the class is claimed on first contact, so a score entered from the returned
+paper before it was posted is counted once, not twice. The lookup stays inside the class, and
+a row another class holds for the assignment is refused rather than moved. Grades are written
+directly with audit rows, because a grade is reversible in the Grades section and that is the
+app's rule for skipping a confirm step; a second sync of an unchanged course writes nothing
+and leaves no row. The sync report counts grades recorded and deadlines completed beside what
+it proposed, and a failed grades read is a line in it rather than the class's failure.
 
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
@@ -1009,8 +1021,9 @@ its meetings.
   before today is tagged `PAST` and left out of ADD ALL: a past date may be a real deadline
   entered late or a scan misreading last year's syllabus, and only its own card can say, so it
   stays individually addable. A deadline that is a Canvas assignment is closed by the sync
-  once Canvas holds a submission for it, with an audit row naming the submission (§7.2); the
-  row's checkbox still reopens it, and the sync never does.
+  once Canvas holds a submission for it, with an audit row naming the submission (§7.2), and
+  its badge reads `VIA CANVAS` however it was first added; the row's checkbox still reopens
+  it, and the sync never does.
 - **Notes**: markdown files in `<Class>/Notes/`. Lightweight editor (textarea + live preview,
   no heavy editor dependency). Notes are included in `search_material` scope.
 - **Grades**: weighted categories per class (weights should sum to 100%; show a warning

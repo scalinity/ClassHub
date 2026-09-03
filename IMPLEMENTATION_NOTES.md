@@ -2510,3 +2510,81 @@ were addressed as individual commits. What future sessions should know:
 - `screencapture` after `End` shoots the bottom of the workspace; the
   Grades section sits above Materials there, so the tag check came from
   `ax text`.
+
+## Post-M21 — Review fixes (2026-09-03)
+
+A two-agent review of the M21 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 6 warnings
+and 9 suggestions, 3 of them corroborated by both reviewers; all were
+addressed as individual commits. What future sessions should know:
+
+- **A hand-entered score was counted twice.** Categories were claimed by
+  name but items were not: a score typed from the returned paper before
+  the professor posted it stayed beside the row the sync then inserted,
+  and the weighted grade summed both. `upsert_canvas_item` now claims a
+  row with no id and the same name anywhere in the class (the category
+  the assignment sits in first), moving it to Canvas's category and
+  writing Canvas's number, with `"claimed": true` on the audit row. The
+  lookup by id joins `grade_categories` and refuses a row another class
+  holds: the index on the assignment id is global, `classes.code` carries
+  no UNIQUE constraint, and two classes matched to one Canvas course would
+  otherwise move one row back and forth with an audit row each way.
+- **Category names stay unique.** `save_category` and the chat tool
+  refuse a second row under one name, so a Canvas write that produced one
+  left both weights uneditable. A group renamed onto a taken name keeps
+  its current name; a second group under a taken name lands as
+  `Name (2)`; both come back as a `note` on `CategoryWrite`, which
+  `upsert_canvas_category` now returns beside the id and the write, and
+  the sync pushes into the report. The note repeats on every sync while
+  the collision stands, deliberately.
+- **The legacy link is audited and atomic.** Stamping a syllabus deadline
+  with its assignment id was a bare autocommitted UPDATE before the
+  transaction that moved its date; it now lands inside that transaction
+  with a `canvas.link_deadline` row, and the (title, day) match orders
+  open rows before done ones. `CanvasAssignment.due_at` is optional, and
+  the settle runs before the sync's undated guard, so a tracked deadline
+  whose assignment Canvas no longer dates is still closed by its
+  submission; `submitted_at` goes through `local_iso` like every other
+  Canvas timestamp.
+- **The deadline row says who owns it.** `DeadlineInfo` and the `Deadline`
+  type carry `canvas_assignment_id`, and `deadlineSourceBadge` prefers it
+  over `source` with the grade item's words: an edit lasts until the next
+  sync. Proposal cards keep the source-only badge.
+- **The by-id refresh keeps the rank rule**, the (title, day) predicate and
+  the not-another-assignment guard are two `const`s interpolated into the
+  five queries that ask them, `fetch_assignments` does the one read both
+  passes consume and `sync_assignments` returns nothing, a failed grades
+  read is a report line rather than the class's failure (the file sync
+  behind it runs), and `grade_state` names Posted / Unposted / Nothing so
+  the report can say how many grades Canvas is holding. The unchanged
+  check in `upsert_canvas_item` precedes its transaction; both upserts
+  compare stored numbers with `==`, since a REAL round-trips bit for bit;
+  the delete audit rows carry the Canvas ids.
+- **Tests**: the item claim and the other-class refusal, the moved
+  assignment, the name collisions, the undated settle, the link audit row
+  and the open-row preference, approval refusing a card whose assignment
+  is already on the list, the rank rule on the id path, and the three
+  grade states. `cargo test`: 190 pass, no warnings. `npx tsc --noEmit`
+  clean.
+- **Live**, on the rebuilt dev build (pid 37717): a full sync of all four
+  classes reported `nothing new` for each, left the audit log at id 134
+  and every count as it was (9 categories, 0 items, 43 proposals, 2 done
+  deadlines, jobs at 294).
+- SPEC §7.2 and §11 record the item claim, the name rule, the link audit
+  row, the undated completion and the badge; nothing was pushed, since
+  the repo has no remote.
+
+### Gotchas
+
+- A perl substitution with `|` as its delimiter and `|conn|` in the
+  replacement landed the replacement at the import line of
+  `canvas_sync.rs`, the M17 gotcha a third time; the editor was used for
+  every multi-line edit after that, and a sed replacement of `x($` put a
+  literal `$` into three lines because `$` is not an anchor on the
+  replacement side.
+- A test helper named `landed` shadowed the `landed` bindings the older
+  tests destructure into; renamed `place`.
+- Each `src-tauri` edit rebuilt and relaunched the dev build (pids 33873
+  then 37717) while no job was running; `cargo test` waits on the target
+  directory lock while `tauri dev` compiles, so a test run after an edit
+  can take a minute.
