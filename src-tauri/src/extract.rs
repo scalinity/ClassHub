@@ -299,8 +299,12 @@ fn extract_local(class_dir: &Path, input_rel: &str, extract_rel: &str, how: &Rou
         }
         Route::Text => text,
         // Named rather than caught by a catch-all, so a new local route has
-        // to say what it does instead of silently extracting as raw text.
-        Route::Pdf | Route::Pptx | Route::Docx | Route::Skip => text,
+        // to say what it does — and refused, so a caller that hands the
+        // source of a converted format here gets an error rather than the
+        // raw bytes recorded as its extract.
+        Route::Pdf | Route::Pptx | Route::Docx | Route::Skip => {
+            bail!("{input_rel} is not extracted locally as it is")
+        }
     };
     content.truncate(content.trim_end().len());
     content.push('\n');
