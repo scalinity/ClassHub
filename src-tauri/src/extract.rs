@@ -1079,6 +1079,9 @@ mod tests {
             (4, "Slides/loose.pdf", "e"),
             (1, "Weeks/Week 02 — Responsible AI, Ethics/deck.pptx", "f"),
             (1, "Weeks/Week 03 — Data/other.pdf", "g"),
+            // Under `Weeks/` but not in a week folder: nobody's.
+            (4, "Weeks/Midterm Review/questions.pdf", "h"),
+            (4, "Weeks/loose.pdf", "i"),
         ] {
             conn.execute(
                 "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)

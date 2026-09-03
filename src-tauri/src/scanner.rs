@@ -728,6 +728,66 @@ mod tests {
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 
+    /// A deck deleted from a week folder is the index's business alone: the
+    /// lectures beside it keep their rows. An edit to a file the walk still
+    /// finds — same path, new content — is a change, and an unchanged tree
+    /// is not.
+    #[test]
+    fn a_deleted_deck_and_an_edited_transcript_leave_the_lectures_alone() {
+        let (db, dir) = part_numbered_class("classhub-scan-deck");
+        let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let (note, html, _md) = filed_and_digested(&db, &dir, transcript, PART_I);
+        write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF-1.4 a deck");
+        scan_class(&db, 4).expect("scan");
+
+        fs::remove_file(dir.join("Weeks/Week 04/deck.pdf")).expect("delete the deck");
+        let scan = scan_class(&db, 4).expect("scan");
+        assert!(scan.changed, "a deleted deck is a change");
+        {
+            let conn = db.lock().expect("db");
+            assert_eq!(count(&conn, "files"), 1);
+            assert_eq!(count(&conn, "lecture_contributions"), 1, "the deck took a row with it");
+            assert_eq!(count(&conn, "guides"), 1, "the deck took the session row with it");
+        }
+        assert!(dir.join(&note).is_file() && dir.join(&html).is_file());
+
+        fs::write(dir.join(transcript), "# Lecture\n\n## 00:00\n\nCorrected.\n").expect("edit");
+        assert!(scan_class(&db, 4).expect("scan").changed, "a content edit is a change");
+        assert!(!scan_class(&db, 4).expect("scan").changed, "an unchanged tree is not");
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// A transcript with a session document and no contribution row — one
+    /// the sorter filed and the digest read before any division claimed it —
+    /// is keyed by its path all the same, and its session row and documents
+    /// go with it.
+    #[test]
+    fn a_session_row_without_a_contribution_row_goes_with_its_transcript() {
+        let (db, dir) = part_numbered_class("classhub-scan-session-only");
+        let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        write(dir.join(transcript), "# Lecture\n");
+        let html = "Study Guides/Sessions/2026-09-15 — Topic.html";
+        let md = "Study Guides/Sessions/2026-09-15 — Topic.md";
+        write(dir.join(html), "<html></html>");
+        write(dir.join(md), "# session");
+        db.lock()
+            .expect("db")
+            .execute(
+                "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+                 VALUES (4, ?1, ?2, 1, '[]')",
+                params![format!("session:{transcript}"), html],
+            )
+            .expect("session row");
+        scan_class(&db, 4).expect("scan");
+
+        fs::remove_file(dir.join(transcript)).expect("delete in Finder");
+        let scan = scan_class(&db, 4).expect("scan");
+        assert!(scan.changed);
+        assert_eq!(count(&db.lock().expect("db"), "guides"), 0, "the session row outlived its transcript");
+        assert!(!dir.join(html).exists() && !dir.join(md).exists(), "the documents outlived it");
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
     /// A transcript dragged into `_Inbox/` to be sorted again vanishes from
     /// the index — the walk skips the app-managed folders — while still on
     /// disk. Its row, its note and its session document wait for the sorter
