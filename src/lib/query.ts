@@ -63,8 +63,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // Staleness is measured against that tree, and a refiled lecture also
       // changes which guide's sources it counts among and which transcript
       // its session document is keyed by — none of which the guides query
-      // sees unless told.
+      // sees unless told. The card's stale count reads the same answer, and
+      // a newly filed lecture emits `files` alone.
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      void queryClient.invalidateQueries({ queryKey: ["classes"] });
       // The same scan points each declared division at its folder, so the
       // Structure list is reading a join the scan just rewrote.
       void queryClient.invalidateQueries({ queryKey: ["units"] });
