@@ -690,56 +690,107 @@ pub fn finalize_job(
     let entries = crate::jobs::parse_entries(result_text)?;
     let summary = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
-        let mut recorded = 0usize;
-        let mut skipped = Vec::new();
-        // Per-entry tolerance throughout: one malformed or invalid entry
-        // costs that entry, never the rest of the batch.
-        for (index, raw) in entries.iter().enumerate() {
-            let entry: RawProposal = match serde_json::from_value(raw.clone()) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    skipped.push(format!("entry {} (malformed: {e})", index + 1));
-                    continue;
-                }
-            };
-            match validate_entry(&class_dir, &entry) {
-                Ok(valid) if scope == Some(valid.source_rel.as_str()) => {
-                    override_canvas_placement(conn, class_id, &valid)?;
-                    recorded += 1;
-                }
-                Ok(valid) => {
-                    upsert_proposal(
-                        conn,
-                        class_id,
-                        "sort_job",
-                        &valid.source_rel,
-                        &valid.dest_rel,
-                        &valid.reasoning,
-                        valid.confidence.as_deref(),
-                    )?;
-                    recorded += 1;
-                }
-                Err(e) => skipped.push(format!("{} ({e:#})", entry.file)),
-            }
-        }
-        if recorded == 0 {
-            bail!(
-                "no valid proposals in the job output{}",
-                if skipped.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — skipped: {}", skipped.join("; "))
-                }
-            );
-        }
-        let mut summary = format!("{recorded} move proposal(s) awaiting approval");
-        if !skipped.is_empty() {
-            summary.push_str(&format!(" · skipped {}", skipped.join("; ")));
-        }
-        Ok(summary)
+        record_entries(conn, class_id, &class_dir, scope, &entries)
     })?;
     emit_hub_change(app, "proposals");
     Ok(summary)
+}
+
+/// Records what a sort job returned, entry by entry, and says what it did.
+/// Zero recorded proposals is an error the caller demotes to job failure —
+/// except for a scoped run whose file was resolved while it ran, which is an
+/// outcome rather than a failure.
+fn record_entries(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    scope: Option<&str>,
+    entries: &[serde_json::Value],
+) -> Result<String> {
+    // A scoped run is for one file. Resolved while the job ran — approved,
+    // which is what moved it out of the inbox, or left in the inbox — the
+    // sort's answer arrived too late: recording it would fail the job over
+    // an approve that succeeded, or bring back a card that was declined.
+    if let Some(file) = scope {
+        if !has_pending(conn, class_id, file)? {
+            return Ok(format!(
+                "{file} was resolved while the sort ran — nothing recorded"
+            ));
+        }
+    }
+    let mut recorded = 0usize;
+    let mut ignored = 0usize;
+    let mut skipped = Vec::new();
+    // Per-entry tolerance throughout: one malformed or invalid entry
+    // costs that entry, never the rest of the batch.
+    for (index, raw) in entries.iter().enumerate() {
+        let entry: RawProposal = match serde_json::from_value(raw.clone()) {
+            Ok(entry) => entry,
+            Err(e) => {
+                skipped.push(format!("entry {} (malformed: {e})", index + 1));
+                continue;
+            }
+        };
+        let valid = match validate_entry(class_dir, &entry) {
+            Ok(valid) => valid,
+            Err(e) => {
+                skipped.push(format!("{} ({e:#})", entry.file));
+                continue;
+            }
+        };
+        let wrote = match scope {
+            // A scoped run records only its file: the prompt named one, and
+            // an entry for another is the model overreaching.
+            Some(file) if file != valid.source_rel => {
+                ignored += 1;
+                continue;
+            }
+            Some(_) => override_canvas_placement(conn, class_id, &valid)?,
+            None => upsert_proposal(
+                conn,
+                class_id,
+                "sort_job",
+                &valid.source_rel,
+                &valid.dest_rel,
+                &valid.reasoning,
+                valid.confidence.as_deref(),
+            )?,
+        };
+        if wrote {
+            recorded += 1;
+        } else {
+            skipped.push(format!("{} (Canvas placement kept)", entry.file));
+        }
+    }
+    if recorded == 0 {
+        bail!(
+            "no valid proposals in the job output{}",
+            if skipped.is_empty() {
+                String::new()
+            } else {
+                format!(" — skipped: {}", skipped.join("; "))
+            }
+        );
+    }
+    let mut summary = format!("{recorded} move proposal(s) awaiting approval");
+    if !skipped.is_empty() {
+        summary.push_str(&format!(" · skipped {}", skipped.join("; ")));
+    }
+    if ignored > 0 {
+        summary.push_str(&format!(" · ignored {ignored} file(s) outside the sort's scope"));
+    }
+    Ok(summary)
+}
+
+/// Whether a pending proposal exists for a source path in the class.
+fn has_pending(conn: &Connection, class_id: i64, source_rel: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM move_proposals
+         WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
+        params![class_id, source_rel],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 struct ValidEntry {
@@ -872,7 +923,7 @@ pub(crate) fn upsert_proposal(
     dest_rel: &str,
     reasoning: &str,
     confidence: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     let held: Option<String> = conn
         .query_row(
             "SELECT source FROM move_proposals
@@ -882,8 +933,13 @@ pub(crate) fn upsert_proposal(
         )
         .optional()?;
     match held.as_deref() {
-        Some("canvas") if source == "sort_job" => Ok(()),
-        Some(_) => replace_pending(conn, class_id, source, source_rel, dest_rel, reasoning, confidence),
+        // Refused, and says so: a caller counting proposals must not count
+        // one the record kept out.
+        Some("canvas") if source == "sort_job" => Ok(false),
+        Some(_) => {
+            replace_pending(conn, class_id, source, source_rel, dest_rel, reasoning, confidence)?;
+            Ok(true)
+        }
         None => {
             conn.execute(
                 "INSERT INTO move_proposals
@@ -892,7 +948,7 @@ pub(crate) fn upsert_proposal(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
                 params![class_id, source_rel, dest_rel, reasoning, confidence, source, now()],
             )?;
-            Ok(())
+            Ok(true)
         }
     }
 }
@@ -922,35 +978,33 @@ fn replace_pending(
 /// The sort's destination in place of Canvas's, for the one file SORT BY
 /// CONTENT was pressed for. The professor's folder moves onto the card's
 /// reasoning, so the override reads as a disagreement with a placement rather
-/// than as Canvas never having said anything. A Canvas row resolved by hand
-/// while the job ran leaves nothing to override, and the entry is recorded the
-/// ordinary way.
-fn override_canvas_placement(conn: &Connection, class_id: i64, valid: &ValidEntry) -> Result<()> {
-    let canvas_dest: Option<String> = conn
+/// than as Canvas never having said anything. Says whether it wrote: a row
+/// retargeted by chat while the job ran is replaced the ordinary way, and a
+/// row no longer pending is left alone rather than brought back.
+fn override_canvas_placement(
+    conn: &Connection,
+    class_id: i64,
+    valid: &ValidEntry,
+) -> Result<bool> {
+    let held: Option<(String, String)> = conn
         .query_row(
-            "SELECT dest_rel_path FROM move_proposals
-             WHERE class_id = ?1 AND source_rel_path = ?2
-               AND status = 'pending' AND source = 'canvas'",
+            "SELECT source, dest_rel_path FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
             params![class_id, valid.source_rel],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some(canvas_dest) = canvas_dest else {
-        return upsert_proposal(
-            conn,
-            class_id,
-            "sort_job",
-            &valid.source_rel,
-            &valid.dest_rel,
-            &valid.reasoning,
-            valid.confidence.as_deref(),
-        );
+    let reasoning = match held {
+        None => return Ok(false),
+        Some((source, _)) if source != "canvas" => valid.reasoning.clone(),
+        Some((_, canvas_dest)) => {
+            let placement = match canvas_dest.rsplit_once('/') {
+                Some((dir, _)) => format!("under \"{dir}\""),
+                None => "in the class root".to_string(),
+            };
+            format!("Canvas files it {placement} — {}", valid.reasoning)
+        }
     };
-    let canvas_dir = canvas_dest
-        .rsplit_once('/')
-        .map(|(dir, _)| dir)
-        .unwrap_or("the class folder");
-    let reasoning = format!("Canvas files it under \"{canvas_dir}\" — {}", valid.reasoning);
     replace_pending(
         conn,
         class_id,
@@ -959,7 +1013,8 @@ fn override_canvas_placement(conn: &Connection, class_id: i64, valid: &ValidEntr
         &valid.dest_rel,
         &reasoning,
         valid.confidence.as_deref(),
-    )
+    )?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,23 +1367,128 @@ mod tests {
             reasoning: "the deck covers Module 2's topics".into(),
             confidence: Some("high".into()),
         };
-        override_canvas_placement(&conn, 1, &valid).expect("override");
+        assert!(override_canvas_placement(&conn, 1, &valid).expect("override"));
         assert_eq!(
             held(&conn),
             ("Module 2/Slides/deck.pdf".into(), "sort_job".into(), 1)
         );
-        let (reasoning, confidence): (String, Option<String>) = conn
-            .query_row(
+        let row = |conn: &Connection| -> (String, Option<String>) {
+            conn.query_row(
                 "SELECT reasoning, confidence FROM move_proposals WHERE class_id = 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .expect("row");
+            .expect("row")
+        };
+        let (reasoning, confidence) = row(&conn);
         assert_eq!(
             reasoning,
             "Canvas files it under \"Slides\" — the deck covers Module 2's topics"
         );
         assert_eq!(confidence.as_deref(), Some("high"));
+
+        // A placement in the class root is named as such, not as a quoted
+        // folder called "the class folder".
+        conn.execute("DELETE FROM move_proposals", []).expect("clear");
+        propose(&conn, "canvas", "deck.pdf");
+        assert!(override_canvas_placement(&conn, 1, &valid).expect("override"));
+        assert_eq!(
+            row(&conn).0,
+            "Canvas files it in the class root — the deck covers Module 2's topics"
+        );
+
+        // Resolved while the job ran: nothing to override, and nothing is
+        // brought back.
+        conn.execute("UPDATE move_proposals SET status = 'dismissed'", [])
+            .expect("dismiss");
+        assert!(!override_canvas_placement(&conn, 1, &valid).expect("override"));
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(pending, 0, "a declined card came back");
+    }
+
+    /// A scoped run is for one file: an entry for any other inbox file is
+    /// ignored rather than recorded, a Canvas row kept by the automatic rule
+    /// counts as skipped rather than recorded, and a scoped file resolved
+    /// while the job ran is an outcome rather than a failure.
+    #[test]
+    fn a_scoped_sort_records_only_its_file() {
+        let dir = std::env::temp_dir().join(format!("classhub-scoped-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(INBOX_DIR)).expect("inbox");
+        for name in ["asked.pdf", "other.pdf"] {
+            fs::write(dir.join(INBOX_DIR).join(name), "x").expect("file");
+        }
+        let conn = crate::db::memory_db();
+        for name in ["asked.pdf", "other.pdf"] {
+            upsert_proposal(
+                &conn,
+                1,
+                "canvas",
+                &format!("{INBOX_DIR}/{name}"),
+                &format!("Slides/{name}"),
+                "Canvas files it under \"Slides\"",
+                None,
+            )
+            .expect("propose");
+        }
+        let entries: Vec<serde_json::Value> = ["asked.pdf", "other.pdf"]
+            .iter()
+            .map(|name| {
+                json!({
+                    "file": format!("{INBOX_DIR}/{name}"),
+                    "destination_rel_path": format!("Module 2/Slides/{name}"),
+                    "reasoning": "read the deck",
+                    "confidence": "high",
+                })
+            })
+            .collect();
+        let asked = format!("{INBOX_DIR}/asked.pdf");
+
+        let summary = record_entries(&conn, 1, &dir, Some(&asked), &entries).expect("record");
+        assert!(summary.starts_with("1 move proposal(s)"), "{summary}");
+        assert!(summary.contains("ignored 1 file(s)"), "{summary}");
+        let source_of = |name: &str| -> String {
+            conn.query_row(
+                "SELECT source FROM move_proposals WHERE source_rel_path = ?1",
+                [format!("{INBOX_DIR}/{name}")],
+                |r| r.get(0),
+            )
+            .expect("row")
+        };
+        assert_eq!(source_of("asked.pdf"), "sort_job");
+        assert_eq!(source_of("other.pdf"), "canvas", "a scoped run touched another file's Canvas row");
+
+        // Unscoped, the automatic rule keeps the Canvas row and the run records
+        // nothing rather than counting a refusal as a proposal.
+        let refused = record_entries(&conn, 1, &dir, None, &entries[1..]);
+        let message = format!("{:#}", refused.expect_err("nothing was recorded"));
+        assert!(message.contains("Canvas placement kept"), "{message}");
+        assert_eq!(source_of("other.pdf"), "canvas");
+
+        // Scoped to a file resolved while the job ran: an outcome, not a
+        // failure, and no card comes back.
+        conn.execute(
+            "UPDATE move_proposals SET status = 'approved' WHERE source_rel_path = ?1",
+            [&asked],
+        )
+        .expect("approve");
+        let summary = record_entries(&conn, 1, &dir, Some(&asked), &entries).expect("record");
+        assert!(summary.contains("resolved while the sort ran"), "{summary}");
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM move_proposals WHERE source_rel_path = ?1 AND status = 'pending'",
+                [&asked],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(pending, 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A pending proposal whose file has left the inbox is resolved with its

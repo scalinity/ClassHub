@@ -889,7 +889,8 @@ fn propose_move(
     // a guess, and this is not one. The card says VIA CANVAS instead, and
     // storing `high` here would make a later read of the table look as though
     // something had rated it.
-    crate::sorter::upsert_proposal(conn, class_id, "canvas", source_rel, dest_rel, reasoning, None)
+    crate::sorter::upsert_proposal(conn, class_id, "canvas", source_rel, dest_rel, reasoning, None)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
