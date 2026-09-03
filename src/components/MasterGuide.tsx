@@ -60,11 +60,16 @@ function PhaseRail({ current }: { current: number }) {
 export function MasterGuideStrip({
   classId,
   guide,
+  practiceActive,
   onView,
   onWatchLive,
 }: {
   classId: number;
   guide: GuideInfo | undefined;
+  /** A semester-wide practice exam (SPEC §8.3) is queued or running — its
+   *  own job, so it neither waits for the master nor blocks it. Derived by
+   *  the workspace, the way the other two guide clusters receive it. */
+  practiceActive: boolean;
   onView: () => void;
   /** Open the live document preview of the file the given job is composing. */
   onWatchLive: (jobId: number) => void;
@@ -81,15 +86,6 @@ export function MasterGuideStrip({
     null;
   const failed =
     !active && masterJobs[0]?.status === "failed" ? masterJobs[0] : null;
-  // A semester-wide practice exam (SPEC §8.3) is its own job, so it neither
-  // waits for the master nor blocks it.
-  const practiceActive = jobs.some(
-    (j) =>
-      j.kind === "practice" &&
-      j.classId === classId &&
-      j.scope === "master" &&
-      (j.status === "running" || j.status === "queued"),
-  );
 
   const start = () => {
     setError(null);

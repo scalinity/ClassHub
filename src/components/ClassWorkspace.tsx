@@ -144,7 +144,9 @@ export function ClassWorkspace({
   const activePractice = practiceJobs.filter(
     (j) => j.status === "running" || j.status === "queued",
   );
-  const activePracticeScopes = new Set(activePractice.map((j) => j.scope ?? ""));
+  const activePracticeScopes = new Set(
+    activePractice.map((j) => j.scope ?? ""),
+  );
   const { data: practice } = useQuery({
     queryKey: ["practice", info.id],
     queryFn: () => listPractice(info.id),
@@ -235,6 +237,7 @@ export function ClassWorkspace({
       {tree !== undefined && tree.length > 0 && (
         <MasterGuideStrip
           classId={info.id}
+          practiceActive={activePracticeScopes.has("master")}
           guide={guideMap.get("master")}
           onView={() => setViewScope("master")}
           onWatchLive={(jobId) =>
