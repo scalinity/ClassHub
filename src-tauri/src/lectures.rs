@@ -797,7 +797,7 @@ fn drop_session(
         .query_map(rusqlite::params![class_id, scope], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .flat_map(|html| [html.clone(), format!("{}.md", html.trim_end_matches(".html"))])
+        .flat_map(|html| [html.clone(), format!("{}.md", html.strip_suffix(".html").unwrap_or(&html))])
         .filter_map(|rel| session_path(class_dir, &rel))
         .collect();
     conn.execute(
