@@ -892,17 +892,13 @@ fn proposer(source: &str) -> &'static str {
 /// The session document's markdown twin (SPEC §8.4) — the copy chat can read
 /// and search, so it is the one the overview names.
 fn markdown_twin(html_rel_path: &str) -> String {
-    format!("{}.md", html_rel_path.trim_end_matches(".html"))
+    format!("{}.md", html_rel_path.strip_suffix(".html").unwrap_or(html_rel_path))
 }
 
 /// `Study Guides/Sessions/2026-09-01 — Topic.html` → `2026-09-01 — Topic`.
 fn document_stem(rel_path: &str) -> String {
-    rel_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(rel_path)
-        .trim_end_matches(".html")
-        .to_string()
+    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    name.strip_suffix(".html").unwrap_or(name).to_string()
 }
 
 /// Depth-0 folders holding indexed files, with their file counts.
