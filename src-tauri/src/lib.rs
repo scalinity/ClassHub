@@ -156,7 +156,7 @@ fn generate_practice(
     generated_at_label: String,
     date_label: String,
 ) -> Result<i64, String> {
-    guides::generate_practice(&app, class_id, &scope, None, &generated_at_label, &date_label)
+    guides::generate_practice(&app, class_id, &scope, None, None, &generated_at_label, &date_label)
         .map(|(job_id, _)| job_id)
         .map_err(|e| format!("{e:#}"))
 }

@@ -386,11 +386,14 @@ struct PracticePayload {
 /// one of the course's own divisions — drawing on the same sources as that
 /// division's guide (SPEC §8.5) — or `master` (the whole semester); `focus`
 /// narrows topics. `date_label` names the file (`<scope> — <date>.html`), so
-/// it must be filename-safe (YYYY-MM-DD).
+/// it must be filename-safe (YYYY-MM-DD). A caller that has already resolved
+/// the division passes its `unit_id`; the name in the scope is looked up
+/// only when it has not.
 pub fn generate_practice(
     app: &AppHandle,
     class_id: i64,
     scope: &str,
+    unit_id: Option<i64>,
     focus: Option<&str>,
     generated_at_label: &str,
     date_label: &str,
@@ -416,14 +419,20 @@ pub fn generate_practice(
         }
         let (ctx, corpus) = match scope.strip_prefix(UNIT_SCOPE_PREFIX) {
             Some(unit_name) => {
-                let unit_id: i64 = conn
-                    .query_row(
+                let unit_id: i64 = match unit_id {
+                    Some(id) => conn.query_row(
+                        "SELECT id FROM units WHERE id = ?1 AND class_id = ?2",
+                        params![id, class_id],
+                        |row| row.get(0),
+                    ),
+                    None => conn.query_row(
                         "SELECT id FROM units WHERE class_id = ?1 AND name = ?2",
                         params![class_id, unit_name],
                         |row| row.get(0),
-                    )
-                    .optional()?
-                    .context("that division is no longer in this course's structure")?;
+                    ),
+                }
+                .optional()?
+                .context("that division is no longer in this course's structure")?;
                 unit_context(&conn, class_id, unit_id, unit_name, scope)?
             }
             None => (

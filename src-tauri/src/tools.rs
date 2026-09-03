@@ -1643,8 +1643,9 @@ enum Scope {
     Master,
     /// A depth-0 folder holding indexed files, by its rel path.
     Folder(String),
-    /// One of the course's own divisions, by its `units` row.
-    Unit { id: i64, name: String },
+    /// One of the course's own divisions, by its `units` row. `kind` and
+    /// `ordinal` are what the row answers to as `week3`.
+    Unit { id: i64, name: String, kind: String, ordinal: i64 },
 }
 
 impl Scope {
@@ -1693,7 +1694,12 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
         .collect();
     let candidates: Vec<Scope> = units
         .iter()
-        .map(|u| Scope::Unit { id: u.id, name: u.name.clone() })
+        .map(|u| Scope::Unit {
+            id: u.id,
+            name: u.name.clone(),
+            kind: u.kind.clone(),
+            ordinal: u.ordinal,
+        })
         .chain(folders.iter().map(|f| Scope::Folder(f.clone())))
         .collect();
     let list = || {
@@ -1724,16 +1730,9 @@ fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Sco
     if needle.is_empty() {
         bail!("which scope? {}", list());
     }
-    let kind_key = |id: i64| {
-        units
-            .iter()
-            .find(|u| u.id == id)
-            .map(|u| format!("{}{}", u.kind, u.ordinal))
-            .unwrap_or_default()
-    };
     // Master never enters the candidates — it was answered above by name.
     let Some(tier) = best_match(&candidates, &needle, |c| match c {
-        Scope::Unit { id, name } => vec![squash(name), kind_key(*id)],
+        Scope::Unit { name, kind, ordinal, .. } => vec![squash(name), format!("{kind}{ordinal}")],
         Scope::Folder(rel) => vec![squash(rel)],
         Scope::Master => unreachable!("master is resolved before matching"),
     }) else {
@@ -1782,7 +1781,7 @@ fn trigger_synthesis(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
                 class.display_name
             )))
         }
-        Scope::Unit { id, name } => {
+        Scope::Unit { id, name, .. } => {
             let job_id = crate::guides::synthesize_unit(app, class.id, id, ctx.today)?;
             Ok(Outcome::ok(format!(
                 "Guide synthesis queued — {name} · {} (job #{job_id})\n\
@@ -1803,10 +1802,17 @@ fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
         Ok((class, scope))
     })?;
     let key = scope.key();
+    // The division was just resolved, so its row is handed over rather than
+    // found again by name.
+    let unit_id = match &scope {
+        Scope::Unit { id, .. } => Some(*id),
+        _ => None,
+    };
     let (job_id, output_rel) = crate::guides::generate_practice(
         app,
         class.id,
         &key,
+        unit_id,
         focus.as_deref(),
         ctx.today,
         ctx.today_iso,
@@ -2209,7 +2215,13 @@ mod tests {
             Scope::Master
         );
         assert_eq!(
-            Scope::Unit { id: 0, name: "Week 3 \u{2014} Data Exploration".into() }.key(),
+            Scope::Unit {
+                id: 0,
+                name: "Week 3 \u{2014} Data Exploration".into(),
+                kind: "week".into(),
+                ordinal: 3,
+            }
+            .key(),
             "unit:Week 3 \u{2014} Data Exploration"
         );
     }
