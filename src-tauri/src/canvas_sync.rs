@@ -620,9 +620,10 @@ fn sync_grades(
     )?;
     let weighted = applies_group_weights(course);
 
-    let (categories_landed, recorded, orphans, changed) = with_conn(app, |conn| {
+    let (categories_landed, category_notes, recorded, orphans, changed) = with_conn(app, |conn| {
         let mut by_group: HashMap<String, i64> = HashMap::new();
         let mut categories_landed = 0usize;
+        let mut category_notes: Vec<String> = Vec::new();
         let mut changed = false;
         for group in &groups {
             let Some(id) = group["id"].as_i64().map(|id| id.to_string()) else {
@@ -635,8 +636,8 @@ fn sync_grades(
             let weight = if weighted { group["group_weight"].as_f64() } else { None };
             let group = CanvasGroup { id: &id, name, weight };
             match crate::grades::upsert_canvas_category(conn, class.id, &group) {
-                Ok((category_id, landed)) => {
-                    match landed {
+                Ok(category) => {
+                    match category.write {
                         CanvasWrite::Created | CanvasWrite::Claimed => {
                             categories_landed += 1;
                             changed = true;
@@ -644,7 +645,8 @@ fn sync_grades(
                         CanvasWrite::Updated => changed = true,
                         CanvasWrite::Unchanged => {}
                     }
-                    by_group.insert(id, category_id);
+                    category_notes.extend(category.note);
+                    by_group.insert(id, category.id);
                 }
                 Err(e) => eprintln!("canvas: skipping assignment group '{name}': {e:#}"),
             }
@@ -675,10 +677,11 @@ fn sync_grades(
                 Err(e) => eprintln!("canvas: skipping grade '{}': {e:#}", graded.name),
             }
         }
-        Ok((categories_landed, recorded, orphans, changed))
+        Ok((categories_landed, category_notes, recorded, orphans, changed))
     })?;
 
     outcome.grades_recorded = recorded;
+    outcome.notes.extend(category_notes);
     if categories_landed > 0 {
         outcome.notes.push(format!(
             "{categories_landed} grade categor{} from Canvas{}",

@@ -440,7 +440,29 @@ fn canvas_name(name: &str) -> Result<String> {
     Ok(name)
 }
 
-/// Upserts a category for an assignment group, returning its row id.
+/// What upserting a category did: the row, how it landed, and a line for the
+/// sync report when Canvas's name could not be taken as it was.
+pub(crate) struct CategoryWrite {
+    pub id: i64,
+    pub write: CanvasWrite,
+    pub note: Option<String>,
+}
+
+/// Whether another category in the class already carries `name`, ignoring
+/// case — the rule `save_category` and the chat tool enforce, which a Canvas
+/// write must not break: two rows sharing a name would leave both weights
+/// uneditable from the Grades section.
+fn name_taken(conn: &Connection, class_id: i64, name: &str, except: Option<i64>) -> Result<bool> {
+    let taken: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM grade_categories
+         WHERE class_id = ?1 AND LOWER(name) = LOWER(?2) AND id != ?3",
+        params![class_id, name, except.unwrap_or(-1)],
+        |row| row.get(0),
+    )?;
+    Ok(taken > 0)
+}
+
+/// Upserts a category for an assignment group.
 ///
 /// Identity is the group id. A category with no id and the same name
 /// (case-insensitive, the chat tool's rule) is claimed rather than duplicated,
@@ -448,11 +470,17 @@ fn canvas_name(name: &str) -> Result<String> {
 /// existed become Canvas's own without a second "Quizzes" beside them. A
 /// weight arrives only when the course applies group weights; otherwise the
 /// existing weight stands and a new category starts at zero.
+///
+/// Names stay unique within the class. A group renamed on Canvas onto a name
+/// another category here holds keeps its current name, and a second group
+/// arriving under a name already held is recorded with a numbered suffix;
+/// both say so in the sync report rather than landing a row the Grades
+/// section could not edit.
 pub(crate) fn upsert_canvas_category(
     conn: &Connection,
     class_id: i64,
     group: &CanvasGroup,
-) -> Result<(i64, CanvasWrite)> {
+) -> Result<CategoryWrite> {
     let name = canvas_name(group.name)?;
     let weight = group.weight.filter(|w| (0.0..=100.0).contains(w));
     let read = |row: &rusqlite::Row| -> rusqlite::Result<(i64, String, f64)> {
@@ -468,10 +496,19 @@ pub(crate) fn upsert_canvas_category(
         .optional()?;
     if let Some((id, current_name, current_weight)) = owned {
         let weight = weight.unwrap_or(current_weight);
+        let (name, note) = if current_name != name && name_taken(conn, class_id, &name, Some(id))? {
+            let note = format!(
+                "Canvas renamed \"{current_name}\" to \"{name}\", which another category here \
+                 already uses — kept as \"{current_name}\""
+            );
+            (current_name.clone(), Some(note))
+        } else {
+            (name, None)
+        };
         // Exact: a REAL round-trips an f64 bit for bit, and the question is
         // whether Canvas's number differs from the stored one at all.
         if current_name == name && current_weight == weight {
-            return Ok((id, CanvasWrite::Unchanged));
+            return Ok(CategoryWrite { id, write: CanvasWrite::Unchanged, note });
         }
         let tx = conn.unchecked_transaction()?;
         tx.execute(
@@ -486,7 +523,7 @@ pub(crate) fn upsert_canvas_category(
                     "after": { "name": name, "weight": weight } }),
         )?;
         tx.commit()?;
-        return Ok((id, CanvasWrite::Updated));
+        return Ok(CategoryWrite { id, write: CanvasWrite::Updated, note });
     }
 
     let unclaimed: Option<(i64, String, f64)> = conn
@@ -514,23 +551,38 @@ pub(crate) fn upsert_canvas_category(
                         "before": { "name": current_name, "weight": current_weight },
                         "after": { "name": name, "weight": weight } }),
             )?;
-            (id, CanvasWrite::Claimed)
+            CategoryWrite { id, write: CanvasWrite::Claimed, note: None }
         }
         None => {
+            // Nothing unclaimed carries the name, so a holder is another Canvas
+            // group: two groups called "Quizzes" are two categories, and the
+            // second takes a suffix so both stay editable.
+            let mut landed = name.clone();
+            let mut serial = 2;
+            while name_taken(&tx, class_id, &landed, None)? {
+                landed = format!("{name} ({serial})");
+                serial += 1;
+            }
+            let note = (landed != name).then(|| {
+                format!(
+                    "Canvas has more than one group called \"{name}\" — this one is recorded \
+                     as \"{landed}\""
+                )
+            });
             let weight = weight.unwrap_or(0.0);
             tx.execute(
                 "INSERT INTO grade_categories (class_id, name, weight, canvas_group_id)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![class_id, name, weight, group.id],
+                params![class_id, landed, weight, group.id],
             )?;
             let id = tx.last_insert_rowid();
             audit(
                 &tx,
                 "canvas.upsert_grade_category",
                 json!({ "id": id, "classId": class_id, "canvasGroupId": group.id,
-                        "name": name, "weight": weight, "created": true }),
+                        "name": landed, "weight": weight, "created": true }),
             )?;
-            (id, CanvasWrite::Created)
+            CategoryWrite { id, write: CanvasWrite::Created, note }
         }
     };
     tx.commit()?;
@@ -809,6 +861,11 @@ mod tests {
         conn.query_row(sql, [], |row| row.get(0)).expect("count")
     }
 
+    /// The row and how it landed, for the tests that care about nothing else.
+    fn place(conn: &Connection, class_id: i64, group: &CanvasGroup) -> Result<(i64, CanvasWrite)> {
+        upsert_canvas_category(conn, class_id, group).map(|c| (c.id, c.write))
+    }
+
     fn category(conn: &Connection, id: i64) -> (String, f64, Option<String>) {
         conn.query_row(
             "SELECT name, weight, canvas_group_id FROM grade_categories WHERE id = ?1",
@@ -831,7 +888,7 @@ mod tests {
         .expect("fixture");
 
         let group = CanvasGroup { id: "901", name: "quizzes", weight: None };
-        let (id, landed) = upsert_canvas_category(&conn, 3, &group).expect("claim");
+        let (id, landed) = place(&conn, 3, &group).expect("claim");
         assert_eq!(landed, CanvasWrite::Claimed);
         // The typed weight stands when the course does not weight its groups;
         // the name takes Canvas's own spelling.
@@ -841,7 +898,7 @@ mod tests {
         // Found by id the second time: nothing changes and no audit row lands.
         let audits = count(&conn, "SELECT COUNT(*) FROM audit_log");
         assert_eq!(
-            upsert_canvas_category(&conn, 3, &group).expect("again"),
+            place(&conn, 3, &group).expect("again"),
             (id, CanvasWrite::Unchanged)
         );
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM audit_log"), audits);
@@ -849,7 +906,7 @@ mod tests {
         // A course that applies its group weights replaces the typed one.
         let weighted = CanvasGroup { id: "901", name: "Quizzes", weight: Some(25.0) };
         assert_eq!(
-            upsert_canvas_category(&conn, 3, &weighted).expect("reweight"),
+            place(&conn, 3, &weighted).expect("reweight"),
             (id, CanvasWrite::Updated)
         );
         assert_eq!(category(&conn, id).1, 25.0);
@@ -857,13 +914,13 @@ mod tests {
         // A group nothing was typed for starts at zero, so the ≠100% warning
         // says the weight is missing rather than a number pretending otherwise.
         let fresh = CanvasGroup { id: "902", name: "Homework", weight: None };
-        let (new_id, landed) = upsert_canvas_category(&conn, 3, &fresh).expect("create");
+        let (new_id, landed) = place(&conn, 3, &fresh).expect("create");
         assert_eq!(landed, CanvasWrite::Created);
         assert_eq!(category(&conn, new_id).1, 0.0);
 
         // Another class's category with the same name is not this class's.
         let elsewhere = CanvasGroup { id: "903", name: "Project", weight: None };
-        let (other, landed) = upsert_canvas_category(&conn, 1, &elsewhere).expect("other class");
+        let (other, landed) = place(&conn, 1, &elsewhere).expect("other class");
         assert_eq!(landed, CanvasWrite::Claimed);
         assert_eq!(category(&conn, other).1, 40.0, "claimed class 1's row, not class 3's");
         assert_eq!(category(&conn, 2).2, None, "class 3's Project is still unclaimed");
@@ -875,7 +932,7 @@ mod tests {
     fn an_item_is_keyed_on_its_assignment_so_a_regrade_updates_in_place() {
         let conn = crate::db::memory_db();
         let group = CanvasGroup { id: "901", name: "Quizzes", weight: Some(20.0) };
-        let (category_id, _) = upsert_canvas_category(&conn, 3, &group).expect("category");
+        let (category_id, _) = place(&conn, 3, &group).expect("category");
         let score = CanvasScore {
             assignment_id: "5001",
             name: "Quiz 1",
@@ -912,13 +969,13 @@ mod tests {
     #[test]
     fn a_hand_entered_score_is_claimed_and_another_class_s_row_is_refused() {
         let conn = crate::db::memory_db();
-        let (quizzes, _) = upsert_canvas_category(
+        let (quizzes, _) = place(
             &conn,
             3,
             &CanvasGroup { id: "901", name: "Quizzes", weight: Some(20.0) },
         )
         .expect("category");
-        let (homework, _) = upsert_canvas_category(
+        let (homework, _) = place(
             &conn,
             3,
             &CanvasGroup { id: "902", name: "Homework", weight: Some(30.0) },
@@ -977,7 +1034,7 @@ mod tests {
 
         // Two classes matched to one Canvas course: the second is refused
         // rather than moving the first's row across.
-        let (elsewhere, _) = upsert_canvas_category(
+        let (elsewhere, _) = place(
             &conn,
             1,
             &CanvasGroup { id: "801", name: "Quizzes", weight: None },
@@ -986,5 +1043,67 @@ mod tests {
         let err = upsert_canvas_item(&conn, 1, elsewhere, &posted).unwrap_err().to_string();
         assert!(err.contains("another class") || err.contains("class #3"), "{err}");
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_items WHERE canvas_assignment_id = '5002'"), 1);
+    }
+
+    /// Names stay unique within the class whatever Canvas sends, because two
+    /// rows sharing one would leave both weights uneditable from the Grades
+    /// section. A second group under a held name takes a suffix; a rename
+    /// onto a held name is kept back; both are said in the report.
+    #[test]
+    fn two_groups_with_one_name_stay_two_editable_categories() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO grade_categories (class_id, name, weight) VALUES (3, 'Homework', 40)",
+            [],
+        )
+        .expect("typed by hand");
+        let first = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "901", name: "Quizzes", weight: None },
+        )
+        .expect("first");
+        assert!(first.note.is_none());
+        let second = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "902", name: "quizzes", weight: None },
+        )
+        .expect("second");
+        assert_eq!(second.write, CanvasWrite::Created);
+        assert_eq!(category(&conn, second.id).0, "quizzes (2)");
+        assert!(second.note.as_deref().unwrap_or("").contains("quizzes (2)"), "{:?}", second.note);
+        // Found by id after, still its own row, nothing to say.
+        let again = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "902", name: "quizzes", weight: None },
+        )
+        .expect("again");
+        assert_eq!((again.id, again.write), (second.id, CanvasWrite::Unchanged));
+        // Wait — Canvas says "quizzes", the row says "quizzes (2)": the name
+        // differs, but the suffixed name is the row's own and a rename back
+        // onto "quizzes" is refused the same way. Recorded as unchanged.
+        assert!(again.note.is_some(), "the standing collision is still reported");
+
+        // Group 901 renamed onto the hand-made category's name.
+        let renamed = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "901", name: "Homework", weight: None },
+        )
+        .expect("rename");
+        assert_eq!(renamed.write, CanvasWrite::Unchanged);
+        assert_eq!(category(&conn, renamed.id).0, "Quizzes", "kept its name");
+        assert!(renamed.note.as_deref().unwrap_or("").contains("kept as \"Quizzes\""), "{:?}", renamed.note);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_categories WHERE class_id = 3 AND LOWER(name) = 'homework'"), 1);
+        // And the hand-made row is still claimable by its own group.
+        let claimed = upsert_canvas_category(
+            &conn,
+            3,
+            &CanvasGroup { id: "903", name: "Homework", weight: None },
+        )
+        .expect("claim");
+        assert_eq!(claimed.write, CanvasWrite::Claimed);
     }
 }
