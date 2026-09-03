@@ -214,6 +214,57 @@ fn read_offsite(host: &str, waited: Duration) -> Offsite {
     }
 }
 
+/// Why the sign-in probe stopped short of an answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Signal {
+    /// Canvas served the page and answered the probe with this status.
+    Refused(u64),
+    /// The window landed on another host — Canvas sent it to SSO.
+    Bounced,
+    /// The window never navigated anywhere, for longer than a first
+    /// navigation should take.
+    Stalled,
+}
+
+/// What a signal means for the stored copy, and for a session that may not
+/// ask for a sign-in.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    /// Conclusive: Canvas ended the session. The stored copy is dead.
+    SessionOver,
+    /// Canvas declined the probe with a status that is not a lapsed session
+    /// — its rate limiter answers 403 — so the copy stands.
+    Declined(u64),
+    /// Nothing conclusive: a window that never loaded.
+    NeverLoaded,
+}
+
+/// The decision `ask` acts on, apart from the window so it can be tested:
+/// only a 401 or an SSO bounce is Canvas ending the session, and only that
+/// throws the stored copy away. Everything else keeps it and, under a quiet
+/// session, is reported as what it was rather than as a sign-in.
+fn read_signal(signal: Signal) -> Verdict {
+    match signal {
+        Signal::Refused(401) | Signal::Bounced => Verdict::SessionOver,
+        Signal::Refused(status) => Verdict::Declined(status),
+        Signal::Stalled => Verdict::NeverLoaded,
+    }
+}
+
+/// What a quiet session says when it stops instead of asking. A lapsed
+/// session is `SignInNeeded`, typed, so the launch sync can report it as a
+/// note; the other two are plain failures in their own words.
+fn quiet_stop(verdict: Verdict) -> anyhow::Error {
+    match verdict {
+        Verdict::SessionOver => SignInNeeded.into(),
+        Verdict::Declined(status) => anyhow::anyhow!(
+            "Canvas declined the sign-in check with status {status} — not a lapsed session, \
+             so the saved copy was kept"
+        ),
+        Verdict::NeverLoaded => anyhow::anyhow!("the Canvas window never finished loading"),
+    }
+}
+
 enum Outcome {
     Json { value: Value, next: NextPage },
     /// A file's bytes, base64 as the page encoded them.
@@ -378,11 +429,13 @@ impl Session {
                 // session perfectly alive — its rate limiter answers 403, and
                 // `Refused` further down exists because a course can too. Only
                 // the first is allowed to throw the stored copy away.
-                Outcome::Unauthorized(status) => self.ask(&mut asked, status == 401, on_stage)?,
+                Outcome::Unauthorized(status) => {
+                    self.ask(&mut asked, Signal::Refused(status), on_stage)?
+                }
                 Outcome::Offsite(host) => match read_offsite(&host, started.elapsed()) {
                     Offsite::Loading => {}
-                    Offsite::Stalled => self.ask(&mut asked, false, on_stage)?,
-                    Offsite::Bounced => self.ask(&mut asked, true, on_stage)?,
+                    Offsite::Stalled => self.ask(&mut asked, Signal::Stalled, on_stage)?,
+                    Offsite::Bounced => self.ask(&mut asked, Signal::Bounced, on_stage)?,
                 },
             }
             if Instant::now() >= deadline {
@@ -571,28 +624,26 @@ impl Session {
 
     /// Puts the sign-in in front of the user, once.
     ///
-    /// `refused` is whether Canvas actually turned the stored copy down. The
-    /// two halves of this are not equally reversible: showing a window costs a
-    /// window, while deleting the session costs a Duo round on the next launch
-    /// — so only a conclusive refusal does the second. A window that has not
-    /// navigated anywhere yet has refused nothing, and the copy it may be about
-    /// to prove has no business being thrown away first.
+    /// The two halves of this are not equally reversible: showing a window
+    /// costs a window, while deleting the session costs a Duo round on the
+    /// next launch — so only a conclusive verdict (`read_signal`) does the
+    /// second. A window that has not navigated anywhere yet has refused
+    /// nothing, and the copy it may be about to prove has no business being
+    /// thrown away first; a 403 is Canvas declining one call, not ending the
+    /// session.
     ///
-    /// A quiet session never asks: a refusal ends it with `SignInNeeded`, and
-    /// a window that never navigated ends it with that said plainly.
-    fn ask(&self, asked: &mut bool, refused: bool, on_stage: &dyn Fn(&str)) -> Result<()> {
+    /// A quiet session never asks: it stops with `quiet_stop`'s words.
+    fn ask(&self, asked: &mut bool, signal: Signal, on_stage: &dyn Fn(&str)) -> Result<()> {
         if *asked {
             return Ok(());
         }
         *asked = true;
-        if refused {
+        let verdict = read_signal(signal);
+        if verdict == Verdict::SessionOver {
             forget();
         }
         if self.quiet {
-            if refused {
-                return Err(SignInNeeded.into());
-            }
-            bail!("the Canvas window never finished loading");
+            return Err(quiet_stop(verdict));
         }
         self.reveal();
         on_stage("Waiting for you to sign in to Canvas…");
@@ -1342,6 +1393,31 @@ mod tests {
         assert_eq!(read_offsite("", SIGN_IN_SETTLE - Duration::from_millis(1)), Offsite::Loading);
         assert_eq!(read_offsite("", SIGN_IN_SETTLE), Offsite::Stalled);
         assert_eq!(read_offsite("", SIGN_IN_SETTLE * 100), Offsite::Stalled);
+    }
+
+    /// The decision that deletes a credential, and what a quiet session says
+    /// about it. Only a 401 or an SSO bounce is Canvas ending the session;
+    /// a 403 is its rate limiter declining one call, and a window that never
+    /// loaded is no evidence at all — neither may throw the stored copy away,
+    /// and a launch sync names each for what it was.
+    #[test]
+    fn only_a_lapsed_session_or_an_sso_bounce_ends_the_stored_copy() {
+        assert_eq!(read_signal(Signal::Refused(401)), Verdict::SessionOver);
+        assert_eq!(read_signal(Signal::Bounced), Verdict::SessionOver);
+        assert_eq!(read_signal(Signal::Refused(403)), Verdict::Declined(403));
+        assert_eq!(read_signal(Signal::Refused(429)), Verdict::Declined(429));
+        assert_eq!(read_signal(Signal::Stalled), Verdict::NeverLoaded);
+
+        let over = quiet_stop(Verdict::SessionOver);
+        assert!(over.chain().any(|cause| cause.is::<SignInNeeded>()), "{over:#}");
+        let declined = format!("{:#}", quiet_stop(Verdict::Declined(403)));
+        assert!(declined.contains("403") && declined.contains("kept"), "{declined}");
+        assert!(!quiet_stop(Verdict::Declined(403))
+            .chain()
+            .any(|cause| cause.is::<SignInNeeded>()));
+        assert!(
+            format!("{:#}", quiet_stop(Verdict::NeverLoaded)).contains("never finished loading")
+        );
     }
 
     /// The CSRF token is the one cookie Canvas sets for its host that is not
