@@ -1484,12 +1484,38 @@ pub struct AnnouncementInfo {
 
 /// The class's announcements, newest first.
 pub fn list_announcements(conn: &Connection, class_id: i64) -> Result<Vec<AnnouncementInfo>> {
+    announcements_newest_first(conn, class_id, -1)
+}
+
+/// The class's `limit` newest announcements and how many it has in all —
+/// what the chat overview wants on every turn, without reading every body
+/// under the database lock to keep three.
+pub fn latest_announcements(
+    conn: &Connection,
+    class_id: i64,
+    limit: usize,
+) -> Result<(Vec<AnnouncementInfo>, usize)> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM announcements WHERE class_id = ?1",
+        [class_id],
+        |row| row.get(0),
+    )?;
+    let latest = announcements_newest_first(conn, class_id, limit as i64)?;
+    Ok((latest, total as usize))
+}
+
+/// A negative `limit` is SQLite's "no limit".
+fn announcements_newest_first(
+    conn: &Connection,
+    class_id: i64,
+    limit: i64,
+) -> Result<Vec<AnnouncementInfo>> {
     let mut stmt = conn.prepare(
         "SELECT id, canvas_id, title, body, posted_at FROM announcements
-         WHERE class_id = ?1 ORDER BY posted_at DESC, id DESC",
+         WHERE class_id = ?1 ORDER BY posted_at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map([class_id], |row| {
+        .query_map(params![class_id, limit], |row| {
             Ok(AnnouncementInfo {
                 id: row.get(0)?,
                 canvas_id: row.get(1)?,

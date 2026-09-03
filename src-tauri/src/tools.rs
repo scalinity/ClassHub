@@ -650,17 +650,20 @@ const NOTICE_BODY_CHARS: usize = 600;
 /// every turn; the detailed form quotes each body, capped. Nothing when the
 /// course has none.
 fn notices_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<String> {
-    let all = crate::canvas_sync::list_announcements(conn, class_id)?;
-    if all.is_empty() {
+    let (latest, total) =
+        crate::canvas_sync::latest_announcements(conn, class_id, NOTICES_SHOWN)?;
+    if latest.is_empty() {
         return Ok(String::new());
     }
-    let day = |posted_at: &str| posted_at[..posted_at.len().min(10)].to_string();
+    // The date half of a stored `YYYY-MM-DDTHH:MM`, taken by characters —
+    // another build shares the table, so the column's shape is not a promise.
+    let day = |posted_at: &str| posted_at.chars().take(10).collect::<String>();
     // Title and body are the professor's text, folded onto one line each so
     // neither can open a line of its own in the system prompt.
     let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let latest = all.iter().take(NOTICES_SHOWN);
     if !detailed {
         let titles = latest
+            .iter()
             .map(|a| format!("\"{}\" ({})", one_line(&a.title), day(&a.posted_at)))
             .collect::<Vec<_>>()
             .join("; ");
@@ -668,10 +671,10 @@ fn notices_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<Str
     }
     let mut out = format!(
         "Notices (latest {} of {}):\n",
-        all.len().min(NOTICES_SHOWN),
-        plural(all.len(), "announcement")
+        latest.len(),
+        plural(total, "announcement")
     );
-    for a in latest {
+    for a in &latest {
         out.push_str(&format!(
             "- {} · {}\n  {}\n",
             day(&a.posted_at),
