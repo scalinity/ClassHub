@@ -1230,10 +1230,9 @@ fn record_move(
 /// Best-effort reversal of `update_index`'s artifact renames, for the
 /// failure path: each relocated extract file goes back to its source mirror.
 fn undo_artifact_moves(class_dir: &Path, source_rel: &str, dest_rel: &str) {
-    let extracts = class_dir.join(EXTRACTS_DIR);
     for suffix in crate::extract::MIRROR_SUFFIXES {
-        let new = extracts.join(format!("{dest_rel}{suffix}"));
-        let old = extracts.join(format!("{source_rel}{suffix}"));
+        let new = crate::extract::mirror_entry(class_dir, dest_rel, suffix);
+        let old = crate::extract::mirror_entry(class_dir, source_rel, suffix);
         if new.is_file() && !old.exists() {
             let _ = fs::rename(&new, &old);
         }
@@ -1263,11 +1262,10 @@ fn update_index(
     if let Some(file_id) = existing {
         // The markdown extract plus any conversion twin and its sidecar mirror
         // the source rel_path — move them along so nothing goes stale.
-        let extracts = class_dir.join(EXTRACTS_DIR);
         for suffix in crate::extract::MIRROR_SUFFIXES {
-            let old = extracts.join(format!("{source_rel}{suffix}"));
+            let old = crate::extract::mirror_entry(class_dir, source_rel, suffix);
             if old.is_file() {
-                let new = extracts.join(format!("{dest_rel}{suffix}"));
+                let new = crate::extract::mirror_entry(class_dir, dest_rel, suffix);
                 if let Some(parent) = new.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -1285,7 +1283,7 @@ fn update_index(
         // A row must never claim an extract that is not on disk — the source
         // hash didn't change, so the pipeline would trust the dangling path
         // forever; clearing the extract columns makes the next scan re-extract.
-        let md_ok = extracts.join(format!("{dest_rel}.md")).is_file();
+        let md_ok = crate::extract::mirror_entry(class_dir, dest_rel, ".md").is_file();
         if recorded.is_some() && !md_ok {
             conn.execute(
                 "UPDATE files SET rel_path = ?1, extract_rel_path = NULL,

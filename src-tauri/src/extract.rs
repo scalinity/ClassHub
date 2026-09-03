@@ -572,6 +572,13 @@ const DOCX_TO_HTML: Conversion = Conversion {
 /// it is derived from; a test holds the two together.
 pub const MIRROR_SUFFIXES: [&str; 5] = [".md", ".pdf", ".pdf.sha256", ".html", ".html.sha256"];
 
+/// Where one of a source's mirror entries lives: the source's class-relative
+/// path under the mirror root, with one of `MIRROR_SUFFIXES` appended. The
+/// one place the shape is written, for the sorter's moves and the remover.
+pub fn mirror_entry(class_dir: &Path, rel_path: &str, suffix: &str) -> PathBuf {
+    class_dir.join(EXTRACTS_DIR).join(format!("{rel_path}{suffix}"))
+}
+
 /// Removes what the mirror holds for a source the index no longer does — its
 /// extract and any conversion with its sidecar — and prunes the folders that
 /// emptied, up to the mirror root, the way a corpus folder emptied of its
@@ -600,7 +607,7 @@ pub fn remove_mirror(class_dir: &Path, rel_path: &str) {
     }
     let root = class_dir.join(EXTRACTS_DIR);
     for suffix in MIRROR_SUFFIXES {
-        let entry = root.join(format!("{rel_path}{suffix}"));
+        let entry = mirror_entry(class_dir, rel_path, suffix);
         if !entry.is_file() {
             continue;
         }
