@@ -962,6 +962,7 @@ fn proposer(source: &str) -> &'static str {
         "syllabus" => "the syllabus scan",
         "sort_job" => "a sort job",
         "chat" => "chat",
+        "by_name" => "its file name",
         _ => "an unknown reader",
     }
 }
@@ -2415,6 +2416,7 @@ mod tests {
         assert_eq!(proposer("syllabus"), "the syllabus scan");
         assert_eq!(proposer("sort_job"), "a sort job");
         assert_eq!(proposer("chat"), "chat");
+        assert_eq!(proposer("by_name"), "its file name");
         assert_eq!(proposer("?"), "an unknown reader");
         assert_eq!(Scope::Master.key(), "master");
         assert_eq!(Scope::Folder("Module 1".into()).key(), "Module 1");
