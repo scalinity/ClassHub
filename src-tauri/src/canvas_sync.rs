@@ -437,23 +437,20 @@ fn sync_assignments(
             else {
                 continue;
             };
-            // An assignment with no due date is real but not a deadline. It
-            // would have to be invented to store one, which is exactly what
-            // reading Canvas was supposed to stop.
-            let Some(due_at) = assignment["due_at"].as_str().and_then(local_iso) else {
-                undated += 1;
-                continue;
-            };
+            let due_at = assignment["due_at"].as_str().and_then(local_iso);
             let canvas_id = assignment["id"].as_i64().map(|id| id.to_string());
+            // Settled before the due-date guard below: a deadline the list
+            // already holds is tracked by its id whether or not Canvas dates
+            // the assignment, and its submission closes it either way.
             if let Some(canvas_id) = canvas_id.as_deref() {
                 let submitted_at = assignment["submission"]["submitted_at"]
                     .as_str()
-                    .filter(|s| !s.is_empty());
+                    .and_then(local_iso);
                 let tracked = CanvasAssignment {
                     id: canvas_id,
                     title,
-                    due_at: &due_at,
-                    submitted_at,
+                    due_at: due_at.as_deref(),
+                    submitted_at: submitted_at.as_deref(),
                 };
                 match crate::deadlines::settle_canvas_deadline(conn, class.id, &tracked) {
                     Ok(Some(settled)) => {
@@ -470,6 +467,13 @@ fn sync_assignments(
                     Err(e) => eprintln!("canvas: could not settle '{title}': {e:#}"),
                 }
             }
+            // An assignment with no due date is real but not a deadline. It
+            // would have to be invented to store one, which is exactly what
+            // reading Canvas was supposed to stop.
+            let Some(due_at) = due_at else {
+                undated += 1;
+                continue;
+            };
             let kind = if assignment["is_quiz_assignment"].as_bool().unwrap_or(false)
                 || assignment["submission_types"]
                     .as_array()

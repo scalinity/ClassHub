@@ -963,9 +963,11 @@ pub(crate) fn record_proposal(
 pub(crate) struct CanvasAssignment<'a> {
     pub id: &'a str,
     pub title: &'a str,
-    /// Local wall-clock ISO, already converted (canvas_sync::local_iso).
-    pub due_at: &'a str,
-    /// The submission's `submitted_at`, when the reader has handed it in.
+    /// Local wall-clock ISO, already converted (canvas_sync::local_iso). An
+    /// assignment Canvas dates nothing for has none, and a deadline tracked by
+    /// id is still closed by its submission.
+    pub due_at: Option<&'a str>,
+    /// When the reader handed it in, local wall-clock ISO.
     pub submitted_at: Option<&'a str>,
 }
 
@@ -998,7 +1000,8 @@ pub(crate) fn settle_canvas_deadline(
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
     };
     let title = truncate(assignment.title.trim(), MAX_TITLE_CHARS);
-    if title.is_empty() || !valid_due_at(assignment.due_at) {
+    let canvas_due = assignment.due_at.filter(|d| valid_due_at(d));
+    if title.is_empty() {
         return Ok(None);
     }
     let by_id: Option<Row> = conn
@@ -1009,9 +1012,11 @@ pub(crate) fn settle_canvas_deadline(
             read,
         )
         .optional()?;
-    let row = match by_id {
-        Some(row) => row,
-        None => {
+    let row = match (by_id, canvas_due) {
+        (Some(row), _) => row,
+        // Without a day there is no (title, day) to match a legacy row on.
+        (None, None) => return Ok(None),
+        (None, Some(canvas_due)) => {
             let legacy: Option<Row> = conn
                 .query_row(
                     "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
@@ -1019,7 +1024,7 @@ pub(crate) fn settle_canvas_deadline(
                        AND substr(due_at, 1, 10) = substr(?3, 1, 10)
                        AND canvas_assignment_id IS NULL
                      ORDER BY id LIMIT 1",
-                    params![class_id, title, assignment.due_at],
+                    params![class_id, title, canvas_due],
                     read,
                 )
                 .optional()?;
@@ -1037,17 +1042,17 @@ pub(crate) fn settle_canvas_deadline(
 
     let mut settled = Settled::default();
     let tx = conn.unchecked_transaction()?;
-    if due_at != assignment.due_at {
+    if let Some(canvas_due) = canvas_due.filter(|d| *d != due_at) {
         tx.execute(
             "UPDATE deadlines SET due_at = ?1 WHERE id = ?2",
-            params![assignment.due_at, id],
+            params![canvas_due, id],
         )?;
         audit(
             &tx,
             "canvas.update_deadline",
             json!({ "id": id, "classId": class_id, "canvasAssignmentId": assignment.id,
                     "title": title, "before": { "dueAt": due_at },
-                    "after": { "dueAt": assignment.due_at } }),
+                    "after": { "dueAt": canvas_due } }),
         )?;
         settled.due_moved = true;
     }
@@ -1408,7 +1413,7 @@ mod tests {
         let unsubmitted = CanvasAssignment {
             id: "5001",
             title: "quiz 1",
-            due_at: "2026-09-03T23:59",
+            due_at: Some("2026-09-03T23:59"),
             submitted_at: None,
         };
         assert_eq!(
@@ -1425,7 +1430,7 @@ mod tests {
         );
 
         let submitted = CanvasAssignment {
-            submitted_at: Some("2026-09-03T18:12:00Z"),
+            submitted_at: Some("2026-09-03T14:12"),
             ..unsubmitted
         };
         assert_eq!(
@@ -1436,7 +1441,7 @@ mod tests {
         let named: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM audit_log WHERE action = 'canvas.complete_deadline'
-                   AND payload LIKE '%2026-09-03T18:12:00Z%'",
+                   AND payload LIKE '%2026-09-03T14:12%'",
                 [],
                 |r| r.get(0),
             )
@@ -1468,10 +1473,59 @@ mod tests {
         let unknown = CanvasAssignment {
             id: "5002",
             title: "Quiz 2",
-            due_at: "2026-09-24T23:59",
+            due_at: Some("2026-09-24T23:59"),
             submitted_at: None,
         };
         assert_eq!(settle_canvas_deadline(&conn, 3, &unknown).expect("none"), None);
+    }
+
+    /// An assignment Canvas dates nothing for still closes the deadline it is
+    /// tracked by; without a day there is nothing to link a legacy row on and
+    /// nothing to move.
+    #[test]
+    fn an_undated_assignment_still_closes_its_tracked_deadline() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, status, source, canvas_assignment_id)
+             VALUES (3, 'Survey', 'other', '2026-09-10', 'open', 'canvas', '6001'),
+                    (3, 'Reflection', 'other', '2026-09-12', 'open', 'syllabus', NULL)",
+            [],
+        )
+        .expect("fixture");
+        let tracked = CanvasAssignment {
+            id: "6001",
+            title: "Survey",
+            due_at: None,
+            submitted_at: Some("2026-09-05T09:00"),
+        };
+        assert_eq!(
+            settle_canvas_deadline(&conn, 3, &tracked).expect("settle"),
+            Some(Settled { due_moved: false, completed: true })
+        );
+        let (due_at, status): (String, String) = conn
+            .query_row(
+                "SELECT due_at, status FROM deadlines WHERE canvas_assignment_id = '6001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((due_at.as_str(), status.as_str()), ("2026-09-10", "done"));
+
+        let untracked = CanvasAssignment {
+            id: "6002",
+            title: "Reflection",
+            due_at: None,
+            submitted_at: Some("2026-09-05T09:00"),
+        };
+        assert_eq!(settle_canvas_deadline(&conn, 3, &untracked).expect("settle"), None);
+        let linked: Option<String> = conn
+            .query_row(
+                "SELECT canvas_assignment_id FROM deadlines WHERE title = 'Reflection'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(linked, None, "linked on a title alone");
     }
 
     /// A Canvas card is one row per assignment: a moved due date refreshes it
