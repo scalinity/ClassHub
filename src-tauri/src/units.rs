@@ -1191,9 +1191,9 @@ pub fn week_from_rel_path(rel_path: &str) -> Option<i64> {
 /// The week a file's name carries: `CAI6734_Week2_Foundations.pdf` is 2,
 /// `Week01_Course_Overview.pdf` is 1, `Week 3 2017 Feder.pdf` is 3. Read at
 /// a word boundary and only for the word `week`, so `Weekly Readings.pdf`,
-/// `Midweek 2.pdf`, a `class2` and a `Module1` carry none; a plural (`Weeks
-/// 1-3`) spans more than one and carries none either. The first such word
-/// decides. The walk sets it on a file (`scanner::TreeNode`) so its Materials
+/// `Midweek 2.pdf`, a `class2` and a `Module1` carry none; a range (`Weeks
+/// 1-3`, `Week 1-3`) spans more than one and carries none either. The first
+/// such word decides, once it carries a number. The walk sets it on a file (`scanner::TreeNode`) so its Materials
 /// row can offer the week's folder, where the division that reads the week
 /// counts it (SPEC §10).
 pub fn week_in_name(name: &str) -> Option<i64> {
@@ -1211,10 +1211,19 @@ pub fn week_in_name(name: &str) -> Option<i64> {
         }
         let rest = lower[cursor..]
             .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | '#' | '.'));
-        if let Some((week, _)) = leading_number(rest) {
-            if (1..=MAX_WEEK).contains(&week) {
-                return Some(week);
+        if let Some((week, after)) = leading_number(rest) {
+            if !(1..=MAX_WEEK).contains(&week) {
+                continue;
             }
+            // `Week 1-3` spans more than one, like the plural, and carries
+            // none: a range opens the way `parse_week_range` reads one.
+            let after = after.trim_start();
+            let range = after
+                .strip_prefix(['-', '\u{2013}', '\u{2014}'])
+                .or_else(|| after.strip_prefix("to "))
+                .or_else(|| after.strip_prefix("through "))
+                .is_some_and(|tail| leading_number(tail.trim_start()).is_some());
+            return if range { None } else { Some(week) };
         }
     }
     None
@@ -2172,5 +2181,32 @@ mod tests {
         assert_eq!(week_in_name("Biostatistics_Module1_Slides_class2.pptx"), None);
         assert_eq!(week_in_name("Weeks 1-3 review.pdf"), None);
         assert_eq!(week_in_name("Week 2026 plan.pdf"), None);
+        assert_eq!(week_in_name("Week 1-3 review.pdf"), None);
+        assert_eq!(week_in_name("Week 2 – 3 notes.pdf"), None);
+        assert_eq!(week_in_name("Week 3 - lecture notes.pdf"), Some(3));
+        // A first candidate out of range yields to the next word.
+        assert_eq!(week_in_name("Week 2026 Week 3 plan.pdf"), Some(3));
+    }
+    /// Two Parts that both claim a week: the earlier keeps it, and the claim
+    /// is named once for the writer to report — the text that reaches a job
+    /// summary and a sync note.
+    #[test]
+    fn an_overlapping_part_range_is_claimed_once_for_the_earlier_part() {
+        let conn = db();
+        for (ordinal, name, weeks) in [
+            (1, "Part I: Foundations", (1, 8)),
+            (2, "Part II: Alignment", (8, 12)),
+        ] {
+            let part = NewUnit { weeks: Some(weeks), ..unit(ordinal, "part", name, None) };
+            write(&conn, 4, &part);
+        }
+        assert_eq!(slot_for_week(&conn, 4, 8).unwrap().unwrap().unit_name, "Part I: Foundations");
+        let claims = week_claims(&conn, 4).expect("claims");
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert!(
+            claims[0].starts_with("Part II: Alignment claims week 8, which Part I: Foundations already holds"),
+            "{}",
+            claims[0]
+        );
     }
 }
