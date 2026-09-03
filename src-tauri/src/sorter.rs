@@ -866,7 +866,7 @@ fn record_move(
     // SPEC §8.5: refiling a lecture into a different week is how a wrong unit
     // is corrected, so the map has to travel with the file rather than being
     // left naming a path nothing is at.
-    crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
+    let note = crate::lectures::refile_contribution(&tx, class_id, class_dir, source_rel, dest_rel)?;
     tx.execute(
         "INSERT INTO audit_log (action, payload, created_at)
          VALUES ('sort.move', ?1, ?2)",
@@ -889,6 +889,13 @@ fn record_move(
         params![dest_rel, now(), proposal_id],
     )?;
     tx.commit()?;
+    // Only now: the database can no longer roll back, so the corpus note moves
+    // against a record that already says it moved. Before the commit it stays
+    // put, which is what keeps the caller's undo path — the transcript rename
+    // and the extract artifacts — the whole of what a failure has to reverse.
+    if let Some(note) = note {
+        note.apply();
+    }
     Ok(())
 }
 

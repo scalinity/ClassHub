@@ -450,7 +450,7 @@ pub fn refile_contribution(
     class_dir: &Path,
     source_rel: &str,
     dest_rel: &str,
-) -> Result<()> {
+) -> Result<Option<NoteMove>> {
     refile_session(conn, class_id, source_rel, dest_rel)?;
 
     let old_corpus: Option<String> = conn
@@ -462,7 +462,7 @@ pub fn refile_contribution(
         )
         .optional()?;
     if old_corpus.is_none() && !is_filed_transcript(dest_rel) {
-        return Ok(());
+        return Ok(None);
     }
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
@@ -471,20 +471,68 @@ pub fn refile_contribution(
     let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
 
     let Some(old) = old_corpus else {
-        return Ok(());
+        return Ok(None);
     };
     let from = class_dir.join(&old);
-    match moved {
+    if !from.is_file() {
+        // Never distilled, or the note is already gone: nothing to carry.
+        return Ok(None);
+    }
+    Ok(match moved {
         // A different unit's corpus: the note goes with the lecture, so that
         // unit's guide reads it and the old unit's guide stops reading it.
         Some((_, _, new)) if new != old => {
-            if from.is_file() {
-                let to = class_dir.join(&new);
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent)?;
+            let to = class_dir.join(&new);
+            // Notes are keyed by unit and transcript name, and a unit spanning
+            // several weeks can hold two transcripts with one name. Refused
+            // here, inside the transaction, so the move rolls back cleanly
+            // instead of one distillation silently replacing another.
+            if to.exists() {
+                bail!("a distilled note already exists at {new} — refiling would overwrite it");
+            }
+            Some(NoteMove::Relocate { from, to })
+        }
+        Some(_) => None,
+        // Out of `Weeks/`: no unit reads it any more.
+        None => Some(NoteMove::Remove(from)),
+    })
+}
+
+/// The filesystem half of a refile, decided inside the move's transaction and
+/// performed once it has committed. Nothing on disk changes while the database
+/// can still roll back, so a failed commit leaves the note exactly where the
+/// row still says it is — the sorter's undo path reverses the transcript's own
+/// rename and needs to know nothing about notes.
+#[must_use = "the note has not moved until this is applied"]
+#[derive(Debug)]
+pub enum NoteMove {
+    /// The note follows the lecture into another unit's corpus folder.
+    Relocate { from: PathBuf, to: PathBuf },
+    /// The lecture left `Weeks/`, so no unit reads the note any more.
+    Remove(PathBuf),
+}
+
+impl NoteMove {
+    /// Applied after the commit, so a failure is logged rather than
+    /// propagated: the database has already recorded the move, and undoing the
+    /// transcript's rename against it would be worse than a note that stayed
+    /// put — which the Lectures listing shows as undistilled, and a redistill
+    /// repairs.
+    pub fn apply(self) {
+        match self {
+            NoteMove::Relocate { from, to } => {
+                let moved = to
+                    .parent()
+                    .map_or(Ok(()), fs::create_dir_all)
+                    .and_then(|()| fs::rename(&from, &to));
+                if let Err(e) = moved {
+                    eprintln!(
+                        "corpus note move failed ({} → {}): {e}",
+                        from.display(),
+                        to.display()
+                    );
+                    return;
                 }
-                fs::rename(&from, &to)
-                    .with_context(|| format!("moving the corpus note {old} to {new}"))?;
                 // `remove_dir` refuses a folder with anything left in it, which
                 // is the whole check: a unit's corpus folder outlives its last
                 // note only as clutter.
@@ -492,14 +540,13 @@ pub fn refile_contribution(
                     let _ = fs::remove_dir(parent);
                 }
             }
-        }
-        Some(_) => {}
-        // Out of `Weeks/`: no unit reads it any more.
-        None => {
-            let _ = fs::remove_file(from);
+            NoteMove::Remove(path) => {
+                if let Err(e) = fs::remove_file(&path) {
+                    eprintln!("corpus note removal failed ({}): {e}", path.display());
+                }
+            }
         }
     }
-    Ok(())
 }
 
 /// The session document follows its transcript. Its `guides` row is keyed by
@@ -1388,9 +1435,15 @@ mod tests {
         fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
         fs::write(dir.join(&corpus), "# note").expect("note");
 
-        // The move itself, then the map catching up with it.
+        // The move itself, then the map catching up with it. The note's own
+        // move is decided now and performed after the commit: until it is
+        // applied, the note is exactly where the rolled-back row would say.
         fs::rename(dir.join(&from), dir.join(&to)).expect("move");
-        refile_contribution(&conn, 1, &dir, &from, &to).expect("refile");
+        let note = refile_contribution(&conn, 1, &dir, &from, &to)
+            .expect("refile")
+            .expect("a note to move");
+        assert!(dir.join(&corpus).is_file(), "the note moved before the commit");
+        note.apply();
 
         let rows = list_contributions(&conn, 1).expect("list");
         assert_eq!(rows.len(), 1, "the refile duplicated the contribution");
@@ -1415,9 +1468,73 @@ mod tests {
         let out = "Module 1/2026-08-27 — Lecture.md".to_string();
         fs::create_dir_all(dir.join("Module 1")).expect("module dir");
         fs::rename(dir.join(&to), dir.join(&out)).expect("move out");
-        refile_contribution(&conn, 1, &dir, &to, &out).expect("refile out");
+        refile_contribution(&conn, 1, &dir, &to, &out)
+            .expect("refile out")
+            .expect("a note to remove")
+            .apply();
         assert!(list_contributions(&conn, 1).expect("list").is_empty());
         assert!(!dir.join(&moved_note).exists(), "a note survived with no unit reading it");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Notes are keyed by unit and transcript name, so a unit spanning several
+    /// weeks can already hold a note at the path a refiled lecture's would take.
+    /// `fs::rename` replaces silently; the refile has to refuse instead, inside
+    /// the transaction, so the whole move rolls back.
+    #[test]
+    fn refuses_to_move_a_note_onto_another_lecture_s() {
+        let root = std::env::temp_dir().join("classhub-refile-collision");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 1", [], |row| row.get(0))
+            .expect("class");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join(folder);
+        // One Part covering weeks 1–8: two week folders, one corpus folder.
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, source)
+             VALUES (1, 1, 'part', 'Part I: Foundations (Weeks 1-8)', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, source)
+             VALUES (1, 2, 'part', 'Part II: Models (Weeks 9-16)', 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let a = "Weeks/Week 08/2026-09-01 — Lecture.md";
+        let a_moved = "Weeks/Week 09/2026-09-01 — Lecture.md";
+        let b = "Weeks/Week 12/2026-09-01 — Lecture.md";
+        for rel in [a, a_moved, b] {
+            fs::create_dir_all(dir.join(rel).parent().expect("parent")).expect("week dir");
+        }
+        fs::write(dir.join(a), markdown).expect("a");
+        fs::write(dir.join(b), markdown).expect("b");
+        for (rel, week) in [(a, 8), (b, 12)] {
+            let slot = crate::units::slot_for_week(&conn, 1, week).expect("slots").expect("slot");
+            let corpus = record_contribution(&conn, 1, &slot, rel, markdown).expect("record");
+            fs::create_dir_all(dir.join(&corpus).parent().expect("parent")).expect("corpus dir");
+            fs::write(dir.join(&corpus), format!("# note for {rel}")).expect("note");
+        }
+
+        fs::rename(dir.join(a), dir.join(a_moved)).expect("move");
+        let err = refile_contribution(&conn, 1, &dir, a, a_moved).expect_err("a collision");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        // B's distillation is untouched either way.
+        let b_note = list_contributions(&conn, 1)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.rel_path == b)
+            .expect("b's row")
+            .corpus_rel_path;
+        assert_eq!(
+            fs::read_to_string(dir.join(b_note)).expect("b's note"),
+            format!("# note for {b}")
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
