@@ -2981,3 +2981,40 @@ branch. What future sessions should know:
   one reviewer regenerated its report with different numbering when asked
   to resend by number; asking for sections by name, and for the Verdict
   line explicitly, got the whole of both.
+
+### Live
+
+Run after the branch was rebased onto main at c16f66a and fast-forwarded
+(bf526ab), on a dev build launched from main (pid 45655) beside the
+installed app, with no job of its own and no Canvas sync due — every
+`canvas_synced_at` was from today. One scan per class from the Deadlines
+picker, choosing the syllabus PDF; the audit log stood at 134 and jobs at
+295 before:
+
+- **Biostatistics** (job 296, 35 s): `3 weight(s) already as the syllabus
+  states · Survey left at 0 — the syllabus does not weight it`. Nothing
+  written.
+- **Design Studio** (297, 35 s): `weights set: AI Design Project 60,
+  Studio Participation 20, Peer Design Sessions 20 (new) · Quizzes left at
+  0 — the syllabus does not weight it`. Audit rows 135–137, the new
+  category with no Canvas id, sum 100.
+- **Fundamentals** (298, 75 s): `weights set: Assignments 50, Final
+  Project 30 (new), Weekly Live Coding Sessions 20 (new)`. Audit rows
+  144–146, sum 100. The deadline part proposed twelve `Live coding session
+  MM/DD` cards, one per remaining dated week — new items rather than
+  re-proposals, left in the queue for the reader — and the divisions part
+  added two rows the first scan had not recorded, `No class (Nov. 24) —
+  Thanksgiving Break` and `Finals week — Capstone Presentations`, under
+  names nothing else uses, so no fork; Week 14's ordinal moved from 14 to
+  15 to make room.
+- **Applied Generative AI** (299, 20 s): `weights set: Quizzes 10 (new),
+  Assignments 10, Project Progress Report 10 (new), Project Final Report
+  50 (new), Project Presentation and Poster 10 (new), Paper Presentation
+  10 (new)`. Audit rows 138–143, sum 100, `no date-bearing items found`,
+  the three Parts untouched.
+- **Design Studio again** (300, 50 s): `3 weight(s) already as the
+  syllabus states · Quizzes left at 0 — the syllabus does not weight it`.
+  Audit log still at 146, no weight changed.
+
+Every class's weights sum to 100. The dev build was stopped afterwards;
+the installed app is still the Aug 25 build until `npm run install-app`.
