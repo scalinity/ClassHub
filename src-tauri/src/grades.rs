@@ -642,12 +642,19 @@ pub(crate) fn set_syllabus_weight(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
+    // The read-only outcomes first, before any transaction, as the Canvas
+    // upsert does: agreement within the UI's own epsilon, or a weight already
+    // stated that the syllabus disagrees with.
+    if let Some((_, _, current)) = &existing {
+        if (current - weight).abs() < WEIGHT_EPSILON {
+            return Ok(WeightWrite::Unchanged);
+        }
+        if *current != 0.0 {
+            return Ok(WeightWrite::Kept(*current));
+        }
+    }
     let tx = conn.unchecked_transaction()?;
     let write = match existing {
-        Some((_, _, current)) if (current - weight).abs() < WEIGHT_EPSILON => {
-            WeightWrite::Unchanged
-        }
-        Some((_, _, current)) if current != 0.0 => WeightWrite::Kept(current),
         Some((id, current_name, current)) => {
             tx.execute(
                 "UPDATE grade_categories SET weight = ?1 WHERE id = ?2",
