@@ -1533,3 +1533,58 @@ addressed as individual commits. What future sessions should know:
   folder. Untouched here.
 - The installed app is still the Aug 25 build; it was not reinstalled this session and
   was left running throughout (no job of its own was active).
+
+## Post-M16 — Review fixes (2026-09-02)
+
+A two-agent review of the M16 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced no criticals, 6 warnings and
+10 suggestions, 4 of them corroborated by both reviewers; all but one pre-existing
+suggestion were addressed as individual commits. What future sessions should know:
+
+- **Nothing on disk changes inside the move's transaction any more.** The M16
+  refile renamed or deleted the corpus note inside `record_move`'s transaction,
+  and the sorter's undo path (`undo_artifact_moves`) knew only the transcript and
+  its extract artifacts — a failed audit insert, proposal update or commit rolled
+  the rows back and left the note wherever the filesystem had put it.
+  `lectures::refile_lecture` (renamed from `refile_contribution`, since it moves
+  the session row as well as the contribution) now returns `RefileEffects` — the
+  note's `NoteMove` and the documents of any row cleared at the destination scope
+  — and `record_move` applies it after `tx.commit()`. A failure there is logged,
+  not propagated: the database has already recorded the move. The rollback path
+  therefore stays exactly what it was.
+- **An occupied corpus destination is refused, inside the transaction.** Notes
+  are keyed by unit and transcript name, and a Part spanning several weeks can
+  hold two transcripts with one name; `fs::rename` would have replaced one
+  distillation with another silently. Tested with two lectures under one Part.
+- **A destination week the course has not declared keeps the note.** The arm
+  commented "out of `Weeks/`" also fired for an undeclared week or a folder that
+  does not parse as one, deleting the distillation only a fresh digest could
+  bring back. The note is removed only when the transcript actually leaves
+  `Weeks/`; otherwise it stays for the sync that declares the week or the refile
+  that comes back, which finds it again.
+- **A stale session row at the destination is cleared with its documents,
+  whether or not the incoming transcript brings a row.** The guard had run only
+  when the source had a row, and even then left the pair under
+  `Study Guides/Sessions/` for chat's search to keep finding.
+- The digest's title now travels across a refile (`PLACEHOLDER_SUMMARY` marks the
+  filing-time value that belongs to the old unit); a session manifest that does
+  not parse is left as it is, stale, rather than failing the whole move, matching
+  `manifest_is_stale`.
+- `describe_caption` counts cues as `transcripts::parse` reads them and shows the
+  first cue with its speaker when there was one; page-derived strings in the
+  capture log are quoted; the probe harness checks the `named:` counter.
+- A Structure row whose guide exists but whose sources are gone shows a plain
+  `STALE` label (reason in its title) and VIEW GUIDE, never a resynthesize the
+  backend would refuse; the gating flag is `hasGuideCluster`, with `canBuild`
+  beside it. The `files` hub change also refetches the class cards, since a newly
+  filed lecture emits `files` alone.
+- Lecture test fixtures use a per-process scratch folder.
+- **Left as is:** the one-row-per-transcript read in the refile (SPEC §8.5 keeps
+  the span columns for a course that divides itself finer than it meets, and none
+  does). The guide job reading the transcript in full remains the model's call.
+- Verified: `cargo test` 137 pass (four new: the collision, the undeclared week,
+  the stale destination row, the caption description), `npx tsc --noEmit` clean,
+  and the Week 2 → Week 3 → Week 2 refile repeated live on the reordered code —
+  note relocated after the commit, emptied folder removed, session row following,
+  the Week 2 row reading `STALE` with VIEW GUIDE while its lecture was away and
+  fresh once it returned. Nothing was pushed: the repo has no remote.
