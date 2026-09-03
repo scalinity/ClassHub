@@ -581,6 +581,9 @@ pub const MIRROR_SUFFIXES: [&str; 5] = [".md", ".pdf", ".pdf.sha256", ".html", "
 /// fails is logged, and the entry is dead weight rather than a wrong answer.
 pub fn remove_mirror(class_dir: &Path, rel_path: &str) {
     let path = Path::new(rel_path);
+    // Every component plain — the shape `corpus_note_path` and the sorter's
+    // `clean_rel` each check for their own paths — and not the empty path,
+    // for which `all` holds vacuously and whose "parent" is the root's.
     let plain = path
         .components()
         .all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -606,10 +609,11 @@ pub fn remove_mirror(class_dir: &Path, rel_path: &str) {
         }
     }
     // `remove_dir` refuses a folder with anything left in it, which is the
-    // whole check; the root itself stays, empty or not.
+    // whole check; the root itself stays, empty or not. A plain path's
+    // parents all sit under the root, so reaching it is the only stop.
     let mut dir = root.join(rel_path);
     while let Some(parent) = dir.parent().map(Path::to_path_buf) {
-        if parent == root || !parent.starts_with(&root) || fs::remove_dir(&parent).is_err() {
+        if parent == root || fs::remove_dir(&parent).is_err() {
             break;
         }
         dir = parent;
