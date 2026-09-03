@@ -3355,3 +3355,76 @@ listed it twice.
   folders' come after it.
 - The owner used the dev build during the run, so the view moved between
   dumps; every dump was re-taken after opening the workspace.
+
+## Post-M24 — Review fixes (2026-09-03)
+
+A two-agent review of the M24 changeset since 93250cc (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, 4 warnings and 4 suggestions, two of each corroborated by both
+reviewers. All were addressed as individual commits, the two form
+suggestions as one since they share their lines. What future sessions
+should know:
+
+- **The refusal names the file, not only the form.** "Give this lecture
+  a title" reached the sorter's approve card and the DISTILL button, which
+  have no title field; the message now names the form's title or a rename
+  of the file (both reviewers).
+- **A stale holder gives the name up.** A transcript deleted in Finder
+  keeps its row (`scan_class` never touches `lecture_contributions`), and
+  the new check refused a real lecture in the name of one not on disk.
+  `refuse_held_note` clears a holder whose transcript is gone and lets the
+  newcomer take the name; a note it left is the next digest's to replace.
+- **The filing is settled in one testable step.** The pre-capture
+  resolution lived inline in `add`, behind an `AppHandle`, so the claim
+  that a refusal costs no capture had no test. `resolve_filing` holds the
+  week's folder or the inbox, the free name and the refusals, and a test
+  walks the inbox route, the bare folder of a Part-numbered course, the
+  held name, the ` (2)` suffix and a title of its own.
+- **A note on disk refuses too.** A refile to an undeclared week keeps the
+  note for the refile back, so a same-named filing could have written over
+  it. The form refuses it — a title is a field away — and the sorter's
+  path does not, since there the note is the lecture's own coming home.
+- **A refusal at the write removes the transcript.** The form's check and
+  the write are separate lock acquisitions with the capture between them;
+  a row taking the name meanwhile left a file for the next scan to index
+  as a lecture no division reads. The file goes with the error now.
+- **Both note guards are pinned.** The refile collision test asserts the
+  row guard's message, then drops the other lecture's row with its note
+  still on disk and asserts the on-disk guard refuses the move.
+- **The option names the division by kind.** Counting distinct unit ids
+  against slots missed a Part spanning one week; `WeekSlot.unit_kind`
+  says whether the division is the week itself, and the form names any
+  other kind beside the bare folder. **The ask keys off the dates**: a
+  date the field cannot parse also resolves to no default, so the line
+  reads the slots' `meets_on` rather than the default (both reviewers on
+  the first; the second DB1's).
+- **§7.1 says the inbox.** "Files nowhere until one is picked" contradicted
+  the `_Inbox/` route the form's own line describes (both reviewers).
+- **One note per name is a unique index.** `refuse_held_note` is one
+  process's promise and two builds share the database; migration 0013
+  adds `UNIQUE(class_id, corpus_rel_path)` on `lecture_contributions`,
+  reducing rows that already collide to the earliest — the row whose note
+  the rule protects — with a migration test. Live: a dev build (pid 53569)
+  took the shared database to `user_version` 13 on open, the index
+  present and the three contribution rows intact; its launch scan also
+  picked up the owner's stale Biostatistics PDFs as extract job 308.
+- **Tests**: 220 pass, `npx tsc --noEmit` clean. Every fix went through a
+  gate script that runs `cargo test` to a log file and stops on its exit
+  status — never piped through grep, which is how it caught a compile
+  error in the first attempt at the `resolve_filing` test — then `tsc`
+  when frontend files were staged, then commits. Nothing was pushed; the
+  repo has no remote.
+- **Left as it is**: the week folders' material outside a Part's manifest
+  (the M24 note above); `scan_class` not clearing rows for deleted
+  transcripts, softened now by the stale-holder clearing at the next
+  same-named filing; an edit of the owner's own demoting a running extract.
+
+### Gotchas
+
+- `status` is a read-only variable in zsh; a script that assigns it dies
+  at the assignment with "read-only variable".
+- `expect_err` needs `Debug` on the `Ok` type, and a struct holding a
+  `WeekSlot` has none; `.err().expect(..)` asserts the same thing without.
+- The launch scan of any build enqueues whatever is stale in every class,
+  so a dev build brought up for a migration check may start an extract job
+  of the owner's; wait for it before stopping the build.
