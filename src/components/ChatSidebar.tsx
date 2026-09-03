@@ -38,6 +38,7 @@ import {
   type ChatItem,
   type ChatSnapshot,
 } from "@/lib/chat";
+import { openClassId } from "@/lib/sorter";
 import { iconAction } from "@/lib/styles";
 
 /**
@@ -69,8 +70,8 @@ const PROSE = [
 
 /**
  * Openers, drawn three at a time so the panel doesn't greet you with the same
- * three questions for the rest of the semester. `{class}` is filled from a
- * class you actually have.
+ * three questions for the rest of the semester. `{class}` is the open
+ * workspace's class, or any class you have when asked from the dashboard.
  */
 const STARTERS = [
   "What's due next, and what should I work on first?",
@@ -85,8 +86,13 @@ const STARTERS = [
   "Distill the newest module of {class} into a note I can skim",
 ];
 
-function pickStarters(classes: readonly ClassInfo[]): string[] {
-  const name = classes[Math.floor(Math.random() * classes.length)]?.displayName;
+function pickStarters(
+  classes: readonly ClassInfo[],
+  openId: number | null,
+): string[] {
+  const open = classes.find((c) => c.id === openId);
+  const name = (open ?? classes[Math.floor(Math.random() * classes.length)])
+    ?.displayName;
   const pool = name
     ? STARTERS.map((s) => s.replace("{class}", name))
     : STARTERS.filter((s) => !s.includes("{class}"));
@@ -402,8 +408,13 @@ function EmptyState({
   classes: readonly ClassInfo[];
   onAsk: (text: string) => void;
 }) {
-  // A fresh draw each time the panel opens; the class list settling re-draws.
-  const starters = useMemo(() => pickStarters(classes), [classes]);
+  // A fresh draw each time the panel opens; the class list settling re-draws,
+  // and so does opening or leaving a workspace.
+  const openId = openClassId();
+  const starters = useMemo(
+    () => pickStarters(classes, openId),
+    [classes, openId],
+  );
   if (!hasKey) {
     return (
       <div className="mt-6">

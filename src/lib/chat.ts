@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
 import { todayIso } from "@/lib/schedule";
+import { openClassId } from "@/lib/sorter";
 
 export interface ChatSettings {
   hasKey: boolean;
@@ -514,6 +515,8 @@ export async function sendChat(text: string) {
       today: todayLabel(),
       // YYYY-MM-DD in local time — stamps practice file names backend-side.
       todayIso: todayIso(),
+      // The open workspace rides along as context for this turn only.
+      classId: openClassId(),
     });
     if (snapshot.sessionId !== sessionId) {
       emitChange({

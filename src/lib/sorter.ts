@@ -118,6 +118,16 @@ export function setDropTarget(classId: number | null) {
   dropInterceptor = null;
 }
 
+/**
+ * The class whose workspace is open, or null on the dashboard and in Settings.
+ * The same value the drop target reads: chat sends it with each question so a
+ * question that names no class means this one (SPEC §9), and the ask panel
+ * draws its starters from it.
+ */
+export function openClassId(): number | null {
+  return dropClassId;
+}
+
 export function clearDropNotice() {
   if (snapshot.notice !== null) emitDrag({ notice: null });
 }

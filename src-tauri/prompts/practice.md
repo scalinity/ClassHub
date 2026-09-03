@@ -18,6 +18,19 @@ toward what the class actually asked of him.
 
 {files}
 
+### What was said in the room
+
+When this exam is scoped to one of the course's own divisions, the lectures for it have
+each been distilled once into a corpus note: the high-yield content of that session, every
+point carrying an `HH:MM` anchor back to the transcript it came from. Read every note in
+full — the professor's own emphasis and exam hints live there, and none of it is on a
+slide. Question what was said as readily as what was shown. The transcript beside a note
+is a three-hour verbatim record; open it only where the distillation is not enough and
+you need the exact wording, and read the stretch the anchor points at rather than the
+whole file. Solution citations may name the note or the transcript with its anchor.
+
+{corpus}
+
 ## Required content — the exam anatomy
 
 Write ONE complete, self-contained HTML document to {output}:

@@ -9,6 +9,7 @@ import {
   type ClassOutcome,
   type Unit,
 } from "@/lib/canvas";
+import { PracticeAction } from "@/components/PracticeAction";
 import { unitScope, type GuideInfo } from "@/lib/guides";
 import { listLectureContributions } from "@/lib/lectures";
 import { monoAction } from "@/lib/styles";
@@ -17,7 +18,10 @@ import { monoAction } from "@/lib/styles";
 export interface UnitGuideControls {
   guides: ReadonlyMap<string, GuideInfo>;
   activeScopes: ReadonlySet<string>;
+  /** Scopes with a queued/running practice job (SPEC §8.3). */
+  activePracticeScopes: ReadonlySet<string>;
   onSynthesize: (unitId: number) => Promise<unknown>;
+  onPractice: (scope: string) => Promise<unknown>;
   onView: (scope: string) => void;
 }
 
@@ -66,11 +70,21 @@ export function StructureSection({
   }
   const progress = useCanvasSync();
   const [refused, setRefused] = useState<string | null>(null);
-  const [synthError, setSynthError] = useState<string | null>(null);
+  // A job the backend turned down — a guide or a practice exam — as the line
+  // to show, since the two refusals read differently.
+  const [jobError, setJobError] = useState<string | null>(null);
   const running = progress !== null && !progress.done;
   const synthesize = (unitId: number) => {
-    setSynthError(null);
-    controls.onSynthesize(unitId).catch((e) => setSynthError(String(e)));
+    setJobError(null);
+    controls
+      .onSynthesize(unitId)
+      .catch((e) => setJobError(`NO GUIDE — ${String(e)}`));
+  };
+  const practice = (scope: string) => {
+    setJobError(null);
+    controls
+      .onPractice(scope)
+      .catch((e) => setJobError(`NO PRACTICE EXAM — ${String(e)}`));
   };
   const outcome = progress?.done
     ? progress.results?.find((r) => r.classId === classId)
@@ -130,9 +144,9 @@ export function StructureSection({
           THIS CLASS DID NOT SYNC — {outcome.error}
         </p>
       )}
-      {synthError && (
+      {jobError && (
         <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
-          NO GUIDE — {synthError}
+          {jobError}
         </p>
       )}
       <SyncNotes outcome={outcome} />
@@ -171,6 +185,7 @@ export function StructureSection({
                   distilled={distilledPerUnit.get(unit.id) ?? 0}
                   controls={controls}
                   onSynthesize={synthesize}
+                  onPractice={practice}
                 />
               ))}
             </ol>
@@ -204,6 +219,7 @@ function UnitRow({
   distilled,
   controls,
   onSynthesize,
+  onPractice,
 }: {
   unit: Unit;
   /** This is the division the course is in today. */
@@ -211,6 +227,7 @@ function UnitRow({
   distilled: number;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
+  onPractice: (scope: string) => void;
 }) {
   const scope = unitScope(unit.name);
   const guide = controls.guides.get(scope);
@@ -264,6 +281,7 @@ function UnitRow({
           canBuild={canBuild}
           controls={controls}
           onSynthesize={onSynthesize}
+          onPractice={onPractice}
         />
       )}
       {unit.startsOn && (
@@ -279,6 +297,8 @@ function UnitRow({
  * SPEC §8.1 — a division's guide, in the same words the Materials tree uses for
  * a folder's: synthesis is manual, staleness is always visible, and the
  * token-costing action stays quiet until the guide has actually gone stale.
+ * The practice exam (SPEC §8.3) draws on the same sources as the guide, so it
+ * is offered exactly when a guide could be built.
  */
 function UnitGuideCluster({
   scope,
@@ -288,6 +308,7 @@ function UnitGuideCluster({
   canBuild,
   controls,
   onSynthesize,
+  onPractice,
 }: {
   scope: string;
   unitId: number;
@@ -297,28 +318,42 @@ function UnitGuideCluster({
   canBuild: boolean;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
+  onPractice: (scope: string) => void;
 }) {
+  const practice = canBuild ? (
+    <PracticeAction
+      active={controls.activePracticeScopes.has(scope)}
+      onSelect={() => onPractice(scope)}
+    />
+  ) : null;
+
   if (controls.activeScopes.has(scope)) {
     return (
-      <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-        <span
-          aria-hidden
-          className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-        />
-        SYNTHESIZING…
+      <span className="flex shrink-0 items-center gap-0.5">
+        <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+          <span
+            aria-hidden
+            className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+          />
+          SYNTHESIZING…
+        </span>
+        {practice}
       </span>
     );
   }
 
   if (!guide) {
     return (
-      <button
-        type="button"
-        onClick={() => onSynthesize(unitId)}
-        className={`${monoAction} text-muted-foreground opacity-0 transition-opacity hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
-      >
-        SYNTHESIZE GUIDE
-      </button>
+      <span className="flex shrink-0 items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => onSynthesize(unitId)}
+          className={`${monoAction} text-muted-foreground opacity-0 transition-opacity hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+        >
+          SYNTHESIZE GUIDE
+        </button>
+        {practice}
+      </span>
     );
   }
 
@@ -352,6 +387,7 @@ function UnitGuideCluster({
           <RefreshCw size={12} aria-hidden />
         </button>
       )}
+      {practice}
       <button
         type="button"
         onClick={() => controls.onView(scope)}

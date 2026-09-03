@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { PracticeAction } from "@/components/PracticeAction";
 import type { GuideInfo } from "@/lib/guides";
 import {
   countFiles,
@@ -43,7 +44,10 @@ export interface ModuleGuideControls {
   guides: ReadonlyMap<string, GuideInfo>;
   /** Module scopes with a queued/running module_guide job. */
   activeScopes: ReadonlySet<string>;
+  /** Scopes with a queued/running practice job (SPEC §8.3). */
+  activePracticeScopes: ReadonlySet<string>;
   onSynthesize: (scope: string) => void;
+  onPractice: (scope: string) => void;
   onView: (scope: string) => void;
 }
 
@@ -183,7 +187,9 @@ function DirNode({
 /**
  * SPEC §8.1 / M5: per-module guide state. Synthesis is manual only; staleness
  * is always visible, the token-costing resynthesize action stays quiet until
- * the guide is actually stale.
+ * the guide is actually stale. The practice exam (SPEC §8.3) sits beside the
+ * guide in every state — a folder with files is always something to be
+ * examined on, whether or not a guide has been built from it.
  */
 function GuideCluster({
   scope,
@@ -194,28 +200,40 @@ function GuideCluster({
 }) {
   const guide = controls.guides.get(scope);
   const active = controls.activeScopes.has(scope);
+  const practice = (
+    <PracticeAction
+      active={controls.activePracticeScopes.has(scope)}
+      onSelect={() => controls.onPractice(scope)}
+    />
+  );
 
   if (active) {
     return (
-      <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-        <span
-          aria-hidden
-          className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-        />
-        SYNTHESIZING…
+      <span className="flex shrink-0 items-center gap-0.5">
+        <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+          <span
+            aria-hidden
+            className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
+          />
+          SYNTHESIZING…
+        </span>
+        {practice}
       </span>
     );
   }
 
   if (!guide) {
     return (
-      <button
-        type="button"
-        onClick={() => controls.onSynthesize(scope)}
-        className={`${monoAction} text-muted-foreground hover:bg-(--accent)/12 hover:text-(--accent)`}
-      >
-        SYNTHESIZE GUIDE
-      </button>
+      <span className="flex shrink-0 items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => controls.onSynthesize(scope)}
+          className={`${monoAction} text-muted-foreground hover:bg-(--accent)/12 hover:text-(--accent)`}
+        >
+          SYNTHESIZE GUIDE
+        </button>
+        {practice}
+      </span>
     );
   }
 
@@ -241,6 +259,7 @@ function GuideCluster({
           <RefreshCw size={12} aria-hidden />
         </button>
       )}
+      {practice}
       <button
         type="button"
         onClick={() => controls.onView(scope)}

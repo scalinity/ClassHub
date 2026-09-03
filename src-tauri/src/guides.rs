@@ -224,18 +224,7 @@ pub fn synthesize_unit(
             bail!("a synthesis for {unit_name} is already queued or running");
         }
 
-        let corpus = crate::lectures::corpus_block(&conn, class_id, unit_id)?;
-        let ctx = synthesis_context(
-            &conn,
-            class_id,
-            &scope,
-            Some(unit_id),
-            &format!(
-                "nothing to build {unit_name} from yet — it has no folder of its own and no \
-                 lecture mapped to it has been distilled. Add a lecture for one of its weeks, \
-                 or distil one already filed."
-            ),
-        )?;
+        let (ctx, corpus) = unit_context(&conn, class_id, unit_id, &unit_name, &scope)?;
         let output_rel = format!("{GUIDES_DIR}/{}.html", crate::units::folder_segment(&unit_name));
         let prompt =
             render_guide_prompt(&ctx, &unit_name, &output_rel, generated_at_label, &corpus);
@@ -249,6 +238,35 @@ pub fn synthesize_unit(
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
     crate::jobs::enqueue_module_guide(app, class_id, &scope, &prompt, payload)
+}
+
+/// The sources of one of the course's own divisions (SPEC §8.5), for its guide
+/// and its practice exam alike: the manifest over its folder and its mapped
+/// lectures, plus the prompt block naming its distilled notes.
+///
+/// Refused when there is nothing a job could read. A division whose lectures
+/// are filed but not yet distilled has a manifest — the transcripts count as
+/// sources, so the guide goes stale when one changes — and yet nothing to
+/// list: the transcripts are named through their notes rather than as files,
+/// and there are no notes.
+fn unit_context(
+    conn: &Connection,
+    class_id: i64,
+    unit_id: i64,
+    unit_name: &str,
+    scope: &str,
+) -> Result<(SynthesisContext, String)> {
+    let nothing = format!(
+        "nothing to build {unit_name} from yet — it has no folder of its own and no \
+         lecture mapped to it has been distilled. Add a lecture for one of its weeks, \
+         or distil one already filed."
+    );
+    let notes = crate::lectures::corpus_notes(conn, class_id, unit_id)?;
+    let ctx = synthesis_context(conn, class_id, scope, Some(unit_id), &nothing)?;
+    if notes.is_empty() && ctx.files_block.is_empty() {
+        bail!("{nothing}");
+    }
+    Ok((ctx, crate::lectures::corpus_block(&notes)))
 }
 
 /// `guides.scope` and `jobs.scope` for one of the course's own divisions.
@@ -363,10 +381,12 @@ struct PracticePayload {
     rel_path: String,
 }
 
-/// SPEC §8.3: practice exam synthesis, triggered from chat (M8). Scope is a
-/// module rel path or `master` (the whole semester); `focus` narrows topics.
-/// `date_label` names the file (`<scope> — <date>.html`), so it must be
-/// filename-safe (YYYY-MM-DD).
+/// SPEC §8.3: practice exam synthesis, from chat (M8) or the workspace's
+/// PRACTICE EXAM action (M19). Scope is a folder rel path, `unit:<name>` for
+/// one of the course's own divisions — drawing on the same sources as that
+/// division's guide (SPEC §8.5) — or `master` (the whole semester); `focus`
+/// narrows topics. `date_label` names the file (`<scope> — <date>.html`), so
+/// it must be filename-safe (YYYY-MM-DD).
 pub fn generate_practice(
     app: &AppHandle,
     class_id: i64,
@@ -377,6 +397,8 @@ pub fn generate_practice(
 ) -> Result<(i64, String)> {
     let scope_label = if scope == MASTER_SCOPE {
         "Semester".to_string()
+    } else if let Some(unit_name) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
+        unit_name.to_string()
     } else {
         Path::new(scope)
             .file_name()
@@ -392,18 +414,43 @@ pub fn generate_practice(
         if has_active_job(&conn, class_id, "practice", scope)? {
             bail!("a practice exam for this scope is already queued or running");
         }
-        let ctx = synthesis_context(
-            &conn,
-            class_id,
-            scope,
-            None,
-            "no indexed files in that scope — rescan the class first",
-        )?;
+        let (ctx, corpus) = match scope.strip_prefix(UNIT_SCOPE_PREFIX) {
+            Some(unit_name) => {
+                let unit_id: i64 = conn
+                    .query_row(
+                        "SELECT id FROM units WHERE class_id = ?1 AND name = ?2",
+                        params![class_id, unit_name],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .context("that division is no longer in this course's structure")?;
+                unit_context(&conn, class_id, unit_id, unit_name, scope)?
+            }
+            None => (
+                synthesis_context(
+                    &conn,
+                    class_id,
+                    scope,
+                    None,
+                    "no indexed files in that scope — rescan the class first",
+                )?,
+                // A folder is not one of the course's divisions, so no lecture
+                // is mapped to it; the semester scope lists its transcripts
+                // among the files above, since they are source material.
+                "(none — only an exam scoped to one of the course's divisions draws on \
+                 distilled lectures; the files above are the whole of this scope)"
+                    .to_string(),
+            ),
+        };
 
         // Same-day exams for the same scope get a numeric suffix instead of
-        // silently overwriting the earlier one.
+        // silently overwriting the earlier one. A division's name can carry a
+        // slash or a colon, which a file name cannot.
         let class_dir = ctx.class_dir.clone();
-        let base = format!("{PRACTICE_DIR}/{scope_label} — {date_label}");
+        let base = format!(
+            "{PRACTICE_DIR}/{} — {date_label}",
+            crate::units::folder_segment(&scope_label)
+        );
         let mut output_rel = format!("{base}.html");
         let mut n = 2;
         while class_dir.join(&output_rel).exists() {
@@ -424,7 +471,8 @@ pub fn generate_practice(
             .replace("{accent_light}", ctx.accent_light)
             .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &ctx.files_block);
+            .replace("{files}", &ctx.files_block)
+            .replace("{corpus}", &corpus);
         let payload = serde_json::to_string(&PracticePayload {
             rel_path: output_rel.clone(),
         })?;

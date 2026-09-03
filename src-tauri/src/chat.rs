@@ -607,12 +607,17 @@ fn title_from(text: &str) -> String {
 
 /// Records the question, then answers it on a background thread. Returns the
 /// session id (new sessions are created here) so the UI can follow the stream.
+///
+/// `class_id` is the workspace open when the question was asked, if one was
+/// (SPEC §9): it rides the system prompt for this turn only, so a question
+/// that names no class means that one. Nothing about it is persisted.
 pub fn send(
     app: &AppHandle,
     session_id: Option<i64>,
     text: &str,
     today: &str,
     today_iso: &str,
+    class_id: Option<i64>,
 ) -> Result<i64> {
     let text = text.trim();
     if text.is_empty() {
@@ -632,9 +637,11 @@ pub fn send(
         // result would otherwise wedge the session permanently — every later
         // send rejected by the API, with no way back from the UI.
         close_dangling_tool_uses(conn, session_id)?;
-        // SPEC §9: identity, today's date, and the injected hub context.
+        // SPEC §9: identity, today's date, the open class, and the injected
+        // hub context.
         let system = SYSTEM_TEMPLATE
             .replace("{today}", today)
+            .replace("{open_class}", &open_class_line(conn, class_id)?)
             .replace("{context}", &crate::tools::overview_text(conn, false, today_iso)?);
         insert_message(
             conn,
@@ -704,6 +711,26 @@ pub fn send(
     });
 
     Ok(session_id)
+}
+
+/// The system prompt's one line about where the question was asked from. An
+/// id no class has (a workspace closed by a build that renumbered nothing
+/// should not happen, but a stale id must not fail the turn) reads as the
+/// dashboard.
+fn open_class_line(conn: &Connection, class_id: Option<i64>) -> Result<String> {
+    let name: Option<String> = match class_id {
+        Some(id) => conn
+            .query_row("SELECT display_name FROM classes WHERE id = ?1", [id], |row| row.get(0))
+            .optional()?,
+        None => None,
+    };
+    Ok(match name {
+        Some(name) => format!(
+            "Daniel is looking at the **{name}** workspace. A question that names no class is \
+             about this one — pass it as `class` to the tools, and never ask which class he means."
+        ),
+        None => "Daniel is on the dashboard, looking at no class in particular.".to_string(),
+    })
 }
 
 pub fn stop(app: &AppHandle, session_id: i64) {
@@ -1013,6 +1040,11 @@ fn stream_turn(
 
     let mut turn = Turn::default();
     let mut open: Option<OpenBlock> = None;
+    // What the round cost, from the API's own accounting: the prompt at
+    // `message_start`, the answer at `message_delta`. Chat is pay-per-token
+    // (SPEC §15), and the cached system prompt is the one number that says
+    // whether the overview is still short enough to ride every turn.
+    let mut usage = Value::Null;
     for line in BufReader::new(response).lines() {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -1027,6 +1059,9 @@ fn stream_turn(
             continue;
         };
         match value["type"].as_str().unwrap_or("") {
+            "message_start" => {
+                usage = value["message"]["usage"].clone();
+            }
             "content_block_start" => {
                 let block = &value["content_block"];
                 open = match block["type"].as_str() {
@@ -1130,8 +1165,21 @@ fn stream_turn(
                 if let Some(reason) = value["delta"]["stop_reason"].as_str() {
                     turn.stop_reason = Some(reason.to_string());
                 }
+                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
+                    usage["output_tokens"] = json!(output);
+                }
             }
-            "message_stop" => break,
+            "message_stop" => {
+                eprintln!(
+                    "chat session {session_id}: round used input {} · cache write {} · \
+                     cache read {} · output {}",
+                    usage["input_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                    usage["output_tokens"].as_u64().unwrap_or(0),
+                );
+                break;
+            }
             "error" => {
                 let message = value["error"]["message"]
                     .as_str()

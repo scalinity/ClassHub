@@ -753,9 +753,16 @@ plus a "Cross-module threads" section. This is a long-running exclusive job (pot
 
 ### 8.3 Practice exams (`practice` job)
 
-Triggered from chat (M8) or a button in Study Guides. Inputs: scope (module or semester) +
-optional focus topics. Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style
-questions with hidden answers + scoring rubric.
+Triggered from chat, or from the `PRACTICE EXAM` action that sits beside `VIEW GUIDE` in
+every guide cluster of the workspace — a folder's row in Materials, a division's row in the
+Structure list, and the semester-master strip. Inputs: scope (a division, a folder, or the
+semester) + optional focus topics from chat. A division's exam draws on the same sources as
+its guide (§8.5) — its folder, if it has one, and its distilled lectures — so the action is
+offered on a division's row exactly when a guide could be built, and a division with neither
+is refused by name. One exam per scope at a time, the same duplicate-active guard as guides.
+Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style questions with hidden
+answers + scoring rubric; the row shows `GENERATING EXAM…` while it is written, and the
+exam appears in the workspace's PRACTICE EXAMS listing when the job succeeds.
 
 ### 8.4 Session documents (`lecture_digest` job)
 
@@ -862,24 +869,46 @@ its meetings.
 - **Tool loop**: hand-rolled in Rust: send → on `tool_use` block, execute locally → append
   `tool_result` → continue until end_turn. Stream text deltas and tool-call chips to the
   frontend. Persist full content blocks to `chat_messages`.
-- **System prompt**: identity ("ClassHub agent"), today's date, injected context (classes,
-  schedule, each class's current division, open deadlines, staleness summary), retrieval
-  guidance (search extracts first;
-  cite file paths), and write-action policy (file moves are proposals only).
+- **System prompt**: identity ("ClassHub agent"), today's date, the open class, injected
+  context, retrieval guidance (search extracts first; cite file paths), and write-action
+  policy (file moves are proposals only).
+  - **The open class rides with the question.** `send_chat` carries the id of the workspace
+    the question was asked from, if one was open, and the prompt gains one line saying so: a
+    question that names no class means that one. It is context for the turn and nothing is
+    persisted, so the same conversation can move between classes. The ask panel's starters
+    draw from that class too, and from any class on the dashboard.
+  - **The overview** is the per-class picture the app itself has: how the course divides
+    itself (count and kind, the current division, and in the detailed form every division
+    with its date), the lectures filed under those divisions and which are distilled or have
+    a session document, material by folder — a folder is named as a folder, never as a
+    module — every guide scope with its staleness, and the proposals of both kinds waiting
+    for approval. The compact form rides every turn as cached system context and stays one
+    line per topic; the detailed form, behind `get_overview`, is where the lists and the
+    proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
+    6.4 KB of text (6.0 KB before M19), and the whole system block — template and overview —
+    cached at about 5,000 tokens beside about 3,600 for the tool schemas.
 - **Read tools** (Milestone 7):
-  - `get_overview()` — classes, schedule, upcoming deadlines, guide freshness
+  - `get_overview()` — classes, schedule, divisions with dates, lectures with their notes and
+    session documents, guides with freshness, waiting proposals with ids, open deadlines
   - `list_material(class, subpath?)` — tree listing
-  - `search_material(query, class?)` — ripgrep over extracts, notes, and guides
+  - `search_material(query, class?)` — ripgrep over extracts, corpus notes, notes, and guides
   - `read_material(path, offset?, limit?)` — bounded file reads (extracts/notes/guides/text
     sources; never binaries)
 - **Write tools** (Milestone 8):
-  - `trigger_synthesis(class, scope)` — enqueue module/master/practice job
+  - `trigger_synthesis(class, scope)` — enqueue a guide job. `scope` is one of the course's
+    own divisions as the overview names it (`Week 3`, or its topic), a folder of material
+    (`Module 1`), or `master`; a division routes to the unit guide (§8.1) and draws on its
+    folder and its distilled lectures. A division answers to its whole name and to its kind
+    and number, so `Week 1` is an exact hit rather than a substring of Weeks 10–15; a folder
+    named exactly like a division is that division's folder, and the division wins. Nothing
+    is guessed: an empty, ambiguous or unmatched scope is an error naming the candidates.
   - `upsert_deadline(...)` / `complete_deadline(id)` / `delete_deadline(id)`
   - `upsert_grade_category(...)` / `add_grade_item(...)`
   - `write_note(class, title, content_md)` — creates/updates `Notes/<title>.md`
   - `propose_file_moves(moves[])` — routes into the drop-to-sort confirm queue; never moves
     directly
-  - `generate_practice(class, scope, focus?)`
+  - `generate_practice(class, scope, focus?)` — the same scopes as `trigger_synthesis`; a
+    division's exam is built from the same sources as its guide (§8.3)
 - Sidebar UX: toggleable right panel, session list, streaming markdown, tool-call chips with
   expandable args/results, inline confirm cards for proposals.
 
@@ -1143,7 +1172,7 @@ Mark the checkbox when the acceptance criteria pass.
   "No Class" week reads as the syllabus wrote it, and Applied Generative AI, which publishes no
   dates, shows nothing.
 
-- [ ] **M19 — Chat knows what the app knows.** (`milestones/M19-chat-parity.md`)
+- [x] **M19 — Chat knows what the app knows.** (`milestones/M19-chat-parity.md`)
   The overview carries divisions, lectures, corpus notes, unit guides and pending proposals;
   synthesis and practice triggers accept a division; the open class rides with each question;
   practice exams get their button in the workspace.

@@ -144,6 +144,23 @@ fn synthesize_master(
     guides::synthesize_master(&app, class_id, &generated_at_label).map_err(|e| format!("{e:#}"))
 }
 
+/// SPEC §8.3: the workspace's PRACTICE EXAM action. `scope` is a folder rel
+/// path, `unit:<name>` for one of the course's divisions, or `master`; the
+/// two labels are formatted client-side — the footer stamp and the file
+/// name's YYYY-MM-DD.
+#[tauri::command]
+fn generate_practice(
+    app: tauri::AppHandle,
+    class_id: i64,
+    scope: String,
+    generated_at_label: String,
+    date_label: String,
+) -> Result<i64, String> {
+    guides::generate_practice(&app, class_id, &scope, None, &generated_at_label, &date_label)
+        .map(|(job_id, _)| job_id)
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// SPEC §6: resume a failed master run with `--resume <session_id>`.
 #[tauri::command]
 fn resume_master_guide(app: tauri::AppHandle, job_id: i64) -> Result<i64, String> {
@@ -587,6 +604,7 @@ fn chat_history(
 /// arrives as `chat-event`. `today` (display) and `today_iso` (YYYY-MM-DD)
 /// are formatted client-side (std Rust cannot format a local date); the
 /// write tools stamp job prompts and practice file names with them.
+/// `class_id` is the open workspace, if one is — context for this turn only.
 #[tauri::command]
 fn send_chat(
     app: tauri::AppHandle,
@@ -594,8 +612,9 @@ fn send_chat(
     text: String,
     today: String,
     today_iso: String,
+    class_id: Option<i64>,
 ) -> Result<i64, String> {
-    chat::send(&app, session_id, &text, &today, &today_iso).map_err(|e| format!("{e:#}"))
+    chat::send(&app, session_id, &text, &today, &today_iso, class_id).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -661,6 +680,7 @@ pub fn run() {
             synthesize_module,
             synthesize_unit,
             synthesize_master,
+            generate_practice,
             resume_master_guide,
             add_lecture,
             digest_lecture,

@@ -1,8 +1,10 @@
 import { Fragment, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
+import { PracticeAction } from "@/components/PracticeAction";
 import {
   formatGeneratedAt,
+  generatePractice,
   resumeMasterGuide,
   synthesizeMaster,
   type GuideInfo,
@@ -79,14 +81,33 @@ export function MasterGuideStrip({
     null;
   const failed =
     !active && masterJobs[0]?.status === "failed" ? masterJobs[0] : null;
+  // A semester-wide practice exam (SPEC §8.3) is its own job, so it neither
+  // waits for the master nor blocks it.
+  const practiceActive = jobs.some(
+    (j) =>
+      j.kind === "practice" &&
+      j.classId === classId &&
+      j.scope === "master" &&
+      (j.status === "running" || j.status === "queued"),
+  );
 
   const start = () => {
     setError(null);
-    synthesizeMaster(classId).catch((e) => setError(String(e)));
+    synthesizeMaster(classId).catch((e) =>
+      setError(`MASTER NOT STARTED — ${String(e)}`),
+    );
   };
   const resume = (jobId: number) => {
     setError(null);
-    resumeMasterGuide(jobId).catch((e) => setError(String(e)));
+    resumeMasterGuide(jobId).catch((e) =>
+      setError(`MASTER NOT STARTED — ${String(e)}`),
+    );
+  };
+  const practice = () => {
+    setError(null);
+    generatePractice(classId, "master").catch((e) =>
+      setError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+    );
   };
 
   return (
@@ -159,6 +180,7 @@ export function MasterGuideStrip({
                 GENERATE SEMESTER MASTER
               </button>
             )}
+            <PracticeAction standing active={practiceActive} onSelect={practice} />
             {guide && (
               <button
                 type="button"
@@ -225,9 +247,7 @@ export function MasterGuideStrip({
       )}
 
       {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">
-          MASTER NOT STARTED — {error}
-        </p>
+        <p className="mt-2 font-mono text-[11px] text-destructive">{error}</p>
       )}
     </section>
   );

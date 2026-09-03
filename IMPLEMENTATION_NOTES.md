@@ -1924,3 +1924,182 @@ individual commits. What future sessions should know:
   WEEK 2 · STUDY DESIGNS · JAX1 231 · 2 CR` with `NOW` on the Week 2 row, and
   the Applied Generative AI workspace carried neither. Nothing was pushed: the
   repo has no remote.
+
+## M19 — Chat knows what the app knows (2026-09-02)
+
+### What was built
+
+- **The overview.** `tools::overview_text` builds each class's block through
+  `class_block`: after the meeting line, `Divisions: 17 weeks from the
+  syllabus` (the course's own word where every row agrees on one, the neutral
+  noun otherwise, and the source the way `Structure.tsx`'s `provenance` names
+  it), `Now:` as before, then `Lectures:` — filed transcripts counted from
+  `files` rows under `Weeks/*.md`, distilled and session-document counts, the
+  divisions they feed with counts, and any transcript mapped to no division —
+  then `Material:` with its depth-0 folders named as folders, `Guides:` with a
+  session document named for what the session was about (`session 2026-09-01
+  — Clinical Model Evaluation, Fairness, and HIPAA`, from its document path
+  rather than its transcript-path scope), and `Waiting:` with both confirm
+  queues counted. The detailed form lists every division with its date, `NOW`,
+  its folder, its lecture counts and its guide's freshness; every lecture with
+  its corpus note and session document's markdown twin; and every proposal
+  with its id and the reader that proposed it. Ids stay out of the compact
+  form: chat has no tool that acts on a proposal, so an id is something to
+  name, not something to press. The tool description and the system prompt's
+  "What you can see" paragraph say what the overview now carries.
+- **Division-scoped triggers.** `resolve_scope` returns a `Scope` — `Master`,
+  `Folder(rel)` or `Unit {id, name}` — matched through the same `best_match`
+  tiers as classes over the units and the depth-0 folders together. A unit
+  answers to its squashed name and to `kind + ordinal` (`week3`), so `Week 1`
+  is an exact hit rather than a substring of Weeks 10–15, and a topic
+  (`Data Exploration`) finds its week; a leading `unit:` is stripped, since a
+  scope copied out of a listing carries it. A folder named exactly like a
+  division is dropped from the candidates — `attach_folder_paths` joins the
+  two on that equality, so the division's sources include the folder's files —
+  and the division wins. `trigger_synthesis` routes a unit to
+  `guides::synthesize_unit`; `generate_practice` passes `unit:<name>` through
+  to `guides::generate_practice`, which looks the unit up by name, draws on
+  `synthesis_context` with the unit id, and fills a new `{corpus}` section of
+  `practice.md` from its distilled notes. `unit_context` is the shared step
+  behind both the unit guide and the unit exam: it refuses when the division
+  has neither a listed file nor a note — a filed-but-undistilled lecture puts
+  the transcript in the manifest, which is what keeps the guide stale-aware,
+  and nothing in the prompt's file listing, so the earlier code would have
+  spawned a job with nothing to read. `lectures::corpus_block` now formats the
+  `corpus_notes` list rather than reading the table itself.
+- **The open class rides with the question.** `send_chat` takes
+  `class_id: Option<i64>`; `sorter.ts` exports `openClassId()` — the same
+  module variable `setDropTarget` writes — and `sendChat` sends it. The system
+  prompt gains one line after the date: the workspace being looked at and that
+  a question naming no class means that one, or that the dashboard is open.
+  Nothing is persisted. `pickStarters` takes the open class's name and falls
+  back to a random one on the dashboard; the memo re-draws when the id
+  changes. `stream_turn` logs each round's usage from the API's own accounting
+  (`message_start` for the prompt, `message_delta` for the answer), which is
+  where the cost of the overview is read from now.
+- **Practice exams from the workspace.** `PracticeAction` is one component
+  used in all three guide clusters: FileTree's folder rows, Structure's
+  division rows and the master strip. It sits beside VIEW GUIDE in the same
+  mono register as resynthesize — muted, revealed on hover or focus on a row,
+  standing on the strip, which has no row to hover — and turns into a pulsing
+  `GENERATING EXAM…` while a practice job for that scope is queued or
+  running. A division's row offers it exactly when a guide could be built
+  (`canBuild`). The `generate_practice` Tauri command reuses
+  `guides::generate_practice` with no focus; `lib/guides.ts` sends the two
+  client-formatted labels. The three error slots now carry their whole line
+  (`NO PRACTICE EXAM — …`, `PRACTICE EXAM NOT STARTED — …`), since a practice
+  refusal under a `NO GUIDE` prefix read wrong. The active row in PRACTICE
+  EXAMS labels a unit scope through `scopeLabel` instead of printing
+  `UNIT:…`.
+- The chat prompt's synthesis paragraph names the three scopes, says a
+  division with neither folder nor distilled lecture is refused, and — after
+  the live run below — that a refusal ends the action: no substituting a
+  folder the reader did not name.
+
+### Verified
+
+- `cargo test`: 153 pass, four new in `tools.rs`. The scope parser: `Week 3`,
+  `week 1` (not 10 or 13), `Data Exploration`, `unit:Week 3 — …` → the unit;
+  `Module 1`, `m2` → the folder; `master`, `whole semester` → master; `?` →
+  "which scope?"; `week` → six candidates named; `Week 99` → the divisions and
+  folders listed; a Canvas unit called `Module 1` beside the `Module 1` folder
+  → the unit. The overview: `Divisions: 5 weeks from the syllabus` and `Now:`
+  for Biostatistics, `1 part` and no `Now:` for the Part course, `none
+  declared` for a class without rows; the compact `Lectures: 1 filed, 0
+  distilled, 0 session documents — Week 2 — Study Designs (1)`, `folders:`,
+  `Waiting: 1 deadline proposal` and no `#`; the detailed division row with
+  `NOW · 1 lecture (0 distilled)`, the lecture line, and `deadline proposal #1
+  · Form Teams (project) due 2026-09-02 · from the syllabus scan`.
+  `npx tsc --noEmit` clean.
+- **Token count.** Measured against the live database with a throwaway
+  ignored test printing `overview_text` read-only: the compact overview went
+  from 6,007 to 6,407 characters, about 100 tokens across the four classes;
+  the open-deadline list, capped at 25 of 37, is most of the text either way.
+  The API's own accounting on the first live turn: 3,636 tokens cached at the
+  tool-schema breakpoint and 4,995 at the system breakpoint (template plus
+  overview); a later turn from another workspace rewrote the system block at
+  5,001 with the tools still read from cache.
+- Live on the dev build (pids 25364, then 25728 after a prompt edit) beside
+  the installed app, driven through the M18 accessibility driver, model
+  `claude-sonnet-5`, machine date still 2026-09-02 at 22:30 so `Now:` read
+  Week 2:
+  - From the Biostatistics workspace, "what's this week about?" — no class
+    named — answered `Week 2 — Study Designs` from the overview and went on to
+    read the Module 2 slide extract; it never asked which class. Four rounds:
+    28,101 uncached input, 8,631 cache write, 25,893 cache read, 1,614 output
+    — about $0.10 at Sonnet 5 list price.
+  - "Make a practice exam for Week 3" from the same workspace: the model read
+    the detailed overview, saw Week 3 has no folder and no lecture, and
+    declined without calling the tool, naming what would give it sources. Two
+    rounds, about $0.08. No job.
+  - The same conversation, after opening the Fundamentals workspace: "Make a
+    practice exam for Week 2" — the model kept the conversation's Biostatistics
+    context over the open-class line, called `generate_practice` for
+    Biostatistics Week 2 (refused: no folder, no distilled lecture), then on
+    its own called it again for the `Module 2` folder and queued job 291.
+    Cancelled from the Job Center about a minute in; the prompt now says a
+    refusal ends the action. Three rounds, about $0.17.
+  - A new conversation from the Fundamentals workspace: "Make a practice exam
+    for Week 2" queued job 293, `practice` with scope `unit:Week 2 — Responsible
+    AI, Ethics, and Governance`, in one tool call; the job's first reads were
+    the corpus note and then the transcript. Two rounds, about $0.02. The
+    starters in that panel all named Fundamentals; in the Biostatistics panel
+    they had all named Biostatistics.
+  - "Which deadline proposals are waiting for me?" named both — `#40 Form
+    Teams (project)` from the syllabus scan and `#31 Introduction to Python
+    and Version Control` from Canvas — as AI in Health Design Studio I's,
+    waiting in that workspace's queue. Two rounds, about $0.02.
+  - The Module 1 row's PRACTICE EXAM (the second of that name in the tree;
+    the master strip's is first) queued job 292, `practice` with scope
+    `Module 1`; the row read `GENERATING EXAM…` and the PRACTICE EXAMS section
+    `GENERATING`. Screenshots: the Biostatistics master strip reading
+    `STALE — REGENERATE · PRACTICE EXAM · VIEW GUIDE`, and the Fundamentals
+    Week 2 row reading `NOW · 1 LECTURE · ⟳ · GENERATING EXAM… · VIEW GUIDE`
+    with `GENERATE SEMESTER MASTER · PRACTICE EXAM` on its strip.
+  - Both jobs succeeded, Opus at `xhigh` on the subscription, list-price
+    equivalents from the CLI's own accounting: job 292 (`Module 1`, folder)
+    10.4 min, 23 turns, $3.74, 54.7k output tokens, an 82 KB exam of 19
+    questions; job 293 (`unit:Week 2 — …`) 8.3 min, 18 turns, $2.37, 45.2k
+    output tokens, a 79 KB exam of 18 questions citing the corpus note and
+    the transcript 37 times. Neither file carries a `CONTINUE` marker or an
+    external reference. The finished exam appeared in the Fundamentals
+    PRACTICE EXAMS listing and the Week 2 row returned to `PRACTICE EXAM ·
+    VIEW GUIDE`. The cancelled job 291 ran about a minute: 20 assistant
+    messages, 191k cache-write and 1.03M cache-read tokens, about $1.70
+    list-equivalent.
+  - Chat in total: five turns, about $0.39 at Sonnet 5 list price
+    ($2/M input, $2.50/M cache write, $0.20/M cache read, $10/M output),
+    plus five unlogged follow-up calls of a few hundred tokens each.
+
+### Left as it is
+
+- A conversation's own history outweighs the open-class line: a chat that
+  had been about Biostatistics kept resolving "Week 2" there after the
+  Fundamentals workspace opened. The line is one sentence against pages of
+  transcript, and a new conversation from the workspace behaves. Worth
+  knowing before assuming the open class re-targets an old thread.
+- The model may decline a scope from the detailed overview without calling
+  the tool, which is the right answer arrived at one call early; the tool
+  refuses the same request the same way (job 291's first call proved it).
+- Each round of a turn re-sends the conversation uncached, so a turn's
+  `input` count climbs with every tool result (28k over four rounds on the
+  first turn). The system block and the tool schemas are cached; the history
+  is not. Pre-existing, and the largest cost in a multi-round turn.
+- The compact overview's open-deadline list (25 of 37, `LIMIT 25`) is most of
+  the text either way; the per-class blocks are about a third of it.
+- `Lectures:` counts transcripts as `Weeks/*.md`; Applied Generative AI's
+  `Weeks/Week 01` holds a PDF deck and reads `none filed` beside
+  `folders: … Weeks (1)`, which is accurate.
+
+### Gotchas
+
+- `screencapture -l` with the first id `winid` prints can shoot a tooltip
+  window (a 264×20 strip); filter the listing by the window name.
+- The page came back on the dashboard after the jobs finished, with the AX
+  tree showing only the dashboard's buttons — a reload, not a driver fault;
+  navigating again was enough. Cause not found.
+- `Cancel job N` from the Job Center takes a few seconds to show in the
+  table; a read straight after the press still says `running`.
+- The chat textarea has no accessible name; `ax <pid> focus role:AXTextArea`
+  and `setvalue role:AXTextArea <text>` reach it, and the controlled React
+  input takes the value.

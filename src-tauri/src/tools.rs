@@ -120,7 +120,7 @@ pub fn definitions() -> Value {
     json!([
         {
             "name": "get_overview",
-            "description": "Snapshot of the hub: every class, when it meets, what material is indexed and extracted per module, which study guides exist and whether they are stale, and open deadlines. Use it for questions about the schedule, deadlines, what exists, or what has been synthesized — not to find content inside material.",
+            "description": "Snapshot of the hub, in full: every class, when it meets, how the course divides itself (its weeks, modules or parts, with dates and which one is current), the lectures filed under each division and whether they have been distilled or have a session document, what material is indexed and extracted per folder, which study guides exist and whether they are stale, every deadline or file-move proposal waiting for approval (with ids), and open deadlines. Use it for questions about the schedule, this week, deadlines, what exists, what is waiting, or what has been synthesized — not to find content inside material.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
@@ -276,12 +276,12 @@ pub fn definitions() -> Value {
         },
         {
             "name": "trigger_synthesis",
-            "description": "Queue a study-guide synthesis job — one module's guide, or 'master' for the semester master. It appears in the Job Center immediately and runs on the Claude subscription: long (10–30+ minutes) and token-heavy, so trigger only on a clear request, one job per ask, and never re-trigger a scope that is already queued or running. The master runs exclusively after the queue drains. Report the job as queued, never as done.",
+            "description": "Queue a study-guide synthesis job — for one of the course's own divisions (a week, module or part as the overview lists it), for one folder of material, or 'master' for the semester master. A division's guide is built from its folder, if it has one, and its distilled lectures. It appears in the Job Center immediately and runs on the Claude subscription: long (10–30+ minutes) and token-heavy, so trigger only on a clear request, one job per ask, and never re-trigger a scope that is already queued or running. The master runs exclusively after the queue drains. Report the job as queued, never as done.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "class": { "type": "string", "description": "Class name." },
-                    "scope": { "type": "string", "description": "A module folder name as get_overview lists it (e.g. 'Module 1'), or 'master' for the semester master." }
+                    "scope": { "type": "string", "description": "A division as the overview names it (e.g. 'Week 3', or its topic), a folder name (e.g. 'Module 1'), or 'master' for the semester master." }
                 },
                 "required": ["class", "scope"],
                 "additionalProperties": false
@@ -289,12 +289,12 @@ pub fn definitions() -> Value {
         },
         {
             "name": "generate_practice",
-            "description": "Queue a practice-exam job for a module or the whole semester, optionally focused on given topics. Same rules as trigger_synthesis: subscription job, visible in the Job Center, report it as queued. The exam lands in Study Guides/Practice/ and the workspace's practice list when it succeeds.",
+            "description": "Queue a practice-exam job for one of the course's divisions (a week, module or part), for one folder of material, or the whole semester, optionally focused on given topics. A division's exam draws on the same sources as its guide: its folder, if it has one, and its distilled lectures — a division with neither is refused. Same rules as trigger_synthesis: subscription job, visible in the Job Center, report it as queued. The exam lands in Study Guides/Practice/ and the workspace's practice list when it succeeds.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "class": { "type": "string", "description": "Class name." },
-                    "scope": { "type": "string", "description": "A module folder name, or 'master' for semester-wide." },
+                    "scope": { "type": "string", "description": "A division as the overview names it (e.g. 'Week 3'), a folder name (e.g. 'Module 1'), or 'master' for semester-wide." },
                     "focus": { "type": "string", "description": "Optional topics to emphasize, e.g. 'hypothesis testing and p-values'." }
                 },
                 "required": ["class", "scope"],
@@ -508,122 +508,7 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
     }
 
     for class in classes {
-        let (color, room, instructors, credits, exam_start, exam_end): (
-            String,
-            String,
-            String,
-            i64,
-            Option<String>,
-            Option<String>,
-        ) = conn.query_row(
-            "SELECT color, room, instructors, credits, final_exam_start, final_exam_end
-             FROM classes WHERE id = ?1",
-            [class.id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )?;
-
-        let mut meeting_stmt = conn.prepare(
-            "SELECT weekday, start_time, end_time FROM meetings
-             WHERE class_id = ?1 ORDER BY weekday, start_time",
-        )?;
-        let meetings = meeting_stmt
-            .query_map([class.id], |row| {
-                let weekday: i64 = row.get(0)?;
-                let start: String = row.get(1)?;
-                let end: String = row.get(2)?;
-                Ok(format!(
-                    "{} {start}–{end}",
-                    WEEKDAYS
-                        .get((weekday.max(1) - 1) as usize)
-                        .unwrap_or(&"?")
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        out.push_str(&format!(
-            "\n## {} (folder: {}, accent {color})\n",
-            class.display_name, class.folder_name
-        ));
-        out.push_str(&format!(
-            "Meets {} · {room} · {credits} credits · {instructors}\n",
-            if meetings.is_empty() {
-                "—".to_string()
-            } else {
-                meetings.join(", ")
-            }
-        ));
-        // Where the course is today, from its own schedule; a course that
-        // published no dates gets no line rather than a computed week. The
-        // name is text a model read out of a syllabus PDF, placed in the
-        // system prompt on purpose: it is the same trust tier as the guide
-        // and folder lines below, capped by `units::MAX_UNIT_NAME`, and a
-        // chat that does not know which week it is would be the worse trade.
-        if let Some(unit) = crate::units::current_unit(conn, class.id, today_iso)? {
-            out.push_str(&format!("Now: {}\n", unit.name));
-        }
-        if let (Some(start), Some(end)) = (&exam_start, &exam_end) {
-            out.push_str(&format!("Final exam: {start} to {end}\n"));
-        }
-
-        let (indexed, extracted): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*),
-                    SUM(CASE WHEN extracted_sha256 IS NOT NULL
-                              AND extracted_sha256 = sha256 THEN 1 ELSE 0 END)
-             FROM files WHERE class_id = ?1",
-            [class.id],
-            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
-        )?;
-        let modules = module_counts(conn, class.id)?;
-        let module_list = modules
-            .iter()
-            .map(|(name, count)| format!("{name} ({count})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str(&format!(
-            "Material: {indexed} files indexed, {extracted} with a current extract{}\n",
-            if module_list.is_empty() {
-                " · no modules yet".to_string()
-            } else {
-                format!(" · modules: {module_list}")
-            }
-        ));
-
-        let guides = crate::guides::list_guides(conn, class.id)?;
-        if guides.is_empty() {
-            out.push_str("Guides: none generated yet\n");
-        } else {
-            let now_ts = now();
-            let described = guides
-                .iter()
-                .map(|g| {
-                    let scope = crate::guides::scope_label(&g.scope);
-                    if detailed {
-                        format!(
-                            "{scope} — {} ({}, {})",
-                            if g.stale { "STALE" } else { "fresh" },
-                            g.rel_path,
-                            days_ago(now_ts, g.generated_at)
-                        )
-                    } else {
-                        format!("{scope} ({})", if g.stale { "STALE" } else { "fresh" })
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            out.push_str(&format!("Guides: {described}\n"));
-        }
-        if detailed {
-            out.push_str(&grades_line(conn, class.id)?);
-        }
+        class_block(conn, &class, detailed, today_iso, &mut out)?;
     }
 
     let mut deadline_stmt = conn.prepare(
@@ -656,8 +541,359 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
     Ok(out)
 }
 
+/// One class of the overview: how it meets, how the course divides itself and
+/// where it is today, which lectures are filed and distilled, what material
+/// and guides exist, and what waits for approval. The compact form is one
+/// line per topic, since it rides every turn as system context; `detailed`
+/// is where the lists go — every division with its date, every lecture with
+/// its note and session document, every pending proposal with its id.
+fn class_block(
+    conn: &Connection,
+    class: &ClassRow,
+    detailed: bool,
+    today_iso: &str,
+    out: &mut String,
+) -> Result<()> {
+    let (color, room, instructors, credits, exam_start, exam_end): (
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT color, room, instructors, credits, final_exam_start, final_exam_end
+         FROM classes WHERE id = ?1",
+        [class.id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+
+    let mut meeting_stmt = conn.prepare(
+        "SELECT weekday, start_time, end_time FROM meetings
+         WHERE class_id = ?1 ORDER BY weekday, start_time",
+    )?;
+    let meetings = meeting_stmt
+        .query_map([class.id], |row| {
+            let weekday: i64 = row.get(0)?;
+            let start: String = row.get(1)?;
+            let end: String = row.get(2)?;
+            Ok(format!(
+                "{} {start}–{end}",
+                WEEKDAYS
+                    .get((weekday.max(1) - 1) as usize)
+                    .unwrap_or(&"?")
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    out.push_str(&format!(
+        "\n## {} (folder: {}, accent {color})\n",
+        class.display_name, class.folder_name
+    ));
+    out.push_str(&format!(
+        "Meets {} · {room} · {credits} credits · {instructors}\n",
+        if meetings.is_empty() {
+            "—".to_string()
+        } else {
+            meetings.join(", ")
+        }
+    ));
+
+    // The course's own divisions (SPEC §5), and where it is today from its
+    // own schedule; a course that published no dates gets no `Now:` rather
+    // than a computed week. Every name below is text a model read out of a
+    // syllabus PDF, placed in the system prompt on purpose: it is the same
+    // trust tier as the guide and folder lines, capped by
+    // `units::MAX_UNIT_NAME`, and a chat that does not know which week it is
+    // would be the worse trade.
+    let units = crate::units::list_units(conn, class.id)?;
+    let current = crate::units::current_unit(conn, class.id, today_iso)?;
+    let contributions = crate::lectures::list_contributions(conn, class.id)?;
+    let guides = crate::guides::list_guides(conn, class.id)?;
+    let guide_for = |scope: &str| guides.iter().find(|g| g.scope == scope);
+    out.push_str(&divisions_line(&units));
+    if let Some(unit) = &current {
+        out.push_str(&format!("Now: {}\n", unit.name));
+    }
+    if detailed {
+        for unit in &units {
+            let mapped = contributions.iter().filter(|c| c.unit_id == unit.id);
+            let filed = mapped.clone().count();
+            let distilled = mapped.filter(|c| c.distilled).count();
+            let mut line = format!("- {}. {}", unit.ordinal, unit.name);
+            if let Some(starts) = &unit.starts_on {
+                line.push_str(&format!(" · from {starts}"));
+            }
+            if current.as_ref().is_some_and(|c| c.id == unit.id) {
+                line.push_str(" · NOW");
+            }
+            if let Some(folder) = &unit.rel_path {
+                line.push_str(&format!(" · folder {folder}"));
+            }
+            if filed > 0 {
+                line.push_str(&format!(" · {} ({distilled} distilled)", plural(filed, "lecture")));
+            }
+            if let Some(guide) = guide_for(&crate::guides::unit_scope(&unit.name)) {
+                line.push_str(&format!(" · guide {}", freshness(guide.stale)));
+            }
+            line.push('\n');
+            out.push_str(&line);
+        }
+    }
+    if let (Some(start), Some(end)) = (&exam_start, &exam_end) {
+        out.push_str(&format!("Final exam: {start} to {end}\n"));
+    }
+
+    // Lectures: what is filed under `Weeks/` (SPEC §4), which of it the
+    // calendar mapped to a division and distilled into a corpus note (§8.5),
+    // and which session documents exist (§8.4).
+    let mut filed_stmt = conn.prepare(
+        "SELECT rel_path FROM files WHERE class_id = ?1 AND rel_path LIKE 'Weeks/%.md'
+         ORDER BY rel_path",
+    )?;
+    let filed = filed_stmt
+        .query_map([class.id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let sessions: Vec<&crate::guides::GuideInfo> = guides.iter().filter(|g| g.session).collect();
+    let session_for = |transcript: &str| {
+        guide_for(&format!("{}{transcript}", crate::db::SESSION_SCOPE_PREFIX))
+    };
+    if filed.is_empty() && contributions.is_empty() && sessions.is_empty() {
+        out.push_str("Lectures: none filed\n");
+    } else if detailed {
+        out.push_str("Lectures:\n");
+        for c in &contributions {
+            let mut line = format!("- {} · feeds {}", c.rel_path, c.unit_name);
+            line.push_str(&if c.distilled {
+                format!(" · distilled to {}", c.corpus_rel_path)
+            } else {
+                " · not distilled yet".to_string()
+            });
+            if let Some(session) = session_for(&c.rel_path) {
+                line.push_str(&format!(
+                    " · session document {} ({})",
+                    markdown_twin(&session.rel_path),
+                    freshness(session.stale)
+                ));
+            }
+            line.push('\n');
+            out.push_str(&line);
+        }
+        for rel_path in filed.iter().filter(|p| !contributions.iter().any(|c| &c.rel_path == *p)) {
+            out.push_str(&format!("- {rel_path} · mapped to no division\n"));
+        }
+    } else {
+        let distilled = contributions.iter().filter(|c| c.distilled).count();
+        let mut line = format!(
+            "Lectures: {} filed, {distilled} distilled, {}",
+            filed.len().max(contributions.len()),
+            plural(sessions.len(), "session document")
+        );
+        let mut per_unit: Vec<(&str, usize)> = Vec::new();
+        for c in &contributions {
+            match per_unit.iter_mut().find(|(name, _)| *name == c.unit_name) {
+                Some((_, count)) => *count += 1,
+                None => per_unit.push((&c.unit_name, 1)),
+            }
+        }
+        if !per_unit.is_empty() {
+            line.push_str(" — ");
+            line.push_str(
+                &per_unit
+                    .iter()
+                    .map(|(name, count)| format!("{name} ({count})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        let unmapped = filed
+            .iter()
+            .filter(|p| !contributions.iter().any(|c| &c.rel_path == *p))
+            .count();
+        if unmapped > 0 {
+            line.push_str(&format!(" · {unmapped} mapped to no division"));
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+
+    let (indexed, extracted): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                SUM(CASE WHEN extracted_sha256 IS NOT NULL
+                          AND extracted_sha256 = sha256 THEN 1 ELSE 0 END)
+         FROM files WHERE class_id = ?1",
+        [class.id],
+        |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+    )?;
+    let folders = folder_counts(conn, class.id)?;
+    let folder_list = folders
+        .iter()
+        .map(|(name, count)| format!("{name} ({count})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "Material: {indexed} files indexed, {extracted} with a current extract{}\n",
+        if folder_list.is_empty() {
+            " · no folders yet".to_string()
+        } else {
+            format!(" · folders: {folder_list}")
+        }
+    ));
+
+    if guides.is_empty() {
+        out.push_str("Guides: none generated yet\n");
+    } else {
+        let now_ts = now();
+        let described = guides
+            .iter()
+            .map(|g| {
+                // A session document is named for what the session was
+                // about, which its scope (the transcript's path) is not.
+                let scope = if g.session {
+                    format!("session {}", document_stem(&g.rel_path))
+                } else {
+                    crate::guides::scope_label(&g.scope)
+                };
+                if detailed {
+                    format!(
+                        "{scope} — {} ({}, {})",
+                        freshness(g.stale),
+                        g.rel_path,
+                        days_ago(now_ts, g.generated_at)
+                    )
+                } else {
+                    format!("{scope} ({})", freshness(g.stale))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push_str(&format!("Guides: {described}\n"));
+    }
+
+    // Both confirm queues (SPEC §10, §11), so the model can say what waits
+    // and where. Ids in the detailed form only: chat has no tool that acts
+    // on a proposal, so an id is something to name, not something to press.
+    let deadline_proposals = crate::deadlines::pending_proposals(conn, class.id)?;
+    let move_proposals = crate::sorter::sort_state(conn, class.id)?.proposals;
+    if !deadline_proposals.is_empty() || !move_proposals.is_empty() {
+        if detailed {
+            out.push_str("Waiting for approval:\n");
+            for p in &deadline_proposals {
+                out.push_str(&format!(
+                    "- deadline proposal #{} · {} ({}) due {} · from {}\n",
+                    p.id,
+                    p.title,
+                    p.kind,
+                    p.due_at,
+                    proposer(&p.source)
+                ));
+            }
+            for p in &move_proposals {
+                out.push_str(&format!(
+                    "- move proposal #{} · {} → {} · from {}\n",
+                    p.id,
+                    p.source_rel_path,
+                    p.dest_rel_path,
+                    proposer(&p.source)
+                ));
+            }
+        } else {
+            let mut waiting = Vec::new();
+            if !move_proposals.is_empty() {
+                waiting.push(plural(move_proposals.len(), "file move proposal"));
+            }
+            if !deadline_proposals.is_empty() {
+                waiting.push(plural(deadline_proposals.len(), "deadline proposal"));
+            }
+            out.push_str(&format!("Waiting: {}\n", waiting.join(", ")));
+        }
+    }
+
+    if detailed {
+        out.push_str(&grades_line(conn, class.id)?);
+    }
+    Ok(())
+}
+
+/// `Divisions: 14 weeks from the syllabus` — the course's own word where every
+/// row agrees on one, the neutral noun where it declares two levels. Mirrors
+/// `provenance` in src/components/Structure.tsx.
+fn divisions_line(units: &[crate::units::UnitInfo]) -> String {
+    if units.is_empty() {
+        return "Divisions: none declared\n".to_string();
+    }
+    let kinds: std::collections::BTreeSet<&str> = units.iter().map(|u| u.kind.as_str()).collect();
+    let noun = if kinds.len() == 1 {
+        kinds.iter().next().copied().unwrap_or("division")
+    } else {
+        "division"
+    };
+    let sources: std::collections::BTreeSet<&str> =
+        units.iter().map(|u| u.source.as_str()).collect();
+    let from = if sources.len() > 1 {
+        "Canvas and the syllabus"
+    } else if sources.contains("canvas") {
+        "Canvas"
+    } else {
+        "the syllabus"
+    };
+    format!("Divisions: {} from {from}\n", plural(units.len(), noun))
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+fn freshness(stale: bool) -> &'static str {
+    if stale {
+        "STALE"
+    } else {
+        "fresh"
+    }
+}
+
+/// Who proposed it, in the words the cards use.
+fn proposer(source: &str) -> &'static str {
+    match source {
+        "canvas" => "Canvas",
+        "syllabus" => "the syllabus scan",
+        "sort_job" => "a sort job",
+        "chat" => "chat",
+        _ => "an unknown reader",
+    }
+}
+
+/// The session document's markdown twin (SPEC §8.4) — the copy chat can read
+/// and search, so it is the one the overview names.
+fn markdown_twin(html_rel_path: &str) -> String {
+    format!("{}.md", html_rel_path.trim_end_matches(".html"))
+}
+
+/// `Study Guides/Sessions/2026-09-01 — Topic.html` → `2026-09-01 — Topic`.
+fn document_stem(rel_path: &str) -> String {
+    rel_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel_path)
+        .trim_end_matches(".html")
+        .to_string()
+}
+
 /// Depth-0 folders holding indexed files, with their file counts.
-fn module_counts(conn: &Connection, class_id: i64) -> Result<BTreeMap<String, usize>> {
+fn folder_counts(conn: &Connection, class_id: i64) -> Result<BTreeMap<String, usize>> {
     let mut stmt =
         conn.prepare("SELECT rel_path FROM files WHERE class_id = ?1 ORDER BY rel_path")?;
     let paths = stmt
@@ -1360,47 +1596,120 @@ fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
     Ok(outcome)
 }
 
+/// What a synthesis or practice trigger can be pointed at (SPEC §8.1–§8.3).
+#[derive(Debug, PartialEq)]
+enum Scope {
+    /// The semester master, or the whole class for a practice exam.
+    Master,
+    /// A depth-0 folder holding indexed files, by its rel path.
+    Folder(String),
+    /// One of the course's own divisions, by its `units` row.
+    Unit { id: i64, name: String },
+}
+
+impl Scope {
+    /// The `jobs.scope` / `guides.scope` key this resolves to.
+    fn key(&self) -> String {
+        match self {
+            Scope::Master => crate::db::MASTER_SCOPE.to_string(),
+            Scope::Folder(rel) => rel.clone(),
+            Scope::Unit { name, .. } => crate::guides::unit_scope(name),
+        }
+    }
+}
+
 /// `master` (and natural synonyms) selects the semester master; anything else
-/// must match one of the class's module folders — same tolerant matching as
-/// classes, so "module 1" or "m1" finds "Module 1".
-fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Option<String>> {
-    let needle = squash(scope);
+/// must match one of the course's own divisions or one of the class's folders
+/// — the same tolerant matching as classes, so "week 3" finds `Week 3 — Data
+/// Exploration…`, "module 1" or "m1" finds `Module 1`, and a topic finds the
+/// division named for it.
+///
+/// A division answers to its whole name and to its kind and ordinal
+/// (`week3`), so "Week 1" is an exact hit on Week 1 rather than a substring
+/// of Weeks 10–15. A folder named exactly like a division is that division's
+/// folder (`units::attach_folder_paths` joins them on that equality), so it is
+/// dropped from the candidates and the division wins: its sources include the
+/// folder's files and its lectures both.
+fn resolve_scope(conn: &Connection, class: &ClassRow, scope: &str) -> Result<Scope> {
+    // A scope copied out of a guide listing carries the storage prefix.
+    let raw = scope
+        .trim()
+        .strip_prefix(crate::db::UNIT_SCOPE_PREFIX)
+        .unwrap_or(scope.trim());
+    let needle = squash(raw);
     if ["master", "semester", "semestermaster", "wholesemester", "all"]
         .contains(&needle.as_str())
     {
-        return Ok(None);
+        return Ok(Scope::Master);
     }
-    let modules: Vec<String> = module_counts(conn, class.id)?
+    let units = crate::units::list_units(conn, class.id)?;
+    let folders: Vec<String> = folder_counts(conn, class.id)?
         .into_keys()
-        .filter(|m| m != "(class folder)")
+        .filter(|f| f != "(class folder)")
+        .filter(|f| !units.iter().any(|u| squash(&u.name) == squash(f)))
         .collect();
-    if modules.is_empty() {
-        bail!("{} has no module folders yet", class.display_name);
+    let candidates: Vec<Scope> = units
+        .iter()
+        .map(|u| Scope::Unit { id: u.id, name: u.name.clone() })
+        .chain(folders.iter().map(|f| Scope::Folder(f.clone())))
+        .collect();
+    let list = || {
+        let mut parts = Vec::new();
+        if !units.is_empty() {
+            parts.push(format!(
+                "divisions: {}",
+                units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !folders.is_empty() {
+            parts.push(format!("folders: {}", folders.join(", ")));
+        }
+        parts.push("or 'master' for the whole semester".to_string());
+        parts.join("; ")
+    };
+    if candidates.is_empty() {
+        bail!(
+            "{} declares no divisions and has no folders yet — only 'master' is possible",
+            class.display_name
+        );
     }
     // Same guard as `resolve_class`, and for a sharper reason: an empty needle
     // is `contains`-true against every candidate, so a scope of "?" or "—"
-    // squashes to nothing, matches every module, and — in a class with exactly
-    // one — resolves silently. That would enqueue a full synthesis run against
-    // a scope the model never actually named.
+    // squashes to nothing, matches everything, and — in a class with exactly
+    // one candidate — resolves silently. That would enqueue a full synthesis
+    // run against a scope the model never actually named.
     if needle.is_empty() {
-        bail!(
-            "which module? one of: {}",
-            modules.join(", ")
-        );
+        bail!("which scope? {}", list());
     }
-    let Some(tier) = best_match(&modules, &needle, |m| vec![squash(m)]) else {
-        bail!(
-            "no module matches '{scope}' in {}. Modules: {} — or 'master' for the semester master",
-            class.display_name,
-            modules.join(", ")
-        );
+    let kind_key = |id: i64| {
+        units
+            .iter()
+            .find(|u| u.id == id)
+            .map(|u| format!("{}{}", u.kind, u.ordinal))
+            .unwrap_or_default()
+    };
+    let Some(tier) = best_match(&candidates, &needle, |c| match c {
+        Scope::Unit { id, name } => vec![squash(name), kind_key(*id)],
+        Scope::Folder(rel) => vec![squash(rel)],
+        Scope::Master => Vec::new(),
+    }) else {
+        bail!("nothing in {} matches '{scope}' — {}", class.display_name, list());
+    };
+    let describe = |c: &Scope| match c {
+        Scope::Unit { name, .. } => name.clone(),
+        Scope::Folder(rel) => format!("folder {rel}"),
+        Scope::Master => "master".to_string(),
     };
     match tier.as_slice() {
-        [only] => Ok(Some((*only).clone())),
+        [only] => Ok(match only {
+            Scope::Unit { id, name } => Scope::Unit { id: *id, name: name.clone() },
+            Scope::Folder(rel) => Scope::Folder(rel.clone()),
+            Scope::Master => Scope::Master,
+        }),
         many => bail!(
-            "'{scope}' matches {} modules ({}) — be specific",
+            "'{scope}' matches {} scopes ({}) — be specific",
             many.len(),
-            many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            many.iter().map(|c| describe(c)).collect::<Vec<_>>().join(", ")
         ),
     }
 }
@@ -1413,7 +1722,7 @@ fn trigger_synthesis(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
     })?;
     // Enqueued outside the DB lock — the job runner takes the lock itself.
     match scope {
-        None => {
+        Scope::Master => {
             let job_id = crate::guides::synthesize_master(app, class.id, ctx.today)?;
             Ok(Outcome::ok(format!(
                 "Semester master synthesis queued — {} (job #{job_id})\n\
@@ -1423,13 +1732,23 @@ fn trigger_synthesis(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
                 class.display_name
             )))
         }
-        Some(module_rel) => {
+        Scope::Folder(module_rel) => {
             let job_id =
                 crate::guides::synthesize_module(app, class.id, &module_rel, ctx.today)?;
             Ok(Outcome::ok(format!(
-                "Module guide synthesis queued — {module_rel} · {} (job #{job_id})\n\
-                 Progress is live in the Job Center; the guide appears on the module row when \
+                "Guide synthesis queued — folder {module_rel} · {} (job #{job_id})\n\
+                 Progress is live in the Job Center; the guide appears on the folder's row when \
                  it succeeds (typically 10–30 minutes).",
+                class.display_name
+            )))
+        }
+        Scope::Unit { id, name } => {
+            let job_id = crate::guides::synthesize_unit(app, class.id, id, ctx.today)?;
+            Ok(Outcome::ok(format!(
+                "Guide synthesis queued — {name} · {} (job #{job_id})\n\
+                 Built from the division's folder, if it has one, and its distilled lectures. \
+                 Progress is live in the Job Center; the guide appears on the division's row in \
+                 the Structure list when it succeeds (typically 10–30 minutes).",
                 class.display_name
             )))
         }
@@ -1443,11 +1762,11 @@ fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
         let scope = resolve_scope(conn, &class, &str_arg(input, "scope")?)?;
         Ok((class, scope))
     })?;
-    let scope_rel = scope.as_deref().unwrap_or("master");
+    let key = scope.key();
     let (job_id, output_rel) = crate::guides::generate_practice(
         app,
         class.id,
-        scope_rel,
+        &key,
         focus.as_deref(),
         ctx.today,
         ctx.today_iso,
@@ -1456,7 +1775,11 @@ fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
         "Practice exam queued — {} · {} (job #{job_id})\n\
          It will land at {}/{output_rel} and show in the workspace's practice list when \
          the job succeeds (live in the Job Center now).{}",
-        if scope_rel == "master" { "semester scope" } else { scope_rel },
+        match &scope {
+            Scope::Master => "semester scope".to_string(),
+            Scope::Folder(rel) => format!("folder {rel}"),
+            Scope::Unit { name, .. } => name.clone(),
+        },
         class.display_name,
         class.folder_name,
         focus
@@ -1666,18 +1989,22 @@ pub fn format_size(bytes: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{overview_text, waiting_line};
+    use super::{overview_text, resolve_scope, waiting_line, ClassRow, Scope};
+    use rusqlite::Connection;
 
-    /// Each dated course's block names where it is today; a course that
-    /// published no dates gets no such line rather than a computed one.
-    #[test]
-    fn the_overview_names_the_current_division_per_class() {
+    /// Biostatistics (seeded id 3) with a few of its weeks, two folders of
+    /// material, one filed lecture and one waiting deadline proposal; Applied
+    /// Generative AI (id 4) with an undated Part.
+    fn fixture() -> Connection {
         let conn = crate::db::memory_db();
         let root = std::env::temp_dir().join(format!("classhub-overview-{}", std::process::id()));
         crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
         for (class_id, ordinal, kind, name, starts_on) in [
+            (3, 1, "week", "Week 1 \u{2014} Introduction", Some("2026-08-20")),
             (3, 2, "week", "Week 2 \u{2014} Study Designs", Some("2026-08-27")),
             (3, 3, "week", "Week 3 \u{2014} Data Exploration", Some("2026-09-03")),
+            (3, 10, "week", "Week 10 \u{2014} Model evaluation", Some("2026-10-22")),
+            (3, 13, "week", "Week 13 \u{2014} Reproducibility", Some("2026-11-12")),
             (4, 1, "part", "Part I: Deep Learning (Weeks 1-8)", None),
         ] {
             conn.execute(
@@ -1687,20 +2014,197 @@ mod tests {
             )
             .expect("unit");
         }
+        for rel_path in [
+            "Module 1/Slides/deck.pptx",
+            "Module 1/Reading Material/paper.pdf",
+            "Module 2/Slides/deck.pptx",
+            "Weeks/Week 02 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md",
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+                 VALUES (3, ?1, 'abc', 1, 1, 'other')",
+                [rel_path],
+            )
+            .expect("file");
+        }
+        let week2: i64 = conn
+            .query_row(
+                "SELECT id FROM units WHERE class_id = 3 AND ordinal = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("week 2");
+        conn.execute(
+            "INSERT INTO lecture_contributions
+             (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+              corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (3, ?1, 'Weeks/Week 02 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md',
+                     0, 1, 1, 1, '.classhub/corpus/Week 2 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md',
+                     'Whole session', 'high', 'applied', 1)",
+            [week2],
+        )
+        .expect("contribution");
+        conn.execute(
+            "INSERT INTO deadline_proposals (class_id, title, kind, due_at, status, source, created_at)
+             VALUES (3, 'Form Teams', 'project', '2026-09-02', 'pending', 'syllabus', 1)",
+            [],
+        )
+        .expect("proposal");
+        conn
+    }
 
+    fn biostatistics() -> ClassRow {
+        ClassRow {
+            id: 3,
+            display_name: "Biostatistics for AI".into(),
+            folder_name: "Biostatistics for AI".into(),
+        }
+    }
+
+    fn block(text: &str, name: &str) -> String {
+        text.split("\n## ")
+            .find(|block| block.starts_with(name))
+            .expect("class block")
+            .to_string()
+    }
+
+    /// Each dated course's block names its divisions and where it is today;
+    /// a course that published no dates gets no such line rather than a
+    /// computed one.
+    #[test]
+    fn the_overview_names_the_divisions_and_the_current_one_per_class() {
+        let conn = fixture();
         let text = overview_text(&conn, false, "2026-09-02").expect("overview");
-        let block = |name: &str| {
-            text.split("\n## ")
-                .find(|block| block.starts_with(name))
-                .expect("class block")
-                .to_string()
-        };
-        assert!(
-            block("Biostatistics for AI").contains("\nNow: Week 2 \u{2014} Study Designs\n"),
-            "{text}"
+        let biostats = block(&text, "Biostatistics for AI");
+        assert!(biostats.contains("\nDivisions: 5 weeks from the syllabus\n"), "{text}");
+        assert!(biostats.contains("\nNow: Week 2 \u{2014} Study Designs\n"), "{text}");
+        let applied = block(&text, "Applied Generative AI in Medicine");
+        assert!(applied.contains("\nDivisions: 1 part from the syllabus\n"), "{text}");
+        assert!(!applied.contains("Now:"), "{text}");
+        let fundamentals = block(&text, "Fundamentals of AI in Medicine I");
+        assert!(fundamentals.contains("\nDivisions: none declared\n"), "{text}");
+        assert!(!fundamentals.contains("Now:"), "{text}");
+    }
+
+    /// The compact form counts lectures, names folders as folders and says
+    /// what waits; the detailed form lists divisions with dates, lectures with
+    /// their notes, and proposals with their ids.
+    #[test]
+    fn the_overview_carries_lectures_folders_and_proposals() {
+        let conn = fixture();
+        let compact = block(
+            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
         );
-        assert!(!block("Applied Generative AI in Medicine").contains("Now:"), "{text}");
-        assert!(!block("Fundamentals of AI in Medicine I").contains("Now:"), "{text}");
+        assert!(
+            compact.contains(
+                "\nLectures: 1 filed, 0 distilled, 0 session documents \u{2014} Week 2 \u{2014} Study Designs (1)\n"
+            ),
+            "{compact}"
+        );
+        assert!(
+            compact.contains("folders: Module 1 (2), Module 2 (1), Weeks (1)\n"),
+            "{compact}"
+        );
+        assert!(compact.contains("\nWaiting: 1 deadline proposal\n"), "{compact}");
+        assert!(!compact.contains("#"), "ids belong to the detailed form: {compact}");
+
+        let detailed = block(
+            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(
+            detailed.contains(
+                "\n- 2. Week 2 \u{2014} Study Designs · from 2026-08-27 · NOW · 1 lecture (0 distilled)\n"
+            ),
+            "{detailed}"
+        );
+        assert!(detailed.contains("\n- 3. Week 3 \u{2014} Data Exploration · from 2026-09-03\n"), "{detailed}");
+        assert!(
+            detailed.contains(
+                "\n- Weeks/Week 02 \u{2014} Study Designs/2026-08-27 \u{2014} Lecture.md · feeds Week 2 \u{2014} Study Designs · not distilled yet\n"
+            ),
+            "{detailed}"
+        );
+        assert!(
+            detailed.contains(
+                "\n- deadline proposal #1 · Form Teams (project) due 2026-09-02 · from the syllabus scan\n"
+            ),
+            "{detailed}"
+        );
+    }
+
+    /// The scope both triggers share: a division by its number, its topic or
+    /// its storage key, a folder by name, the master by any of its names.
+    #[test]
+    fn the_scope_parser_finds_divisions_and_folders() {
+        let conn = fixture();
+        let class = biostatistics();
+        let unit_named = |scope: &str| match resolve_scope(&conn, &class, scope) {
+            Ok(Scope::Unit { name, .. }) => name,
+            other => panic!("{scope}: {other:?}"),
+        };
+        assert_eq!(unit_named("Week 3"), "Week 3 \u{2014} Data Exploration");
+        // The number is an exact key, so Week 1 is not a substring of Week 10
+        // and Week 13.
+        assert_eq!(unit_named("week 1"), "Week 1 \u{2014} Introduction");
+        assert_eq!(unit_named("Data Exploration"), "Week 3 \u{2014} Data Exploration");
+        assert_eq!(
+            unit_named("unit:Week 3 \u{2014} Data Exploration"),
+            "Week 3 \u{2014} Data Exploration"
+        );
+        assert_eq!(
+            resolve_scope(&conn, &class, "Module 1").expect("folder"),
+            Scope::Folder("Module 1".into())
+        );
+        assert_eq!(
+            resolve_scope(&conn, &class, "m2").expect("folder"),
+            Scope::Folder("Module 2".into())
+        );
+        assert_eq!(resolve_scope(&conn, &class, "master").expect("master"), Scope::Master);
+        assert_eq!(
+            resolve_scope(&conn, &class, "whole semester").expect("master"),
+            Scope::Master
+        );
+        assert_eq!(
+            Scope::Unit { id: 0, name: "Week 3 \u{2014} Data Exploration".into() }.key(),
+            "unit:Week 3 \u{2014} Data Exploration"
+        );
+    }
+
+    /// Nothing is guessed: an empty needle, a needle matching several scopes,
+    /// and one matching none are each an error naming the candidates.
+    #[test]
+    fn the_scope_parser_refuses_rather_than_guessing() {
+        let conn = fixture();
+        let class = biostatistics();
+        let error = |scope: &str| match resolve_scope(&conn, &class, scope) {
+            Err(e) => format!("{e:#}"),
+            Ok(found) => panic!("{scope} resolved to {found:?}"),
+        };
+        assert!(error("?").starts_with("which scope?"), "{}", error("?"));
+        let ambiguous = error("week");
+        assert!(ambiguous.contains("matches 6 scopes"), "{ambiguous}");
+        let missing = error("Week 99");
+        assert!(missing.contains("divisions: Week 1"), "{missing}");
+        assert!(missing.contains("folders: Module 1, Module 2, Weeks"), "{missing}");
+    }
+
+    /// A folder named exactly like a division is that division's folder, so
+    /// the division wins and its sources include the folder's files.
+    #[test]
+    fn a_folder_named_like_a_division_resolves_to_the_division() {
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, rel_path, source)
+             VALUES (3, 1, 'module', 'Module 1', 'Module 1', 'canvas')",
+            [],
+        )
+        .expect("unit");
+        match resolve_scope(&conn, &biostatistics(), "Module 1").expect("resolves") {
+            Scope::Unit { name, .. } => assert_eq!(name, "Module 1"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The one new line of user-facing prose in the overview: nothing when
@@ -1723,3 +2227,4 @@ mod tests {
         );
     }
 }
+

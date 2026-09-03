@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { todayIso } from "@/lib/schedule";
+
 /** Mirrors the backend MASTER_OUTPUT constant (guides.rs). */
 export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
 /** Mirrors `db.rs::SESSION_SCOPE_PREFIX` — a session scope names its transcript. */
@@ -100,6 +102,24 @@ export function synthesizeMaster(classId: number): Promise<number> {
   return invoke<number>("synthesize_master", {
     classId,
     generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/**
+ * Enqueues a practice exam (SPEC §8.3) for a folder rel path, a division's
+ * `unitScope`, or "master". Same duplicate-active guard as the guides; the
+ * exam lands in the workspace's practice list when the job succeeds.
+ */
+export function generatePractice(
+  classId: number,
+  scope: string,
+): Promise<number> {
+  return invoke<number>("generate_practice", {
+    classId,
+    scope,
+    generatedAtLabel: generatedAtLabel(),
+    // YYYY-MM-DD in local time — names the file.
+    dateLabel: todayIso(),
   });
 }
 

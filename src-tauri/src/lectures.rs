@@ -714,34 +714,42 @@ pub fn contributing_paths(
     Ok(paths)
 }
 
-/// The corpus notes a unit's guide is built from, each listed with the
-/// transcript it came from so the job can open the professor's exact words when
-/// the distillation is not enough (SPEC §8.5).
+/// The corpus notes a unit's guide is built from, as `(note, transcript)`
+/// pairs (SPEC §8.5).
 ///
 /// Only notes that exist on disk: a lecture filed but not yet distilled has a
 /// row and no note, and naming a file that is not there sends the job looking
 /// for it.
-pub fn corpus_block(conn: &Connection, class_id: i64, unit_id: i64) -> Result<String> {
+pub fn corpus_notes(conn: &Connection, class_id: i64, unit_id: i64) -> Result<Vec<(String, String)>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let mut stmt = conn.prepare(
         "SELECT corpus_rel_path, rel_path FROM lecture_contributions
          WHERE class_id = ?1 AND unit_id = ?2 AND status = 'applied'
          ORDER BY rel_path",
     )?;
-    let lines: Vec<String> = stmt
+    let notes = stmt
         .query_map(rusqlite::params![class_id, unit_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .filter(|(corpus, _)| class_dir.join(corpus).is_file())
-        .map(|(corpus, transcript)| format!("- {corpus}\n  transcript: {transcript}"))
         .collect();
-    Ok(if lines.is_empty() {
-        "(none — no lecture for this division has been distilled yet)".into()
-    } else {
-        lines.join("\n")
-    })
+    Ok(notes)
+}
+
+/// The prompt block naming those notes, each with the transcript it came from
+/// so the job can open the professor's exact words when the distillation is
+/// not enough.
+pub fn corpus_block(notes: &[(String, String)]) -> String {
+    if notes.is_empty() {
+        return "(none — no lecture for this division has been distilled yet)".into();
+    }
+    notes
+        .iter()
+        .map(|(corpus, transcript)| format!("- {corpus}\n  transcript: {transcript}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------

@@ -28,8 +28,10 @@ import {
 } from "@/lib/classes";
 import {
   formatGeneratedAt,
+  generatePractice,
   listGuides,
   MASTER_OUTPUT_PATH,
+  scopeLabel,
   SESSION_SCOPE_PREFIX,
   synthesizeModule,
   synthesizeUnit,
@@ -142,6 +144,7 @@ export function ClassWorkspace({
   const activePractice = practiceJobs.filter(
     (j) => j.status === "running" || j.status === "queued",
   );
+  const activePracticeScopes = new Set(activePractice.map((j) => j.scope ?? ""));
   const { data: practice } = useQuery({
     queryKey: ["practice", info.id],
     queryFn: () => listPractice(info.id),
@@ -157,6 +160,8 @@ export function ClassWorkspace({
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
   const [addingLecture, setAddingLecture] = useState(false);
+  // A job the Materials tree asked for and the backend turned down — a folder
+  // guide or a practice exam — as the line to show under that heading.
   const [synthError, setSynthError] = useState<string | null>(null);
   // Its own, because the only render site for synthError is the Materials
   // header — a failed distillation surfaced there, above the fold, under a
@@ -164,7 +169,15 @@ export function ClassWorkspace({
   const [digestError, setDigestError] = useState<string | null>(null);
   const handleSynthesize = (scope: string) => {
     setSynthError(null);
-    synthesizeModule(info.id, scope).catch((e) => setSynthError(String(e)));
+    synthesizeModule(info.id, scope).catch((e) =>
+      setSynthError(`SYNTHESIS NOT STARTED — ${String(e)}`),
+    );
+  };
+  const handlePractice = (scope: string) => {
+    setSynthError(null);
+    generatePractice(info.id, scope).catch((e) =>
+      setSynthError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+    );
   };
   const viewedGuide = viewScope ? (guideMap.get(viewScope) ?? null) : null;
 
@@ -244,7 +257,9 @@ export function ClassWorkspace({
         controls={{
           guides: guideMap,
           activeScopes,
+          activePracticeScopes,
           onSynthesize: (unitId) => synthesizeUnit(info.id, unitId),
+          onPractice: (scope) => generatePractice(info.id, scope),
           onView: setViewScope,
         }}
       />
@@ -282,7 +297,7 @@ export function ClassWorkspace({
 
         {synthError && (
           <p className="mt-3 font-mono text-[11px] text-destructive">
-            SYNTHESIS NOT STARTED — {synthError}
+            {synthError}
           </p>
         )}
 
@@ -312,7 +327,9 @@ export function ClassWorkspace({
               guideControls={{
                 guides: guideMap,
                 activeScopes,
+                activePracticeScopes,
                 onSynthesize: handleSynthesize,
+                onPractice: handlePractice,
                 onView: setViewScope,
               }}
             />
@@ -482,7 +499,7 @@ export function ClassWorkspace({
                   className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
                 />
                 {job.status === "running" ? "GENERATING" : "QUEUED"}
-                {` — ${job.scope && job.scope !== "master" ? job.scope.toUpperCase() : "SEMESTER"}`}
+                {` — ${job.scope && job.scope !== "master" ? scopeLabel(job.scope).toUpperCase() : "SEMESTER"}`}
                 <span className="font-normal text-muted-foreground/70">
                   · LIVE IN THE JOB CENTER
                 </span>
