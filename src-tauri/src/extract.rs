@@ -52,6 +52,7 @@ struct BatchItem {
     extract_rel_path: String,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum Route {
     Text,
     Html,
@@ -864,6 +865,33 @@ mod tests {
         let lines: Vec<String> = super::text_lines(&csv, "data.csv").unwrap().collect();
         assert_eq!(lines, ["a,b", "1,2", "3,4"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The one table deciding whether a kind is extracted at all, and how; a
+    /// kind that falls to Skip here silently never gets an extract.
+    #[test]
+    fn every_kind_takes_its_route() {
+        use super::{route, Route};
+        for (kind, expected) in [
+            ("rmd", Route::Text),
+            ("r", Route::Text),
+            ("md", Route::Text),
+            ("py", Route::Text),
+            ("csv", Route::Csv),
+            ("html", Route::Html),
+            ("caption", Route::Caption),
+            ("ipynb", Route::Notebook),
+            ("pdf", Route::Pdf),
+            ("pptx", Route::Pptx),
+            ("docx", Route::Docx),
+            ("media", Route::Skip),
+            ("other", Route::Skip),
+        ] {
+            assert_eq!(route("Module 1/file", kind), expected, "{kind}");
+        }
+        // Zoom's saved transcript is a caption track with a .txt extension.
+        assert_eq!(route("Weeks/Week 02/transcript.txt", "other"), Route::Caption);
+        assert_eq!(route("Module 1/notes.TXT", "other"), Route::Caption);
     }
 
     /// The sorter moves a source's whole mirror by this list; a conversion

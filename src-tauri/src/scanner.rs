@@ -538,6 +538,33 @@ mod tests {
         assert!(!names.contains(&"syllabus.pdf"), "{names:?}");
     }
 
+    /// The kind is what the extract routes and the viewer key on; a
+    /// misspelt or missing arm here makes a format silently `other`.
+    #[test]
+    fn names_every_kind_by_extension_case_insensitively() {
+        use std::path::Path;
+        for (name, kind) in [
+            ("deck.pptx", "pptx"),
+            ("paper.PDF", "pdf"),
+            ("Notes .docx", "docx"),
+            ("lab.Rmd", "rmd"),
+            ("script.R", "r"),
+            ("warmup.py", "py"),
+            ("week4.ipynb", "ipynb"),
+            ("report.html", "html"),
+            ("report.htm", "html"),
+            ("readme.md", "md"),
+            ("cohort.csv", "csv"),
+            ("lecture.vtt", "caption"),
+            ("lecture.srt", "caption"),
+            ("lecture.mp4", "media"),
+            ("transcript.txt", "other"),
+            ("Makefile", "other"),
+        ] {
+            assert_eq!(super::kind_for(Path::new(name)), kind, "{name}");
+        }
+    }
+
     fn sig(entries: &[(&str, u64, i64)]) -> HashMap<String, (u64, i64)> {
         entries
             .iter()
