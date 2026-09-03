@@ -1702,9 +1702,13 @@ mod tests {
             json!({ "name": "Project", "weight": 30 }),
         ];
         let recorded = apply_weights(&conn, 3, &agreeing).expect("apply");
-        assert_eq!(
-            recorded.summary(),
-            "3 weight(s) already as the syllabus states · Survey left at 0 — the syllabus does not weight it"
+        assert!(recorded.set.is_empty());
+        assert_eq!(recorded.unchanged, 3);
+        assert_eq!(recorded.unweighted, vec!["Survey".to_string()]);
+        assert!(
+            recorded.summary().contains("Survey left at 0 — the syllabus does not weight it"),
+            "{}",
+            recorded.summary()
         );
         assert_eq!(audits(&conn), 0);
 
@@ -1716,12 +1720,19 @@ mod tests {
             json!({ "weight": 10 }),
         ];
         let recorded = apply_weights(&conn, 3, &disagreeing).expect("apply");
+        assert!(recorded.set.is_empty());
+        assert_eq!(recorded.unchanged, 1);
         assert_eq!(
-            recorded.summary(),
-            "1 weight(s) already as the syllabus states · Assignments kept at 50 — the syllabus says 40 \
-             · Survey left at 0 — the syllabus does not weight it \
-             · weights skipped: Quizzes (repeated); Project (bad weight \"thirty\"); \
-             entry 5 (malformed: missing field `name`)"
+            recorded.kept,
+            vec!["Assignments kept at 50 — the syllabus says 40".to_string()]
+        );
+        assert_eq!(
+            recorded.skipped,
+            vec![
+                "Quizzes (repeated)".to_string(),
+                "Project (bad weight \"thirty\")".to_string(),
+                "entry 5 (malformed: missing field `name`)".to_string(),
+            ]
         );
         assert_eq!(audits(&conn), 0);
         assert_eq!(weights(&conn, 3)[0].1, 50.0, "the typed weight stands");
