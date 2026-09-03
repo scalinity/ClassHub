@@ -1358,8 +1358,12 @@ fn sync_announcements(
     let topics = session.get_all(&path, on_stage)?;
     // The count lands on the outcome as each row does, so a failure partway
     // reports what reached the table rather than zero.
-    let recorded = with_conn(app, |conn| {
+    let (recorded, refused) = with_conn(app, |conn| {
         let mut recorded = 0usize;
+        // Announcements the table would not take, with the first reason: a
+        // row another class holds for the same Canvas id, or a write that
+        // failed. Said in the report, since NOTICES staying empty says nothing.
+        let mut refused: Vec<String> = Vec::new();
         for topic in &topics {
             let Some(id) = topic["id"].as_i64().map(|id| id.to_string()) else {
                 continue;
@@ -1386,15 +1390,32 @@ fn sync_announcements(
                     outcome.announcements_recorded = recorded;
                 }
                 Ok(false) => {}
-                Err(e) => eprintln!("canvas: skipping announcement '{title}': {e:#}"),
+                Err(e) => {
+                    eprintln!("canvas: skipping announcement '{title}': {e:#}");
+                    refused.push(format!("{e:#}"));
+                }
             }
         }
-        Ok(recorded)
+        Ok((recorded, refused))
     })?;
+    if let Some(first) = refused.first() {
+        outcome.notes.push(format!(
+            "{} could not be recorded — {first}",
+            plural(refused.len(), "announcement")
+        ));
+    }
     if recorded > 0 {
         emit_hub_change(app, "announcements");
     }
     Ok(())
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Inserts an announcement, or updates the row its Canvas id already names
@@ -1653,11 +1674,7 @@ fn prune_stale_texts(dir: &Path, kept: &HashSet<String>) -> Result<usize> {
 }
 
 fn plural_pages(count: usize) -> String {
-    if count == 1 {
-        "1 Canvas page".to_string()
-    } else {
-        format!("{count} Canvas pages")
-    }
+    plural(count, "Canvas page")
 }
 
 /// The sanitized titles that more than one page in the listing shares,
