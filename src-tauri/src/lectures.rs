@@ -821,16 +821,10 @@ pub fn lecture_left(
     rel_path: &str,
     moved_to: Option<&str>,
 ) -> Result<Option<RefileEffects>> {
-    let scope = session_scope(rel_path);
-    let keyed: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2)
-             OR EXISTS(SELECT 1 FROM guides WHERE class_id = ?1 AND scope = ?3)",
-        rusqlite::params![class_id, rel_path, &scope],
-        |row| row.get(0),
-    )?;
-    if !keyed {
+    if !keyed_by(conn, class_id, rel_path)? {
         return Ok(None);
     }
+    let scope = session_scope(rel_path);
     if let Some(dest) = moved_to {
         eprintln!("lectures: {rel_path} moved in Finder to {dest}; refiling it");
         return refile_lecture(conn, class_id, class_dir, rel_path, dest).map(Some);
@@ -853,6 +847,18 @@ pub fn lecture_left(
         .map(NoteMove::Remove);
     eprintln!("lectures: {rel_path} is gone; its row, its note and its session document go with it");
     Ok(Some(RefileEffects { note, orphaned }))
+}
+
+/// Whether anything is keyed by a transcript's path: a contribution row or a
+/// session row. A deck that vanished has neither, and is the index's business
+/// alone.
+pub fn keyed_by(conn: &Connection, class_id: i64, rel_path: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2)
+             OR EXISTS(SELECT 1 FROM guides WHERE class_id = ?1 AND scope = ?3)",
+        rusqlite::params![class_id, rel_path, session_scope(rel_path)],
+        |row| row.get(0),
+    )?)
 }
 
 /// Every lecture that feeds one of this class's divisions.

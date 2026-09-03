@@ -136,10 +136,23 @@ pub fn scan_class(
         .collect();
     let mut effects = Vec::new();
     for rel_path in &vanished {
-        let moved_to = existing
-            .get(*rel_path)
+        if !crate::lectures::keyed_by(&tx, class_id, rel_path)? {
+            continue;
+        }
+        let indexed = existing.get(*rel_path);
+        let moved_to = indexed
             .and_then(|indexed| arrived.get(indexed.sha256.as_str()))
             .copied();
+        // Dragged into `_Inbox/` to be sorted again, most likely: the walk
+        // skips the app-managed folders, so the transcript vanishes from the
+        // index while still on disk. Its rows and its note wait for the
+        // sorter to bring it back rather than being forgotten.
+        if moved_to.is_none()
+            && indexed.is_some_and(|i| parked_in_app_managed(&dir, i.size, &i.sha256))
+        {
+            eprintln!("scan: {rel_path} is resting under an app-managed folder; its lecture waits");
+            continue;
+        }
         let savepoint = tx.savepoint()?;
         match crate::lectures::lecture_left(&savepoint, class_id, &dir, rel_path, moved_to) {
             Ok(effect) => {
@@ -165,6 +178,25 @@ pub fn scan_class(
         effect.apply();
     }
     Ok(Scan { tree, changed })
+}
+
+/// Whether content the index held — a vanished transcript's size and hash —
+/// is resting under one of the app-managed folders the walk skips. Read flat,
+/// the way the sorter reads the inbox, and hashed only where the size already
+/// matches, so a scan that lost nothing keyed pays nothing here.
+fn parked_in_app_managed(class_dir: &Path, size: i64, sha256: &str) -> bool {
+    APP_MANAGED_DIRS.iter().any(|folder| {
+        fs::read_dir(class_dir.join(folder))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.len() as i64 == size)
+            })
+            .any(|entry| hash_file(&entry.path()).is_ok_and(|hash| hash == sha256))
+    })
 }
 
 /// Cap on vocabulary entries in a prompt — the shared names are the point, and
@@ -591,25 +623,34 @@ mod tests {
         fs::write(path, content).expect("write");
     }
 
+    const PART_I: (i64, &str) = (37, "Part I: Deep Learning");
+    const PART_II: (i64, &str) = (38, "Part II: Alignment");
+
     /// A transcript on disk with what a filing and a digest leave behind: a
-    /// contribution row on Part I, a note at the Part's corpus path, a session
-    /// row and its two documents. Returns the note and the documents,
-    /// class-relative.
-    fn filed_and_digested(db: &Mutex<Connection>, dir: &Path, transcript: &str) -> (String, String, String) {
+    /// contribution row on the given Part, a note at the Part's corpus path, a
+    /// session row and its two documents, named for the transcript's stem.
+    /// Returns the note and the documents, class-relative.
+    fn filed_and_digested(
+        db: &Mutex<Connection>,
+        dir: &Path,
+        transcript: &str,
+        unit: (i64, &str),
+    ) -> (String, String, String) {
         let conn = db.lock().expect("db");
-        write(dir.join(transcript), "# Lecture\n\n## 00:00\n\nHello.\n");
-        let note = crate::lectures::corpus_rel_path("Part I: Deep Learning", transcript);
+        write(dir.join(transcript), &format!("# Lecture {transcript}\n\n## 00:00\n\nHello.\n"));
+        let note = crate::lectures::corpus_rel_path(unit.1, transcript);
         write(dir.join(&note), "# note");
         conn.execute(
             "INSERT INTO lecture_contributions
              (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
               corpus_rel_path, summary, confidence, status, created_at)
-             VALUES (4, 37, ?1, 0, 0, 1, 1, ?2, 'Topic', 'high', 'applied', 0)",
-            params![transcript, note],
+             VALUES (4, ?1, ?2, 0, 0, 1, 1, ?3, 'Topic', 'high', 'applied', 0)",
+            params![unit.0, transcript, note],
         )
         .expect("row");
-        let html = "Study Guides/Sessions/2026-09-15 — Topic.html".to_string();
-        let md = "Study Guides/Sessions/2026-09-15 — Topic.md".to_string();
+        let stem = transcript.rsplit('/').next().expect("name").trim_end_matches(".md");
+        let html = format!("Study Guides/Sessions/{stem} — Topic.html");
+        let md = format!("Study Guides/Sessions/{stem} — Topic.md");
         write(dir.join(&html), "<html></html>");
         write(dir.join(&md), "# session");
         conn.execute(
@@ -633,7 +674,7 @@ mod tests {
     fn a_scan_forgets_a_transcript_deleted_in_finder() {
         let (db, dir) = part_numbered_class("classhub-scan-forget");
         let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
-        let (note, html, md) = filed_and_digested(&db, &dir, transcript);
+        let (note, html, md) = filed_and_digested(&db, &dir, transcript, PART_I);
 
         let first = scan_class(&db, 4).expect("scan");
         assert!(first.changed, "the transcript was indexed");
@@ -659,6 +700,30 @@ mod tests {
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 
+    /// A transcript dragged into `_Inbox/` to be sorted again vanishes from
+    /// the index — the walk skips the app-managed folders — while still on
+    /// disk. Its row, its note and its session document wait for the sorter
+    /// to bring it back rather than being forgotten.
+    #[test]
+    fn a_scan_leaves_a_transcript_parked_in_the_inbox_alone() {
+        let (db, dir) = part_numbered_class("classhub-scan-parked");
+        let transcript = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let (note, html, _md) = filed_and_digested(&db, &dir, transcript, PART_I);
+        scan_class(&db, 4).expect("scan");
+
+        fs::create_dir_all(dir.join("_Inbox")).expect("inbox");
+        fs::rename(dir.join(transcript), dir.join("_Inbox/2026-09-15 — Lecture.md")).expect("park");
+        let scan = scan_class(&db, 4).expect("scan");
+        assert!(scan.changed, "the index lost a file");
+        let conn = db.lock().expect("db");
+        assert_eq!(count(&conn, "files"), 0, "the index reflects the walk");
+        assert_eq!(count(&conn, "lecture_contributions"), 1, "the row was forgotten");
+        assert_eq!(count(&conn, "guides"), 1, "the session row was forgotten");
+        assert!(dir.join(&note).is_file() && dir.join(&html).is_file(), "the note or the document went");
+        drop(conn);
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
     /// The same content at a path the index did not hold is the transcript
     /// moved in Finder, and the scan refiles it as an approved move would: the
     /// row follows to the Part the new week feeds, the note goes with it, and
@@ -668,7 +733,7 @@ mod tests {
         let (db, dir) = part_numbered_class("classhub-scan-move");
         let from = "Weeks/Week 04/2026-09-15 — Lecture.md";
         let to = "Weeks/Week 09/2026-09-15 — Lecture.md";
-        let (note, html, _md) = filed_and_digested(&db, &dir, from);
+        let (note, html, _md) = filed_and_digested(&db, &dir, from, PART_I);
         scan_class(&db, 4).expect("scan");
 
         fs::create_dir_all(dir.join("Weeks/Week 09")).expect("week dir");
