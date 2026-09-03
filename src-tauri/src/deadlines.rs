@@ -797,6 +797,19 @@ pub(crate) enum Recorded {
     DismissedBefore,
 }
 
+/// The (title, calendar day) identity both readers share, bound to ?2 (the
+/// title) and ?3 (the due date). One definition, so the rule the comment on
+/// `record_proposal` promises cannot drift between the five queries that ask
+/// it.
+const SAME_TITLE_AND_DAY: &str =
+    "LOWER(title) = LOWER(?2) AND substr(due_at, 1, 10) = substr(?3, 1, 10)";
+
+/// Keeps a (title, day) match away from rows that are some *other* Canvas
+/// assignment, bound to ?4 — the reader's Canvas id, or NULL for a reader
+/// without one, which then matches every row.
+const NOT_ANOTHER_ASSIGNMENT: &str =
+    "(?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)";
+
 /// canvas > syllabus, for a card both readers can propose.
 ///
 /// Canvas returns the assignment's own `due_at`; a syllabus scan returns a
@@ -894,10 +907,10 @@ pub(crate) fn record_proposal(
     // to share a title and a day, not this one; without an id every row
     // matches, so a syllabus rescan still recognizes a Canvas-linked deadline.
     let existing: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM deadlines
-         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-           AND substr(due_at, 1, 10) = substr(?3, 1, 10)
-           AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+        &format!(
+            "SELECT COUNT(*) FROM deadlines
+             WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY} AND {NOT_ANOTHER_ASSIGNMENT}"
+        ),
         params![class_id, title, due_at, canvas_id],
         |row| row.get(0),
     )?;
@@ -905,11 +918,11 @@ pub(crate) fn record_proposal(
         return Ok(Recorded::AlreadyDeadline);
     }
     let dismissed_before: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM deadline_proposals
-         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-           AND substr(due_at, 1, 10) = substr(?3, 1, 10)
-           AND status = 'dismissed'
-           AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+        &format!(
+            "SELECT COUNT(*) FROM deadline_proposals
+             WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY} AND status = 'dismissed'
+               AND {NOT_ANOTHER_ASSIGNMENT}"
+        ),
         params![class_id, title, due_at, canvas_id],
         |row| row.get(0),
     )?;
@@ -918,10 +931,11 @@ pub(crate) fn record_proposal(
     }
     let pending: Option<(i64, String)> = conn
         .query_row(
-            "SELECT id, source FROM deadline_proposals
-             WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-               AND substr(due_at, 1, 10) = substr(?3, 1, 10) AND status = 'pending'
-               AND (?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)",
+            &format!(
+                "SELECT id, source FROM deadline_proposals
+                 WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY} AND status = 'pending'
+                   AND {NOT_ANOTHER_ASSIGNMENT}"
+            ),
             params![class_id, title, due_at, canvas_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1026,11 +1040,12 @@ pub(crate) fn settle_canvas_deadline(
             // the open one is the one a submission has something to close.
             let legacy: Option<Row> = tx
                 .query_row(
-                    "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
-                     WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-                       AND substr(due_at, 1, 10) = substr(?3, 1, 10)
-                       AND canvas_assignment_id IS NULL
-                     ORDER BY (status = 'open') DESC, id LIMIT 1",
+                    &format!(
+                        "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
+                         WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY}
+                           AND canvas_assignment_id IS NULL
+                         ORDER BY (status = 'open') DESC, id LIMIT 1"
+                    ),
                     params![class_id, title, canvas_due],
                     read,
                 )
@@ -1172,9 +1187,7 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
     // A matching deadline may have appeared since the scan (added by hand
     // or through chat) — approving would silently duplicate it.
     let existing: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM deadlines
-         WHERE class_id = ?1 AND LOWER(title) = LOWER(?2)
-           AND substr(due_at, 1, 10) = substr(?3, 1, 10)",
+        &format!("SELECT COUNT(*) FROM deadlines WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY}"),
         params![class_id, title, due_at],
         |row| row.get(0),
     )?;
