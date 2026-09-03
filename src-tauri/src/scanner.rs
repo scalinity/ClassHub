@@ -132,6 +132,17 @@ pub fn scan_class(
     for f in &files {
         by_hash.entry(f.sha256.as_str()).or_default().push(f.rel_path.as_str());
     }
+    // A move is one lecture's content turning up in one place. Two vanished
+    // lectures with one content, or one content found twice, are not a move
+    // the index can name, and are settled as gone rather than onto a guess.
+    let mut left_by_hash: HashMap<&str, usize> = HashMap::new();
+    for rel_path in &vanished {
+        if let Some(indexed) = existing.get(*rel_path) {
+            if crate::lectures::keyed_by(&tx, class_id, rel_path)? {
+                *left_by_hash.entry(indexed.sha256.as_str()).or_default() += 1;
+            }
+        }
+    }
     let mut effects = Vec::new();
     for rel_path in &vanished {
         let savepoint = tx.savepoint()?;
@@ -144,13 +155,17 @@ pub fn scan_class(
             continue;
         }
         let indexed = existing.get(*rel_path);
-        let mut moved_to = None;
+        let mut candidates = Vec::new();
         for candidate in indexed.and_then(|i| by_hash.get(i.sha256.as_str())).into_iter().flatten() {
             if !crate::lectures::keyed_by(&savepoint, class_id, candidate)? {
-                moved_to = Some(*candidate);
-                break;
+                candidates.push(*candidate);
             }
         }
+        let alone = indexed.is_some_and(|i| left_by_hash.get(i.sha256.as_str()) == Some(&1));
+        let moved_to = match candidates.as_slice() {
+            [only] if alone => Some(*only),
+            _ => None,
+        };
         // Dragged into `_Inbox/` to be sorted again, most likely: the walk
         // skips the app-managed folders, so the transcript vanishes from the
         // index while still on disk. Its rows and its note wait for the
@@ -779,6 +794,42 @@ mod tests {
             assert_eq!(indexed(mover), 1, "pass {pass}: the path left the index, so nothing will try again");
             assert_eq!(indexed(dest), 1, "pass {pass}: the destination is on disk");
         }
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// Two lectures with one content that both vanish while one copy turns
+    /// up are not a move the index can name: both are settled as gone, and
+    /// the copy is a plain new file with no row, rather than one refile
+    /// re-keying a session row the other then deletes.
+    #[test]
+    fn two_lectures_with_one_content_are_not_a_move() {
+        let (db, dir) = part_numbered_class("classhub-scan-twins");
+        let first = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let second = "Weeks/Week 09/2026-09-22 — Lecture.md";
+        let (note_a, html_a, _) = filed_and_digested(&db, &dir, first, PART_I);
+        let (note_b, html_b, _) = filed_and_digested(&db, &dir, second, PART_II);
+        for path in [first, second] {
+            fs::write(dir.join(path), "# the same recording twice\n").expect("twin");
+        }
+        scan_class(&db, 4).expect("scan");
+
+        let copy = "Weeks/Week 05/2026-09-15 — Lecture.md";
+        fs::create_dir_all(dir.join("Weeks/Week 05")).expect("week dir");
+        fs::rename(dir.join(first), dir.join(copy)).expect("move one");
+        fs::remove_file(dir.join(second)).expect("delete the other");
+        let scan = scan_class(&db, 4).expect("scan");
+        assert!(scan.changed);
+        let conn = db.lock().expect("db");
+        assert_eq!(count(&conn, "lecture_contributions"), 0, "a twin was taken for a move");
+        assert_eq!(count(&conn, "guides"), 0, "a session row survived");
+        for path in [&note_a, &note_b, &html_a, &html_b] {
+            assert!(!dir.join(path).exists(), "{path} outlived its lecture");
+        }
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE class_id = 4 AND rel_path = ?1", [copy], |row| row.get(0))
+            .expect("files");
+        assert_eq!(indexed, 1, "the copy is a plain new file");
+        drop(conn);
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 
