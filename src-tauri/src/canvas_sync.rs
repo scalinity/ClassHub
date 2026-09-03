@@ -135,7 +135,7 @@ pub fn sync_on_launch(app: &AppHandle) {
     }
     // The Keychain read comes second, so a launch inside the day never
     // touches the Keychain at all.
-    if !crate::canvas::has_remembered_session() {
+    if !crate::canvas::remembered_session_kept() {
         return;
     }
     if let Err(e) = spawn_with(app, Vec::new(), true) {
@@ -1651,6 +1651,9 @@ fn sync_pages(
                 outcome
                     .notes
                     .push("the Canvas syllabus page was mirrored — SCAN SYLLABUS can read it".into());
+                // The picker offers the page the moment it exists, the way
+                // the announcements pass tells NOTICES.
+                emit_hub_change(app, "canvasSyllabus");
             }
             Ok(false) => {}
             Err(e) => outcome
@@ -2232,6 +2235,43 @@ mod tests {
         assert!(stem.starts_with("Week 3 Week 3"), "{stem}");
     }
 
+    /// A scratch folder that is removed however the test ends, so a failed
+    /// assertion does not leave it behind for the next run to trip on.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("classhub-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The picker offers the mirrored syllabus page exactly when the file
+    /// exists, by its class-relative path.
+    #[test]
+    fn the_syllabus_page_is_offered_only_once_a_sync_wrote_it() {
+        let conn = crate::db::memory_db();
+        let root = TempDir::new("syllabus");
+        crate::db::set_setting(&conn, "aibhs_root", &root.0.to_string_lossy()).expect("root");
+        let class_dir = root.0.join("Applied Generative AI in Medicine");
+        std::fs::create_dir_all(&class_dir).expect("class dir");
+        assert_eq!(canvas_syllabus_path(&conn, 4).expect("path"), None);
+
+        let rel = canvas_syllabus_rel();
+        assert_eq!(rel, ".classhub/extracts/Canvas/Syllabus.md");
+        std::fs::create_dir_all(class_dir.join(&rel).parent().unwrap()).expect("dir");
+        std::fs::write(class_dir.join(&rel), "# Syllabus\n").expect("file");
+        assert_eq!(canvas_syllabus_path(&conn, 4).expect("path").as_deref(), Some(rel.as_str()));
+    }
+
     /// The mirrored file is text with a header, and an unchanged page is not
     /// rewritten — the re-sync no-op, measured on disk.
     #[test]
@@ -2253,33 +2293,30 @@ mod tests {
         );
         assert!(!content.contains('<'), "{content}");
 
-        let dir = std::env::temp_dir().join(format!("classhub-pages-{}", std::process::id()));
-        let path = dir.join("Canvas").join("Module 2.md");
+        let dir = TempDir::new("pages");
+        let path = dir.0.join("Canvas").join("Module 2.md");
         assert!(write_if_changed(&path, &content).expect("first write"));
         assert!(!write_if_changed(&path, &content).expect("same content"));
         assert!(write_if_changed(&path, "# Module 2\n\nchanged\n").expect("changed"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A page retitled or unpublished on Canvas loses its file; what the sync
     /// wrote or confirmed stays, and so does anything that is not a page.
     #[test]
     fn a_page_canvas_no_longer_lists_is_removed_from_the_cache() {
-        let dir = std::env::temp_dir().join(format!("classhub-prune-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = TempDir::new("prune");
+        let dir = &dir.0;
         for name in ["Home.md", "Module 2.md", "Syllabus.md", "notes.txt"] {
             std::fs::write(dir.join(name), "x").expect("file");
         }
         let kept: HashSet<String> = ["home", "syllabus"].into_iter().map(String::from).collect();
-        assert_eq!(prune_stale_texts(&dir, &kept).expect("prune"), 1);
+        assert_eq!(prune_stale_texts(dir, &kept).expect("prune"), 1);
         assert!(dir.join("Home.md").is_file());
         assert!(dir.join("Syllabus.md").is_file());
         assert!(!dir.join("Module 2.md").exists(), "the retitled page's old file");
         assert!(dir.join("notes.txt").is_file(), "not a page, not the sync's to remove");
         // A folder no sync has written yet is nothing to reconcile.
         assert_eq!(prune_stale_texts(&dir.join("missing"), &kept).expect("absent"), 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A launch syncs when nothing ever has or the last sync is a day old,

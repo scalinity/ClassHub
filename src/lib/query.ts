@@ -14,7 +14,8 @@ interface HubChange {
     | "files"
     | "deadlineProposals"
     | "units"
-    | "announcements";
+    | "announcements"
+    | "canvasSyllabus";
 }
 
 // Backend writes (chat tools, drop-to-sort, deadline CRUD) change hub data;
@@ -67,6 +68,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // A Canvas sync recorded or updated what the professor said; the
       // workspace's NOTICES section reads it.
       void queryClient.invalidateQueries({ queryKey: ["announcements"] });
+      break;
+    case "canvasSyllabus":
+      // A Canvas sync mirrored the syllabus page; the scan picker offers it.
+      void queryClient.invalidateQueries({ queryKey: ["canvasSyllabus"] });
       break;
     case "files":
       // An approved move changed the tree on disk.

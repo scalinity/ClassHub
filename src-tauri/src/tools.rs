@@ -2246,10 +2246,11 @@ mod tests {
     #[test]
     fn the_overview_carries_the_latest_notices() {
         let conn = fixture();
+        let long_body = "Bring your laptop. ".repeat(50);
         for (canvas_id, title, body, posted_at) in [
             ("1", "Welcome", "Slides are under Module 1.", "2026-08-20T00:00"),
             ("2", "Office hours\nmoved", "Thursday at <b>6 PM</b> this week.\n\nBen", "2026-09-02T15:03"),
-            ("3", "Quiz 1 posted", "Due Friday.", "2026-08-28T09:00"),
+            ("3", "Quiz 1 posted", long_body.as_str(), "2026-08-28T09:00"),
             ("4", "Reading for week 2", "Chapter 3.", "2026-08-25T09:00"),
         ] {
             conn.execute(
@@ -2280,6 +2281,13 @@ mod tests {
             "{detailed}"
         );
         assert!(!detailed.contains("Welcome"), "only the latest three: {detailed}");
+        // A long body is quoted up to the cap and ellipsized, on one line.
+        let quiz_line = detailed
+            .lines()
+            .find(|line| line.starts_with("  Bring your laptop."))
+            .expect("the quiz body line");
+        assert!(quiz_line.ends_with('…'), "{quiz_line}");
+        assert_eq!(quiz_line.trim_start().chars().count(), super::NOTICE_BODY_CHARS + 1);
         let applied = block(
             &overview_text(&conn, true, "2026-09-02").expect("overview"),
             "Applied Generative AI in Medicine",

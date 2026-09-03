@@ -957,10 +957,11 @@ fn stored_session() -> Option<Remembered> {
     Some(session)
 }
 
-/// Whether a session worth replaying is stored — what decides if a launch
-/// tries Canvas at all (SPEC §7.2). The read applies the age rule, so a copy
-/// past `REMEMBERED_FOR` answers no and is gone.
-pub fn has_remembered_session() -> bool {
+/// Whether a session worth replaying is stored, dropping one that is not —
+/// what decides if a launch tries Canvas at all (SPEC §7.2). Named for the
+/// write: the read applies the age rule and the schema check, so a copy past
+/// `REMEMBERED_FOR` or from an incompatible build answers no and is gone.
+pub fn remembered_session_kept() -> bool {
     stored_session().is_some()
 }
 

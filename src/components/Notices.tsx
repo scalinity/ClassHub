@@ -3,7 +3,20 @@ import { useQuery } from "@tanstack/react-query";
 import { Megaphone } from "lucide-react";
 
 import { listAnnouncements, type Announcement } from "@/lib/canvas";
-import { formatDueDate } from "@/lib/schedule";
+import { formatDueDate, formatTime } from "@/lib/schedule";
+
+/** `SEP 2 3:03 PM`, and `SEP 2 2025 3:03 PM` when the notice is from another
+ *  year — a course site can carry a term's worth of old posts, and "AUG 20"
+ *  alone reads as this term's. */
+function noticeStamp(postedAt: string): string {
+  const [date, time] = postedAt.split("T");
+  const year = Number(date.slice(0, 4));
+  const day =
+    year === new Date().getFullYear()
+      ? formatDueDate(date)
+      : `${formatDueDate(date)} ${year}`;
+  return time ? `${day} ${formatTime(time.slice(0, 5))}` : day;
+}
 
 /**
  * SPEC §7.2 — what the professor said. The class's Canvas announcements,
@@ -63,7 +76,7 @@ function NoticeRow({ notice }: { notice: Announcement }) {
           {notice.title}
         </span>
         <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
-          {formatDueDate(notice.postedAt)}
+          {noticeStamp(notice.postedAt)}
         </span>
       </button>
       {notice.body !== "" && (
