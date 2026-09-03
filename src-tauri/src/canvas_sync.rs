@@ -586,6 +586,20 @@ struct Graded {
     graded_at: Option<String>,
 }
 
+/// Where a submission stands, for the grade pass and its report.
+#[derive(Debug, PartialEq)]
+enum GradeState {
+    /// Graded, posted, not excused, with points to score against: a grade.
+    Posted(Graded),
+    /// Graded, but the professor has not released it. Reported and never
+    /// recorded — silence here would read as "nothing to do", when the reader
+    /// is waiting on exactly this.
+    Unposted,
+    /// Nothing to record: ungraded, excused, no points possible, or read
+    /// without the submission.
+    Nothing,
+}
+
 /// The predicate that turns a submission into a grade, or refuses to.
 ///
 /// Three things have to be true: Canvas holds a score, the professor has
@@ -594,26 +608,43 @@ struct Graded {
 /// excused. Points possible has to be positive as well: Canvas reports 0 or
 /// null for an ungraded assignment, and the CHECK on `max_score` would refuse
 /// it a step later.
-fn graded_and_posted(assignment: &Value) -> Option<Graded> {
-    let submission = assignment.get("submission")?;
-    let score = submission["score"].as_f64()?;
-    submission["posted_at"].as_str().filter(|p| !p.is_empty())?;
+fn grade_state(assignment: &Value) -> GradeState {
+    let graded = || -> Option<Graded> {
+        let submission = assignment.get("submission")?;
+        let score = submission["score"].as_f64()?;
+        let max_score = assignment["points_possible"].as_f64().filter(|p| *p > 0.0)?;
+        Some(Graded {
+            assignment_id: assignment["id"].as_i64()?.to_string(),
+            group_id: assignment["assignment_group_id"].as_i64()?.to_string(),
+            name: assignment["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())?
+                .to_string(),
+            score,
+            max_score,
+            graded_at: iso_date(submission["graded_at"].as_str()),
+        })
+    };
+    let submission = &assignment["submission"];
     if submission["excused"].as_bool().unwrap_or(false) {
-        return None;
+        return GradeState::Nothing;
     }
-    let max_score = assignment["points_possible"].as_f64().filter(|p| *p > 0.0)?;
-    Some(Graded {
-        assignment_id: assignment["id"].as_i64()?.to_string(),
-        group_id: assignment["assignment_group_id"].as_i64()?.to_string(),
-        name: assignment["name"]
-            .as_str()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())?
-            .to_string(),
-        score,
-        max_score,
-        graded_at: iso_date(submission["graded_at"].as_str()),
-    })
+    let Some(graded) = graded() else {
+        return GradeState::Nothing;
+    };
+    if submission["posted_at"].as_str().filter(|p| !p.is_empty()).is_none() {
+        return GradeState::Unposted;
+    }
+    GradeState::Posted(graded)
+}
+
+/// `grade_state` for a caller that wants the grade or nothing.
+fn graded_and_posted(assignment: &Value) -> Option<Graded> {
+    match grade_state(assignment) {
+        GradeState::Posted(graded) => Some(graded),
+        GradeState::Unposted | GradeState::Nothing => None,
+    }
 }
 
 /// Categories from the course's assignment groups, items from every graded and
@@ -639,7 +670,7 @@ fn sync_grades(
     )?;
     let weighted = applies_group_weights(course);
 
-    let (categories_landed, category_notes, recorded, orphans, changed) = with_conn(app, |conn| {
+    let (categories_landed, category_notes, recorded, orphans, unposted, changed) = with_conn(app, |conn| {
         let mut by_group: HashMap<String, i64> = HashMap::new();
         let mut categories_landed = 0usize;
         let mut category_notes: Vec<String> = Vec::new();
@@ -673,7 +704,16 @@ fn sync_grades(
 
         let mut recorded = 0usize;
         let mut orphans = 0usize;
-        for graded in assignments.iter().filter_map(graded_and_posted) {
+        let mut unposted = 0usize;
+        for assignment in assignments {
+            let graded = match grade_state(assignment) {
+                GradeState::Posted(graded) => graded,
+                GradeState::Unposted => {
+                    unposted += 1;
+                    continue;
+                }
+                GradeState::Nothing => continue,
+            };
             // A group the listing did not carry — deleted between the two
             // reads, or refused. Counted rather than filed under a guess.
             let Some(&category_id) = by_group.get(&graded.group_id) else {
@@ -696,11 +736,16 @@ fn sync_grades(
                 Err(e) => eprintln!("canvas: skipping grade '{}': {e:#}", graded.name),
             }
         }
-        Ok((categories_landed, category_notes, recorded, orphans, changed))
+        Ok((categories_landed, category_notes, recorded, orphans, unposted, changed))
     })?;
 
     outcome.grades_recorded = recorded;
     outcome.notes.extend(category_notes);
+    if unposted > 0 {
+        outcome.notes.push(format!(
+            "{unposted} graded assignment(s) not posted yet — Canvas is holding the grade"
+        ));
+    }
     if categories_landed > 0 {
         outcome.notes.push(format!(
             "{categories_landed} grade categor{} from Canvas{}",
@@ -1460,6 +1505,17 @@ mod tests {
             graded_and_posted(&value)
         };
         assert!(with(&|v| v["submission"]["posted_at"] = Value::Null).is_none(), "muted");
+        // Muted is told apart from ungraded, so the report can say the
+        // professor is holding a grade.
+        let mut muted = base.clone();
+        muted["submission"]["posted_at"] = Value::Null;
+        assert_eq!(grade_state(&muted), GradeState::Unposted);
+        let mut ungraded = base.clone();
+        ungraded["submission"]["score"] = Value::Null;
+        assert_eq!(grade_state(&ungraded), GradeState::Nothing);
+        let mut excused = muted.clone();
+        excused["submission"]["excused"] = json!(true);
+        assert_eq!(grade_state(&excused), GradeState::Nothing, "excused outranks muted");
         assert!(with(&|v| v["submission"]["score"] = Value::Null).is_none(), "ungraded");
         assert!(with(&|v| v["submission"]["excused"] = json!(true)).is_none(), "excused");
         assert!(with(&|v| v["points_possible"] = json!(0)).is_none(), "zero points");
