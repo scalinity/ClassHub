@@ -2808,3 +2808,104 @@ changes. What future sessions should know:
 - `sanitize_name("../week-3")` is `-week-3`: the separator becomes a dash
   and the leading dots go, which is the single segment wanted, not the
   `week-3` a first test expected.
+
+## Weights from the syllabus (2026-09-03)
+
+Built on the `weights-from-syllabus` branch in a worktree beside the M22
+session, which held main and the dev port for the whole session.
+
+### What was built
+
+- **The prompt.** `syllabus.md` reports a third thing beside deadlines and
+  divisions: `grading`, a list of `{name, weight}` with the weight as a
+  number of percent. `build_prompt` fills a `{categories}` block with the
+  class's category names — names only, so the weights come out of the
+  document rather than echoing what was typed — and the grading section
+  says what counts: the final-grade breakdown and nothing inside it (a
+  component's own rubric and the letter scale are not shares of the final
+  grade); a component that is the same work as an existing category goes
+  under that name, spelled as listed; one the class lacks goes under the
+  syllabus's own short name; an existing category the syllabus never
+  weights is not reported, at zero or otherwise.
+- **The parser.** `split_output` returns a `ScanOutput` holding the three
+  lists. `grading` is read the way `units` is — absent or null is an empty
+  list, present and not a list fails the scan — and an object carrying only
+  `grading` is a valid answer. `RawWeight` keeps the weight as a JSON value
+  and `percent_of` accepts a number or the `"50%"` the syllabus tables
+  print, since a model copying the string should not cost a scan its
+  breakdown.
+- **The write.** `grades::set_syllabus_weight`, beside the Canvas upsert so
+  the category rules stay in one module: the name is matched
+  case-insensitively; a weight within `WEIGHT_EPSILON` of the syllabus is
+  `Unchanged`; a zero takes the syllabus weight (`Set`); a category the
+  class lacks is inserted with no Canvas id (`Created`); any other weight
+  already set is `Kept(current)`, untouched. `syllabus.set_grade_weight`
+  audit rows land for `Set` (before and after) and `Created` only. The
+  name bound `canvas_name` became `read_name`, since both readers use it.
+- **The step.** `deadlines::record_weights` mirrors `record_units`: it runs
+  before the deadline half, reports and never propagates, and emits
+  `hub-changed grades` only when something was written. The pass itself is
+  `apply_weights` over a connection, so it is tested directly; after the
+  entries it lists the categories still at zero that the scan did not
+  name. Its summary reads `weights set: Assignments 50, Peer Design
+  Sessions 20 (new) · N weight(s) already as the syllabus states ·
+  Assignments kept at 50 — the syllabus says 40 · Survey left at 0 — the
+  syllabus does not weight it · weights skipped: …`, and the job summary
+  joins the three halves with ` · `.
+- No schema change and no UI: the ≠100% warning and chat's weights line
+  already say whether the numbers add up.
+
+### Verified
+
+- `cargo test`: 193 pass, 3 new — the split accepting `grading` alone and
+  refusing it as an object; the Design Studio shape (three Canvas
+  categories at zero filled, one created with no Canvas id, `"20%"`
+  accepted, a second pass writing nothing and leaving no row); the
+  Biostatistics shape (typed weights agreeing, then disagreeing and kept, a
+  repeated name, a bad weight and a nameless entry all named in the
+  summary); and the write itself (cross-case match, another class's row
+  untouched, the audit payloads, the epsilon, the bounds). `npx tsc
+  --noEmit` clean, run in the worktree against the main tree's
+  `node_modules` through a symlink.
+- **Not run live.** Main carried uncommitted M22 work all session, so the
+  branch was not merged and no dev build was launched. The four scans and
+  the rescan are still to do; what each should produce, read from the
+  extracts:
+  - Biostatistics (`Assignments (%10 x 5)` 50 · `Quiz (%5 x 4)` 20 ·
+    `Project` 30): nothing written, `3 weight(s) already as the syllabus
+    states · Survey left at 0`.
+  - Design Studio (`AI Design Project` 60 · `Studio Participation` 20 ·
+    `Peer Design Sessions` 20): the two matching names filled, `Peer
+    Design Sessions` created with no Canvas id, `Quizzes left at 0`, sum
+    100. The milestone table under the project is `% of Project Grade`
+    and must not appear.
+  - Fundamentals (`Weekly Live Coding Sessions` 20 · `Homework (7
+    assignments)` 50 · `Final Project (Capstone Project)` 30): Homework
+    onto `Assignments` at 50, the other two created, sum 100.
+  - Applied Generative AI (six components, 10/10/10/50/10/10): the
+    homework onto `Assignments` at 10, five created, sum 100. The syllabus
+    carries no dates, so the deadline half reads `no date-bearing items
+    found`.
+
+### Left as it is
+
+- A weight is filled once. A syllabus revised mid-semester changes nothing
+  after a scan has set the number; the Grades section is where that edit
+  happens, and the summary names the disagreement on every rescan.
+- Which syllabus component is which category is the model's reading. A
+  wrong mapping lands as a wrongly named category with a weight, which the
+  summary names and the Grades section reverses; nothing is guessed on the
+  Rust side beyond the case-insensitive name match.
+- A category the scan creates carries no Canvas id, so a Canvas group that
+  later arrives under its name claims it (the M21 rule) and keeps its
+  weight.
+- A component the syllabus weights at 0 and the class lacks is created at
+  0. The prompt says not to report those; the write does not second-guess
+  it.
+
+### Gotchas
+
+- A worktree builds its own `target/` from cold and has no `node_modules`;
+  a symlink to the main tree's serves `tsc`, and git ignores it.
+- `zsh` treats a leading `=` as equals-expansion, so `echo ====` is an
+  error rather than a separator.

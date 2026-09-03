@@ -152,8 +152,8 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
 - **No course weights its assignment groups.** Read from all four courses on 2026-09-03:
   `apply_assignment_group_weights` is false on every course and every group's `group_weight`
   is 0, so Canvas knows the names of the grading categories and never what they are worth —
-  category weights come from the syllabus, typed by hand, and a Canvas sync leaves them alone
-  (§7.2). The groups themselves: Fundamentals and Applied Generative AI declare one
+  category weights come from the syllabus, read by the syllabus scan (§11), and a Canvas sync
+  leaves them alone (§7.2). The groups themselves: Fundamentals and Applied Generative AI declare one
   (`Assignments`); Design Studio three (`Studio Participation`, `Quizzes`, `AI Design
   Project`); Biostatistics four (`Assignments`, `Quizzes`, `Project`, `Survey`). Biostatistics
   publishes no assignments at all in Canvas — Quiz 1 is not there — and on that date no course
@@ -798,8 +798,9 @@ a name another category holds keeps its current name, and a second group arrivin
 held name is recorded with a numbered suffix, each said in the sync report — two rows under
 one name would leave both weights uneditable. A group's weight is taken only when the course
 applies its group weights (`apply_assignment_group_weights` on the course); otherwise the
-typed weight stands, a new category starts at zero, and the ≠100% warning says what is
-missing. A submission becomes a `grade_item` when it is graded, posted and not excused — a
+weight already set stands and a new category starts at zero, which is the state the syllabus
+scan fills in (§11) — a zero is a weight nobody has stated yet, not a number. A submission
+becomes a `grade_item` when it is graded, posted and not excused — a
 muted grade is one the professor has not released, and recording it early is the wrong kind
 of early, so the report counts the grades Canvas is holding instead — and the assignment has
 positive points possible, which Canvas reports as 0 or null for ungraded work. Items are keyed
@@ -1090,7 +1091,11 @@ its meetings.
   chip on the dashboard; exam countdown chips (days until each `final_exam_start`).
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
   chat tools. **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
-  class folder) and proposes deadlines as JSON → confirm cards → insert with `source='syllabus'`.
+  class folder) once and returns three things as one JSON object: deadlines → confirm cards →
+  insert with `source='syllabus'`; the course's own divisions, recorded directly (§7.2); and
+  the grade breakdown, recorded directly as category weights (Grades below). Each half is
+  independent of the others — a malformed schedule costs the scan its schedule, never its
+  deadlines — and a bare array is still read as the deadline list alone.
   The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `CANVAS SYLLABUS PAGE`
   when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
   so a scan of it finds no dates and says so.
@@ -1111,6 +1116,22 @@ its meetings.
   as an item, each tagged `VIA CANVAS` — the deadline row's source tag, reused. A Canvas-owned
   score can be edited by hand, audited like any edit, and the tag's tooltip says the next sync
   writes Canvas's number back.
+
+  **Where weights come from.** Canvas names the categories and never weights them (§1); the
+  syllabus states the breakdown, and the syllabus scan reads it in the same pass as the
+  deadlines and the schedule. The prompt carries the class's category names and asks the
+  model to map the syllabus's components onto them where they mean the same thing — a
+  syllabus's "Quiz (5% x 4)" is the class's `Quizzes` — and to name anything the syllabus
+  weights that the class does not track. Names match case-insensitively, the rule every
+  category writer shares. A category whose weight is zero takes the syllabus weight; one the
+  syllabus names and the class lacks is created with its weight and no Canvas id; one whose
+  weight was already set and disagrees with the syllabus is left alone and named in the job
+  summary, so a rescan never silently changes a number that was typed. The writes are direct
+  with audit rows (`syllabus.set_grade_weight`, before and after) and refresh the Grades
+  section, and the summary says what was set — `weights set: Assignments 50, Quizzes 20,
+  Project 30 · Survey left at 0 — the syllabus does not weight it`. A rescan of an unchanged
+  syllabus writes nothing and leaves no row. Whether the weights add up is the section's own
+  ≠100% warning's job, and chat's weights line reports the same sum.
 
 ## 12. UI specification & design language
 

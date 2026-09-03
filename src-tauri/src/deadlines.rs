@@ -459,13 +459,33 @@ fn build_prompt(
             dismissed_rows.join("\n")
         ));
     }
+    // The category names the syllabus breakdown is mapped onto — names only,
+    // so the model reads the weights out of the document rather than echoing
+    // what was typed. Canvas supplied most of them (§7.2), so its wording is
+    // what the syllabus's has to be matched to.
+    let mut stmt = conn.prepare(
+        "SELECT name FROM grade_categories WHERE class_id = ?1 ORDER BY id",
+    )?;
+    let category_rows = stmt
+        .query_map([class_id], |row| Ok(format!("- {}", row.get::<_, String>(0)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let categories = if category_rows.is_empty() {
+        "The class has no grade categories yet.".to_string()
+    } else {
+        format!(
+            "Grade categories the class already tracks (map the syllabus breakdown onto \
+             these names where they mean the same thing):\n\n{}",
+            category_rows.join("\n")
+        )
+    };
 
     Ok(PROMPT_TEMPLATE
         .replace("{class}", &class_name)
         .replace("{today}", today)
         .replace("{semester}", &semester_label(today))
         .replace("{target}", &target)
-        .replace("{existing}", &existing))
+        .replace("{existing}", &existing)
+        .replace("{categories}", &categories))
 }
 
 /// "Fall 2026" from a YYYY-MM-DD. Month-level precision is all the prompt
@@ -514,13 +534,32 @@ struct RawUnit {
     ends_on: Option<String>,
 }
 
+/// One entry of the scan's `grading` array — a component of the final grade
+/// and its share, read out of the same document (SPEC §11). The weight is
+/// kept as a value because the tables it is read from print `50%`, and a
+/// model copying that string should not cost the scan its breakdown.
+#[derive(Deserialize)]
+struct RawWeight {
+    name: String,
+    weight: serde_json::Value,
+}
+
+/// The three halves of a scan's output, split by `split_output`.
+struct ScanOutput {
+    deadlines: Vec<serde_json::Value>,
+    units: Vec<serde_json::Value>,
+    grading: Vec<serde_json::Value>,
+}
+
 /// Parses and records the scan's proposals. Unlike the sort job, an empty
 /// array is a legitimate success (the material may hold no dated items) —
 /// only unparseable output or an all-invalid batch is an error the caller
 /// demotes to job failure.
 pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
-    let (entries, raw_units) = split_output(result_text)?;
+    let ScanOutput { deadlines: entries, units: raw_units, grading: raw_weights } =
+        split_output(result_text)?;
     let unit_summary = record_units(app, class_id, &raw_units);
+    let weight_summary = record_weights(app, class_id, &raw_weights);
     let summary = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut duplicates = 0usize;
@@ -642,24 +681,28 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         Ok(summary)
     })?;
     emit_hub_change(app, "deadlineProposals");
-    let summary = match unit_summary {
-        Some(units) => format!("{summary} · {units}"),
-        None => summary,
-    };
+    let summary = [Some(summary), unit_summary, weight_summary]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
     Ok(summary)
 }
 
-/// Splits the scan's output into its two halves.
+/// Splits the scan's output into its three halves.
 ///
-/// The contract is one object holding `deadlines` and `units`, because the
-/// weekly schedule and the due dates live in the same document and cost one
-/// read between them. A bare array is still accepted as the deadline list
-/// alone: the model does occasionally answer the older shape, and dropping a
-/// whole scan's findings over the wrapper would be an expensive way to be
-/// strict about punctuation.
-fn split_output(result_text: &str) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+/// The contract is one object holding `deadlines`, `units` and `grading`,
+/// because the weekly schedule, the due dates and the grade breakdown live in
+/// the same document and cost one read between them. A bare array is still
+/// accepted as the deadline list alone: the model does occasionally answer the
+/// older shape, and dropping a whole scan's findings over the wrapper would be
+/// an expensive way to be strict about punctuation.
+fn split_output(result_text: &str) -> Result<ScanOutput> {
     if let Ok(record) = crate::jobs::parse_object(result_text) {
-        if record.get("deadlines").is_some() || record.get("units").is_some() {
+        if ["deadlines", "units", "grading"]
+            .iter()
+            .any(|key| record.get(key).is_some())
+        {
             // An absent key is a real answer — a syllabus may hold no dated
             // items, or no structure. A key that is present and not a list is
             // not: collapsing that to an empty vec reported "no date-bearing
@@ -679,10 +722,18 @@ fn split_output(result_text: &str) -> Result<(Vec<serde_json::Value>, Vec<serde_
                     ),
                 }
             };
-            return Ok((array("deadlines")?, array("units")?));
+            return Ok(ScanOutput {
+                deadlines: array("deadlines")?,
+                units: array("units")?,
+                grading: array("grading")?,
+            });
         }
     }
-    Ok((crate::jobs::parse_entries(result_text)?, Vec::new()))
+    Ok(ScanOutput {
+        deadlines: crate::jobs::parse_entries(result_text)?,
+        units: Vec::new(),
+        grading: Vec::new(),
+    })
 }
 
 /// Records the divisions the syllabus declared, as SPEC §7.2's middle source.
@@ -776,6 +827,140 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
             Some("divisions could not be recorded".to_string())
         }
     }
+}
+
+/// What a scan's grading half did, for the job summary.
+#[derive(Default)]
+struct WeightsRecorded {
+    /// Weights written: `Assignments 50`, `Peer Design Sessions 20 (new)`.
+    set: Vec<String>,
+    /// Weights already agreeing with the syllabus.
+    unchanged: usize,
+    /// Typed weights the syllabus disagrees with, left alone and named.
+    kept: Vec<String>,
+    /// Categories still at zero after the pass, which the syllabus did not
+    /// weight — the ≠100% warning will name them, and so does the summary.
+    unweighted: Vec<String>,
+    skipped: Vec<String>,
+}
+
+impl WeightsRecorded {
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.set.is_empty() {
+            parts.push(format!("weights set: {}", self.set.join(", ")));
+        }
+        if self.unchanged > 0 {
+            parts.push(format!(
+                "{} weight(s) already as the syllabus states",
+                self.unchanged
+            ));
+        }
+        parts.extend(self.kept.iter().cloned());
+        if !self.unweighted.is_empty() {
+            parts.push(format!(
+                "{} left at 0 — the syllabus does not weight {}",
+                self.unweighted.join(", "),
+                if self.unweighted.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        if !self.skipped.is_empty() {
+            parts.push(format!("weights skipped: {}", self.skipped.join("; ")));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Records the grade breakdown the syllabus states (SPEC §11): a category
+/// whose weight is still zero takes the syllabus's, one the class lacks is
+/// created, and one already set is left alone and named. Same posture as
+/// `record_units` — reported, never propagated, and run before the deadline
+/// half so a scan whose deadlines are unusable still keeps what it read.
+fn record_weights(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    match with_conn(app, |conn| apply_weights(conn, class_id, raw)) {
+        Ok(recorded) => {
+            if !recorded.set.is_empty() {
+                emit_hub_change(app, "grades");
+            }
+            Some(recorded.summary())
+        }
+        Err(e) => {
+            eprintln!("syllabus: weights not recorded for class {class_id}: {e:#}");
+            Some("weights could not be recorded".to_string())
+        }
+    }
+}
+
+fn apply_weights(
+    conn: &Connection,
+    class_id: i64,
+    raw: &[serde_json::Value],
+) -> Result<WeightsRecorded> {
+    use crate::grades::{set_syllabus_weight, trim_num, WeightWrite};
+    let mut out = WeightsRecorded::default();
+    // Names this scan has handled, lowercased: a second entry under one name
+    // is the model repeating itself, and the first reading stands.
+    let mut claimed: Vec<String> = Vec::new();
+    for (index, value) in raw.iter().enumerate() {
+        let entry: RawWeight = match serde_json::from_value(value.clone()) {
+            Ok(entry) => entry,
+            Err(e) => {
+                out.skipped.push(format!("entry {} (malformed: {e})", index + 1));
+                continue;
+            }
+        };
+        let name = entry.name.trim();
+        if name.is_empty() {
+            out.skipped.push(format!("entry {} (empty name)", index + 1));
+            continue;
+        }
+        let Some(weight) = percent_of(&entry.weight) else {
+            out.skipped.push(format!("{name} (bad weight {})", entry.weight));
+            continue;
+        };
+        let lowered = name.to_lowercase();
+        if claimed.contains(&lowered) {
+            out.skipped.push(format!("{name} (repeated)"));
+            continue;
+        }
+        claimed.push(lowered);
+        match set_syllabus_weight(conn, class_id, name, weight) {
+            Ok(WeightWrite::Set) => out.set.push(format!("{name} {}", trim_num(weight))),
+            Ok(WeightWrite::Created) => {
+                out.set.push(format!("{name} {} (new)", trim_num(weight)))
+            }
+            Ok(WeightWrite::Unchanged) => out.unchanged += 1,
+            Ok(WeightWrite::Kept(current)) => out.kept.push(format!(
+                "{name} kept at {} — the syllabus says {}",
+                trim_num(current),
+                trim_num(weight)
+            )),
+            Err(e) => out.skipped.push(format!("{name} ({e})")),
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name FROM grade_categories WHERE class_id = ?1 AND weight = 0 ORDER BY id",
+    )?;
+    out.unweighted = stmt
+        .query_map([class_id], |row| row.get::<_, String>(0))?
+        .filter_map(|name| name.ok())
+        .filter(|name| !claimed.contains(&name.to_lowercase()))
+        .collect();
+    Ok(out)
+}
+
+/// A weight as the scan reported it: a number, or the `50%` the syllabus's
+/// own table prints when the model copies it as a string.
+fn percent_of(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().trim_end_matches('%').trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|w| w.is_finite())
 }
 
 /// The day half of a validated ISO timestamp. `valid_due_at` guarantees at
@@ -1364,18 +1549,130 @@ mod tests {
     /// date-bearing items found" and lost the scan's whole deadline half.
     #[test]
     fn a_malformed_half_fails_the_scan_rather_than_reading_as_empty() {
-        let (deadlines, units) =
-            split_output(r#"{"deadlines": [{"title": "x"}]}"#).expect("valid shape");
-        assert_eq!(deadlines.len(), 1);
-        assert!(units.is_empty(), "an absent key is an empty list");
+        let output = split_output(r#"{"deadlines": [{"title": "x"}]}"#).expect("valid shape");
+        assert_eq!(output.deadlines.len(), 1);
+        assert!(output.units.is_empty(), "an absent key is an empty list");
+        assert!(output.grading.is_empty(), "an absent key is an empty list");
 
         assert!(split_output(r#"{"deadlines": {"title": "x"}, "units": []}"#).is_err());
         assert!(split_output(r#"{"units": "Week 1"}"#).is_err());
+        assert!(split_output(r#"{"grading": {"Quizzes": 20}}"#).is_err());
+        // A breakdown alone is a valid answer for a syllabus with no dates.
+        let output = split_output(r#"{"grading": [{"name": "Quizzes", "weight": 20}]}"#)
+            .expect("grading alone");
+        assert_eq!(output.grading.len(), 1);
+        assert!(output.deadlines.is_empty());
         // A bare array is still the deadline list alone.
+        let output = split_output(r#"[{"title": "x"}]"#).expect("bare array");
+        assert_eq!(output.deadlines.len(), 1);
+        assert!(output.grading.is_empty());
+    }
+
+    fn weights(conn: &rusqlite::Connection, class_id: i64) -> Vec<(String, f64, Option<String>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, weight, canvas_group_id FROM grade_categories
+                 WHERE class_id = ?1 ORDER BY id",
+            )
+            .expect("prepare");
+        stmt.query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows")
+    }
+
+    fn audits(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'syllabus.set_grade_weight'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count")
+    }
+
+    /// The Design Studio shape: Canvas supplied the categories at zero, the
+    /// syllabus supplies the weights, and one component the class did not
+    /// track becomes a category with no Canvas id. A second pass of the same
+    /// breakdown writes nothing.
+    #[test]
+    fn a_scan_fills_zero_weights_and_creates_what_the_class_lacks() {
+        let conn = db();
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight, canvas_group_id) VALUES
+               (2, 'Studio Participation', 0, '1'), (2, 'Quizzes', 0, '2'),
+               (2, 'AI Design Project', 0, '3');",
+        )
+        .expect("fixture");
+        let raw = vec![
+            json!({ "name": "AI Design Project", "weight": 60 }),
+            json!({ "name": "studio participation", "weight": "20%" }),
+            json!({ "name": "Peer Design Sessions", "weight": 20 }),
+        ];
+        let recorded = apply_weights(&conn, 2, &raw).expect("apply");
         assert_eq!(
-            split_output(r#"[{"title": "x"}]"#).expect("bare array").0.len(),
-            1
+            recorded.summary(),
+            "weights set: AI Design Project 60, studio participation 20, \
+             Peer Design Sessions 20 (new) · Quizzes left at 0 — the syllabus does not weight it"
         );
+        assert_eq!(
+            weights(&conn, 2),
+            vec![
+                ("Studio Participation".to_string(), 20.0, Some("1".to_string())),
+                ("Quizzes".to_string(), 0.0, Some("2".to_string())),
+                ("AI Design Project".to_string(), 60.0, Some("3".to_string())),
+                ("Peer Design Sessions".to_string(), 20.0, None),
+            ]
+        );
+        assert_eq!(audits(&conn), 3);
+
+        let again = apply_weights(&conn, 2, &raw).expect("again");
+        assert!(again.set.is_empty(), "{}", again.summary());
+        assert_eq!(again.unchanged, 3);
+        assert_eq!(audits(&conn), 3, "a rescan of an unchanged syllabus leaves no row");
+        assert_eq!(weights(&conn, 2).len(), 4);
+    }
+
+    /// The Biostatistics shape: three weights typed by hand and one Canvas
+    /// category at zero. A syllabus agreeing with the typed numbers writes
+    /// nothing; one disagreeing changes nothing either and says so.
+    #[test]
+    fn a_scan_never_replaces_a_weight_already_set() {
+        let conn = db();
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight, canvas_group_id) VALUES
+               (3, 'Assignments', 50, '1'), (3, 'Quizzes', 20, '2'),
+               (3, 'Project', 30, '3'), (3, 'Survey', 0, '4');",
+        )
+        .expect("fixture");
+        let agreeing = vec![
+            json!({ "name": "Assignments", "weight": 50 }),
+            json!({ "name": "Quizzes", "weight": 20.0 }),
+            json!({ "name": "Project", "weight": 30 }),
+        ];
+        let recorded = apply_weights(&conn, 3, &agreeing).expect("apply");
+        assert_eq!(
+            recorded.summary(),
+            "3 weight(s) already as the syllabus states · Survey left at 0 — the syllabus does not weight it"
+        );
+        assert_eq!(audits(&conn), 0);
+
+        let disagreeing = vec![
+            json!({ "name": "Assignments", "weight": 40 }),
+            json!({ "name": "Quizzes", "weight": 20 }),
+            json!({ "name": "Quizzes", "weight": 25 }),
+            json!({ "name": "Project", "weight": "thirty" }),
+            json!({ "weight": 10 }),
+        ];
+        let recorded = apply_weights(&conn, 3, &disagreeing).expect("apply");
+        assert_eq!(
+            recorded.summary(),
+            "1 weight(s) already as the syllabus states · Assignments kept at 50 — the syllabus says 40 \
+             · Survey left at 0 — the syllabus does not weight it \
+             · weights skipped: Quizzes (repeated); Project (bad weight \"thirty\"); \
+             entry 5 (malformed: missing field `name`)"
+        );
+        assert_eq!(audits(&conn), 0);
+        assert_eq!(weights(&conn, 3)[0].1, 50.0, "the typed weight stands");
     }
 
     use super::valid_due_at;

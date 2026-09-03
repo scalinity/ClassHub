@@ -435,10 +435,11 @@ pub(crate) enum CanvasWrite {
     Unchanged,
 }
 
-/// A Canvas name in the column's own bounds. Truncated rather than refused:
-/// the assignment is real whatever its name's length, and the sync must not
-/// lose a score over a long title.
-fn canvas_name(name: &str) -> Result<String> {
+/// A name a reader supplied — a Canvas group or assignment, a syllabus
+/// component — in the column's own bounds. Truncated rather than refused: the
+/// thing is real whatever its name's length, and a sync must not lose a score,
+/// nor a scan a weight, over a long title.
+fn read_name(name: &str) -> Result<String> {
     let name = crate::db::truncate(name.trim(), MAX_NAME_CHARS);
     if name.is_empty() {
         bail!("a Canvas name is empty");
@@ -487,7 +488,7 @@ pub(crate) fn upsert_canvas_category(
     class_id: i64,
     group: &CanvasGroup,
 ) -> Result<CategoryWrite> {
-    let name = canvas_name(group.name)?;
+    let name = read_name(group.name)?;
     let weight = group.weight.filter(|w| (0.0..=100.0).contains(w));
     let read = |row: &rusqlite::Row| -> rusqlite::Result<(i64, String, f64)> {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -595,6 +596,89 @@ pub(crate) fn upsert_canvas_category(
     Ok(outcome)
 }
 
+// ---------------------------------------------------------------------------
+// What a syllabus scan writes (SPEC §11): a category's weight, read out of the
+// syllabus's grade breakdown. Direct and audited like a Canvas write, for the
+// same reason — a weight is reversible in the Grades section.
+
+/// What recording a syllabus weight did, so the scan's summary can say which
+/// numbers it set and which it left alone.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum WeightWrite {
+    /// A category the class did not track, created with this weight and no
+    /// Canvas id.
+    Created,
+    /// A category whose weight was zero now carries the syllabus's.
+    Set,
+    /// The stored weight already agrees with the syllabus.
+    Unchanged,
+    /// The stored weight was already set and disagrees with the syllabus.
+    /// Left alone, carrying the stored weight so the caller can name it: a
+    /// rescan must never silently change a number that was typed.
+    Kept(f64),
+}
+
+/// Records the weight the syllabus states for `name`, matched
+/// case-insensitively — the rule `save_category` and the chat tool enforce.
+/// Fills a weight still at zero, creates a category the class lacks, and never
+/// replaces a weight already set. Writes an audit row
+/// (`syllabus.set_grade_weight`, before and after) only when something
+/// changed, so a rescan of an unchanged syllabus leaves none.
+pub(crate) fn set_syllabus_weight(
+    conn: &Connection,
+    class_id: i64,
+    name: &str,
+    weight: f64,
+) -> Result<WeightWrite> {
+    let name = read_name(name)?;
+    if !weight.is_finite() || !(0.0..=100.0).contains(&weight) {
+        bail!("a weight is a percentage between 0 and 100");
+    }
+    let existing: Option<(i64, String, f64)> = conn
+        .query_row(
+            "SELECT id, name, weight FROM grade_categories
+             WHERE class_id = ?1 AND LOWER(name) = LOWER(?2)",
+            params![class_id, name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let tx = conn.unchecked_transaction()?;
+    let write = match existing {
+        Some((_, _, current)) if (current - weight).abs() < WEIGHT_EPSILON => {
+            WeightWrite::Unchanged
+        }
+        Some((_, _, current)) if current != 0.0 => WeightWrite::Kept(current),
+        Some((id, current_name, current)) => {
+            tx.execute(
+                "UPDATE grade_categories SET weight = ?1 WHERE id = ?2",
+                params![weight, id],
+            )?;
+            audit(
+                &tx,
+                "syllabus.set_grade_weight",
+                json!({ "id": id, "classId": class_id, "name": current_name,
+                        "before": { "weight": current }, "after": { "weight": weight } }),
+            )?;
+            WeightWrite::Set
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO grade_categories (class_id, name, weight) VALUES (?1, ?2, ?3)",
+                params![class_id, name, weight],
+            )?;
+            audit(
+                &tx,
+                "syllabus.set_grade_weight",
+                json!({ "id": tx.last_insert_rowid(), "classId": class_id,
+                        "name": name, "weight": weight, "created": true }),
+            )?;
+            WeightWrite::Created
+        }
+    };
+    tx.commit()?;
+    Ok(write)
+}
+
 /// Upserts the item for a graded, posted submission under `category_id`, one
 /// of `class_id`'s categories.
 ///
@@ -614,7 +698,7 @@ pub(crate) fn upsert_canvas_item(
     category_id: i64,
     score: &CanvasScore,
 ) -> Result<CanvasWrite> {
-    let name = canvas_name(score.name)?;
+    let name = read_name(score.name)?;
     if score.max_score <= 0.0 {
         bail!("{name} has no points possible");
     }
@@ -1141,5 +1225,65 @@ mod tests {
         )
         .expect("claim");
         assert_eq!(claimed.write, CanvasWrite::Claimed);
+    }
+
+    /// A syllabus weight fills a zero and creates what is missing, and never
+    /// touches a number already set — a rescan must not change a typed weight
+    /// in silence. Audit rows land only for what changed.
+    #[test]
+    fn a_syllabus_weight_fills_a_zero_and_never_a_typed_one() {
+        let conn = crate::db::memory_db();
+        conn.execute_batch(
+            "INSERT INTO grade_categories (class_id, name, weight, canvas_group_id) VALUES
+               (3, 'Quizzes', 0, '901'), (3, 'Project', 30, NULL), (1, 'Quizzes', 0, '801');",
+        )
+        .expect("fixture");
+        let audits = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT payload FROM audit_log WHERE action = 'syllabus.set_grade_weight' ORDER BY id")
+                .expect("prepare");
+            stmt.query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .expect("rows")
+        };
+
+        // A zero takes the syllabus weight, matched across casing, the Canvas
+        // id untouched, with the row's before and after in the audit.
+        assert_eq!(set_syllabus_weight(&conn, 3, "quizzes", 20.0).expect("fill"), WeightWrite::Set);
+        assert_eq!(category(&conn, 1), ("Quizzes".to_string(), 20.0, Some("901".to_string())));
+        let rows = audits(&conn);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains(r#""before":{"weight":0.0}"#), "{}", rows[0]);
+        assert!(rows[0].contains(r#""after":{"weight":20.0}"#), "{}", rows[0]);
+        assert_eq!(category(&conn, 3).1, 0.0, "another class's Quizzes is not this class's");
+
+        // The same weight again: nothing changes and no row lands.
+        assert_eq!(set_syllabus_weight(&conn, 3, "Quizzes", 20.0).expect("again"), WeightWrite::Unchanged);
+        // A typed weight the syllabus disagrees with is kept, and reported as such.
+        assert_eq!(set_syllabus_weight(&conn, 3, "Project", 25.0).expect("kept"), WeightWrite::Kept(30.0));
+        assert_eq!(category(&conn, 2).1, 30.0);
+        // Agreement is within the UI's own epsilon.
+        assert_eq!(set_syllabus_weight(&conn, 3, "Project", 30.004).expect("near"), WeightWrite::Unchanged);
+        assert_eq!(audits(&conn).len(), 1);
+
+        // A component the class did not track becomes a category with no Canvas id.
+        assert_eq!(
+            set_syllabus_weight(&conn, 3, "Peer Design Sessions", 20.0).expect("create"),
+            WeightWrite::Created
+        );
+        assert_eq!(
+            category(&conn, 4),
+            ("Peer Design Sessions".to_string(), 20.0, None)
+        );
+        let rows = audits(&conn);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].contains(r#""created":true"#), "{}", rows[1]);
+
+        // The category rules hold at this door too.
+        assert!(set_syllabus_weight(&conn, 3, "Quizzes", 120.0).is_err());
+        assert!(set_syllabus_weight(&conn, 3, "Quizzes", f64::NAN).is_err());
+        assert!(set_syllabus_weight(&conn, 3, "  ", 5.0).is_err());
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM grade_categories WHERE class_id = 3"), 3);
     }
 }
