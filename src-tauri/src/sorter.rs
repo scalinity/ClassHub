@@ -50,7 +50,8 @@ pub struct Proposal {
     /// high|medium|low from sort jobs; NULL on chat and Canvas proposals —
     /// neither is a model rating its own guess.
     pub confidence: Option<String>,
-    /// chat | sort_job | canvas
+    /// chat | sort_job | canvas | by_name — the last a file named for a week,
+    /// proposed into its week folder from its Materials row (SPEC §10).
     pub source: String,
     pub created_at: i64,
 }
@@ -319,6 +320,12 @@ pub fn propose_week_filing(app: &AppHandle, class_id: i64, rel_path: &str) -> Re
 
 fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &str) -> Result<String> {
     let source_rel = clean_rel(rel_path)?;
+    // An inbox file is the sorter's, and Canvas may have placed it: the row
+    // never offers one, and a caller that asked would be replacing a Canvas
+    // card by a route the record does not argue for (`upsert_proposal`).
+    if source_rel.starts_with(&format!("{INBOX_DIR}/")) {
+        bail!("'{source_rel}' is in the inbox — its card there is the way to file it");
+    }
     let name = Path::new(&source_rel)
         .file_name()
         .and_then(|n| n.to_str())
@@ -330,16 +337,24 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
         .with_context(|| format!("'{name}' carries no week in its name"))?;
     let slot = crate::units::slot_for_week(conn, class_id, week)?
         .with_context(|| format!("this course declares no week {week}"))?;
-    let dest_rel = format!("{WEEKS_DIR}/{}/{name}", slot.folder);
-    if dest_rel == source_rel {
-        bail!("'{name}' is already under {WEEKS_DIR}/{}", slot.folder);
+    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+    // Already under the week's folder at any depth: the division counts it
+    // there (SPEC §8.5), and lifting it out of a subfolder is not a filing.
+    // The row hides the action by the same rule; this is the enforcement.
+    if source_rel.starts_with(&format!("{folder_rel}/")) {
+        bail!("'{name}' is already under {folder_rel}");
     }
+    let dest_rel = format!("{folder_rel}/{name}");
     validate_dest(class_dir, &source_rel, &dest_rel)?;
     let reasoning = format!(
-        "Its name carries Week {week}. Under {WEEKS_DIR}/{}, it counts among the sources of {}.",
-        slot.folder, slot.unit_name
+        "Its name carries Week {week}. Under {folder_rel}, it counts among the sources of {}.",
+        slot.unit_name
     );
-    upsert_proposal(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning, None)?;
+    // Written or refused, never silently kept out: a row saying PROPOSED over
+    // nothing recorded is the state this guards against.
+    if !upsert_proposal(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning, None)? {
+        bail!("the proposal for '{name}' was not recorded — another card holds this file");
+    }
     Ok(dest_rel)
 }
 
@@ -989,7 +1004,7 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 }
 
 /// One pending proposal per source file — a re-proposal replaces the pending
-/// row instead of stacking. The one path all three producers take, so the rule
+/// row instead of stacking. The one path all four producers take, so the rule
 /// cannot drift between them.
 ///
 /// Canvas is the exception the sort job defers to. Where Canvas filed a file is
@@ -997,6 +1012,10 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 /// destination is an *inference* from a filename and a tree. Letting the guess
 /// replace the record is how a slide deck Canvas had placed under `Slides/`
 /// ended up proposed for a `Week 1/Slides/` that nobody had said existed.
+///
+/// A chat proposal is the reader asking, so it replaces a Canvas row. A by-name
+/// proposal is the reader clicking, and never meets one: its source is a file
+/// in the tree, and `week_filing` refuses an inbox source before this is reached.
 ///
 /// Chat is not that exception: a chat move is the user asking for one, which is
 /// a decision rather than a guess. Either way the card's own "Change
@@ -1737,6 +1756,47 @@ mod tests {
         fs::write(class_dir.join("Slides/deck.pdf"), "%PDF").expect("plain deck");
         let err = week_filing(&conn, 4, &class_dir, "Slides/deck.pdf").err().expect("no week in name");
         assert!(format!("{err:#}").contains("carries no week"), "{err:#}");
+
+        // Two files, one name, one week: the second collides once the first
+        // is filed, and is refused rather than written.
+        fs::create_dir_all(class_dir.join("Readings")).expect("readings");
+        fs::write(class_dir.join("Readings/CAI6734_Week2_Foundations.pdf"), "%PDF").expect("twin");
+        let err = week_filing(&conn, 4, &class_dir, "Readings/CAI6734_Week2_Foundations.pdf")
+            .err()
+            .expect("the destination is taken");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        // Under the week folder at any depth: the division counts it there.
+        fs::create_dir_all(class_dir.join("Weeks/Week 02/Extra")).expect("extra");
+        fs::write(class_dir.join("Weeks/Week 02/Extra/CAI6734_Week2_Notes.pdf"), "%PDF").expect("nested");
+        let err = week_filing(&conn, 4, &class_dir, "Weeks/Week 02/Extra/CAI6734_Week2_Notes.pdf")
+            .err()
+            .expect("nested under its folder");
+        assert!(format!("{err:#}").contains("already under"), "{err:#}");
+        // An inbox file is the sorter's, whatever its name says.
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        fs::write(class_dir.join(format!("{INBOX_DIR}/CAI6734_Week2_Lab.pdf")), "%PDF").expect("inbox file");
+        let err = week_filing(&conn, 4, &class_dir, &format!("{INBOX_DIR}/CAI6734_Week2_Lab.pdf"))
+            .err()
+            .expect("an inbox source");
+        assert!(format!("{err:#}").contains("in the inbox"), "{err:#}");
+        // A row clicked after the file was moved in Finder.
+        fs::remove_file(class_dir.join("Slides/deck.pdf")).expect("gone");
+        let err = week_filing(&conn, 4, &class_dir, "Slides/deck.pdf").err().expect("gone");
+        assert!(format!("{err:#}").contains("not on disk"), "{err:#}");
+        // A second click refreshes the pending row rather than stacking one.
+        fs::write(class_dir.join("Slides/CAI6734_Week3_Deck.pdf"), "%PDF").expect("week 3 deck");
+        for _ in 0..2 {
+            week_filing(&conn, 4, &class_dir, "Slides/CAI6734_Week3_Deck.pdf").expect("proposed");
+        }
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM move_proposals
+                 WHERE class_id = 4 AND source_rel_path = 'Slides/CAI6734_Week3_Deck.pdf' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(pending, 1, "one pending row per source");
         let _ = fs::remove_dir_all(&root);
     }
 }
