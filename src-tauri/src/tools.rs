@@ -619,66 +619,101 @@ fn class_block(
     let current = crate::units::current_unit(conn, class.id, today_iso)?;
     let contributions = crate::lectures::list_contributions(conn, class.id)?;
     let guides = crate::guides::list_guides(conn, class.id)?;
-    let guide_for = |scope: &str| guides.iter().find(|g| g.scope == scope);
     out.push_str(&divisions_line(&units));
     if let Some(unit) = &current {
         out.push_str(&format!("Now: {}\n", unit.name));
     }
     if detailed {
-        for unit in &units {
-            let mapped = contributions.iter().filter(|c| c.unit_id == unit.id);
-            let filed = mapped.clone().count();
-            let distilled = mapped.filter(|c| c.distilled).count();
-            let mut line = format!("- {}. {}", unit.ordinal, unit.name);
-            if let Some(starts) = &unit.starts_on {
-                line.push_str(&format!(" · from {starts}"));
-            }
-            if current.as_ref().is_some_and(|c| c.id == unit.id) {
-                line.push_str(" · NOW");
-            }
-            if let Some(folder) = &unit.rel_path {
-                line.push_str(&format!(" · folder {folder}"));
-            }
-            if filed > 0 {
-                line.push_str(&format!(" · {} ({distilled} distilled)", plural(filed, "lecture")));
-            }
-            if let Some(guide) = guide_for(&crate::guides::unit_scope(&unit.name)) {
-                line.push_str(&format!(" · guide {}", freshness(guide.stale)));
-            }
-            line.push('\n');
-            out.push_str(&line);
-        }
+        out.push_str(&division_rows(&units, current.as_ref(), &contributions, &guides));
     }
     if let (Some(start), Some(end)) = (&exam_start, &exam_end) {
         out.push_str(&format!("Final exam: {start} to {end}\n"));
     }
+    out.push_str(&lectures_block(conn, class.id, &contributions, &guides, current.as_ref(), detailed)?);
+    out.push_str(&material_line(conn, class.id)?);
+    out.push_str(&guides_line(&guides, detailed));
+    out.push_str(&waiting_block(conn, class.id, detailed)?);
+    if detailed {
+        out.push_str(&grades_line(conn, class.id)?);
+    }
+    Ok(())
+}
 
-    // Lectures: what is filed under `Weeks/` (SPEC §4), which of it the
-    // calendar mapped to a division and distilled into a corpus note (§8.5),
-    // and which session documents exist (§8.4).
-    let mut filed_stmt = conn.prepare(
+/// The detailed form's row per division: its date, `NOW`, its folder, its
+/// lecture counts and its guide's freshness.
+fn division_rows(
+    units: &[crate::units::UnitInfo],
+    current: Option<&crate::units::UnitInfo>,
+    contributions: &[crate::lectures::Contribution],
+    guides: &[crate::guides::GuideInfo],
+) -> String {
+    let mut out = String::new();
+    for unit in units {
+        let mapped = contributions.iter().filter(|c| c.unit_id == unit.id);
+        let filed = mapped.clone().count();
+        let distilled = mapped.filter(|c| c.distilled).count();
+        let mut line = format!("- {}. {}", unit.ordinal, unit.name);
+        if let Some(starts) = &unit.starts_on {
+            line.push_str(&format!(" · from {starts}"));
+        }
+        if current.is_some_and(|c| c.id == unit.id) {
+            line.push_str(" · NOW");
+        }
+        if let Some(folder) = &unit.rel_path {
+            line.push_str(&format!(" · folder {folder}"));
+        }
+        if filed > 0 {
+            line.push_str(&format!(" · {} ({distilled} distilled)", plural(filed, "lecture")));
+        }
+        let scope = crate::guides::unit_scope(&unit.name);
+        if let Some(guide) = guides.iter().find(|g| g.scope == scope) {
+            line.push_str(&format!(" · guide {}", freshness(guide.stale)));
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+/// `Lectures:` — what is filed under `Weeks/` (SPEC §4), which of it the
+/// calendar mapped to a division and distilled into a corpus note (§8.5), and
+/// which session documents exist (§8.4). The compact form counts, plus the
+/// current division's share — naming every division with a lecture would grow
+/// the line that rides every turn by the semester; the detailed form lists
+/// each lecture with its note and its session document's markdown twin.
+fn lectures_block(
+    conn: &Connection,
+    class_id: i64,
+    contributions: &[crate::lectures::Contribution],
+    guides: &[crate::guides::GuideInfo],
+    current: Option<&crate::units::UnitInfo>,
+    detailed: bool,
+) -> Result<String> {
+    let mut stmt = conn.prepare(
         "SELECT rel_path FROM files WHERE class_id = ?1 AND rel_path LIKE 'Weeks/%.md'
          ORDER BY rel_path",
     )?;
-    let filed = filed_stmt
-        .query_map([class.id], |row| row.get::<_, String>(0))?
+    let filed = stmt
+        .query_map([class_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let sessions: Vec<&crate::guides::GuideInfo> = guides.iter().filter(|g| g.session).collect();
-    let session_for = |transcript: &str| {
-        guide_for(&format!("{}{transcript}", crate::db::SESSION_SCOPE_PREFIX))
-    };
-    if filed.is_empty() && contributions.is_empty() && sessions.is_empty() {
-        out.push_str("Lectures: none filed\n");
-    } else if detailed {
+    let sessions = guides.iter().filter(|g| g.session).count();
+    let mapped = |rel_path: &str| contributions.iter().any(|c| c.rel_path == rel_path);
+    if filed.is_empty() && contributions.is_empty() && sessions == 0 {
+        return Ok("Lectures: none filed\n".to_string());
+    }
+
+    let mut out = String::new();
+    if detailed {
         out.push_str("Lectures:\n");
-        for c in &contributions {
+        for c in contributions {
             let mut line = format!("- {} · feeds {}", c.rel_path, c.unit_name);
             line.push_str(&if c.distilled {
                 format!(" · distilled to {}", c.corpus_rel_path)
             } else {
                 " · not distilled yet".to_string()
             });
-            if let Some(session) = session_for(&c.rel_path) {
+            let session_scope = format!("{}{}", crate::db::SESSION_SCOPE_PREFIX, c.rel_path);
+            if let Some(session) = guides.iter().find(|g| g.scope == session_scope) {
                 line.push_str(&format!(
                     " · session document {} ({})",
                     markdown_twin(&session.rel_path),
@@ -688,106 +723,110 @@ fn class_block(
             line.push('\n');
             out.push_str(&line);
         }
-        for rel_path in filed.iter().filter(|p| !contributions.iter().any(|c| &c.rel_path == *p)) {
+        for rel_path in filed.iter().filter(|p| !mapped(p)) {
             out.push_str(&format!("- {rel_path} · mapped to no division\n"));
         }
-    } else {
-        // Counts only, plus the current division's share: the compact form
-        // rides every turn, and naming every division that has a lecture
-        // would grow it by the semester. The detailed form names them.
-        let distilled = contributions.iter().filter(|c| c.distilled).count();
-        let mut line = format!(
-            "Lectures: {} filed, {distilled} distilled, {}",
-            filed.len().max(contributions.len()),
-            plural(sessions.len(), "session document")
-        );
-        if let Some(unit) = &current {
-            let here: Vec<_> = contributions.iter().filter(|c| c.unit_id == unit.id).collect();
-            if !here.is_empty() {
-                line.push_str(&format!(
-                    " · {} in the current division ({} distilled)",
-                    here.len(),
-                    here.iter().filter(|c| c.distilled).count()
-                ));
-            }
-        }
-        let unmapped = filed
-            .iter()
-            .filter(|p| !contributions.iter().any(|c| &c.rel_path == *p))
-            .count();
-        if unmapped > 0 {
-            line.push_str(&format!(" · {unmapped} mapped to no division"));
-        }
-        line.push('\n');
-        out.push_str(&line);
+        return Ok(out);
     }
 
+    let distilled = contributions.iter().filter(|c| c.distilled).count();
+    out.push_str(&format!(
+        "Lectures: {} filed, {distilled} distilled, {}",
+        filed.len().max(contributions.len()),
+        plural(sessions, "session document")
+    ));
+    if let Some(unit) = current {
+        let here: Vec<_> = contributions.iter().filter(|c| c.unit_id == unit.id).collect();
+        if !here.is_empty() {
+            out.push_str(&format!(
+                " · {} in the current division ({} distilled)",
+                here.len(),
+                here.iter().filter(|c| c.distilled).count()
+            ));
+        }
+    }
+    let unmapped = filed.iter().filter(|p| !mapped(p)).count();
+    if unmapped > 0 {
+        out.push_str(&format!(" · {unmapped} mapped to no division"));
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+/// `Material:` — how much is indexed and extracted, and the depth-0 folders
+/// holding it, named as folders: a folder is where material sits, not one of
+/// the course's divisions (SPEC §7.2).
+fn material_line(conn: &Connection, class_id: i64) -> Result<String> {
     let (indexed, extracted): (i64, i64) = conn.query_row(
         "SELECT COUNT(*),
                 SUM(CASE WHEN extracted_sha256 IS NOT NULL
                           AND extracted_sha256 = sha256 THEN 1 ELSE 0 END)
          FROM files WHERE class_id = ?1",
-        [class.id],
+        [class_id],
         |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
     )?;
-    let folders = folder_counts(conn, class.id)?;
-    let folder_list = folders
+    let folders = folder_counts(conn, class_id)?
         .iter()
         .map(|(name, count)| format!("{name} ({count})"))
         .collect::<Vec<_>>()
         .join(", ");
-    out.push_str(&format!(
+    Ok(format!(
         "Material: {indexed} files indexed, {extracted} with a current extract{}\n",
-        if folder_list.is_empty() {
+        if folders.is_empty() {
             " · no folders yet".to_string()
         } else {
-            format!(" · folders: {folder_list}")
+            format!(" · folders: {folders}")
         }
-    ));
+    ))
+}
 
+/// `Guides:` — every scope with its staleness; the detailed form adds the
+/// path and the age. A session document is named for what the session was
+/// about, which its scope (the transcript's path) is not.
+fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
     if guides.is_empty() {
-        out.push_str("Guides: none generated yet\n");
-    } else {
-        let now_ts = now();
-        let described = guides
-            .iter()
-            .map(|g| {
-                // A session document is named for what the session was
-                // about, which its scope (the transcript's path) is not.
-                let scope = if g.session {
-                    format!("session {}", document_stem(&g.rel_path))
-                } else {
-                    crate::guides::scope_label(&g.scope)
-                };
-                if detailed {
-                    format!(
-                        "{scope} — {} ({}, {})",
-                        freshness(g.stale),
-                        g.rel_path,
-                        days_ago(now_ts, g.generated_at)
-                    )
-                } else {
-                    format!("{scope} ({})", freshness(g.stale))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        out.push_str(&format!("Guides: {described}\n"));
+        return "Guides: none generated yet\n".to_string();
     }
+    let now_ts = now();
+    let described = guides
+        .iter()
+        .map(|g| {
+            let scope = if g.session {
+                format!("session {}", document_stem(&g.rel_path))
+            } else {
+                crate::guides::scope_label(&g.scope)
+            };
+            if detailed {
+                format!(
+                    "{scope} — {} ({}, {})",
+                    freshness(g.stale),
+                    g.rel_path,
+                    days_ago(now_ts, g.generated_at)
+                )
+            } else {
+                format!("{scope} ({})", freshness(g.stale))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("Guides: {described}\n")
+}
 
-    // Both confirm queues (SPEC §10, §11), so the model can say what waits
-    // and where. Ids in the detailed form only: chat has no tool that acts
-    // on a proposal, so an id is something to name, not something to press.
-    // The move rows are read directly rather than through `sort_state`: the
-    // vanish pass already ran for every class at the top of the overview,
-    // and the inbox listing it would also produce is not shown here.
-    let deadline_proposals = crate::deadlines::pending_proposals(conn, class.id)?;
-    let mut move_stmt = conn.prepare(
+/// `Waiting:` — both confirm queues (SPEC §10, §11), so the model can say
+/// what waits and where; nothing when nothing does. Ids in the detailed form
+/// only: chat has no tool that acts on a proposal, so an id is something to
+/// name, not something to press. The move rows are read directly rather than
+/// through `sort_state`: the vanish pass already ran for every class at the
+/// top of the overview, and the inbox listing it would also produce is not
+/// shown here.
+fn waiting_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<String> {
+    let deadlines = crate::deadlines::pending_proposals(conn, class_id)?;
+    let mut stmt = conn.prepare(
         "SELECT id, source_rel_path, dest_rel_path, source FROM move_proposals
          WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
     )?;
-    let move_proposals = move_stmt
-        .query_map([class.id], |row| {
+    let moves = stmt
+        .query_map([class_id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -796,41 +835,37 @@ fn class_block(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !deadline_proposals.is_empty() || !move_proposals.is_empty() {
-        if detailed {
-            out.push_str("Waiting for approval:\n");
-            for p in &deadline_proposals {
-                out.push_str(&format!(
-                    "- deadline proposal #{} · {} ({}) due {} · from {}\n",
-                    p.id,
-                    p.title,
-                    p.kind,
-                    p.due_at,
-                    proposer(&p.source)
-                ));
-            }
-            for (id, from, to, source) in &move_proposals {
-                out.push_str(&format!(
-                    "- move proposal #{id} · {from} → {to} · from {}\n",
-                    proposer(source)
-                ));
-            }
-        } else {
-            let mut waiting = Vec::new();
-            if !move_proposals.is_empty() {
-                waiting.push(plural(move_proposals.len(), "file move proposal"));
-            }
-            if !deadline_proposals.is_empty() {
-                waiting.push(plural(deadline_proposals.len(), "deadline proposal"));
-            }
-            out.push_str(&format!("Waiting: {}\n", waiting.join(", ")));
+    if deadlines.is_empty() && moves.is_empty() {
+        return Ok(String::new());
+    }
+    if !detailed {
+        let mut waiting = Vec::new();
+        if !moves.is_empty() {
+            waiting.push(plural(moves.len(), "file move proposal"));
         }
+        if !deadlines.is_empty() {
+            waiting.push(plural(deadlines.len(), "deadline proposal"));
+        }
+        return Ok(format!("Waiting: {}\n", waiting.join(", ")));
     }
-
-    if detailed {
-        out.push_str(&grades_line(conn, class.id)?);
+    let mut out = String::from("Waiting for approval:\n");
+    for p in &deadlines {
+        out.push_str(&format!(
+            "- deadline proposal #{} · {} ({}) due {} · from {}\n",
+            p.id,
+            p.title,
+            p.kind,
+            p.due_at,
+            proposer(&p.source)
+        ));
     }
-    Ok(())
+    for (id, from, to, source) in &moves {
+        out.push_str(&format!(
+            "- move proposal #{id} · {from} → {to} · from {}\n",
+            proposer(source)
+        ));
+    }
+    Ok(out)
 }
 
 /// `Divisions: 14 weeks from the syllabus` — the course's own word where every
