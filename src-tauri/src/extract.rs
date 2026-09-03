@@ -12,6 +12,7 @@
 //! source rel path with `.md` appended under `.classhub/extracts/` (SPEC §4).
 
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -268,19 +269,54 @@ fn record(
 // ---------------------------------------------------------------------------
 // Local (zero-token) extraction
 
+/// Largest source a local route reads whole. A notebook carries every figure
+/// as base64 and the read is copied twice before it is parsed, so past this a
+/// file is skipped with a logged reason rather than taking the pipeline
+/// thread down with it; it stays stale, and the log says why. A CSV is not
+/// read whole at all.
+const MAX_LOCAL_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The file as text, CRLF normalized, refused above `cap` bytes.
+fn read_text(source: &Path, input_rel: &str, cap: u64) -> Result<String> {
+    let len = fs::metadata(source)
+        .with_context(|| format!("reading {input_rel}"))?
+        .len();
+    if len > cap {
+        bail!(
+            "{input_rel} is {:.0} MB — too large to extract locally (the cap is {} MB)",
+            len as f64 / 1_048_576.0,
+            cap / 1_048_576
+        );
+    }
+    let raw = fs::read(source).with_context(|| format!("reading {input_rel}"))?;
+    Ok(String::from_utf8_lossy(&raw).replace("\r\n", "\n"))
+}
+
+/// The file line by line, each decoded on its own, so a dataset of any size
+/// costs one line of memory at a time.
+fn text_lines(source: &Path, input_rel: &str) -> Result<impl Iterator<Item = String>> {
+    let file = fs::File::open(source).with_context(|| format!("reading {input_rel}"))?;
+    Ok(std::io::BufReader::new(file)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim_end_matches('\r').to_string()))
+}
+
 /// `input_rel` is the file read — the source itself, or for a DOCX the HTML
 /// LibreOffice made of it — while the extract lands at `extract_rel`.
 fn extract_local(class_dir: &Path, input_rel: &str, extract_rel: &str, how: &Route) -> Result<()> {
-    let raw = fs::read(class_dir.join(input_rel))
-        .with_context(|| format!("reading {input_rel}"))?;
-    let text = String::from_utf8_lossy(&raw).replace("\r\n", "\n");
+    let source = class_dir.join(input_rel);
     let mut content = match how {
-        Route::Html => strip_html(&text),
-        Route::Notebook => crate::notebook::flatten(&text)?,
-        Route::Csv => cap_csv(&text),
+        // Streamed: the cap is known before the file is opened.
+        Route::Csv => cap_csv(text_lines(&source, input_rel)?),
+        Route::Html => strip_html(&read_text(&source, input_rel, MAX_LOCAL_BYTES)?),
+        Route::Notebook => {
+            crate::notebook::flatten(&read_text(&source, input_rel, MAX_LOCAL_BYTES)?)?
+        }
         // A raw caption track is thousands of two-second fragments. What the
         // agent should search is the merged prose, not the timing grid.
         Route::Caption => {
+            let text = read_text(&source, input_rel, MAX_LOCAL_BYTES)?;
             let name = Path::new(input_rel)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -297,7 +333,7 @@ fn extract_local(class_dir: &Path, input_rel: &str, extract_rel: &str, how: &Rou
                 },
             )
         }
-        Route::Text => text,
+        Route::Text => read_text(&source, input_rel, MAX_LOCAL_BYTES)?,
         // Named rather than caught by a catch-all, so a new local route has
         // to say what it does — and refused, so a caller that hands the
         // source of a converted format here gets an error rather than the
@@ -318,20 +354,29 @@ fn extract_local(class_dir: &Path, input_rel: &str, extract_rel: &str, how: &Rou
 
 /// Lines of a CSV kept in its extract. An extract exists to be searched — the
 /// header and the shape of the rows are what a question about the data needs —
-/// not to hold the dataset; the rest stays in the source.
+/// not to hold the dataset; the rest stays in the source. These are physical
+/// lines, so a quoted field holding a newline can be cut mid-record at the
+/// boundary; for an index whose note says where the source takes over, that
+/// is acceptable.
 const MAX_CSV_LINES: usize = 300;
 
-fn cap_csv(text: &str) -> String {
-    let total = text.lines().count();
-    if total <= MAX_CSV_LINES {
-        return text.to_string();
+fn cap_csv(lines: impl IntoIterator<Item = String>) -> String {
+    let mut kept: Vec<String> = Vec::with_capacity(MAX_CSV_LINES);
+    let mut total = 0usize;
+    for line in lines {
+        total += 1;
+        if kept.len() < MAX_CSV_LINES {
+            kept.push(line);
+        }
     }
-    let mut out = text.lines().take(MAX_CSV_LINES).collect::<Vec<_>>().join("\n");
-    out.push_str(&format!(
-        "\n\n… {} more lines not extracted ({total} in the file, header included) — \
-         read the source for the rest.",
-        total - MAX_CSV_LINES
-    ));
+    let mut out = kept.join("\n");
+    if total > MAX_CSV_LINES {
+        out.push_str(&format!(
+            "\n\n… {} more lines not extracted ({total} in the file, header included) — \
+             read the source for the rest.",
+            total - MAX_CSV_LINES
+        ));
+    }
     out
 }
 
@@ -356,7 +401,7 @@ fn strip_html(html: &str) -> String {
     let mut pre_depth = 0usize;
     // A newline seen in prose, owed as one space before the next word.
     let mut soft_break = false;
-    let mut emit = |text: &str, out: &mut String, in_pre: bool, soft_break: &mut bool| {
+    let emit = |text: &str, out: &mut String, in_pre: bool, soft_break: &mut bool| {
         let mut decoded = String::new();
         decode_entities(text, &mut decoded);
         if in_pre {
@@ -789,7 +834,7 @@ mod tests {
         for i in 1..=1_000 {
             text.push_str(&format!("{i},{},{}\n", 20 + i % 60, i % 2));
         }
-        let capped = cap_csv(&text);
+        let capped = cap_csv(text.lines().map(String::from));
         let lines: Vec<&str> = capped.lines().collect();
         assert_eq!(lines[0], "id,age,outcome");
         assert_eq!(lines[MAX_CSV_LINES - 1], "299,79,1");
@@ -799,6 +844,26 @@ mod tests {
             "… 701 more lines not extracted (1001 in the file, header included) — read the source for the rest."
         );
         assert!(!capped.contains("\n300,"), "{capped}");
+    }
+
+    /// The cap on a whole-file read is what keeps one oversized notebook from
+    /// taking the pipeline thread with it; a CSV never goes through it.
+    #[test]
+    fn a_source_past_the_local_cap_is_refused_and_a_csv_is_streamed() {
+        let dir = std::env::temp_dir().join(format!("classhub-local-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.py");
+        std::fs::write(&big, "x = 1\r\n".repeat(4)).unwrap();
+        let err = super::read_text(&big, "big.py", 10).unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err:#}");
+        assert_eq!(super::read_text(&big, "big.py", 1024).unwrap(), "x = 1\n".repeat(4));
+
+        let csv = dir.join("data.csv");
+        std::fs::write(&csv, "a,b\r\n1,2\r\n3,4\r\n").unwrap();
+        let lines: Vec<String> = super::text_lines(&csv, "data.csv").unwrap().collect();
+        assert_eq!(lines, ["a,b", "1,2", "3,4"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The sorter moves a source's whole mirror by this list; a conversion
@@ -816,8 +881,8 @@ mod tests {
 
     #[test]
     fn a_csv_within_the_cap_is_kept_whole() {
-        let text = "a,b\n1,2\n3,4\n";
-        assert_eq!(cap_csv(text), text);
+        let lines = ["a,b", "1,2", "3,4"].map(String::from);
+        assert_eq!(cap_csv(lines), "a,b\n1,2\n3,4");
     }
 
     /// What the viewer's PDF frame is given: the PDF, or a deck's twin only
