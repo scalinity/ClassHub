@@ -3781,3 +3781,13 @@ frontend files are staged. What future sessions should know:
   orphan the feature removes.
 - **Tests**: 234 pass, three new; `npx tsc --noEmit` clean. Nothing was
   pushed.
+
+### Gotchas
+
+- `npm run install-app` ran from the session for the first time and produced
+  a newer bundle: efc8505 at `/Applications/ClassHub.app`, the binary dated
+  thirty seconds after the commit, relaunched on the shared database. The
+  installed app is no longer the Aug 25 build.
+- The reviewers' reports arrive truncated near 4,000 characters; asking each
+  for the Verdict and a numbered index first, then the rest by section, took
+  one follow-up message per agent.
