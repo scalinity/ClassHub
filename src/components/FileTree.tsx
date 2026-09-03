@@ -132,14 +132,18 @@ function DirNode({
   const isCollapsed = collapsed.has(node.relPath);
   const isModule = depth === 0;
   const fileCount = countFiles(node.children);
-  // A folder is a guide's scope when it is named as a division is (`Module
-  // 1`), or once a guide has been built for it, so nothing built goes
-  // unreachable. `Weeks`, `Slides` and `Syllabus` are storage: what they hold
-  // reaches a guide through the division that reads it (SPEC §8.3).
-  const offersGuide =
-    isModule &&
-    guideControls !== undefined &&
-    (node.labelled === true || guideControls.guides.has(node.relPath));
+  // A top-level folder's row carries the guide cluster when the folder is
+  // named as a division is (`Module 1`), or once a guide exists or a job is
+  // running for it, so nothing built or in flight goes unreachable. `Weeks`,
+  // `Slides` and `Syllabus` are storage: what they hold reaches a guide
+  // through the division that reads it (SPEC §8.3). A folder named some other
+  // way — `Unit 1`, `Module 0` — is still a scope chat can ask for by name,
+  // and the guide that puts on its row is what brings the cluster back.
+  const offersGuide = (controls: ModuleGuideControls) =>
+    node.labelled === true ||
+    controls.guides.has(node.relPath) ||
+    controls.activeScopes.has(node.relPath) ||
+    controls.activePracticeScopes.has(node.relPath);
 
   return (
     <div className={isModule ? "not-first:mt-3" : undefined}>
@@ -169,7 +173,7 @@ function DirNode({
             {node.name}
           </span>
         </button>
-        {offersGuide && guideControls && (
+        {isModule && guideControls && offersGuide(guideControls) && (
           <GuideCluster scope={node.relPath} controls={guideControls} />
         )}
         {isModule && (
@@ -201,11 +205,12 @@ function DirNode({
 }
 
 /**
- * SPEC §8.1 / M5: per-module guide state. Synthesis is manual only; staleness
- * is always visible, the token-costing resynthesize action stays quiet until
- * the guide is actually stale. The practice exam (SPEC §8.3) sits beside the
- * guide in every state — a folder with files is always something to be
- * examined on, whether or not a guide has been built from it.
+ * SPEC §8.1 / §8.3: a folder guide's state, on the rows `DirNode` offers it —
+ * a top-level folder named as a division is, or one with a guide or a job
+ * already. Synthesis is manual only; staleness is always visible, the
+ * token-costing resynthesize action stays quiet until the guide is actually
+ * stale. The practice exam draws on the same sources, so it sits beside the
+ * guide in every state the cluster appears in.
  */
 function GuideCluster({
   scope,
