@@ -985,7 +985,8 @@ and apply it. Non-negotiable per project owner.
   scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
   a Jupyter notebook as its extract, and a PDF — or a slide deck, through its converted
   twin — in WebKit's own PDF view framed over the asset protocol (§13); a deck whose twin
-  is missing or out of date opens in its default app instead)
+  is missing or out of date, and a notebook whose extract the index does not yet hold,
+  open in their default app instead)
   · Chat sidebar (global, overlays right side, keyboard shortcut) · Job Center (bottom bar
   pill expanding to a panel with live logs) · Settings.
 - Empty states matter: a class with no modules yet (3 of 4 classes today) shows a friendly

@@ -2318,3 +2318,71 @@ What future sessions should know:
   and the extract columns set with it.
 - `cd src-tauri` persists across Bash calls; two later commands with
   relative paths failed on it.
+
+## Post-M20 — Review fixes (2026-09-03)
+
+A two-agent review of the M20 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 0 critical, 7 warnings
+and 8 suggestions, 2 of the warnings corroborated by both reviewers; all
+were addressed as individual commits. What future sessions should know:
+
+- **The docx twin was being searched.** `search_material` greps the whole
+  extracts mirror, where `<name>.docx.html` (3.9 MB, every figure a base64
+  line) sits beside `<name>.docx.md`; the live M20 chat turn's "12 matching
+  lines in 2 files" was one document matched twice. `run_rg` now skips
+  `*.docx.html` the way it skips a session document's HTML copy, and
+  `read_material` turns a twin path into a pointer at the extract.
+- **The sorter moves the whole mirror.** `update_index` and
+  `undo_artifact_moves` named `.md`, `.pdf` and `.pdf.sha256`, so an
+  approved move of a docx would have orphaned its twin and sidecar.
+  `extract::MIRROR_SUFFIXES` holds the list beside the `Conversion`
+  constants, and a test asserts every conversion's twin and sidecar are in
+  it.
+- **A notebook opens what the index holds.** The tree node carries
+  `extractRelPath` — the row's `extract_rel_path` when `extracted_sha256`
+  equals the file's current hash — and the workspace opens a notebook as
+  that, or in its default app when there is none yet, the rule an
+  unconverted deck already followed. The frontend's copy of the mirror
+  rule (`extractPath`) is gone. `pdf_view_path` answers `None` for a deck
+  with no current twin and keeps errors for failures; the workspace shows
+  those under the Materials heading (`COULD NOT OPEN … —`) through the
+  state now called `materialsError`, instead of opening the default app as
+  if nothing had gone wrong.
+- **Local reads are bounded.** `read_text` refuses a source above 32 MB
+  with a logged reason (it stays stale), and a CSV never goes through it:
+  `text_lines` streams the file so the 300-line cap costs one line at a
+  time. `cap_csv` takes an iterator. The cap counts physical lines, which
+  its doc comment now says.
+- **`extract_local` refuses what it cannot do.** The `Pdf`, `Pptx`, `Docx`
+  and `Skip` arms bail instead of returning the raw text as the extract.
+- **The notebook flattener**: one output budget per cell rather than per
+  output (three 30-line streams are one cell that printed ninety; each
+  dropped output names its own remainder), fences one backtick longer than
+  any run inside the block, and an error output with neither name nor
+  message skipped. `ConversionPaths` names what was a positional triple.
+- **DOCX conversion egress, measured.** A docx whose only image was an
+  external `http` relationship converted headless with `EmbedImages` to an
+  `<img>` with an empty payload; a listener that logged a request before
+  and after the run saw nothing from LibreOffice. Recorded in SPEC §13
+  beside the PDF measurement; no profile setting was needed.
+- SPEC §13's asset-scope bullet now says why a left root stays allowed
+  until relaunch (a forbid would also cover a new root chosen inside the
+  old one, and cannot be lifted without a relaunch), and §12 says a
+  notebook without an indexed extract opens in its default app. The
+  `read_material` tool description names `.docx` and `.ipynb` beside
+  `.pptx` and `.pdf`, as the system prompt already did.
+- **Tests**: `route` and `kind_for` table tests (the two dispatch
+  functions had none), the mirror-suffix invariant, the read cap and the
+  streamed CSV, the per-cell budget, the fence growth, the empty error
+  output, and `pdf_view_path`'s `None`/error split. `cargo test`: 177
+  pass, no warnings. `npx tsc --noEmit` clean.
+- **Live**, on a rebuilt dev build (pid 32574) with the fixture notebook
+  placed back in Design Studio before the launch scan: the notebook row
+  opened as `MATERIAL · NOTEBOOK EXTRACT` from the node's indexed extract
+  path, the reading PDF as `MATERIAL · PDF`, the deck as `MATERIAL · SLIDES
+  AS PDF`; the fixture was removed and the class rescanned before the
+  commit, and the jobs table still ends at id 293.
+- The first attempt at two of these commits landed with a compile error
+  because a `grep` in the commit pipeline masked `cargo test`'s exit code;
+  both were reset and remade once the missing `BufRead` import was in.
+  Nothing was pushed: the repo has no remote.
