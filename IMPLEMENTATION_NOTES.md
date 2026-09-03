@@ -3957,3 +3957,61 @@ an ignored probe test in `guides.rs`, under the code at b6f5578:
   file redirect is what made the claims count measurable.
 - A capture window on a UF cloud recording needed no sign-in for the third
   time; the `waiting → fetching → ready` timings match §1's.
+
+## Post-M27 — Review fixes (2026-09-03)
+
+A two-agent review of the M27 changeset since b6f5578 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, six warnings and nine suggestions, two warnings and two suggestions
+raised by both reviewers. Each was addressed as its own commit through
+`scripts/gate.sh`. What future sessions should know:
+
+- **A row's PROPOSED is the queue's fact** (both reviewers). The label was
+  local state nothing cleared: a DISMISS emits only `proposals`, the tree
+  never refetches, and a row keyed on an unchanged path kept saying
+  PROPOSED over an empty inbox. The workspace reads `sortState` — the query
+  the queue renders — and passes the pending sources down; the row derives
+  the label, so a dismissal restores the button and a card left pending
+  from an earlier session shows as pending. A refused filing is a line
+  under the row, not a tooltip; the prefix test uses `WEEKS_DIR`.
+- **The form waits for the schedule** (both reviewers). The copy branched
+  on an empty slot list while the button waited for the query, so a course
+  with weeks read "declares no weeks yet" for a round trip, and for good
+  when the command failed. Copy and button share the gate now, with a
+  reading line and the error when there is one.
+- **`week_filing` enforces its own preconditions.** It refused only the
+  exact destination path while the row hid the action at any depth under
+  the week folder; it accepted an inbox source, which would have replaced
+  a Canvas card by a route nothing argued for; and it dropped
+  `upsert_proposal`'s flag. All three are refusals now, and the by-name
+  suggestion to carry Canvas's folder in the reason is settled by the
+  inbox rule: a by-name row never meets a Canvas card, which
+  `upsert_proposal`'s doc and SPEC §10 say. Tests cover the destination
+  collision, a nested source, an inbox source, a file gone from disk and a
+  second click.
+- **A hyphenated range carries no week.** `Week 1-3 review.pdf` read as
+  week 1; a number followed by a range separator and a second number now
+  carries none. Tested with a second-candidate case (`Week 2026 Week 3`)
+  and an overlapping Part range claimed once for the earlier Part.
+- **Chat knows `by_name`**: `proposer()` read "an unknown reader" for a
+  by-name card — the fourth reader of `move_proposals.source`, beside the
+  queue chip, `upsert_proposal`'s Canvas rule and the audit payload; a grep
+  for the other source literals is the check when a fifth value arrives.
+- **A claim is reported by the pass that wrote a row**: an unchanged rescan
+  or a launch sync no longer repeats a claim decided earlier.
+- The implied `slot.is_none()` conjunct went; the walk test is named for
+  the week it asserts; the shared-key and source-union comments say what
+  is true.
+- **Not changed.** The workspace reads slots through the form's
+  `lecture_weeks` command and ignores its default week: reusing the
+  command beats adding one. The sorter test builds its temp root inline.
+- **Tests**: 238 pass, one new; `npx tsc --noEmit` clean. Nothing was
+  pushed.
+
+### Gotchas
+
+- The reviewers' reports arrive at the next turn, truncated near 4,000
+  characters; the Verdict-and-index-first request worked, and each section
+  came in its own message.
+- `TaskOutput` does not know a named teammate; their replies are delivered
+  as messages, so a turn has to end for them to arrive.

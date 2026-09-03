@@ -1199,7 +1199,9 @@ its meetings.
    naming the division that reads the folder; the card carries a `BY NAME` chip and is
    approved, redirected or left like any other, and approval is the ordinary move, so the
    extract travels with the file and nothing is re-extracted. Explicit by design: Canvas may
-   have placed the file where it is (§7.2), and an automatic sort never overrides that.
+   have placed the file where it is (§7.2), and an automatic sort never overrides that. Its
+   source is a file in the tree, never one in `_Inbox/`, so a by-name row never replaces a
+   Canvas card; a file already under its week folder, at any depth, is refused.
 
 ## 11. Hub features
 
