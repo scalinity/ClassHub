@@ -4,7 +4,7 @@
 //! auth env vars stripped (SPEC §1), raw stream-json persisted to a log file, and
 //! condensed progress forwarded to the frontend via `job://{id}/progress` events.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::PathBuf;
@@ -319,13 +319,17 @@ fn record_contract_breach(app: &AppHandle, job: &QueuedJob, touched: &[String]) 
     }
 }
 
-/// The audit actions that record the app itself writing into a class folder,
-/// with the payload keys naming the class-relative paths it wrote. The write
-/// guard reads these to tell the app's own moves apart from a job's; an app
-/// write into source material that is not on this list is one the guard will
+/// The audit action for an app move, whose `from` and `to` the write guard
+/// reads as a pair: the file left `from`, and what sits at `to` is the app's
+/// only while it still carries the signature it had at `from`.
+const APP_MOVE: &str = "sort.move";
+
+/// The other audit actions that record the app itself writing into a class
+/// folder, with the payload keys naming the class-relative paths it wrote. The
+/// guard reads these to tell the app's own writes apart from a job's; an app
+/// write into source material that is on neither list is one the guard will
 /// pin on whichever job was running.
 const APP_WRITES: &[(&str, &[&str])] = &[
-    ("sort.move", &["from", "to"]),
     ("sort.staged", &["staged"]),
     ("canvas.staged_file", &["source"]),
     ("lecture.added", &["relPath"]),
@@ -333,33 +337,64 @@ const APP_WRITES: &[(&str, &[&str])] = &[
     ("ui.write_note", &["relPath"]),
 ];
 
+/// What the app recorded doing to a path inside the guard's window.
+#[derive(Debug, PartialEq)]
+enum AppWrite {
+    /// The app created, rewrote or removed the file there: the path is the
+    /// app's whatever it looks like after the run.
+    Wrote,
+    /// The app moved a file here from the named path. Exclusion holds only
+    /// while the file still has the signature it had there — a job that
+    /// rewrote it afterwards is a job that wrote a source, and a rename does
+    /// not change size or mtime.
+    MovedFrom(String),
+}
+
 /// Every path the app recorded writing in `class_id`'s folder since `since`,
-/// read out of the audit log — the set the write-scope guard subtracts from a
+/// read out of the audit log — what the write-scope guard subtracts from a
 /// job's touched list (SPEC §6).
-fn app_written_paths(conn: &Connection, class_id: i64, since: i64) -> Result<HashSet<String>> {
-    let actions: Vec<&str> = APP_WRITES.iter().map(|(action, _)| *action).collect();
-    let placeholders = actions
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 2))
-        .collect::<Vec<_>>()
-        .join(", ");
+fn app_written_paths(
+    conn: &Connection,
+    class_id: i64,
+    since: i64,
+) -> Result<HashMap<String, AppWrite>> {
+    use rusqlite::types::Value;
+    let actions = std::iter::once(APP_MOVE).chain(APP_WRITES.iter().map(|(action, _)| *action));
+    // `since` is whole seconds, and the comparison is inclusive on purpose: a
+    // row stamped in the same second as the fingerprint, but before it, can
+    // only exclude a path the app also wrote — it widens, never narrows.
+    let mut params = vec![Value::Integer(since), Value::Integer(class_id)];
+    params.extend(actions.map(|action| Value::Text(action.to_string())));
+    let placeholders = vec!["?"; params.len() - 2].join(", ");
+    // The class is filtered in SQL so a note row's replaced content — up to a
+    // megabyte — is not parsed for a class the job is not in. json_extract
+    // raises on a payload that is not JSON, and CASE is the one construct
+    // guaranteed not to reach it for such a row.
     let mut stmt = conn.prepare(&format!(
         "SELECT action, payload FROM audit_log
-         WHERE created_at >= ?1 AND action IN ({placeholders})"
+         WHERE created_at >= ?
+           AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.classId') END = ?
+           AND action IN ({placeholders})"
     ))?;
-    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&since];
-    params.extend(actions.iter().map(|a| a as &dyn rusqlite::ToSql));
-    let rows = stmt.query_map(params.as_slice(), |row| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
-    let mut paths = HashSet::new();
+    let mut writes: HashMap<String, AppWrite> = HashMap::new();
     for row in rows {
         let (action, payload) = row?;
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
             continue;
         };
-        if payload["classId"].as_i64() != Some(class_id) {
+        if action == APP_MOVE {
+            if let (Some(from), Some(to)) = (payload["from"].as_str(), payload["to"].as_str()) {
+                // A path a file left is the app's outright, and stays so if a
+                // later move brought another file through it; a path a file
+                // arrived at is the app's only under the signature rule.
+                writes.insert(from.to_string(), AppWrite::Wrote);
+                writes
+                    .entry(to.to_string())
+                    .or_insert_with(|| AppWrite::MovedFrom(from.to_string()));
+            }
             continue;
         }
         let Some((_, keys)) = APP_WRITES.iter().find(|(a, _)| *a == action) else {
@@ -368,22 +403,42 @@ fn app_written_paths(conn: &Connection, class_id: i64, since: i64) -> Result<Has
         for key in *keys {
             match &payload[*key] {
                 serde_json::Value::String(path) => {
-                    paths.insert(path.clone());
+                    writes.insert(path.clone(), AppWrite::Wrote);
                 }
                 serde_json::Value::Array(list) => {
-                    paths.extend(list.iter().filter_map(|v| v.as_str().map(str::to_string)));
+                    for path in list.iter().filter_map(|v| v.as_str()) {
+                        writes.insert(path.to_string(), AppWrite::Wrote);
+                    }
                 }
                 _ => {}
             }
         }
     }
-    Ok(paths)
+    Ok(writes)
 }
 
 /// The touched list with the app's own recorded writes taken out. What is left
-/// is the job's.
-fn excluding_app_writes(mut touched: Vec<String>, app_writes: &HashSet<String>) -> Vec<String> {
-    touched.retain(|path| !app_writes.contains(path));
+/// is the job's. A path the app moved a file to is excluded only while the
+/// file still carries the signature it had where it came from; the two
+/// fingerprints are the run's before and after pictures.
+fn excluding_app_writes(
+    mut touched: Vec<String>,
+    app_writes: &HashMap<String, AppWrite>,
+    before: &HashMap<String, (u64, i64)>,
+    after: &HashMap<String, (u64, i64)>,
+) -> Vec<String> {
+    touched.retain(|path| match app_writes.get(path) {
+        None => true,
+        Some(AppWrite::Wrote) => false,
+        Some(AppWrite::MovedFrom(from)) => match before.get(from) {
+            // The move alone leaves that signature intact at the new path;
+            // anything else there is the job's.
+            Some(signature) => after.get(path) != Some(signature),
+            // The file arrived during the window — a drop, a download —
+            // under a row of its own, so there is nothing to compare.
+            None => false,
+        },
+    });
     touched
 }
 
@@ -997,10 +1052,8 @@ fn run_job(
 
     // Runs whatever the outcome: a cancelled or failed run had the same tools.
     if let (Some(dir), Some(before)) = (guarded_dir.as_deref(), before) {
-        let mut touched = crate::scanner::diff_fingerprints(
-            &before,
-            &crate::scanner::fingerprint_sources(dir),
-        );
+        let after = crate::scanner::fingerprint_sources(dir);
+        let mut touched = crate::scanner::diff_fingerprints(&before, &after);
         // The app itself moves files while a job runs — an approved sort, a
         // drop, a lecture filed into Weeks/ — and none of that is the job's
         // doing. Each of those writes an audit row, and the row is what
@@ -1016,7 +1069,7 @@ fn run_job(
             match app_writes {
                 Ok(Some(app_writes)) => {
                     let seen = touched.len();
-                    touched = excluding_app_writes(touched, &app_writes);
+                    touched = excluding_app_writes(touched, &app_writes, &before, &after);
                     if touched.len() < seen {
                         // The only trace the exclusion leaves: a demotion that
                         // did not happen is invisible otherwise.
@@ -1980,7 +2033,7 @@ mod tests {
     use super::{
         app_written_paths, excluding_app_writes, insert_unique_job, is_orphan, parse_entries,
         parse_object, process_alive, recover_orphans, standing_self_check, unescape_fragment,
-        wait_bounded,
+        wait_bounded, AppWrite,
     };
     use crate::db::now;
     use std::fs;
@@ -2271,10 +2324,14 @@ mod tests {
         let before = crate::scanner::fingerprint_sources(&dir);
 
         // The window: the app approves a move, a job also rewrites a source.
+        // The rewrite changes the length on purpose — mtime is whole seconds,
+        // so a same-length rewrite inside the same second would go unseen by
+        // the fingerprint itself, which is not what this test is about.
         fs::rename(dir.join("_Inbox/deck.pdf"), dir.join("Module 1/deck.pdf")).unwrap();
         fs::write(dir.join("Module 1/notes.md"), "rewritten by the job").unwrap();
-        let touched =
-            crate::scanner::diff_fingerprints(&before, &crate::scanner::fingerprint_sources(&dir));
+        let after = crate::scanner::fingerprint_sources(&dir);
+        assert_ne!(before["Module 1/notes.md"].0, after["Module 1/notes.md"].0);
+        let touched = crate::scanner::diff_fingerprints(&before, &after);
         assert_eq!(
             touched,
             vec!["Module 1/deck.pdf", "Module 1/notes.md", "_Inbox/deck.pdf"]
@@ -2282,7 +2339,10 @@ mod tests {
 
         // No row yet: the rename is the job's as far as the guard can tell.
         let none = app_written_paths(&conn, 1, window_start).unwrap();
-        assert_eq!(excluding_app_writes(touched.clone(), &none), touched);
+        assert_eq!(
+            excluding_app_writes(touched.clone(), &none, &before, &after),
+            touched
+        );
 
         // The app's row clears both halves of the rename and nothing else.
         crate::db::audit(
@@ -2296,9 +2356,20 @@ mod tests {
         .unwrap();
         let writes = app_written_paths(&conn, 1, window_start).unwrap();
         assert_eq!(
-            excluding_app_writes(touched.clone(), &writes),
+            excluding_app_writes(touched.clone(), &writes, &before, &after),
             vec!["Module 1/notes.md"],
             "the job's own rewrite must survive the exclusion"
+        );
+
+        // The row clears the moved file only as the app left it: rewritten by
+        // the job after the move, it is reported again.
+        fs::write(dir.join("Module 1/deck.pdf"), "deck, rewritten by the job").unwrap();
+        let after_rewrite = crate::scanner::fingerprint_sources(&dir);
+        let touched_again = crate::scanner::diff_fingerprints(&before, &after_rewrite);
+        assert_eq!(
+            excluding_app_writes(touched_again, &writes, &before, &after_rewrite),
+            vec!["Module 1/deck.pdf", "Module 1/notes.md"],
+            "a job rewrite of a file the app moved must not hide behind the move"
         );
 
         // Another class's row, and a row from before the window, clear nothing.
@@ -2306,6 +2377,7 @@ mod tests {
         assert!(app_written_paths(&conn, 1, window_start + 3600).unwrap().is_empty());
 
         // A drop stages a list, a note write names one path: both shapes read.
+        // A row whose payload is not JSON is skipped, not fatal.
         crate::db::audit(
             &conn,
             "sort.staged",
@@ -2318,10 +2390,19 @@ mod tests {
             serde_json::json!({ "classId": 1, "relPath": "Notes/Today.md", "created": true }),
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (action, payload, created_at) VALUES ('sort.move', 'not json', ?1)",
+            [window_start],
+        )
+        .unwrap();
         let writes = app_written_paths(&conn, 1, window_start).unwrap();
         for path in ["_Inbox/a.pdf", "_Inbox/b.pdf", "Notes/Today.md"] {
-            assert!(writes.contains(path), "{path} missing from {writes:?}");
+            assert_eq!(writes.get(path), Some(&AppWrite::Wrote), "{path} in {writes:?}");
         }
+        assert_eq!(
+            writes.get("Module 1/deck.pdf"),
+            Some(&AppWrite::MovedFrom("_Inbox/deck.pdf".into()))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

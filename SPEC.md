@@ -445,8 +445,10 @@ claude -p <prompt>
   none of that is the job's doing. Each of those writes an audit row naming its paths, and
   the compare reads the rows for the job's window and takes those paths out of the touched
   list. Exclusion is by audit row, never by the shape of the change: a rename with no row
-  behind it is still the job's. The corollary is that every app write into source material
-  must be audited, because the audit log is what tells the guard "that was us".
+  behind it is still the job's, and a file the app moved is cleared only while it still
+  carries the size and mtime it had where it came from, so a job that rewrote it after the
+  move is still caught. The corollary is that every app write into source material must be
+  audited, because the audit log is what tells the guard "that was us".
 - **Models**: one global model/effort pair, set in Settings and read at spawn time so a
   change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
