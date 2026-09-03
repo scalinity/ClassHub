@@ -235,22 +235,26 @@ pub fn delete_category(app: &AppHandle, id: i64) -> Result<()> {
         let tx = conn.unchecked_transaction()?;
         let head = tx
             .query_row(
-                "SELECT class_id, name, weight FROM grade_categories WHERE id = ?1",
+                "SELECT class_id, name, weight, canvas_group_id FROM grade_categories
+                 WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, f64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?
             .with_context(|| format!("no grade category #{id}"))?;
+        // The whole row rides along, Canvas ids included: the entry is what a
+        // recovery would be rebuilt from.
         let items: Vec<serde_json::Value> = tx
             .prepare(
-                "SELECT id, name, score, max_score, graded_at FROM grade_items
-                 WHERE category_id = ?1 ORDER BY id",
+                "SELECT id, name, score, max_score, graded_at, canvas_assignment_id
+                 FROM grade_items WHERE category_id = ?1 ORDER BY id",
             )?
             .query_map([id], |r| {
                 Ok(json!({
@@ -259,6 +263,7 @@ pub fn delete_category(app: &AppHandle, id: i64) -> Result<()> {
                     "score": r.get::<_, f64>(2)?,
                     "maxScore": r.get::<_, f64>(3)?,
                     "gradedAt": r.get::<_, Option<String>>(4)?,
+                    "canvasAssignmentId": r.get::<_, Option<String>>(5)?,
                 }))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -268,7 +273,7 @@ pub fn delete_category(app: &AppHandle, id: i64) -> Result<()> {
             &tx,
             "ui.delete_grade_category",
             json!({ "id": id, "classId": head.0, "name": head.1,
-                    "weight": head.2, "items": items }),
+                    "weight": head.2, "canvasGroupId": head.3, "items": items }),
         )?;
         tx.commit()?;
         Ok(())
@@ -367,7 +372,7 @@ pub fn delete_item(app: &AppHandle, id: i64) -> Result<()> {
         let tx = conn.unchecked_transaction()?;
         let row = tx
             .query_row(
-                "SELECT category_id, name, score, max_score, graded_at
+                "SELECT category_id, name, score, max_score, graded_at, canvas_assignment_id
                  FROM grade_items WHERE id = ?1",
                 [id],
                 |r| {
@@ -378,6 +383,7 @@ pub fn delete_item(app: &AppHandle, id: i64) -> Result<()> {
                         "score": r.get::<_, f64>(2)?,
                         "maxScore": r.get::<_, f64>(3)?,
                         "gradedAt": r.get::<_, Option<String>>(4)?,
+                        "canvasAssignmentId": r.get::<_, Option<String>>(5)?,
                     }))
                 },
             )
