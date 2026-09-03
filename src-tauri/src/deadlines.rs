@@ -978,13 +978,15 @@ fn apply_weights(
     Ok(out)
 }
 
-/// The class's categories whose weight nobody has stated yet, in list order.
+/// The class's categories whose weight nobody has stated yet, in list order —
+/// zero within the epsilon `set_syllabus_weight` reads it with.
 fn still_at_zero(conn: &Connection, class_id: i64) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT name FROM grade_categories WHERE class_id = ?1 AND weight = 0 ORDER BY id",
+        "SELECT name FROM grade_categories
+         WHERE class_id = ?1 AND ABS(weight) < ?2 ORDER BY id",
     )?;
     let names = stmt
-        .query_map([class_id], |row| row.get(0))?
+        .query_map(params![class_id, crate::grades::WEIGHT_EPSILON], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<String>>>()?;
     Ok(names)
 }

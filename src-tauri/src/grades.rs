@@ -649,7 +649,9 @@ pub(crate) fn set_syllabus_weight(
         if (current - weight).abs() < WEIGHT_EPSILON {
             return Ok(WeightWrite::Unchanged);
         }
-        if *current != 0.0 {
+        // A zero is a weight nobody has stated yet, and zero is read within
+        // the same epsilon as agreement is.
+        if current.abs() >= WEIGHT_EPSILON {
             return Ok(WeightWrite::Kept(*current));
         }
     }
