@@ -1,21 +1,38 @@
 //! SPEC §7 step 3: a Jupyter notebook flattened to markdown locally, zero
 //! tokens. Markdown cells are kept verbatim, code cells are fenced with the
 //! kernel's language, and what a cell printed follows it — `stream` and
-//! `text/plain` outputs, capped per cell, with an image output replaced by the
-//! bracketed figure marker the PDF extracts use. The raw `.ipynb` is JSON that
-//! carries every image as base64, which is why chat reads the extract instead.
+//! `text/plain` outputs, capped per cell, with an image output replaced by
+//! the bracketed figure marker the PDF extracts use. The raw `.ipynb` is JSON
+//! that carries every image as base64, which is why chat reads the extract
+//! instead.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-/// Output lines kept per cell: enough to show what a cell printed, not enough
-/// to hold a dataset that scrolled by.
+/// Output lines kept per cell, across all of its outputs: enough to show what
+/// a cell printed, not enough to hold a dataset that scrolled by.
 const MAX_OUTPUT_LINES: usize = 40;
 /// A byte cap beneath the line cap, for the one-line output that is a whole
 /// DataFrame repr.
 const MAX_OUTPUT_BYTES: usize = 4 * 1024;
 
 const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/svg+xml"];
+
+/// What one cell may still print. A cell with several outputs shares one
+/// budget, so the cap is per cell rather than per output.
+struct OutputBudget {
+    lines: usize,
+    bytes: usize,
+}
+
+impl OutputBudget {
+    fn new() -> Self {
+        Self {
+            lines: MAX_OUTPUT_LINES,
+            bytes: MAX_OUTPUT_BYTES,
+        }
+    }
+}
 
 pub fn flatten(json: &str) -> Result<String> {
     let notebook: Value = serde_json::from_str(json).context("parsing notebook JSON")?;
@@ -33,11 +50,12 @@ pub fn flatten(json: &str) -> Result<String> {
             "markdown" | "raw" => push_block(&mut out, source),
             "code" => {
                 if !source.is_empty() {
-                    push_block(&mut out, &format!("```{language}\n{source}\n```"));
+                    push_block(&mut out, &fenced(&language, source));
                 }
+                let mut budget = OutputBudget::new();
                 let outputs = cell.get("outputs").and_then(Value::as_array);
                 for output in outputs.into_iter().flatten() {
-                    if let Some(block) = render_output(output) {
+                    if let Some(block) = render_output(output, &mut budget) {
                         push_block(&mut out, &block);
                     }
                 }
@@ -74,7 +92,7 @@ fn text_of(value: Option<&Value>) -> String {
     }
 }
 
-fn render_output(output: &Value) -> Option<String> {
+fn render_output(output: &Value, budget: &mut OutputBudget) -> Option<String> {
     let text = match output.get("output_type").and_then(Value::as_str)? {
         "stream" => text_of(output.get("text")),
         "execute_result" | "display_data" => {
@@ -86,46 +104,65 @@ fn render_output(output: &Value) -> Option<String> {
             }
             text_of(data.get("text/plain"))
         }
-        "error" => format!(
-            "{}: {}",
-            text_of(output.get("ename")),
-            text_of(output.get("evalue"))
-        ),
+        "error" => {
+            let name = text_of(output.get("ename"));
+            let message = text_of(output.get("evalue"));
+            match (name.trim(), message.trim()) {
+                ("", "") => return None,
+                (name, "") => name.to_string(),
+                ("", message) => message.to_string(),
+                (name, message) => format!("{name}: {message}"),
+            }
+        }
         _ => return None,
     };
-    let text = cap_output(text.trim_end());
+    let text = cap_output(text.trim_end(), budget);
     if text.is_empty() {
         return None;
     }
-    Some(format!("```output\n{text}\n```"))
+    Some(fenced("output", &text))
 }
 
-fn cap_output(text: &str) -> String {
+/// Keeps what fits in the cell's remaining budget and names what did not.
+fn cap_output(text: &str, budget: &mut OutputBudget) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut kept = String::new();
     let mut shown = 0;
     for line in &lines {
-        if shown == MAX_OUTPUT_LINES {
+        if budget.lines == 0 {
             break;
         }
-        let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
-        if line.len() > room {
+        budget.lines -= 1;
+        shown += 1;
+        if line.len() > budget.bytes {
+            let room = budget.bytes;
             let end = (0..=room).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
             kept.push_str(&line[..end]);
             kept.push('…');
-            shown += 1;
+            budget.bytes = 0;
             break;
         }
+        budget.bytes -= line.len();
         kept.push_str(line);
         kept.push('\n');
-        shown += 1;
     }
     let dropped = lines.len() - shown;
     let mut kept = kept.trim_end().to_string();
     if dropped > 0 {
-        kept.push_str(&format!("\n… ({dropped} more lines)"));
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        kept.push_str(&format!("… ({dropped} more lines)"));
     }
     kept
+}
+
+/// A fence one backtick longer than any run inside the block, so a cell that
+/// prints a markdown table or quotes a fence cannot close its own early.
+fn fenced(info: &str, body: &str) -> String {
+    let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}{info}\n{body}\n{fence}")
 }
 
 fn push_block(out: &mut String, block: &str) {
@@ -141,7 +178,7 @@ fn push_block(out: &mut String, block: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_output, flatten, MAX_OUTPUT_LINES};
+    use super::{cap_output, fenced, flatten, OutputBudget, MAX_OUTPUT_LINES};
 
     const FIXTURE: &str = include_str!("../tests/notebook.ipynb");
 
@@ -182,6 +219,18 @@ mod tests {
     }
 
     #[test]
+    fn an_error_output_with_nothing_in_it_emits_nothing() {
+        let nb = r#"{"cells":[{"cell_type":"code","source":"x","outputs":[
+            {"output_type":"error","ename":"","evalue":"","traceback":[]},
+            {"output_type":"error","ename":"KeyError","evalue":"","traceback":[]}
+        ]}]}"#;
+        let md = flatten(nb).expect("flatten");
+        assert!(!md.contains("```output\n:"), "a bare colon: {md}");
+        assert_eq!(md.matches("```output").count(), 1, "{md}");
+        assert!(md.contains("```output\nKeyError\n```"), "{md}");
+    }
+
+    #[test]
     fn an_unrun_cell_has_code_and_no_output_block() {
         let md = flatten(FIXTURE).expect("flatten");
         assert!(md.contains("```python\n# not run yet\n```"), "{md}");
@@ -210,7 +259,7 @@ mod tests {
     #[test]
     fn caps_a_long_output_by_lines_and_names_the_remainder() {
         let text: String = (1..=100).map(|i| format!("row {i}\n")).collect();
-        let capped = cap_output(text.trim_end());
+        let capped = cap_output(text.trim_end(), &mut OutputBudget::new());
         assert_eq!(capped.lines().count(), MAX_OUTPUT_LINES + 1);
         assert!(capped.starts_with("row 1\n"), "{capped}");
         assert!(capped.contains(&format!("row {MAX_OUTPUT_LINES}\n")), "{capped}");
@@ -220,8 +269,43 @@ mod tests {
     #[test]
     fn caps_a_single_huge_line_at_a_char_boundary() {
         let text = "é".repeat(5_000);
-        let capped = cap_output(&text);
+        let capped = cap_output(&text, &mut OutputBudget::new());
         assert!(capped.len() < 4_200, "{}", capped.len());
         assert!(capped.ends_with('…'), "{capped}");
+    }
+
+    /// The budget is the cell's, not each output's: three streams of thirty
+    /// lines are one cell that printed ninety.
+    #[test]
+    fn a_cell_s_outputs_share_one_budget() {
+        let stream = |n: usize| {
+            let lines: Vec<String> = (1..=30).map(|i| format!("s{n} line {i}\\n")).collect();
+            format!(
+                r#"{{"output_type":"stream","name":"stdout","text":"{}"}}"#,
+                lines.concat()
+            )
+        };
+        let nb = format!(
+            r#"{{"cells":[{{"cell_type":"code","source":"x","outputs":[{},{},{}]}}]}}"#,
+            stream(1),
+            stream(2),
+            stream(3)
+        );
+        let md = flatten(&nb).expect("flatten");
+        assert!(md.contains("s1 line 30\n"), "{md}");
+        assert!(md.contains("s2 line 10\n… (20 more lines)"), "{md}");
+        assert!(!md.contains("s2 line 11"), "{md}");
+        assert!(md.contains("… (30 more lines)"), "the third output was dropped silently: {md}");
+        assert!(!md.contains("s3 line 1\n"), "{md}");
+    }
+
+    #[test]
+    fn a_fence_outgrows_the_backticks_inside_it() {
+        assert!(fenced("python", "print(1)").starts_with("```python\n"));
+        let block = fenced("output", "| a |\n```\nquoted fence\n```");
+        assert!(block.starts_with("````output\n"), "{block}");
+        assert!(block.ends_with("\n````"), "{block}");
+        let longer = fenced("", "a ````` run");
+        assert!(longer.starts_with("``````\n"), "{longer}");
     }
 }
