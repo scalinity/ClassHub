@@ -173,7 +173,14 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0010_canvas_grades.sql"),
     include_str!("../migrations/0011_announcements.sql"),
     UNIT_LABELS_MIGRATION,
+    CONTRIBUTION_NOTES_MIGRATION,
 ];
+
+/// The migration that makes one note per transcript name in a division
+/// structural (SPEC §8.5): a unique index the Rust-side refusal can only
+/// promise for its own process.
+const CONTRIBUTION_NOTES_MIGRATION: &str =
+    include_str!("../migrations/0013_contribution_notes.sql");
 
 /// The migration that adds the label columns; `units::backfill_labels` runs
 /// inside its transaction, so the rows that predate them get theirs from
@@ -450,6 +457,68 @@ mod tests {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    /// Migration 0013 against rows from before it: two contributions naming
+    /// one note are reduced to the earliest, whose note the rule protects, a
+    /// row with a note of its own is kept, and a second row on one note is
+    /// refused from then on.
+    #[test]
+    fn migration_0013_keeps_one_row_per_note() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| *m == CONTRIBUTION_NOTES_MIGRATION)
+            .expect("the notes migration is listed");
+        for sql in &MIGRATIONS[..at] {
+            conn.execute_batch(sql).expect("migration");
+        }
+        conn.pragma_update(None, "user_version", at as i64).expect("version");
+        conn.execute(
+            "INSERT INTO units (id, class_id, ordinal, kind, name, first_week, last_week, source)
+             VALUES (37, 4, 1, 'part', 'Part I: Foundations', 1, 8, 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let note = ".classhub/corpus/Part I- Foundations/2026-09-01 — Lecture.md";
+        let insert = |conn: &Connection, rel_path: &str, corpus: &str| {
+            conn.execute(
+                "INSERT INTO lecture_contributions
+                 (class_id, unit_id, rel_path, start_ms, end_ms, start_line, end_line,
+                  corpus_rel_path, summary, confidence, status, created_at)
+                 VALUES (4, 37, ?1, 0, 1, 1, 1, ?2, '', 'high', 'applied', 1)",
+                rusqlite::params![rel_path, corpus],
+            )
+        };
+        insert(&conn, "Weeks/Week 02/2026-09-01 — Lecture.md", note).expect("first");
+        insert(&conn, "Weeks/Week 03/2026-09-01 — Lecture.md", note).expect("the collision");
+        insert(
+            &conn,
+            "Weeks/Week 03/2026-09-01 — Guest lecture.md",
+            ".classhub/corpus/Part I- Foundations/2026-09-01 — Guest lecture.md",
+        )
+        .expect("its own note");
+
+        run_migrations(&mut conn).expect("migrate");
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("version");
+        assert_eq!(version as usize, MIGRATIONS.len());
+        let mut stmt = conn
+            .prepare("SELECT rel_path FROM lecture_contributions ORDER BY id")
+            .expect("prepare");
+        let kept = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows");
+        assert_eq!(
+            kept,
+            ["Weeks/Week 02/2026-09-01 — Lecture.md", "Weeks/Week 03/2026-09-01 — Guest lecture.md"]
+        );
+        assert!(
+            insert(&conn, "Weeks/Week 04/2026-09-01 — Lecture.md", note).is_err(),
+            "a second row on one note was accepted"
+        );
+    }
 
     /// Migration 0012 against rows from before it: a guide and a job scoped
     /// `unit:<name>` are rescoped to the row's id, one naming a division no

@@ -395,7 +395,8 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
                       confidence TEXT,        -- high|medium|low
                       status TEXT,            -- applied|pending|dismissed
                       created_at INTEGER,
-                      UNIQUE(class_id, rel_path, unit_id, start_ms));
+                      UNIQUE(class_id, rel_path, unit_id, start_ms),
+                      UNIQUE(class_id, corpus_rel_path));  -- one note per name in a division (§8.5)
 
 -- Also holds session documents (§8.4) under scope 'session:<transcript rel path>',
 -- so they inherit the viewer, the listing and staleness without a table of their own.
