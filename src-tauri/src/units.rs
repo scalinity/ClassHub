@@ -309,8 +309,8 @@ pub struct RenameEffects {
 }
 
 impl RenameEffects {
-    fn extend(&mut self, other: RenameEffects) {
-        self.moves.extend(other.moves);
+    fn extend(&mut self, mut other: RenameEffects) {
+        self.moves.append(&mut other.moves);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -328,14 +328,29 @@ impl RenameEffects {
     /// left at the old one reads as undistilled or unreadable — which a
     /// redistill or a regeneration repairs — while the division itself is
     /// recorded as the course now names it.
-    pub fn apply(self) {
-        for (from, to) in self.moves {
+    pub fn apply(mut self) {
+        for (from, to) in std::mem::take(&mut self.moves) {
             if let Some(parent) = to.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(e) = fs::rename(&from, &to) {
                 eprintln!("units: rename failed ({} → {}): {e}", from.display(), to.display());
             }
+        }
+    }
+}
+
+/// `#[must_use]` catches an unused value, not a batch a caller read a field
+/// of and let fall; moves still pending at drop are said on stderr, so rows
+/// renamed with their folder and guide left behind are a visible divergence
+/// rather than a silent one.
+impl Drop for RenameEffects {
+    fn drop(&mut self) {
+        if !self.moves.is_empty() {
+            eprintln!(
+                "units: {} rename move(s) were never applied — rows name paths their files are not at",
+                self.moves.len()
+            );
         }
     }
 }
