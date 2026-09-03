@@ -22,8 +22,8 @@ import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { StructureSection } from "@/components/Structure";
 import {
   CLASS_ACCENTS,
+  classesQuery,
   currentUnitLabel,
-  listClasses,
   type ClassInfo,
 } from "@/lib/classes";
 import {
@@ -63,10 +63,7 @@ export function ClassWorkspace({
   // change refetches ["classes"], so everything below reads the live card —
   // one source for the header and the Structure marker alike — with the
   // snapshot standing in until the first fetch lands.
-  const { data: classes } = useQuery({
-    queryKey: ["classes"],
-    queryFn: listClasses,
-  });
+  const { data: classes } = useQuery(classesQuery());
   const info = classes?.find((c) => c.id === snapshot.id) ?? snapshot;
 
   const {

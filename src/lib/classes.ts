@@ -38,10 +38,25 @@ export interface ClassInfo {
   meetings: Meeting[];
 }
 
-/** Today rides along so the current division is measured against the same
- *  clock as the card's meeting and deadline labels. */
-export function listClasses(): Promise<ClassInfo[]> {
-  return invoke<ClassInfo[]>("list_classes", { today: todayIso() });
+/** `today` is YYYY-MM-DD from the same clock as the card's meeting and
+ *  deadline labels; the current division is measured against it. */
+export function listClasses(today: string): Promise<ClassInfo[]> {
+  return invoke<ClassInfo[]>("list_classes", { today });
+}
+
+/**
+ * The one classes query every screen shares. Today rides in the key as well
+ * as the request: the answer depends on the day, so a dashboard left open
+ * across midnight fetches again under the new day instead of serving
+ * yesterday's division, and every `["classes"]` invalidation still matches
+ * by prefix.
+ */
+export function classesQuery() {
+  const today = todayIso();
+  return {
+    queryKey: ["classes", today] as const,
+    queryFn: () => listClasses(today),
+  };
 }
 
 /** A division's own separator between its number and its topic — an em or en

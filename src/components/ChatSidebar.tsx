@@ -20,7 +20,7 @@ import {
   renderAnswer,
   shortModel,
 } from "@/lib/answer";
-import { listClasses, type ClassInfo } from "@/lib/classes";
+import { classesQuery, type ClassInfo } from "@/lib/classes";
 import {
   closeChat,
   formatSessionDate,
@@ -108,10 +108,7 @@ function pickStarters(classes: readonly ClassInfo[]): string[] {
  */
 export function ChatSidebar() {
   const chat = useChat();
-  const { data: classes } = useQuery({
-    queryKey: ["classes"],
-    queryFn: listClasses,
-  });
+  const { data: classes } = useQuery(classesQuery());
 
   return (
     <>

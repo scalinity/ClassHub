@@ -9,7 +9,7 @@ import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { SettingsScreen } from "@/components/Settings";
 import { WeekSchedule } from "@/components/WeekSchedule";
-import { listClasses, type ClassInfo } from "@/lib/classes";
+import { classesQuery, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
 import { setDropTarget } from "@/lib/sorter";
 import { dragWindow } from "@/lib/window";
@@ -21,10 +21,7 @@ function Dashboard({
   onOpen: (cls: ClassInfo) => void;
   onSettings: () => void;
 }) {
-  const { data: classes, error } = useQuery({
-    queryKey: ["classes"],
-    queryFn: listClasses,
-  });
+  const { data: classes, error } = useQuery(classesQuery());
 
   const dateLabel = new Date()
     .toLocaleDateString("en-US", {
