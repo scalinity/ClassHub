@@ -577,6 +577,16 @@ fn file_is_gone(path: &Path) -> bool {
     }
 }
 
+/// The vanish pass as the readers run it: best-effort housekeeping on the way
+/// to an answer. A failure here — the other process holding the write lock
+/// past the busy timeout, say — costs one stale badge, not the dashboard,
+/// which `list_classes` would otherwise fail for every class at once.
+fn reconcile_vanished(conn: &Connection, class_id: i64, class_dir: &Path) {
+    if let Err(e) = dismiss_vanished(conn, class_id, class_dir) {
+        eprintln!("class {class_id}: reconciling vanished proposals failed: {e:#}");
+    }
+}
+
 /// Dismisses the rows the vanish pass selected, in one transaction, and says
 /// how many it actually dismissed. The other process may have resolved a row
 /// between the read and here — an approve is exactly what makes a file leave
@@ -603,7 +613,7 @@ fn dismiss_rows(conn: &Connection, vanished: Vec<(i64, serde_json::Value)>) -> R
 
 pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
-    dismiss_vanished(conn, class_id, &class_dir)?;
+    reconcile_vanished(conn, class_id, &class_dir);
     let (_, dismissed) = proposal_sources(conn, class_id)?;
     let inbox = list_inbox(&class_dir)
         .into_iter()
@@ -637,7 +647,7 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
 /// dismissed. A dismissed file is a decision already made; it stops counting.
 pub fn pending_count(conn: &Connection, class_id: i64) -> Result<i64> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
-    dismiss_vanished(conn, class_id, &class_dir)?;
+    reconcile_vanished(conn, class_id, &class_dir);
     let (pending, dismissed) = proposal_sources(conn, class_id)?;
     let fresh = list_inbox(&class_dir)
         .iter()
