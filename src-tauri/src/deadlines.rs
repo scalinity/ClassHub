@@ -560,6 +560,12 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         split_output(result_text)?;
     let unit_summary = record_units(app, class_id, &raw_units);
     let weight_summary = record_weights(app, class_id, &raw_weights);
+    // What the other two parts recorded, carried whichever way the deadline
+    // part ends: their writes stand, so a job demoted for its deadlines must
+    // still say what it wrote — a weight set in silence is the one thing the
+    // weights part exists not to do.
+    let recorded_parts: Vec<String> =
+        [unit_summary, weight_summary].into_iter().flatten().collect();
     let summary = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut duplicates = 0usize;
@@ -647,7 +653,14 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         }
 
         if recorded == 0 && duplicates == 0 && dismissed_skips == 0 && !skipped.is_empty() {
-            bail!("no valid proposals in the scan output — skipped: {}", skipped.join("; "));
+            bail!(
+                "no valid proposals in the scan output — skipped: {}{}",
+                skipped.join("; "),
+                recorded_parts
+                    .iter()
+                    .map(|part| format!(" · {part}"))
+                    .collect::<String>()
+            );
         }
         let mut known = Vec::new();
         if duplicates > 0 {
@@ -681,9 +694,8 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result
         Ok(summary)
     })?;
     emit_hub_change(app, "deadlineProposals");
-    let summary = [Some(summary), unit_summary, weight_summary]
-        .into_iter()
-        .flatten()
+    let summary = std::iter::once(summary)
+        .chain(recorded_parts)
         .collect::<Vec<_>>()
         .join(" · ");
     Ok(summary)
