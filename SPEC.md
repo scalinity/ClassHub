@@ -752,11 +752,14 @@ join instead.
 **Sync runs when asked, and once on launch — never on a timer.** A launch syncs on its own when
 a session is stored in the Keychain and the last sync is a day old or there has never been one,
 through a window that stays hidden whatever happens: Canvas wanting a sign-in ends the sync
-rather than prompting for one, and a conclusive refusal discards the stored copy on the same
-evidence a manual sync acts on, so the next press asks. The Settings report says `SYNCED ON
-LAUNCH`, or `NOT SYNCED ON LAUNCH` with the reason as a quiet line rather than a stopped sync.
-It follows the launch scan on the same thread, so its duplicate check reads a fresh index, and
-nothing schedules a second one. The dashboard header names the sync's age (§12).
+rather than prompting for one, whether it is found at the first probe or when the session
+lapses mid-sync, and the stored copy is discarded on the same evidence a manual sync acts on —
+a 401 or a bounce to SSO, never a 403, which is Canvas declining one call — so the next press
+asks. The Settings report says `SYNCED ON LAUNCH`, or `NOT SYNCED ON LAUNCH` with the reason
+as a quiet line when a sign-in is what it needed; any other failure is a stopped sync, on
+launch as by hand. It follows the launch scan on the same thread, so its duplicate check reads
+a fresh index, and nothing schedules a second one. The dashboard header names the sync's age
+(§12).
 
 **Sync is non-destructive.** New units are
 inserted and existing ones updated in place; units whose name no longer appears in Canvas are
@@ -816,15 +819,20 @@ Canvas HTML is never rendered in the app, and its images and links are dropped w
 delayed announcement carries no `posted_at` and is skipped, as a student would not see it; an
 edited one is the same row, updated. The workspace shows them as a `NOTICES` section, newest
 first and absent while there are none, with no unread state; the chat overview carries the
-latest three (§9). A re-sync of an unchanged course writes no row.
+latest three (§9). A re-sync of an unchanged course writes no row, an announcement the table
+would not take is a line in the report, and a failed read of announcements or Pages is a line
+too — like the grades, neither is worth the class, and the file sync and the sync stamp still
+follow.
 
 **Pages and the syllabus page become text in the extract cache.** Each published Page is
 written as markdown to `.classhub/extracts/Canvas/<Page title>.md` — a title line, one line
 saying what it is and where it lives on Canvas, then the stripped text — and the course's
 `syllabus_body` to `.classhub/extracts/Canvas/Syllabus.md`, so `search_material` covers them
 without a new root and chat cites them by path. A page's file name is its title as a path
-segment, with Canvas's URL slug appended when another page already holds that name, and
-`Syllabus` is reserved for the syllabus page. They are not `files` rows: nothing on disk is
+segment, capped, with Canvas's URL slug appended — a path segment too — when another page in
+the listing shares the title or the title is the syllabus page's, so the name is the page's
+own and not the listing order's; `Syllabus` is reserved for the syllabus page. They are not
+`files` rows: nothing on disk is
 their source, so they take no part in a guide's manifest. A file is rewritten only when its
 content changed, and the folder is reconciled to what Canvas lists: a page retitled or
 unpublished on Canvas loses its file rather than lingering beside its replacement as the

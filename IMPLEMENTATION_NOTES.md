@@ -2732,3 +2732,79 @@ addressed as individual commits. What future sessions should know:
   `src/components/…` failed on the relative path.
 - The dev window's `DASHBOARD` button was reported NOT FOUND straight after
   a `touch index.html` reload; the reload had already put the dashboard up.
+
+## Post-M22 — Review fixes (2026-09-03)
+
+A two-agent review of the M22 changeset (one bug-hunting pass, one
+architecture/security/data-integrity pass) produced 1 critical, 9 warnings
+and 9 suggestions, 3 of them corroborated by both reviewers; all were
+addressed, as individual commits where the findings were separate code
+changes. What future sessions should know:
+
+- **The Canvas texts folder is reconciled.** A page retitled or unpublished
+  on Canvas kept its old markdown beside the new, and chat read both as the
+  course's own words. `sync_pages` records every stem it wrote or confirmed
+  and `prune_stale_texts` removes the other `.md` files in
+  `.classhub/extracts/Canvas/` — the one folder the sync owns, with no
+  `files` row pointing into it, which is what keeps this compatible with
+  never deleting source material. SPEC §7.2 says so; the M22 "Left as it
+  is" line about a removed page keeping its file is superseded.
+- **Page file names are the page's own.** Canvas's URL slug is sanitized
+  before it becomes part of a file name (it was raw, and `write_if_changed`
+  creates parent folders), every page whose sanitized title is duplicated in
+  the listing carries its slug — decided from the listing before the loop,
+  so a swapped order does not rewrite two files with each other's content —
+  and the title half of a stem is capped at 120 characters, since Canvas
+  allows 255 and the slug and `.md` follow.
+- **Neither new pass is worth the class.** `note_or_carry_on` gives grades,
+  announcements and pages one shape: a refusal is a line, any other failure
+  a line saying the read did not happen, and the file sync and the sync
+  stamp still follow. Inside `sync_pages` a page that will not write is
+  noted and kept rather than aborting the pass; both passes assign their
+  counts to the outcome as each item lands.
+- **A sign-in need ends a quiet sync wherever it appears.** The wrapper
+  passes `SignInNeeded` up, and `run` re-raises it instead of recording it
+  as one class's error, so a session lapsing mid-sync reaches the report's
+  quiet note. That note keys on its own `signInNeeded` flag on the progress
+  event rather than on `launch`, so a launch sync that failed for any other
+  reason still reads as a stopped sync.
+- **The refusal decision is pure and tested.** `read_signal` maps a 401 or
+  an SSO bounce to the session being over — the only verdict that discards
+  the stored cookie — any other status to a decline that keeps it (Canvas's
+  rate limiter answers 403), and a stall to no evidence; `quiet_stop` gives
+  each its words, `SignInNeeded` typed for the first.
+- **Smaller things.** A refused announcement (a row another class holds for
+  the same Canvas id) is a report line; titles are folded onto one line at
+  both sinks the way bodies were, so a newline in a professor's title cannot
+  open a line in the system prompt or a heading in a mirrored file; the
+  overview reads `LIMIT 3` and a count through `latest_announcements`
+  instead of every body; the date half of `posted_at` is taken by
+  characters; `has_remembered_session` is `remembered_session_kept`, named
+  for the copy it drops; the syllabus write emits a `canvasSyllabus` hub
+  change so the picker offers the page as soon as it exists; a notice from
+  another year carries its year in the NOTICES stamp; the Pages
+  request-count comment says one request per hundred.
+- **Tests**: the prune, order-independent stems with a sanitized slug and a
+  capped title, the refusal verdicts and their quiet messages, the syllabus
+  path resolving only when the file exists, the overview's body cap and
+  ellipsis; the tests' scratch folders are removed by a drop guard.
+  `cargo test`: 198 pass, no warnings. `npx tsc --noEmit` clean.
+- **Live**, on the rebuilt dev build (pid 45083): a full sync of all four
+  classes reported `nothing new` for each, left all 21 files under the four
+  `Canvas/` folders with their mtimes, and left every count as it was
+  (9 announcements, audit log at 134, jobs at 295). Nothing was pushed,
+  since the repo has no remote.
+
+### Gotchas
+
+- `cd src-tauri` persisted into a later Bash call, so `git add
+  src/components/Notices.tsx` failed on the pathspec and the following
+  `git add -A` folded that fix into the neighbouring commit; the message
+  was amended to name it.
+- A gate script whose `cargo test` is piped through `tail | grep 'test
+  result: ok'` passes on a failed lib test, because the doc-test binaries
+  print their own `ok` lines last. The gate runs `cargo test` directly and
+  reads its exit code.
+- `sanitize_name("../week-3")` is `-week-3`: the separator becomes a dash
+  and the leading dots go, which is the single segment wanted, not the
+  `week-3` a first test expected.
