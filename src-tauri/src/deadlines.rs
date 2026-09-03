@@ -927,7 +927,10 @@ fn apply_weights(
             ));
             continue;
         };
-        let lowered = name.to_lowercase();
+        // ASCII folding, to match SQLite's LOWER() in the lookup below — the
+        // deadline half's rule, for the same reason: Unicode folding here
+        // would let the two layers disagree on a non-ASCII name.
+        let lowered = name.to_ascii_lowercase();
         if claimed.contains(&lowered) {
             out.skipped.push(format!("{name} (repeated)"));
             continue;
@@ -953,7 +956,7 @@ fn apply_weights(
     out.unweighted = stmt
         .query_map([class_id], |row| row.get::<_, String>(0))?
         .filter_map(|name| name.ok())
-        .filter(|name| !claimed.contains(&name.to_lowercase()))
+        .filter(|name| !claimed.contains(&name.to_ascii_lowercase()))
         .collect();
     Ok(out)
 }
