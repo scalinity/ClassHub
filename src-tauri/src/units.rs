@@ -434,13 +434,17 @@ fn find_held(conn: &Connection, class_id: i64, unit: &NewUnit, incoming: &Incomi
     let Some(number) = incoming.number else {
         return Ok(None);
     };
+    // A row Canvas gave a different id is another module that happens to
+    // share the label (`Week 1 Overview`, `Week 1 Readings`), not this one
+    // under a new name: no match, and the insert goes unnumbered.
     Ok(conn
         .query_row(
             &format!(
                 "SELECT {HELD_COLUMNS} FROM units
-                 WHERE class_id = ?1 AND source = ?2 AND kind = ?3 AND number = ?4"
+                 WHERE class_id = ?1 AND source = ?2 AND kind = ?3 AND number = ?4
+                   AND (canvas_id IS NULL OR ?5 IS NULL OR canvas_id = ?5)"
             ),
-            params![class_id, unit.source, incoming.kind, number],
+            params![class_id, unit.source, incoming.kind, number, unit.canvas_id],
             read_held,
         )
         .optional()?)
@@ -1541,6 +1545,28 @@ mod tests {
         assert!(folder("Module 3").join("Module 2.md").is_file(), "Module 2's note did not reach Module 3");
         assert!(folder("Module 2").join("Module 1.md").is_file(), "Module 1's note did not reach Module 2");
         assert!(!folder("Module 1").exists(), "the vacated folder lingers");
+    }
+
+    /// Two Canvas modules can share a number and not a name (`Week 1
+    /// Overview`, `Week 1 Readings`): the second is a division of its own,
+    /// recorded without a number rather than refused or written over the
+    /// first, and a syllabus row under the first's name still defers to it.
+    #[test]
+    fn a_canvas_module_sharing_a_number_is_recorded_unnumbered() {
+        let conn = db();
+        assert_eq!(write(&conn, 1, &canvas_unit(1, "Week 1 Overview", "55")), Outcome::Inserted);
+        assert_eq!(write(&conn, 1, &canvas_unit(2, "Week 1 Readings", "56")), Outcome::Inserted);
+        let labels: Vec<(String, Option<i64>)> = list_units(&conn, 1)
+            .expect("list")
+            .into_iter()
+            .map(|u| (u.name, u.number))
+            .collect();
+        assert_eq!(
+            labels,
+            [("Week 1 Overview".to_string(), Some(1)), ("Week 1 Readings".to_string(), None)]
+        );
+        assert_eq!(write(&conn, 1, &unit(1, "module", "Week 1 Overview", None)), Outcome::Unchanged);
+        assert_eq!(list_units(&conn, 1).expect("list").len(), 2);
     }
 
     /// A rename must not land on a name another row holds: a Canvas module
