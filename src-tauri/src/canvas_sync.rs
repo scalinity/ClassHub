@@ -259,8 +259,15 @@ fn run(
             notes: Vec::new(),
             error: None,
         };
-        // One class's failure costs that class, never the rest of the sync.
+        // One class's failure costs that class, never the rest of the sync —
+        // except the session lapsing under a quiet sync, which is the sync's
+        // own outcome: the stored copy is already gone, every later class
+        // would fail the same way, and the report should say what happened
+        // once rather than in red per class.
         if let Err(e) = sync_class(app, &session, &class, &courses, &mut outcome, on_stage) {
+            if e.chain().any(|cause| cause.is::<SignInNeeded>()) {
+                return Err(e);
+            }
             outcome.error = Some(format!("{e:#}"));
         }
         results.push(outcome);
