@@ -118,31 +118,39 @@ pub fn scan_class(
             changed |= existing.get(&f.rel_path).is_none_or(|i| i.sha256 != f.sha256);
             upsert.execute(params![class_id, f.rel_path, f.sha256, f.size, f.mtime, f.kind])?;
         }
-        let mut delete = tx.prepare("DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2")?;
-        for rel_path in &vanished {
-            delete.execute(params![class_id, rel_path])?;
-        }
     }
     // A transcript the index held and the walk did not is a lecture moved in
-    // Finder — the same content at a path the index did not hold — or one
-    // deleted there (SPEC §8.5). Each is settled on its own savepoint, so one
-    // that cannot follow — a refile onto a held note — is logged and left as
-    // it was rather than costing the scan; what each leaves for the
-    // filesystem is applied once the whole scan has committed.
-    let arrived: HashMap<&str, &str> = files
-        .iter()
-        .filter(|f| !existing.contains_key(&f.rel_path))
-        .map(|f| (f.sha256.as_str(), f.rel_path.as_str()))
-        .collect();
+    // Finder — the same content somewhere the walk found — or one deleted
+    // there (SPEC §8.5). Each is settled on its own savepoint, the index row
+    // included, so one that cannot follow — a refile onto a held note — is
+    // logged and left as it was, path still in the index, and the next scan
+    // sees it vanish again and tries again. A path the index already holds
+    // counts as where it went when nothing is keyed by it, which is what the
+    // destination of a refused refile looks like on that next scan. What each
+    // leaves for the filesystem is applied once the whole scan has committed.
+    let mut by_hash: HashMap<&str, Vec<&str>> = HashMap::new();
+    for f in &files {
+        by_hash.entry(f.sha256.as_str()).or_default().push(f.rel_path.as_str());
+    }
     let mut effects = Vec::new();
     for rel_path in &vanished {
-        if !crate::lectures::keyed_by(&tx, class_id, rel_path)? {
+        let savepoint = tx.savepoint()?;
+        savepoint.execute(
+            "DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2",
+            params![class_id, rel_path],
+        )?;
+        if !crate::lectures::keyed_by(&savepoint, class_id, rel_path)? {
+            savepoint.commit()?;
             continue;
         }
         let indexed = existing.get(*rel_path);
-        let moved_to = indexed
-            .and_then(|indexed| arrived.get(indexed.sha256.as_str()))
-            .copied();
+        let mut moved_to = None;
+        for candidate in indexed.and_then(|i| by_hash.get(i.sha256.as_str())).into_iter().flatten() {
+            if !crate::lectures::keyed_by(&savepoint, class_id, candidate)? {
+                moved_to = Some(*candidate);
+                break;
+            }
+        }
         // Dragged into `_Inbox/` to be sorted again, most likely: the walk
         // skips the app-managed folders, so the transcript vanishes from the
         // index while still on disk. Its rows and its note wait for the
@@ -151,15 +159,18 @@ pub fn scan_class(
             && indexed.is_some_and(|i| parked_in_app_managed(&dir, i.size, &i.sha256))
         {
             eprintln!("scan: {rel_path} is resting under an app-managed folder; its lecture waits");
+            savepoint.commit()?;
             continue;
         }
-        let savepoint = tx.savepoint()?;
         match crate::lectures::lecture_left(&savepoint, class_id, &dir, rel_path, moved_to) {
             Ok(effect) => {
                 savepoint.commit()?;
                 effects.extend(effect);
             }
-            Err(e) => eprintln!("scan: {rel_path} left the tree and its lecture could not follow: {e:#}"),
+            Err(e) => eprintln!(
+                "scan: {rel_path} left the tree and its lecture could not follow; it stays in \
+                 the index for the next scan to try again: {e:#}"
+            ),
         }
     }
     // A declared division knows its name and its dates; only the tree knows
@@ -648,7 +659,9 @@ mod tests {
             params![unit.0, transcript, note],
         )
         .expect("row");
-        let stem = transcript.rsplit('/').next().expect("name").trim_end_matches(".md");
+        // Named for the whole path, so two same-named transcripts in two
+        // weeks get documents of their own.
+        let stem = transcript.trim_end_matches(".md").replace('/', " ");
         let html = format!("Study Guides/Sessions/{stem} — Topic.html");
         let md = format!("Study Guides/Sessions/{stem} — Topic.md");
         write(dir.join(&html), "<html></html>");
@@ -721,6 +734,51 @@ mod tests {
         assert_eq!(count(&conn, "guides"), 1, "the session row was forgotten");
         assert!(dir.join(&note).is_file() && dir.join(&html).is_file(), "the note or the document went");
         drop(conn);
+        let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// A refile the rules refuse — the moved transcript would take a note
+    /// another lecture of the Part already holds — rolls back on its own
+    /// savepoint with the path still in the index, so the row, the note and
+    /// the session row are exactly as they were and the next scan tries again
+    /// and is refused again, rather than forgetting a lecture that is on disk.
+    #[test]
+    fn a_refused_settle_keeps_the_path_in_the_index_for_the_next_scan() {
+        let (db, dir) = part_numbered_class("classhub-scan-refused");
+        let held = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        let mover = "Weeks/Week 09/2026-09-15 — Lecture.md";
+        filed_and_digested(&db, &dir, held, PART_I);
+        let (note, html, _md) = filed_and_digested(&db, &dir, mover, PART_II);
+        scan_class(&db, 4).expect("scan");
+
+        // Into Part I, under the name Part I already holds a note for.
+        let dest = "Weeks/Week 05/2026-09-15 — Lecture.md";
+        fs::create_dir_all(dir.join("Weeks/Week 05")).expect("week dir");
+        fs::rename(dir.join(mover), dir.join(dest)).expect("move in Finder");
+        for pass in 1..=2 {
+            let scan = scan_class(&db, 4).expect("scan");
+            assert!(scan.changed, "pass {pass}: the index lost a path");
+            let conn = db.lock().expect("db");
+            let (unit_id, corpus): (i64, String) = conn
+                .query_row(
+                    "SELECT unit_id, corpus_rel_path FROM lecture_contributions WHERE class_id = 4 AND rel_path = ?1",
+                    [mover],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the row was forgotten");
+            assert_eq!((unit_id, corpus.as_str()), (38, note.as_str()), "pass {pass}: the row moved");
+            assert!(dir.join(&note).is_file() && dir.join(&html).is_file(), "pass {pass}: the note or document went");
+            let sessions: String = conn
+                .query_row("SELECT scope FROM guides WHERE class_id = 4 AND rel_path = ?1", [&html], |row| row.get(0))
+                .expect("the session row");
+            assert_eq!(sessions, format!("session:{mover}"), "pass {pass}: the session row was rekeyed");
+            let indexed = |rel: &str| -> i64 {
+                conn.query_row("SELECT COUNT(*) FROM files WHERE class_id = 4 AND rel_path = ?1", [rel], |row| row.get(0))
+                    .expect("files")
+            };
+            assert_eq!(indexed(mover), 1, "pass {pass}: the path left the index, so nothing will try again");
+            assert_eq!(indexed(dest), 1, "pass {pass}: the destination is on disk");
+        }
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
     }
 
