@@ -3556,3 +3556,80 @@ lecture is next Tuesday's, so the fallback branch applied.
 - A `.md` fixture in a week folder is a lecture to the listing; a `.csv`
   extracts locally and spawns no job.
 - Killing the app pid ended `tauri dev` and freed :1420.
+
+## Post-M25 — Review fixes (2026-09-03)
+
+A two-agent review of the M25 changeset since 162b114 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced one
+critical issue, five warnings and eight suggestions, one of them
+pre-existing; four of the warnings were corroborated by both reviewers.
+All were addressed as individual commits, through a gate that runs
+`cargo test` to a log and stops on its exit status, then `tsc` when
+frontend files are staged. What future sessions should know:
+
+- **A parked transcript is not gone (critical).** The walk skips
+  `_Inbox/`, `Notes/` and `Study Guides/`, so a transcript dragged into
+  one of them vanished from the index exactly like a deleted one and the
+  scan removed its note and its session documents while the file sat in
+  the inbox. A vanished path is settled only when something is keyed by
+  it (`lectures::keyed_by`), and `parked_in_app_managed` reads the three
+  folders flat — the way the sorter reads the inbox — for a file of the
+  same size and hash before anything is forgotten. The rows and the note
+  wait; the index still reflects the walk.
+- **A refused settle is retried.** The `files` row of every vanished
+  path was deleted before the per-lecture savepoints, so a refusal — a
+  refile onto a note another lecture of the Part holds — rolled back the
+  lecture and still lost the row, and no later scan could try again. The
+  index row now goes on the lecture's own savepoint, and a move candidate
+  may be a path the index already holds when nothing is keyed by it,
+  which is what a refused refile's destination looks like next time. The
+  test runs two passes and is refused on both with the rows untouched.
+- **A shared hash is not a move.** A move is one vanished lecture's
+  content found at exactly one unkeyed path; two lectures with one
+  content, or one content found twice, are settled as gone, so one refile
+  cannot re-key a session row the other then drops with its documents.
+- **A note is removed only at a corpus note's path.** `corpus_note_path`
+  admits plain components under `.classhub/corpus/`, a division folder
+  and a file deep; the remove, the relocate and the prune all go through
+  it, so a row naming anything else removes nothing (both reviewers).
+- **The launch scan pushes `files`.** Its tree reaches no one, so an open
+  workspace has to fetch it; the RESCAN command keeps `index`, whose tree
+  is its own result (both reviewers).
+- **`changed` counts a folder attached to a division**;
+  `attach_rel_path` reports whether a row took the folder.
+- **A week folder opens with its week.** `week_from_rel_path` no longer
+  reads "week" anywhere in a folder's name, so `Midterm Review (Weeks
+  1-6)` under `Weeks/` is no week's, for the manifest and the join alike.
+- **A week claimed twice is logged** at both skips in `week_slots`.
+- **The slots and the `Weeks/` index are read once per listing.**
+  `extract::unit_manifest` takes them from its caller; `current_manifest`
+  reads them for one scope and `list_units` once for the class.
+- **`materials` is `None` until a listing counts it**, and the row's gate
+  reads null as zero; the comment on `refile_session`'s destination clear
+  states the invariant the scan's caller shares; the markdown twin strips
+  one `.html` (pre-existing).
+- **Tests**: seven new — parked, refused-and-retried, twins, a deleted
+  deck and an edited transcript, a session row without a contribution
+  row, files under `Weeks/` outside a week folder, and the note-path
+  guard; 230 pass, `npx tsc --noEmit` clean. Nothing was pushed.
+- **Not changed**: the units ↔ extract module cycle (`materials` reads the
+  manifest, the manifest reads the slots) stays until a third crossing
+  appears, which the reviewer's own suggestion made the condition. A
+  crash between the scan's commit and its filesystem effects leaves a
+  note or a document on disk that no row names; a transcript deleted from
+  `_Inbox/` after being parked keeps its rows until the next same-named
+  filing clears the stale holder. Both are rare and recorded here rather
+  than built for.
+
+### Gotchas
+
+- A gate that fails leaves the staged files staged: the next
+  `git add <one file>` then commits everything under one message. Reset
+  with `git reset --soft HEAD~1 && git reset` and re-stage per fix.
+- `memory_db` enforces foreign keys: a contribution row needs a real
+  `units` row, or the insert fails with a constraint violation.
+- Two same-named transcripts in two weeks need session documents named
+  for the whole path in a fixture, or a `guides.rel_path` lookup answers
+  for the wrong one.
+- A `_Inbox/` fixture in a scanner test needs the folder created first;
+  the scratch class folder starts empty.

@@ -1052,8 +1052,9 @@ and at the sorter's move, inside its transaction — and a title of its own is t
 
 **A unit guide's sources** are therefore: files under the unit's folder when it has one — which
 is what `units.rel_path` records (§7.2) — every file under a week folder whose number is one of
-the division's weeks (§4), read off the folder the way a filed transcript's week is, so a week
-the syllabus renames still counts the folder it was filed under; files Canvas attributed to it
+the division's weeks (§4), a week folder being one under `Weeks/` that opens with its week as
+filing names them, read off the folder the way a filed transcript's week is, so a week the
+syllabus renames still counts the folder it was filed under; files Canvas attributed to it
 (§7.2); and its corpus notes, each listed with the transcript path so the job can open the
 professor's exact words when the distillation is not enough. The prompt lists the files with
 their extracts and the transcripts only through their notes, and the Structure row offers a
@@ -1074,12 +1075,17 @@ of `Weeks/` altogether loses its row and its note, since no division reads it an
 The scan holds the same line for a transcript that leaves the tree without a proposal. One
 deleted in Finder loses its contribution row, its note, and its session row with both documents
 at the next scan — a pair nothing points at would go on answering for a lecture that is not
-there. One moved in Finder — the same content at a path the index did not hold — is refiled as
-an approved move would refile it, note and session row following; a refile the rules refuse is
-logged and the row left as it was. Each is settled on its own savepoint inside the scan, and
-what it leaves for the disk is applied after the commit. A scan that changed the index pushes
-one `index` change, so staleness, the divisions' counts and the lectures follow a rescan
-without a second scan.
+there. One moved in Finder — its content found at exactly one other path nothing is keyed by —
+is refiled as an approved move would refile it, note and session row following; a refile the
+rules refuse is logged with the path kept in the index, so the next scan tries again. One
+dragged into `_Inbox/` or another app-managed folder, which the walk skips, is parked rather
+than gone: its rows and its note wait for the sorter to bring it back. Two lectures with one
+content are not a move the index can name, and are settled as gone. Each is settled on its own
+savepoint inside the scan, the index row included, and what it leaves for the disk is applied
+after the commit; a note is removed only at a corpus note's path. A scan asked for from the
+workspace that changed the index pushes one `index` change, so staleness, the divisions' counts
+and the lectures follow it without a second scan; the launch scan, whose tree reaches no one,
+pushes `files`.
 
 `lecture_contributions` keeps its per-span shape (`start_ms`/`end_ms`, resolved line bounds)
 even though a lecture currently contributes its whole length to a single unit. The columns cost
