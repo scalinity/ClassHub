@@ -824,9 +824,10 @@ mod tests {
     /// The tree marks a folder named as a division is — a kind and a number —
     /// and not one named for a kind of file or for the calendar: `Module 1`
     /// is a guide's scope in the Materials tree, `Slides` and `Weeks` are
-    /// storage (SPEC §8.3).
+    /// storage (SPEC §8.3). A file named for a week carries it, for its row
+    /// to offer the week folder (SPEC §10); a folder never does.
     #[test]
-    fn a_folder_named_as_a_division_is_labelled_and_a_storage_one_is_not() {
+    fn the_walk_marks_a_labelled_folder_and_a_file_named_for_a_week() {
         let (db, dir) = part_numbered_class("classhub-scan-labelled");
         write(dir.join("Module 1/notes.pdf"), "%PDF");
         write(dir.join("Slides/deck.pdf"), "%PDF");
