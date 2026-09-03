@@ -689,23 +689,28 @@ fn rename_effects(
         return Ok(effects);
     }
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
-    let free = |to: &Path| !to.exists() || pending.vacates(to);
+    // Checked whether or not the source is still on disk: `folder_segment`
+    // maps several names onto one path, and a row whose file is gone must not
+    // be pointed at another division's. A rename that only changes case is
+    // the same entry on a case-insensitive volume, not a collision with
+    // itself.
+    let free = |from: &Path, to: &Path| !to.exists() || same_entry(from, to) || pending.vacates(to);
 
     let old_folder = crate::lectures::corpus_folder(old_name);
     let new_folder = crate::lectures::corpus_folder(new_name);
     if old_folder != new_folder {
+        let from = class_dir.join(&old_folder);
+        let to = class_dir.join(&new_folder);
+        if !free(&from, &to) {
+            bail!("a corpus folder already exists at {new_folder} — renaming would overwrite it");
+        }
         for (id, transcript_rel) in &contributions {
             conn.execute(
                 "UPDATE lecture_contributions SET corpus_rel_path = ?1 WHERE id = ?2",
                 params![crate::lectures::corpus_rel_path(new_name, transcript_rel), id],
             )?;
         }
-        let from = class_dir.join(&old_folder);
         if from.is_dir() {
-            let to = class_dir.join(&new_folder);
-            if !free(&to) {
-                bail!("a corpus folder already exists at {new_folder} — renaming would overwrite it");
-            }
             effects.moves.push((from, to));
         }
     }
@@ -714,11 +719,11 @@ fn rename_effects(
         let new_rel = crate::guides::unit_guide_rel_path(new_name);
         if rel_path != new_rel {
             let from = class_dir.join(&rel_path);
+            let to = class_dir.join(&new_rel);
+            if !free(&from, &to) {
+                bail!("a guide already exists at {new_rel} — renaming would overwrite it");
+            }
             if from.is_file() {
-                let to = class_dir.join(&new_rel);
-                if !free(&to) {
-                    bail!("a guide already exists at {new_rel} — renaming would overwrite it");
-                }
                 effects.moves.push((from, to));
             }
             conn.execute(
@@ -728,6 +733,16 @@ fn rename_effects(
         }
     }
     Ok(effects)
+}
+
+/// Whether two paths are one entry on disk — a rename that only changes case
+/// on a case-insensitive volume, which APFS is by default.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
 }
 
 /// Fills `number`, `first_week` and `last_week` for every row from its name —
@@ -1465,6 +1480,23 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err:#}");
         assert_eq!(list_units(&conn, 1).expect("list")[0].name, new_name, "a refused rename wrote");
+
+        // A rename that only changes case: on a case-insensitive volume the
+        // target is the source itself, which is not a collision.
+        let recased = "Week 2 — Responsible AI and governance";
+        let mut batch = Batch::default();
+        let written = upsert(&conn, 1, &unit(2, "week", recased, Some("2026-09-01")), &mut batch).expect("recase");
+        assert_eq!(written.outcome, Outcome::Updated);
+        batch.apply();
+        assert!(class_dir.join(crate::lectures::corpus_rel_path(recased, transcript)).is_file());
+
+        // With the source gone, a target on disk still refuses the repoint:
+        // the row must not be pointed at another division's files.
+        fs::remove_dir_all(class_dir.join(crate::lectures::corpus_folder(recased))).expect("remove");
+        let err = upsert(&conn, 1, &unit(2, "week", taken, Some("2026-09-01")), &mut Batch::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err:#}");
+        assert_eq!(list_units(&conn, 1).expect("list")[0].name, recased, "a refused repoint wrote");
     }
 
     /// A rename chain inside one pass: a Canvas module takes the folder
