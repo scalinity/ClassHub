@@ -89,39 +89,13 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
     let title = req.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
     let file_name = transcript_file_name(&req.date, title.unwrap_or("Lecture"))?;
 
-    // A lecture is filed by when it happened, and for these four courses that
-    // also settles what it covers (SPEC §8.5). A week that resolved to none of
-    // the course's own means the sorter gets to propose one, which it can only
-    // do from `_Inbox/` (SPEC §10).
-    //
     // Only the lookups need the connection. Writing a multi-megabyte markdown
     // with it held blocks every other command, the chat tools and the job
     // runner for the duration — the arrangement `scan_class` and
     // `search_material` were both restructured away from.
-    let (class_dir, slot) = with_conn(app, |conn| {
-        let slot = match req.week {
-            Some(week) => crate::units::slot_for_week(conn, req.class_id, week)?,
-            None => None,
-        };
-        Ok((crate::scanner::class_dir(conn, req.class_id)?, slot))
-    })?;
+    let Filing { class_dir, slot, dir_rel } =
+        with_conn(app, |conn| resolve_filing(conn, req.class_id, req.week, &file_name))?;
     let routed_to_inbox = slot.is_none();
-    let dir_rel = match &slot {
-        Some(slot) => format!("{WEEKS_DIR}/{}", slot.folder),
-        None => INBOX_DIR.to_string(),
-    };
-    // The name decides where the note goes, and a division spanning several
-    // weeks holds one note per name (`refuse_held_note`). Settled before the
-    // capture: refused here it costs nothing, refused after a three-hour
-    // capture it costs the capture. `record_contribution` checks again at the
-    // write, against whatever name the folder leaves free by then.
-    if let Some(slot) = &slot {
-        let rel_path = unique_rel_path(&class_dir, &dir_rel, &file_name);
-        let corpus_rel = corpus_rel_path(&slot.unit_name, &rel_path);
-        with_conn(app, |conn| {
-            refuse_held_note(conn, req.class_id, &class_dir, &slot.unit_name, &corpus_rel, &rel_path)
-        })?;
-    }
 
     let (caption, source_name) = fetch(app, &req.source, on_stage)?;
     let cues = crate::transcripts::parse(&caption);
@@ -282,6 +256,65 @@ fn transcript_file_name(date: &str, title: &str) -> Result<String> {
         bail!("lecture title is too long — keep it under 80 characters");
     }
     Ok(format!("{date} — {cleaned}.md"))
+}
+
+/// Where a lecture is going, settled before anything is captured.
+struct Filing {
+    class_dir: PathBuf,
+    /// The week and the division it feeds, or `None` for a lecture the
+    /// sorter will place.
+    slot: Option<crate::units::WeekSlot>,
+    /// The folder it files into, class-relative: the week's, or `_Inbox/`.
+    dir_rel: String,
+}
+
+/// Resolves the week, the folder and the name a lecture will take, and
+/// refuses one whose note another transcript holds.
+///
+/// A lecture is filed by when it happened, and for these four courses that
+/// also settles what it covers (SPEC §8.5). A week that resolved to none of
+/// the course's own means the sorter gets to propose one, which it can only
+/// do from `_Inbox/` (SPEC §10).
+///
+/// The name decides where the note goes, and a division spanning several
+/// weeks holds one note per name (`refuse_held_note`). Settled here, before
+/// the capture: refused now it costs nothing, refused after a three-hour
+/// capture it costs the capture. The name is asked for again at the write,
+/// since the folder may have filled in the meantime, and the row is checked
+/// again there by `record_contribution`.
+///
+/// A note already on disk with no row behind it is refused here too. A
+/// refile to a week the course has not declared leaves one (`refile_lecture`),
+/// for the refile back that will claim it again — so this check belongs only
+/// to the form, where a title is a field away; on the sorter's path the same
+/// note is the lecture's own, coming home.
+fn resolve_filing(
+    conn: &Connection,
+    class_id: i64,
+    week: Option<i64>,
+    file_name: &str,
+) -> Result<Filing> {
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let slot = match week {
+        Some(week) => crate::units::slot_for_week(conn, class_id, week)?,
+        None => None,
+    };
+    let dir_rel = match &slot {
+        Some(slot) => format!("{WEEKS_DIR}/{}", slot.folder),
+        None => INBOX_DIR.to_string(),
+    };
+    if let Some(slot) = &slot {
+        let rel_path = unique_rel_path(&class_dir, &dir_rel, file_name);
+        let corpus_rel = corpus_rel_path(&slot.unit_name, &rel_path);
+        refuse_held_note(conn, class_id, &class_dir, &slot.unit_name, &corpus_rel, &rel_path)?;
+        if class_dir.join(&corpus_rel).is_file() {
+            bail!(
+                "a distilled note already exists at {corpus_rel}, and this lecture's would \
+                 replace it — give it a title of its own"
+            );
+        }
+    }
+    Ok(Filing { class_dir, slot, dir_rel })
 }
 
 /// Appends ` (2)`, ` (3)`… until the name is free, the way `guides.rs` keeps
@@ -1839,6 +1872,65 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What the form settles before a capture: the week's folder or the
+    /// inbox, and a refusal — for a name another of the Part's transcripts
+    /// holds, or for a note already on disk — that costs nothing because
+    /// nothing has been captured yet. The same name in the same week folder
+    /// takes its suffix and is no collision at all.
+    #[test]
+    fn a_filing_is_settled_before_the_capture() {
+        let root = scratch("classhub-resolve-filing");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 4", [], |row| row.get(0))
+            .expect("class");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join(folder);
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, first_week, last_week, source)
+             VALUES (4, 1, 'part', 'Part I: Deep Learning to Large Language Models', 1, 8, 'syllabus')",
+            [],
+        )
+        .expect("unit");
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let name = "2026-09-01 — Lecture.md";
+
+        // No week: the inbox, and no division to refuse for.
+        let inbox = resolve_filing(&conn, 4, None, name).expect("inbox");
+        assert!(inbox.slot.is_none());
+        assert_eq!(inbox.dir_rel, "_Inbox");
+
+        // Week 2: the bare folder of a Part-numbered course, feeding Part I.
+        let week2 = resolve_filing(&conn, 4, Some(2), name).expect("week 2");
+        assert_eq!(week2.dir_rel, "Weeks/Week 02");
+        assert_eq!(week2.slot.as_ref().map(|s| s.unit_name.as_str()), Some("Part I: Deep Learning to Large Language Models"));
+
+        // Filed and recorded there, the same name for Week 3 is refused
+        // before a capture; the same name for Week 2 takes ` (2)` instead.
+        let first = format!("{}/{name}", week2.dir_rel);
+        fs::create_dir_all(dir.join(&week2.dir_rel)).expect("week dir");
+        fs::write(dir.join(&first), markdown).expect("first");
+        let slot = week2.slot.as_ref().expect("slot");
+        let note = record_contribution(&conn, 4, &dir, slot, &first, markdown).expect("record");
+        let err = resolve_filing(&conn, 4, Some(3), name).err().expect("held name");
+        assert!(format!("{err:#}").contains(&first), "{err:#}");
+        resolve_filing(&conn, 4, Some(2), name).expect("a suffixed name in the same folder");
+        resolve_filing(&conn, 4, Some(3), "2026-09-01 — Guest lecture.md").expect("a title of its own");
+
+        // A note on disk with no row behind it is refused too: the form has
+        // a title field, and the note is someone's distillation.
+        conn.execute("DELETE FROM lecture_contributions WHERE class_id = 4", []).expect("clear");
+        fs::create_dir_all(dir.join(&note).parent().expect("parent")).expect("corpus dir");
+        fs::write(dir.join(&note), "# note").expect("orphan note");
+        let err = resolve_filing(&conn, 4, Some(3), name).err().expect("a note on disk");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        fs::remove_file(dir.join(&note)).expect("remove note");
+        resolve_filing(&conn, 4, Some(3), name).expect("free again");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Within one week folder the never-overwrite rule already keeps two
