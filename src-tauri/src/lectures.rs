@@ -1788,7 +1788,7 @@ mod tests {
 
         fs::rename(dir.join(a), dir.join(a_moved)).expect("move");
         let err = refile_lecture(&conn, 1, &dir, a, a_moved).expect_err("a collision");
-        assert!(format!("{err:#}").contains("already"), "{err:#}");
+        assert!(format!("{err:#}").contains("already feeds"), "the row guard: {err:#}");
         // B's distillation is untouched either way.
         let b_note = list_contributions(&conn, 1)
             .expect("list")
@@ -1797,8 +1797,22 @@ mod tests {
             .expect("b's row")
             .corpus_rel_path;
         assert_eq!(
-            fs::read_to_string(dir.join(b_note)).expect("b's note"),
+            fs::read_to_string(dir.join(&b_note)).expect("b's note"),
             format!("# note for {b}")
+        );
+
+        // B's row gone but its note still on disk — a transcript deleted in
+        // Finder leaves exactly that — the row guard has nothing to hold, and
+        // the note itself is what refuses the move.
+        conn.execute("DELETE FROM lecture_contributions WHERE rel_path = ?1", [b]).expect("drop b");
+        let slot = crate::units::slot_for_week(&conn, 1, 8).expect("slots").expect("slot");
+        record_contribution(&conn, 1, &dir, &slot, a, markdown).expect("a's row back");
+        let err = refile_lecture(&conn, 1, &dir, a, a_moved).expect_err("a note on disk");
+        assert!(format!("{err:#}").contains("already exists"), "the disk guard: {err:#}");
+        assert_eq!(
+            fs::read_to_string(dir.join(&b_note)).expect("b's note"),
+            format!("# note for {b}"),
+            "the orphan note was touched"
         );
 
         let _ = fs::remove_dir_all(&root);
