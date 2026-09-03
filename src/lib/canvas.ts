@@ -61,9 +61,11 @@ export interface ClassOutcome {
 export interface SyncProgress {
   stage: string;
   done: boolean;
-  /** Started by the launch rather than by a press (SPEC §7.2): Canvas turning
-   *  the saved session down is then a note, not a stopped sync. */
+  /** Started by the launch rather than by a press (SPEC §7.2). */
   launch: boolean;
+  /** Ended because Canvas wants a sign-in the sync could not ask for — the
+   *  one failure that is a note rather than a stopped sync. */
+  signInNeeded: boolean;
   results?: ClassOutcome[];
   error?: string;
 }
@@ -113,7 +115,7 @@ export function syncCanvas(classIds: number[] = []): Promise<void> {
   if (snapshot !== null && !snapshot.done) {
     return invoke<void>("sync_canvas", { classIds });
   }
-  publish({ stage: "Starting…", done: false, launch: false });
+  publish({ stage: "Starting…", done: false, launch: false, signInNeeded: false });
   return invoke<void>("sync_canvas", { classIds }).catch((e: unknown) => {
     publish(null);
     throw e;

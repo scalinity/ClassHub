@@ -88,9 +88,13 @@ pub struct ClassOutcome {
 struct Progress {
     stage: String,
     done: bool,
-    /// Started by the launch rather than by a press. The Settings report
-    /// renders a refused session as a note rather than a stopped sync.
+    /// Started by the launch rather than by a press; the report says so.
     launch: bool,
+    /// Ended because Canvas wants a sign-in the sync was not allowed to ask
+    /// for. The one failure the report renders as a note rather than a
+    /// stopped sync — its own flag, so a launch sync that failed for any
+    /// other reason still reads as one.
+    sign_in_needed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     results: Option<Vec<ClassOutcome>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +171,14 @@ fn spawn_with(app: &AppHandle, class_ids: Vec<i64>, launch: bool) -> Result<()> 
         let emit = |stage: &str, done: bool, results: Option<Vec<ClassOutcome>>, error: Option<String>| {
             let _ = app.emit(
                 PROGRESS_EVENT,
-                Progress { stage: stage.to_string(), done, launch, results, error },
+                Progress {
+                    stage: stage.to_string(),
+                    done,
+                    launch,
+                    sign_in_needed: false,
+                    results,
+                    error,
+                },
             );
         };
         // Claimed above, released here however this thread ends.
@@ -189,9 +200,19 @@ fn spawn_with(app: &AppHandle, class_ids: Vec<i64>, launch: bool) -> Result<()> 
                 emit_hub_change(&app, "units");
             }
             // The one outcome a launch sync expects: the stored session was
-            // turned down. Its own words, so the report can say so quietly.
+            // turned down. Flagged as such, so the report can say so quietly.
             Ok(Err(e)) if e.chain().any(|cause| cause.is::<SignInNeeded>()) => {
-                emit("Not synced", true, None, Some(format!("{SignInNeeded}")))
+                let _ = app.emit(
+                    PROGRESS_EVENT,
+                    Progress {
+                        stage: "Not synced".to_string(),
+                        done: true,
+                        launch,
+                        sign_in_needed: true,
+                        results: None,
+                        error: Some(format!("{SignInNeeded}")),
+                    },
+                );
             }
             Ok(Err(e)) => emit("Failed", true, None, Some(format!("{e:#}"))),
             // The claim releases during the unwind, so the backend recovers —

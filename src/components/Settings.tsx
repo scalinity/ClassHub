@@ -340,13 +340,13 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
     );
   }
 
-  // The launch's sync giving up is the quiet outcome it exists to allow —
-  // Canvas turned the saved session down, and the next press will ask for a
-  // sign-in. A note, not a stopped sync.
-  if (progress.error && progress.launch) {
+  // A sync giving up because Canvas wants a sign-in it could not ask for is
+  // the quiet outcome the launch's sync exists to allow — the next press will
+  // ask. A note, not a stopped sync; any other failure on launch still is one.
+  if (progress.error && progress.signInNeeded) {
     return (
       <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-muted-foreground">
-        NOT SYNCED ON LAUNCH — {progress.error}
+        {progress.launch ? "NOT SYNCED ON LAUNCH" : "NOT SYNCED"} — {progress.error}
       </p>
     );
   }
