@@ -740,12 +740,13 @@ fn refile_session(
 ) -> Result<Vec<PathBuf>> {
     let new_scope = session_scope(dest_rel);
     // A row already at the new scope can only be a leftover from a transcript
-    // that vanished without a move — the destination itself was checked to be
-    // free on disk. Cleared whether or not the incoming transcript brings a
-    // row of its own: left standing it would read as the newcomer's session
-    // document, and its pair would open the other lecture. The documents go
-    // with it, as `record_session` does with a superseded pair, once the
-    // caller has committed.
+    // that vanished without a move: the destination path was not in the
+    // index, whether the sorter checked it free on disk or the scan found a
+    // file there that nothing was keyed by. Cleared whether or not the
+    // incoming transcript brings a row of its own: left standing it would
+    // read as the newcomer's session document, and its pair would open the
+    // other lecture. The documents go with it, as `record_session` does with
+    // a superseded pair, once the caller has committed.
     let orphaned = drop_session(conn, class_id, class_dir, &new_scope)?;
 
     let old_scope = session_scope(source_rel);
