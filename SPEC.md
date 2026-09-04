@@ -1048,7 +1048,7 @@ containing today — whatever the course calls it: a syllabus row stored as `mod
 name opens with neither "Week" nor "Part" (`Reading Days — No Class`) is no less a division than
 one called a week. Two starting on one day go to the week over a coarser division it sits
 inside, then to the later ordinal. One query answers for every reader: the class card, the
-workspace eyebrow, the Structure list (a `now` mark on the row, matched by id; the list marks it
+workspace band, the Structure list (a `now` mark on the row, matched by id; the list marks it
 and does not scroll to it) and the chat overview's `Now:` line — and the query is keyed by the
 day, so a dashboard left open across midnight asks again. A course that published no dates has
 no current division and the app shows nothing, because the only alternative is a week from
@@ -1295,6 +1295,86 @@ its meetings.
   Project 30 · Survey left at 0 — the syllabus does not weight it`. A rescan of an unchanged
   syllabus writes nothing and leaves no row. Whether the weights add up is the section's own
   ≠100% warning's job, and chat's weights line reports the same sum.
+
+## 12. UI specification & design language
+
+**Any milestone session that touches UI MUST first read the frontend-design skill**
+(`/Users/danny/.claude/plugins/cache/claude-plugins-official/frontend-design/unknown/skills/frontend-design/SKILL.md`)
+and apply it. Non-negotiable per project owner.
+
+- **One clean sans, with weight and tracking carrying the hierarchy.** SF Pro throughout —
+  the system stack, nothing bundled, no CDN (the window CSP would refuse one) — and SF Mono
+  only for code, file paths, logs and the raw note editor. Eight type roles, defined once in
+  `src/index.css` as Tailwind text utilities: `display` (34px, semibold, −0.02em) for the
+  workspace's class name and the Settings title; `headline` (22px, semibold, −0.01em) for the
+  dashboard's date, a class card's topic and every section heading; `reading` (15px/1.6) for
+  notice bodies, chat answers and empty states; `title` (14px, medium) for row titles; `body`
+  (13px); `meta` (12px, tabular figures) for dates, times, counts and sizes; `fine` (11px)
+  for chips; `code` (12.5px, mono). No uppercase, no letter-spacing and no mono on a label
+  anywhere in the chrome. Labels are sentence case and say what happens (`Add lecture`, `Scan
+  the syllabus`, `Rewrite · sources changed`, `Read guide`); counts read as phrases
+  (`13 proposed deadlines`, `2 to sort`, `3 guides stale`); dates read `Thu, Sep 24`, times
+  `11:59 pm`, relatives `in 6 days` and `overdue since Sep 3`.
+- **Paper and ink, light and dark.** A warm white paper with a navy ink in light mode; a deep
+  ink-navy ground with a warm-white ink in dark, following the system with no toggle.
+  `--surface` sits one step off the ground for panels, popovers, inputs and decision cards.
+  The four class colours — blue, orange, green, amber, matching the enrollment screenshot's
+  card edge bars — are the only chroma the chrome carries: a class-scoped container sets
+  `--accent` inline and a base rule derives `--accent-ink` (the colour mixed toward the ink,
+  for text) and `--wash` (the colour at 9% over the paper, 13% over the ink) from it. Amber
+  is the one staleness colour. Radii carry hierarchy — surfaces 14px, controls 8px, chips
+  6px — and only floating things (the chat panel, the jobs panel, a dialog) cast a shadow.
+- **The class card is its wash.** No border, no shadow, no bar: `display_name` (never a
+  course code) in the class ink, the next meeting and its distance (`Thu 11:45 am–1:40 pm ·
+  in 6 days`, or an `In session` chip), the current division (§8.5) in the course's own words
+  as the card's headline — `Week 3` in meta over the topic in the headline role, wrapping to
+  two lines, a `No Class` week exactly as the syllabus wrote it, and nothing for a course
+  with no current division — the nearest open deadline as one sentence (`Homework 1 due Mon,
+  Sep 7 at 11:59 pm`, `Quiz 1 overdue since Sep 3`), and a bottom row of chips: the current
+  grade, `N proposed deadlines`, `N to sort`, `N guides stale` in amber. Instructors, room
+  and credits live on the workspace band, not the card.
+- **Views**: Dashboard (a small wordmark; the day as the headline — `Friday, September 4` —
+  with the semester and the Canvas sync's age as meta beside the settings icon: `Canvas
+  synced yesterday`, `synced 6 days ago`, `never synced`, `syncing…`, in the destructive
+  colour from seven days and opening Settings where the sync lives; the This week schedule
+  grid with the next class beside its heading; Due in the next 7 days as class-washed chips;
+  the four class cards)
+  · Class Workspace (a full-width band in the class wash holding the back link, the class
+  name in the display role, the current division in the headline role and one meta row —
+  meeting, room, credits, instructors — then a sticky row of section links in the page's own
+  order, Inbox · Notices · Structure · Deadlines · Grades · Materials · Lectures · Practice
+  exams · Notes, each present only while its section is; the sections follow in that order,
+  each a headline with its count in meta and its text actions on the right, rows separated
+  by hairlines because they are a list, and decisions — proposals, forms — as cards on
+  `--surface`; the `Notices` section lists the professor's Canvas announcements newest
+  first, each a title and posting time with the text clamped beneath it until opened, absent
+  while there are none)
+  · Guide viewer (sandboxed iframe rendering the HTML file + Open in browser / Show in Finder)
+  · Material viewer (the same reading room for a class file: markdown, R and Python
+  scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
+  a Jupyter notebook as its extract, and a PDF — or a slide deck, through its converted
+  twin — in WebKit's own PDF view framed over the asset protocol (§13); a deck whose twin
+  is missing or out of date, and a notebook whose extract the index does not yet hold,
+  open in their default app instead)
+  · Chat sidebar (global, overlays right side, ⌘J; answers in the reading role, tool calls
+  as chips) · Jobs (bottom bar pill — `Jobs · idle`, `Jobs · Extract 00:42` — expanding to a
+  panel with live logs) · Settings.
+  The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
+  previews on the page it will be read on; generated guides keep their own design (§8.1).
+- Empty states matter: a class with no modules yet shows a friendly drop-target hero, not a
+  blank pane, and every other empty section is one line in the reading role and one action.
+- A row in Materials offers `File under Week NN` when its name files under a week the
+  course declares — a week in the name, or a module where the course reads modules as
+  weeks — and it sits outside that week's folder; a folder's row offers it while the
+  folder holds a file and reads `Proposed · see inbox` once every file under it has a
+  card (§10). The inbox card of a Canvas file whose destination names a week shows the
+  week folder as a second route under Canvas's — `or → Weeks/Week 04 — …/`, the folder
+  dash-underlined while it has yet to be created — its reason under Canvas's, and `File
+  under Week NN` beside Approve, which stays the filled default (§10 step 8).
+  The Add lecture form says when a course declares no weeks and keeps Add lecture off,
+  naming the syllabus scan (§7.1).
+- Motion answers an action and nothing else: 150–200ms on a notice opening, a panel or the
+  sidebar appearing, a room fading in; every transition stops under reduced motion.
 
 ## 13. Engineering conventions
 
