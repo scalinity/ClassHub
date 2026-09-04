@@ -566,13 +566,14 @@ fn resolve_move_proposal(
 }
 
 /// A file named for a week, proposed into that week's folder from its row in
-/// Materials (SPEC §10); the destination comes back for the row to say.
+/// Materials (SPEC §10); what it wrote comes back — the destination and the
+/// card count.
 #[tauri::command]
 fn propose_week_filing(
     app: tauri::AppHandle,
     class_id: i64,
     rel_path: String,
-) -> Result<String, String> {
+) -> Result<sorter::WeekFiling, String> {
     sorter::propose_week_filing(&app, class_id, &rel_path).map_err(|e| format!("{e:#}"))
 }
 

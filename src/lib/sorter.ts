@@ -62,14 +62,21 @@ export function sortByContent(proposalId: number): Promise<number> {
   return invoke<number>("sort_by_content", { proposalId });
 }
 
-/** A file named for a week, proposed into that week's folder from its row in
- *  Materials (SPEC §10). Resolves to the destination; the card lands in the
- *  inbox queue and approval is the ordinary move. */
+/** What a filing click wrote (SPEC §10): where it lands — a file's own
+ *  destination, or a folder's under the week folder — and how many cards. */
+export interface WeekFiling {
+  destRel: string;
+  cards: number;
+}
+
+/** A file or folder named for a week, proposed into that week's folder from
+ *  its row in Materials (SPEC §10). The cards land in the inbox queue and
+ *  approval is the ordinary move. */
 export function proposeWeekFiling(
   classId: number,
   relPath: string,
-): Promise<string> {
-  return invoke<string>("propose_week_filing", { classId, relPath });
+): Promise<WeekFiling> {
+  return invoke<WeekFiling>("propose_week_filing", { classId, relPath });
 }
 
 /** Approve the move (optionally to a picked folder) or leave the file put. */

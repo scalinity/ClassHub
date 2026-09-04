@@ -312,18 +312,27 @@ pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
 /// is the ordinary move, extract and all. A folder named for a week files its
 /// contents the same way, one card per file (`folder_filing`); a file named
 /// for a module files under that week where the course reads its modules as
-/// weeks (`units::modules_read_as_weeks`), and the card says so. Returns the
-/// destination — the file's, or the folder's under the week folder.
-pub fn propose_week_filing(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<String> {
-    let dest = with_conn(app, |conn| {
+/// weeks (`units::modules_read_as_weeks`), and the card says so.
+pub fn propose_week_filing(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<WeekFiling> {
+    let filed = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         week_filing(conn, class_id, &class_dir, rel_path)
     })?;
     emit_hub_change(app, "proposals");
-    Ok(dest)
+    Ok(filed)
 }
 
-fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &str) -> Result<String> {
+/// What a filing click wrote (SPEC §10): where it lands — a file's own
+/// destination, or a folder's under the week folder — and how many cards,
+/// one for a file and one per file for a folder.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeekFiling {
+    pub dest_rel: String,
+    pub cards: usize,
+}
+
+fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &str) -> Result<WeekFiling> {
     let source_rel = clean_rel(rel_path)?;
     // An inbox file is the sorter's, and Canvas may have placed it: the row
     // never offers one, and a caller that asked would be replacing a Canvas
@@ -384,7 +393,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     if !upsert_proposal(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning, None)? {
         bail!("the proposal for '{name}' was not recorded — another card holds this file");
     }
-    Ok(dest_rel)
+    Ok(WeekFiling { dest_rel, cards: 1 })
 }
 
 /// A folder named for a week files what it holds: one card per file, each
@@ -400,7 +409,7 @@ fn folder_filing(
     class_dir: &Path,
     source_rel: &str,
     name: &str,
-) -> Result<String> {
+) -> Result<WeekFiling> {
     if source_rel == WEEKS_DIR {
         bail!("'{WEEKS_DIR}' is where lectures are filed, not something to file");
     }
@@ -427,8 +436,10 @@ fn folder_filing(
         validate_dest(class_dir, from, to).with_context(|| format!("'{from}'"))?;
         refuse_held(conn, class_id, from, to)?;
     }
+    // The week folder, not the destination folder: a nested file lands deeper
+    // than `dest_folder`, and the week folder is the claim true of every card.
     let reasoning = format!(
-        "Its folder is named for Week {week}. Under {dest_folder}, it counts among the \
+        "Its folder is named for Week {week}. Under {folder_rel}, it counts among the \
          sources of {}.",
         slot.unit_name
     );
@@ -445,7 +456,7 @@ fn folder_filing(
         }
     }
     tx.commit()?;
-    Ok(dest_folder)
+    Ok(WeekFiling { dest_rel: dest_folder, cards: moves.len() })
 }
 
 /// What the queue already holds against a filing (SPEC §10). A pending card
@@ -1899,8 +1910,9 @@ mod tests {
         fs::create_dir_all(class_dir.join("Slides")).expect("slides");
         fs::write(class_dir.join(deck), "%PDF").expect("deck");
 
-        let dest = week_filing(&conn, 4, &class_dir, deck).expect("proposed");
-        assert_eq!(dest, "Weeks/Week 02/CAI6734_Week2_Foundations.pdf");
+        let filed = week_filing(&conn, 4, &class_dir, deck).expect("proposed");
+        assert_eq!((filed.dest_rel.as_str(), filed.cards), ("Weeks/Week 02/CAI6734_Week2_Foundations.pdf", 1));
+        let dest = filed.dest_rel;
         let (held_dest, source, reasoning): (String, String, String) = conn
             .query_row(
                 "SELECT dest_rel_path, source, reasoning FROM move_proposals
@@ -1997,7 +2009,9 @@ mod tests {
         std::os::unix::fs::symlink(root.join("outside.R"), class_dir.join(folder).join("link.R")).expect("link");
         std::os::unix::fs::symlink(root.join("outside-dir"), class_dir.join(folder).join("Linked")).expect("dir link");
 
-        let dest = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
+        let filed = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
+        assert_eq!(filed.cards, 3);
+        let dest = filed.dest_rel;
         assert_eq!(dest, "Weeks/Week 03 — Data Quality/Week 3 Coding Material");
         let mut stmt = conn
             .prepare(
@@ -2016,8 +2030,11 @@ mod tests {
         assert_eq!(rows[2].0, format!("{folder}/intro.html"));
         assert_eq!(rows[2].1, format!("{dest}/intro.html"));
         assert!(rows.iter().all(|r| r.2 == "by_name"));
+        // The reason names the week folder, which is true of the nested card too.
         assert!(
-            rows[0].3.contains("named for Week 3") && rows[0].3.contains("Week 3 — Data Quality"),
+            rows[0].3.contains("named for Week 3")
+                && rows[0].3.contains("Under Weeks/Week 03 — Data Quality,")
+                && rows[0].3.contains("sources of Week 3 — Data Quality"),
             "{}",
             rows[0].3
         );
@@ -2122,8 +2139,8 @@ mod tests {
         }
 
         let biostat = crate::scanner::class_dir(&conn, 3).expect("class dir");
-        let dest = week_filing(&conn, 3, &biostat, deck).expect("proposed");
-        assert_eq!(dest, "Weeks/Week 03 — Data Quality/Biostatistics_Module3_Slides_class.pptx");
+        let filed = week_filing(&conn, 3, &biostat, deck).expect("proposed");
+        assert_eq!(filed.dest_rel, "Weeks/Week 03 — Data Quality/Biostatistics_Module3_Slides_class.pptx");
         let reasoning: String = conn
             .query_row(
                 "SELECT reasoning FROM move_proposals WHERE class_id = 3 AND source_rel_path = ?1",
