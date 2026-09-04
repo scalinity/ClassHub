@@ -4373,3 +4373,60 @@ through an ignored probe test in `guides.rs`, under the code at 33ce423:
 - A workspace's scan after an approved move enqueues the extract for a PDF
   at once, so an approval on the dev build runs a job there — nothing under
   `src-tauri/` until it ends.
+
+## Post-M29 — Review fixes (2026-09-04)
+
+A two-agent review of the M29 changeset since 33ce423 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, two warnings and eight suggestions once the two reports were merged,
+the first warning raised by both reviewers. Each fix was its own commit
+through `scripts/gate.sh`. What future sessions should know:
+
+- **The queue refetches on a units change** (both reviewers). `sort_state`
+  reads `units` for the alternative, and the `units` hub change invalidated
+  every query but `sortState`; a rescan that recorded a numbered module or
+  renamed a week left the card offering the old destination, which the click
+  would have sent as the override and `validate_dest` accepted. Invalidated
+  with the weeks and the classes.
+- **An alternative another pending card claims is withheld.** A by-name card
+  gets `refuse_held`'s second half at proposal time; the alternative is taken
+  by an approval, which runs `validate_dest` alone. `sort_state` collects the
+  pending destinations and filters the derived alternatives against them, so
+  a by-name card for a same-named file in the tree and a Canvas card for its
+  re-uploaded twin do not both offer the week path. Two Canvas cards cannot
+  collide on their own: the tail always ends in the landed name, which the
+  inbox keeps unique.
+- **A name reading an undeclared week yields to its folder** (both). `Week 9
+  reading.pdf` under `Week 1 - Introduction` offered nothing, though the
+  folder's row would file it under Week 1; the readings are tried in order
+  and the first naming a declared week decides. SPEC §10 step 8 states it.
+- **The segment scan skips `Weeks/`'s own child**, as the walk does, so a
+  Canvas folder literally named `Weeks` cannot yield a week folder nested in
+  another.
+- **Tests** pin a module-named folder segment reading none and the outermost
+  week-bearing folder deciding; the queue test adds the claim case.
+- **The alternative's reason is on the card**, under Canvas's in the same
+  register, and the tooltip is gone — hover reaches neither the keyboard nor
+  touch. Checked on a fixture card (proposal 49) and approved through the
+  button once more (audit row 174), then removed and rescanned.
+- The two `FILE UNDER WEEK` labels carry comments naming each other;
+  `week_alternative` is private.
+- **Left as it is.** Approval trusts the derived destination as it trusts
+  the picker's: `validate_dest` is the boundary, re-deriving for Canvas rows
+  would special-case the one path every producer shares, and with the refetch
+  fixed the window is a click already in flight. The `NEW FOLDER` badge
+  renders once per route line, at the end of the route it describes, which
+  is its attribution. An alternative approval's audit row stays the ordinary
+  one.
+- **Tests**: 244 pass; `npx tsc --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- A perl swap whose old text ends at a line break has to match the file's
+  own line: `className=` continues on the same line in TSX, so a literal that
+  ended there matched nothing, the script died before writing, and the `&&`
+  chain broke at the heredoc so the gate ran with nothing staged. `git
+  status` before re-running.
+- The reviewers' first message truncates near 4,000 characters; batches of
+  three findings by number arrived whole when asked for under about 1,000
+  characters each.
