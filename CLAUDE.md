@@ -65,8 +65,12 @@ session rather than from a prompt.
   (the dialog's own button is the second of that name).
 - Fixtures: a `.md` under `Weeks/` reads as a lecture; use a `.csv`, which extracts locally
   for nothing. Never edit source material to test staleness — add a file beside it.
+- A workspace dump opens with the section links (Notices … Notes, those present) before any
+  section's controls, so a folder row of the same name — `Notes` — is the second of that name
+  (`AX_NTH=2`). A card is `Open <display_name>`.
 - Vite HMR of `query.ts` creates a second `QueryClient`; verify cache changes after a full
-  reload (`touch index.html`), not after HMR.
+  reload (`touch index.html`), not after HMR. A render error while an edit is half-applied
+  blanks the window and HMR does not bring it back; the same `touch` does.
 
 ## The facelift branch (M30)
 

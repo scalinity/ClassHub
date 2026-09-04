@@ -4472,7 +4472,7 @@ at 84454ad:
   `pulseDot`, `statusLine`, `row`/`rowDense`, `decisionCard`, `washCard`, `readingText`,
   `input`/`inputNeutral`, and the option-row set; the six mono constants are gone with their
   last consumers, as is `ui/card.tsx`. `SectionHeading` (`src/components/SectionHeading.tsx`)
-  replaces the sixteen copies of the eyebrow-on-a-rule header.
+  replaces the thirteen copies of the eyebrow-on-a-rule header.
 - **Formatters** in `src/lib`: sentence-case dates and times (`schedule.ts` gained
   `formatClock`, `formatMonthDay`, `formatStamp`; `dueDayLabel` reads `overdue since Sep 3`,
   `today at 11:59 pm`, `Thu, Sep 24 at 11:59 pm`), `splitUnitName` in `classes.ts` in place of
@@ -4567,3 +4567,71 @@ credits.
 - Tailwind v4's `--text-<role>--font-weight` and `--letter-spacing` modifiers make a type role
   one utility; `font-variant-numeric` is not a modifier, so `tabular-nums` rides in the `meta`
   string.
+
+## Post-M30 — Review fixes (2026-09-04)
+
+A two-agent review of the M30 changeset since 84454ad (one bug-hunting
+pass, one architecture/security/documentation pass) produced no critical
+issue, seven warnings and eleven suggestions once the two reports were
+merged, three of them raised by both reviewers. Each fix was its own commit
+through `scripts/gate.sh`. What future sessions should know:
+
+- **SPEC §12 had been deleted, not rewritten.** The milestone commit ran the
+  section swap twice; the first run, without its snippet path, opened an empty
+  handle and replaced §12 with nothing, and the second found nothing to
+  replace. The section is back before §13 with the new design language.
+- **The card decides "overdue" from the date** (both reviewers). It had tested
+  the label's prefix, so a rewording of `dueDayLabel` would have rendered
+  "due overdue since"; `daysUntil` answers the question the label is built
+  from, and the label is computed once.
+- **`formatClock` matches the meridiem's separator as whitespace.** ICU 72
+  and later put U+202F before AM/PM, where a literal-space replace becomes a
+  no-op and every stamp shouts again; the webview's data has the plain space
+  today, and the regex holds under both.
+- **The Structure list's date never carries the year.** `formatMonthDay`
+  adds one when the year differs from today's, and the column is 3rem; the
+  list is one term's, so the local formatter drops the year branch.
+- **`jobKindLabel` cannot fall through to `Object.prototype`**; a kind that
+  is no key of the table gets its sentence-cased words.
+- **The file viewer's live label shrinks and truncates again**, as before the
+  facelift, so a long phase detail cannot push the title off the bar.
+- **The inbox section reads its summary once**; `inboxShown` shares the
+  predicate with it. The nav's own call stays: it is the nav's truth.
+- **The nav puts nine named buttons ahead of every workspace control.** Its
+  labels are unique in the tree except where a folder row shares one — two
+  classes hold a `Notes` folder — so a same-named row is now the second of
+  its name. Documented in CLAUDE.md's driving section; the labels stay as
+  they are, since an `aria-label` would rename the button to the driver
+  without removing the section heading's own static text from the search.
+- Comments: `SectionHeading` no longer calls its title serif; the two-ring
+  note names the job pill's real reason (it sets `--accent` for its running
+  job's colour and keeps the neutral ring because that accent falls back to
+  the muted foreground); `dueDayLabel` says the overdue branch names only the
+  day; the nav's comment ties `scroll-mt-20` to the stuck nav's height.
+  SPEC §8.5 says "the workspace band" where it said "eyebrow"; the notes say
+  thirteen `SectionHeading` sites, not sixteen.
+- The scan picker's two items and the workspace's two row-title buttons each
+  share one module constant; the notices stamp calls `formatDueDate` where
+  it is used, its year rationale beside it.
+- **Left as it is.** The guide footer's uppercased stamp is the generated
+  guides' own design (SPEC §8.1). `Deadlines.tsx`'s row title and
+  `InboxQueue.tsx`'s differ in their disabled classes, so no shared primitive.
+  `scroll-mt-20` stays 80px: the stuck nav is about 68px and the difference
+  is air under it.
+- **Tests**: 244 pass; `npx tsc --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- `perl -0pi` with a `BEGIN` block that opens `$ENV{NAME}` does not die when
+  the variable is unset: `open` on an undefined name succeeds on an empty
+  handle, the replacement is the empty string, and the section is gone with
+  a clean exit. Open the snippet by a literal path, `die` when it reads
+  empty, and grep for the heading afterwards.
+- A replacement string in a `perl -pi` one-liner interpolates `${meta}` as a
+  Perl variable; escape the dollar or the template literal comes back empty.
+- A render error while an edit is half-applied — the card rendering
+  `daysUntil` before its import landed — blanks the dev window and an
+  accessibility dump reads empty; HMR does not recover the root, `touch
+  index.html` does.
+- `pgrep -f target/debug/classhub` also matches the `tauri dev` shell; the app
+  is the pid whose `ps -o comm=` is the binary.
