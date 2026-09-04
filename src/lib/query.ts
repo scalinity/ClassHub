@@ -64,6 +64,10 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The weeks a lecture or a file can be filed into are read off the
       // same rows.
       void queryClient.invalidateQueries({ queryKey: ["lectureWeeks"] });
+      // A Canvas card's week alternative is derived from these rows on every
+      // read (SPEC §10 step 8), so a reading the rescan withdrew has to leave
+      // the queue too, before a click sends it as the destination.
+      void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       // The card and the workspace header name the current division, which
       // is resolved from those same rows.
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
