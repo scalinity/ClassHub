@@ -370,6 +370,9 @@ function ProposalCard({
             disabled={held}
             className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
           >
+            {/* The Materials row's label, word for word (FileTree.tsx,
+                FilingAction): the card offers the row's own action, and the
+                two must read the same. */}
             {busy && filing
               ? "FILING…"
               : `FILE UNDER WEEK ${String(alternative.week).padStart(2, "0")}`}

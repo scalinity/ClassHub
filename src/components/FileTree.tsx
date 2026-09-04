@@ -108,6 +108,9 @@ function FilingAction({
       disabled={proposing}
       className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
     >
+      {/* The inbox card's second approval carries this label word for word
+          (InboxQueue.tsx, ProposalCard): the card offers the row's own action,
+          and the two must read the same. */}
       {proposing
         ? "PROPOSING…"
         : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
