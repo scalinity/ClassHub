@@ -374,6 +374,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     let (slot, folder_rel) = week_target(conn, class_id, &source_rel, name, week)?;
     let dest_rel = format!("{folder_rel}/{name}");
     validate_dest(class_dir, &source_rel, &dest_rel)?;
+    refuse_held(conn, class_id, &source_rel, &dest_rel)?;
     let reasoning = format!(
         "{reading} Under {folder_rel}, it counts among the sources of {}.",
         slot.unit_name
@@ -424,6 +425,7 @@ fn folder_filing(
         .collect();
     for (from, to) in &moves {
         validate_dest(class_dir, from, to).with_context(|| format!("'{from}'"))?;
+        refuse_held(conn, class_id, from, to)?;
     }
     let reasoning = format!(
         "Its folder is named for Week {week}. Under {dest_folder}, it counts among the \
@@ -444,6 +446,41 @@ fn folder_filing(
     }
     tx.commit()?;
     Ok(dest_folder)
+}
+
+/// What the queue already holds against a filing (SPEC §10). A pending card
+/// for the source from another route — chat's, since a sort or Canvas card
+/// names an inbox file — is the reader's own earlier ask, which a click must
+/// not retarget without a word; and a pending card from any source already
+/// heading for the destination — two folders sharing a leaf name would each
+/// claim it — would fail only at the second approval. Both are refused by
+/// name. A by-name card of the click's own is refreshed, as before.
+fn refuse_held(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: &str) -> Result<()> {
+    let other_route: Option<String> = conn
+        .query_row(
+            "SELECT source FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'
+               AND source != 'by_name'",
+            params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(route) = other_route {
+        bail!("'{source_rel}' already has a card in the inbox from {route} — resolve it there first");
+    }
+    let claimant: Option<String> = conn
+        .query_row(
+            "SELECT source_rel_path FROM move_proposals
+             WHERE class_id = ?1 AND dest_rel_path = ?2 AND status = 'pending'
+               AND source_rel_path != ?3",
+            params![class_id, dest_rel, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(other) = claimant {
+        bail!("'{dest_rel}' is already proposed for '{other}'");
+    }
+    Ok(())
 }
 
 /// The week folder a filing lands in, refused for a week the course does not
@@ -1995,6 +2032,45 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
             .expect("count");
         assert_eq!(pending, 0, "a refused click wrote cards");
+        fs::remove_file(class_dir.join(&dest).join("intro.Rmd")).expect("clear collision");
+
+        // A file under the folder holding chat's card is the reader's own ask,
+        // named rather than retargeted; the card keeps its destination.
+        conn.execute(
+            "INSERT INTO move_proposals (class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
+             VALUES (3, ?1, 'Slides/intro.Rmd', 'asked in chat', 'chat', 'pending', 0)",
+            [format!("{folder}/intro.Rmd")],
+        )
+        .expect("chat card");
+        let err = week_filing(&conn, 3, &class_dir, folder).err().expect("chat holds a file");
+        assert!(format!("{err:#}").contains("intro.Rmd") && format!("{err:#}").contains("from chat"), "{err:#}");
+        let (pending, chat_dest): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(dest_rel_path) FROM move_proposals WHERE status = 'pending'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("count");
+        assert_eq!((pending, chat_dest.as_str()), (1, "Slides/intro.Rmd"), "the chat card was touched");
+        conn.execute("DELETE FROM move_proposals", []).expect("clear");
+
+        // Two folders sharing a leaf name claim one destination: the second
+        // click is refused now, naming the first, not at its approval.
+        week_filing(&conn, 3, &class_dir, folder).expect("proposed again");
+        let twin = "Labs/Week 3 Coding Material";
+        fs::create_dir_all(class_dir.join(twin)).expect("twin");
+        fs::write(class_dir.join(twin).join("intro.Rmd"), "x").expect("twin file");
+        let err = week_filing(&conn, 3, &class_dir, twin).err().expect("destination claimed");
+        assert!(
+            format!("{err:#}").contains("already proposed for") && format!("{err:#}").contains(folder),
+            "{err:#}"
+        );
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(pending, 3, "the twin's click wrote cards");
+        conn.execute("DELETE FROM move_proposals", []).expect("clear");
+        fs::remove_dir_all(class_dir.join("Labs")).expect("drop twin");
 
         // Where filing lands is never filed; a folder under its week folder is
         // already counted; a folder with nothing in it has nothing to file.
