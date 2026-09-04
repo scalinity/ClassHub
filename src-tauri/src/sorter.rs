@@ -549,7 +549,13 @@ pub(crate) fn week_alternative(
     let segments: Vec<&str> = folder.split('/').collect();
     let named = crate::units::named_week_reading(name, modules_are_weeks)
         .map(|(week, reading)| (week, reading_words(week, reading), name.to_string()));
+    // `Weeks/`'s own child is a week folder, where filing lands, and carries
+    // no week on the walk either (`scanner::walk_dir`); a Canvas folder
+    // literally named `Weeks` must not yield a week folder nested in another.
     let from_folder = segments.iter().enumerate().filter_map(|(at, segment)| {
+        if at == 1 && segments[0] == WEEKS_DIR {
+            return None;
+        }
         let week = crate::units::week_in_name(segment)?;
         Some((
             week,
@@ -2340,6 +2346,9 @@ mod tests {
         assert_eq!(week_alternative(&slots, true, "AI Design Project/Guidelines.pdf"), None);
         assert_eq!(week_alternative(&slots, true, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf"), None);
         assert_eq!(week_alternative(&slots, true, "Weeks/Week 03 — Data Quality/Slides/Week 3 reading.pdf"), None);
+        // A Canvas folder named `Weeks`: its child is a week folder on the
+        // walk's rule and reads none, so nothing nests one week folder in another.
+        assert_eq!(week_alternative(&slots, true, "Weeks/Week 3/notes.pdf"), None);
         assert_eq!(week_alternative(&[], true, "Reading Material/Week 4 Sampling.pdf"), None);
     }
 
