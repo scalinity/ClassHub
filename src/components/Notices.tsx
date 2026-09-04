@@ -17,13 +17,6 @@ export function announcementsQuery(classId: number) {
   };
 }
 
-/** `Sep 2 at 3:03 pm`, and `Sep 2, 2025 at 3:03 pm` when the notice is from
- *  another year — a course site can carry a term's worth of old posts, and
- *  "Aug 20" alone reads as this term's. */
-function noticeStamp(postedAt: string): string {
-  return formatDueDate(postedAt);
-}
-
 /**
  * SPEC §7.2 — what the professor said. The class's Canvas announcements,
  * newest first, as a record rather than a queue: nothing here is unread,
@@ -73,7 +66,10 @@ function NoticeRow({ notice }: { notice: Announcement }) {
         <span className="min-w-0 flex-1 truncate text-[15px] font-medium">
           {notice.title}
         </span>
-        <span className={`shrink-0 ${meta}`}>{noticeStamp(notice.postedAt)}</span>
+        {/* `Sep 2 at 3:03 pm`, with the year when the notice is from another one —
+            a course site carries a term's worth of old posts, and "Aug 20" alone
+            reads as this term's. */}
+        <span className={`shrink-0 ${meta}`}>{formatDueDate(notice.postedAt)}</span>
       </button>
       {notice.body !== "" && (
         <p
