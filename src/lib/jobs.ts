@@ -348,7 +348,8 @@ const JOB_KIND_LABELS: Record<string, string> = {
 };
 
 export function jobKindLabel(kind: string): string {
-  return JOB_KIND_LABELS[kind] ?? sentence(kind.replace(/_/g, " "));
+  const label = JOB_KIND_LABELS[kind];
+  return typeof label === "string" ? label : sentence(kind.replace(/_/g, " "));
 }
 
 /**
