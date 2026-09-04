@@ -4238,3 +4238,138 @@ through `scripts/gate.sh`. What future sessions should know:
 - The reviewers' reports arrive in pieces near 4,000 characters each; asking
   for three-finding batches by number worked, and an agent that promised
   "follows next" and went idle needed the batch requested again.
+
+## M29 — The week on the card (2026-09-04)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database
+(`user_version` 13, 36 file rows, 4 contributions, 9 guides, jobs at 311,
+audit at 171, no active job, every `canvas_synced_at` 2026-09-03 02:15)
+through an ignored probe test in `guides.rs`, under the code at 33ce423:
+
+- **The Structure rows.** `unit_context` refused for units 25, 42, 9 and
+  40 — nothing filed, no folder, nothing distilled — so those rows offer
+  nothing. Unit 37: a five-entry manifest (two transcripts, both decks, the
+  notebook), the three files in the files block, two notes; row 7 stale.
+  Unit 8: seven entries — the transcript and the six files M28 filed — the
+  six in the files block with the deck's converted twin named, one note;
+  row 9 stale. Stale from before: Biostatistics' `Module 1` guide (row 1)
+  and its Semester Master (row 2).
+- **The queue.** Design Studio's Canvas cards 25–27 from the Sept 3 sync,
+  its inbox holding the three files; every other inbox empty, no other
+  pending card; 37 approved and 5 dismissed on record.
+- **The readings, over every Canvas destination on record.** None of the
+  three pending names carries a week or a module; card 26's folder `Week 1
+  - Introduction` reads week 1 through `week_in_name` on the segment.
+  Biostatistics (`modules_read_as_weeks` true — weeks, no numbered module):
+  the five readings under `Reading Material/` read 1, 2, 2, 3 and 3 from the
+  week word and `(n, Week)` from the reading; the four decks — the two
+  dismissed under `Lecture Slides/`, the two approved under `Slides/` — read
+  nothing from `week_in_name`, 1, 2, 2 and 3 from `module_in_name` and
+  `(n, Module)` from the reading; the two Week 3 coding files read nothing
+  from their names and 3 from the second folder segment; the Posit docx
+  reads nothing. Applied (`false`): the Week 2 deck (card 37) and the staged
+  Week01 deck (audit 67) read their week from the word; audit 132 was loose.
+  Fundamentals has never staged a Canvas file and reads modules as weeks.
+  Design Studio reads modules as weeks by the same rule, though its `Module
+  2` page spans its weeks 2 and 3; no module-named file exists there.
+- **Week folders.** Design Studio's week 1 files into `Week 01 —
+  Introduction, Overview of AI Design Project`; Biostatistics' week 4 into
+  `Week 04 — Probability and Sampling Distributions`.
+- **The date.** Sept 4: the Sept 8–10 lectures had not happened, so no
+  recording could exist and the four links were not asked for.
+
+### What was built
+
+- **The alternative, derived.** `sorter::week_alternative(slots,
+  modules_are_weeks, dest_rel)` is pure over the course's `week_slots`: the
+  file's name through `units::named_week_reading` first, landing at
+  `Weeks/<week folder>/<name>`; else the first segment of the destination's
+  folder path that `week_in_name` reads, landing under that segment and the
+  rest of the path inside the week folder; none for a week the course lacks
+  or a destination already under its week folder. `Proposal.alternative`
+  carries `WeekAlternative { week, dest_rel_path, reasoning }`;
+  `sort_state` reads `modules_read_as_weeks` and the slots once per queue
+  when a Canvas card is present and fills it on Canvas cards alone.
+- **One wording.** `reading_words` (the week sentence, the module sentence)
+  and `week_reason` (the "Under …, it counts among the sources of …" close)
+  serve `week_filing`, `folder_filing` and the alternative; the folder case
+  on a card opens "Canvas files it under "<folder>", a folder named for Week
+  N."
+- **The card.** `DestPath` is the destination rendering `RouteLine` had,
+  reused for a second line `or → Weeks/…/` under Canvas's route, the week
+  folder dash-underlined with `NEW FOLDER` while it has yet to exist;
+  `FILE UNDER WEEK NN` sits beside the filled APPROVE in the row's own
+  register, its tooltip the alternative's reason, and approves through
+  `resolveProposal(id, true, destRelPath)` — the picker's override — with a
+  `filing` flag so the busy word lands on the button pressed.
+- SPEC §7.2 (a third explicit route), §10 step 8, §12, §13 and §14 state
+  the design.
+
+### Verified
+
+- `cargo test`: 244 pass, two new — the alternative over the shapes (a week
+  in the name, a module on a week course and none on a Part course, a week
+  on Canvas's folder and one nested a folder deeper, the file's week over
+  its folder's, a week the course lacks, a destination already under its
+  week folder at two depths, no slots) and the queue carrying it on a Canvas
+  card and not a sort card, then withdrawing the module reading once a
+  numbered module row exists. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 71660) beside the installed app 33ce423; the
+  launch scan enqueued nothing and the launch sync did not fire (the stamp
+  was 23 hours old). **The fixture:** `Week 4 fixture.csv` in Biostatistics'
+  inbox with a `canvas` row (48) toward `Reading Material/`. The card read
+  `_Inbox → Reading Material/`, then `or → Weeks/Week 04 — Probability and
+  Sampling Distributions/ NEW FOLDER`, then Canvas's reason, with `FILE
+  UNDER WEEK 04` between APPROVE and MOVE TO…. One press: proposal 48
+  approved at the week destination, audit row 172 (`sort.move`, `proposedBy:
+  canvas`, `to` the week folder), files row 37 with its local extract, jobs
+  still at 311, the inbox empty, and unit 9's row offering `SYNTHESIZE
+  GUIDE`. The fixture and its folder removed and RESCAN pressed: row 37 gone,
+  the mirror folder gone, the row offering nothing, jobs unchanged.
+- **Card 26.** Design Studio's queue showed `Introduction.pdf` with `_Inbox →
+  Week 1 - Introduction/ NEW FOLDER`, `or → Weeks/Week 01 — Introduction,
+  Overview of AI Design Project/Week 1 - Introduction/ NEW FOLDER`, and
+  `FILE UNDER WEEK 01`; cards 25 and 27 offered nothing new. Pressed:
+  proposal 26 approved there, audit row 173, files row 38, `Weeks/` and the
+  nested folder created; the workspace's scan enqueued extract job 312 for
+  the PDF (Opus at `xhigh`: 4 turns, 48 s, $0.65 list-equivalent, the
+  pipeline's own cost for any approved PDF), and unit 40's row offers
+  `SYNTHESIZE GUIDE`, which was not built.
+- Not run: any chat turn, any digest, any guide. Session cost: one PDF
+  extract, $0.65 on the subscription.
+
+### Left as it is
+
+- **The Sept 8–10 lectures.** None could exist on Sept 4; the four forms
+  resolve their days as M28 measured. Row 7 stays stale; §1 gains no cost.
+- Cards 25 and 27 (`AI Design Project`) wait in Design Studio's inbox — the
+  reader's.
+- Row 9 (Week 3) reads stale over seven entries; rows 1 and 2 were stale
+  before.
+- An approval to the alternative writes the ordinary audit row — `proposedBy:
+  canvas`, `to` the week folder — which reads the same as a MOVE TO… pick;
+  the alternative's reason stays on the card and is not carried onto the
+  row.
+- Where a file's name and Canvas's folder name disagree on the week, the
+  file's reading wins, as its own row would; either row could have been
+  clicked after a Canvas approval, and the card offers one.
+- Design Studio reads modules as weeks by the rule though its `Module 2`
+  page spans two weeks; a module-named file there would offer the module's
+  week, and the offer costs a click not taken.
+
+### Gotchas
+
+- `sqlite3 -readonly` refuses a WAL `.backup` copy ("unable to open database
+  file") because it cannot create the `-shm` beside it; open the copy without
+  the flag.
+- TypeScript's narrowing of an optional field does not reach into a closure;
+  bind the field to a `const` before the handler rather than asserting.
+- The card's buttons precede the Materials rows in `ax dump`, so `press
+  'FILE UNDER WEEK 04'` hits the card; the tree's own `FILE UNDER WEEK 01`
+  and `02` rows (the Module 1 and 2 decks, the Week 1 and 2 readings) sit
+  after it.
+- A workspace's scan after an approved move enqueues the extract for a PDF
+  at once, so an approval on the dev build runs a job there — nothing under
+  `src-tauri/` until it ends.

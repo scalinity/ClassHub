@@ -910,12 +910,17 @@ invented and the file waits for the content-aware sorter, which the sync enqueue
 never replaces a Canvas destination on its own.** Where Canvas filed a file is an observation —
 the professor put it there — and a sort job's destination is an inference from a filename and a
 tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
-reader asking, so it retargets. Disagreeing with the placement takes one of two explicit
-routes on the card: "change destination" names the folder directly, and **SORT BY CONTENT**
+reader asking, so it retargets. Disagreeing with the placement takes one of three explicit
+routes on the card: "change destination" names the folder directly; **SORT BY CONTENT**
 runs a sort job over that one file and, because it was asked for, lets the sort's destination
-replace Canvas's. The card then re-renders as a sort proposal with the Canvas folder named in
-its reasoning, so the professor's placement stays visible. Explicit, never heuristic: for every
-file nobody asked about, Canvas's placement still outranks a content guess.
+replace Canvas's, and the card then re-renders as a sort proposal with the Canvas folder named
+in its reasoning, so the professor's placement stays visible; and where the destination names
+a week — in the file's name, a module the course reads as a week, or Canvas's own folder —
+the card also offers the week folder as its alternative destination, `FILE UNDER WEEK NN`,
+the destination the file's row would offer once it landed where Canvas put it (§10 step 8),
+so the week's material reaches its division in one approval instead of two. Explicit, never
+heuristic: for every file nobody asked about, Canvas's placement still outranks a content
+guess.
 
 Each folder name is mapped onto the vocabulary the tree already uses, so a course calling its
 decks "Lecture Slides" does not earn that class a second folder beside the "Slides" every other
@@ -1221,6 +1226,20 @@ its meetings.
    is a destination another pending card claims. A source already under its week folder,
    at any depth, is refused, as are `Weeks/` and a week folder, which are where filing
    lands, and a symlink, which the tree never shows.
+ 8. A Canvas card (§7.2) whose destination names a week offers the week folder as a second
+   destination beside Canvas's, read when the queue is listed and never stored: the file's
+   own name first, through the reading step 7 takes — a week, or a module where the course
+   reads modules as weeks — landing at `Weeks/<week folder>/<name>`; else the first folder
+   on Canvas's path whose name carries a week (Design Studio's `Week 1 - Introduction`),
+   landing under that folder's own name inside the week folder, as a folder's click files
+   its contents. None for a week the course does not declare, and none for a destination
+   already under its week folder. The card shows both routes and offers `FILE UNDER WEEK
+   NN` beside APPROVE, its tooltip the by-name card's own reason; the click is the ordinary
+   approval with the week folder as its destination, the folder picker's path, so the move
+   carries its audit row and the file's index row. Canvas's placement stays the default:
+   APPROVE still takes Canvas's folder, no sort runs, and because nothing is stored on the
+   row, a rescan that records a numbered module withdraws the module reading from every
+   card at once, and a renamed week's folder follows its name.
 
 ## 11. Hub features
 
@@ -1312,7 +1331,10 @@ and apply it. Non-negotiable per project owner.
   course declares — a week in the name, or a module where the course reads modules as
   weeks — and it sits outside that week's folder; a folder's row offers it while the
   folder holds a file and reads `PROPOSED — SEE INBOX` once every file under it has a
-  card (§10).
+  card (§10). The inbox card of a Canvas file whose destination names a week shows the
+  week folder as a second route under Canvas's — `or → Weeks/Week 04 — …/`, the folder
+  dash-underlined while it has yet to be created — and `FILE UNDER WEEK NN` beside
+  APPROVE, which stays the filled default (§10 step 8).
  The Add lecture form says
   when a course declares no weeks and keeps ADD LECTURE off, naming the syllabus scan (§7.1).
 
@@ -1388,8 +1410,11 @@ and apply it. Non-negotiable per project owner.
   the tree marks as a guide's scope (§8.3 — a guide offered on `Weeks` is a second guide,
   quietly), a name's week — the week word, or a module where the course reads modules as weeks — and
   a by-name proposal's destination, a folder's one card per file included (§10 — a deck
-  proposed into the wrong week is silent until a guide reads it), and a claimed week named once
-  by the scan that wrote it (§8.5). UI and job plumbing are exercised by running the app.
+  proposed into the wrong week is silent until a guide reads it), a Canvas card's week
+  alternative — the file's reading before its folder's, none for a destination already under
+  its week folder, and on a Canvas card alone (§10 — a file approved into the wrong week
+  folder is silent until a guide reads it) — and a claimed week named once by the scan that
+  wrote it (§8.5). UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1645,6 +1670,20 @@ Mark the checkbox when the acceptance criteria pass.
   under the Week 3 folder with their extracts and the Week 3 guide reads stale over seven
   entries, and, where the recordings exist, each session is filed with a note and a session
   document and the guides are built with their costs in §1.
+
+- [x] **M29 — The week on the card.** (`milestones/M29-the-week-on-the-card.md`)
+  A file Canvas places reaches its week folder through two approvals: the Canvas card's and
+  then the by-name card's from its row. A Canvas card whose destination names a week — in
+  the file's name, a module the course reads as a week, or Canvas's own folder — offers
+  the week folder as its alternative destination, named from the reading the row takes,
+  derived on every read and never stored; one click approves the card there. Canvas's
+  placement stays the default and no sort runs. The Sept 8–10 lectures go through the
+  form, the digest and the guide where they exist.
+  *Accepted when:* Design Studio's `Introduction.pdf` card offers `FILE UNDER WEEK 01`
+  toward its folder's place under the Week 1 folder, a week-named fixture card offers its
+  week and one approval puts the file under the week folder with an audit row and no job,
+  the other cards offer nothing new, and, where the recordings exist, each session is
+  filed with a note and a session document and the guides are built with their costs in §1.
 
 ## 15. Risks & trade-offs (accepted)
 

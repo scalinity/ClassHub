@@ -55,6 +55,25 @@ pub struct Proposal {
     /// proposed into its week folder from its Materials row (SPEC §10).
     pub source: String,
     pub created_at: i64,
+    /// SPEC §10: on a Canvas card whose destination names a week — in the
+    /// file's name, a module the course reads as a week, or Canvas's own
+    /// folder — the week folder as a second destination, derived on every
+    /// read (`week_alternative`) and never stored. Absent on every other card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<WeekAlternative>,
+}
+
+/// The week folder a Canvas card also offers (SPEC §10): where the file
+/// would be proposed from its row once it landed where Canvas put it, read a
+/// step earlier so it reaches the week folder in one approval instead of two.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeekAlternative {
+    pub week: i64,
+    pub dest_rel_path: String,
+    /// The by-name card's own words: which reading found the week, and which
+    /// division counts the file under that folder.
+    pub reasoning: String,
 }
 
 /// The workspace queue: what is in the inbox plus every pending proposal.
@@ -362,14 +381,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     // reading it was.
     let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
     let (week, reading) = match crate::units::named_week_reading(name, modules_are_weeks) {
-        Some((week, WeekReading::Week)) => (week, format!("Its name carries Week {week}.")),
-        Some((module, WeekReading::Module)) => (
-            module,
-            format!(
-                "Its name carries Module {module}, and this course divides itself into \
-                 weeks, so Module {module} is Week {module}."
-            ),
-        ),
+        Some((week, reading)) => (week, reading_words(week, reading)),
         // A module this course does not read as a week: a row still offering
         // it was drawn before a scan recorded the course's own modules.
         None => match crate::units::module_in_name(name) {
@@ -384,10 +396,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     let dest_rel = format!("{folder_rel}/{name}");
     validate_dest(class_dir, &source_rel, &dest_rel)?;
     refuse_held(conn, class_id, &source_rel, &dest_rel)?;
-    let reasoning = format!(
-        "{reading} Under {folder_rel}, it counts among the sources of {}.",
-        slot.unit_name
-    );
+    let reasoning = week_reason(&reading, &folder_rel, &slot.unit_name);
     // Written or refused, never silently kept out: a row saying PROPOSED over
     // nothing recorded is the state this guards against.
     if !upsert_proposal(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning, None)? {
@@ -438,10 +447,10 @@ fn folder_filing(
     }
     // The week folder, not the destination folder: a nested file lands deeper
     // than `dest_folder`, and the week folder is the claim true of every card.
-    let reasoning = format!(
-        "Its folder is named for Week {week}. Under {folder_rel}, it counts among the \
-         sources of {}.",
-        slot.unit_name
+    let reasoning = week_reason(
+        &format!("Its folder is named for Week {week}."),
+        &folder_rel,
+        &slot.unit_name,
     );
     // One transaction, so the promise holds on the write as on the validation:
     // an error on the k-th card — the other build holding the write lock past
@@ -513,6 +522,67 @@ fn week_target(
         bail!("'{name}' is already under {folder_rel}");
     }
     Ok((slot, folder_rel))
+}
+
+/// The week folder a Canvas card also offers (SPEC §10). Where Canvas filed a
+/// file is the professor's placement and stays the card's destination (SPEC
+/// §7.2); this is the destination the file's row — or its folder's — would
+/// offer once the file landed there, read a step earlier. The file's own name
+/// first, through the reading the row takes (`units::named_week_reading`),
+/// landing at `Weeks/<week folder>/<name>`; else the first folder on Canvas's
+/// path whose name carries a week, landing under that folder's own name inside
+/// the week folder, the way a folder's row files its contents. None for a week
+/// the course does not declare, and for a destination already under its week
+/// folder. Pure over the course's slots, so `sort_state` reads the rows once
+/// per queue.
+pub(crate) fn week_alternative(
+    slots: &[crate::units::WeekSlot],
+    modules_are_weeks: bool,
+    dest_rel: &str,
+) -> Option<WeekAlternative> {
+    let (folder, name) = dest_rel.rsplit_once('/').unwrap_or(("", dest_rel));
+    let (week, reading, tail) = match crate::units::named_week_reading(name, modules_are_weeks) {
+        Some((week, reading)) => (week, reading_words(week, reading), name.to_string()),
+        None => {
+            let segments: Vec<&str> = folder.split('/').collect();
+            let (at, week) = segments
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| crate::units::week_in_name(s).map(|week| (i, week)))?;
+            (
+                week,
+                format!("Canvas files it under \"{}\", a folder named for Week {week}.", segments[at]),
+                format!("{}/{name}", segments[at..].join("/")),
+            )
+        }
+    };
+    let slot = slots.iter().find(|slot| slot.week == week)?;
+    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+    if dest_rel.starts_with(&format!("{folder_rel}/")) {
+        return None;
+    }
+    Some(WeekAlternative {
+        week,
+        dest_rel_path: format!("{folder_rel}/{tail}"),
+        reasoning: week_reason(&reading, &folder_rel, &slot.unit_name),
+    })
+}
+
+/// The words a by-name card gives the reading that found its week (SPEC §10).
+fn reading_words(week: i64, reading: WeekReading) -> String {
+    match reading {
+        WeekReading::Week => format!("Its name carries Week {week}."),
+        WeekReading::Module => format!(
+            "Its name carries Module {week}, and this course divides itself into weeks, \
+             so Module {week} is Week {week}."
+        ),
+    }
+}
+
+/// How every by-name reason closes: the week folder the file lands in, and
+/// the division that counts it there (SPEC §8.5).
+fn week_reason(reading: &str, folder_rel: &str, unit_name: &str) -> String {
+    format!("{reading} Under {folder_rel}, it counts among the sources of {unit_name}.")
 }
 
 /// The files under a folder, as paths relative to it, by the scanner's rule:
@@ -908,7 +978,7 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
         "SELECT id, source_rel_path, dest_rel_path, reasoning, confidence, source, created_at
          FROM move_proposals WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
     )?;
-    let proposals = stmt
+    let mut proposals = stmt
         .query_map([class_id], |row| {
             Ok(Proposal {
                 id: row.get(0)?,
@@ -918,9 +988,20 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
                 confidence: row.get(4)?,
                 source: row.get(5)?,
                 created_at: row.get(6)?,
+                alternative: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Read from the course's rows each time, never from the card: a rescan
+    // that records a module turns the module reading off, and a renamed
+    // week's folder follows its name (SPEC §10).
+    if proposals.iter().any(|p| p.source == "canvas") {
+        let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
+        let slots = crate::units::week_slots(conn, class_id)?;
+        for card in proposals.iter_mut().filter(|p| p.source == "canvas") {
+            card.alternative = week_alternative(&slots, modules_are_weeks, &card.dest_rel_path);
+        }
+    }
     Ok(SortState { inbox, proposals })
 }
 
@@ -2169,6 +2250,129 @@ mod tests {
         let applied = crate::scanner::class_dir(&conn, 4).expect("class dir");
         let err = week_filing(&conn, 4, &applied, deck).err().expect("a Part course");
         assert!(format!("{err:#}").contains("does not read a module as a week"), "{err:#}");
+        let _ = fs::remove_dir_all(&root);
+    }
+    fn slot(week: i64, folder: &str, unit_name: &str) -> crate::units::WeekSlot {
+        crate::units::WeekSlot {
+            week,
+            folder: folder.into(),
+            unit_id: week,
+            unit_name: unit_name.into(),
+            unit_kind: "week".into(),
+            meets_on: None,
+        }
+    }
+
+    /// SPEC §10: a Canvas card whose destination names a week offers the
+    /// week folder — the file's own reading first, else Canvas's folder's —
+    /// and none for a week the course lacks or a destination already there.
+    #[test]
+    fn a_canvas_card_offers_the_week_folder_its_name_or_its_folder_reads() {
+        let slots = [
+            slot(1, "Week 01 — Introduction", "Week 1 — Introduction"),
+            slot(3, "Week 03 — Data Quality", "Week 3 — Data Quality"),
+            slot(4, "Week 04 — Probability", "Week 4 — Probability"),
+        ];
+        let alt = week_alternative(&slots, true, "Reading Material/Week 4 Sampling.pdf").expect("a week in the name");
+        assert_eq!(
+            alt,
+            WeekAlternative {
+                week: 4,
+                dest_rel_path: "Weeks/Week 04 — Probability/Week 4 Sampling.pdf".into(),
+                reasoning: "Its name carries Week 4. Under Weeks/Week 04 — Probability, it counts \
+                            among the sources of Week 4 — Probability."
+                    .into(),
+            }
+        );
+        // A module, read as a week only where the course says so.
+        let deck = "Slides/Biostatistics_Module3_Slides_class.pptx";
+        let alt = week_alternative(&slots, true, deck).expect("a module read as a week");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Biostatistics_Module3_Slides_class.pptx");
+        assert!(
+            alt.reasoning.starts_with("Its name carries Module 3, and this course divides itself into weeks"),
+            "{}",
+            alt.reasoning
+        );
+        assert_eq!(week_alternative(&slots, false, deck), None, "a course that reads no module as a week");
+        // Canvas's folder carries the week: the file keeps that folder's name
+        // under the week folder, as a folder's row files its contents.
+        let alt = week_alternative(&slots, true, "Week 1 - Introduction/Introduction.pdf").expect("a week on the folder");
+        assert_eq!(
+            alt,
+            WeekAlternative {
+                week: 1,
+                dest_rel_path: "Weeks/Week 01 — Introduction/Week 1 - Introduction/Introduction.pdf".into(),
+                reasoning: "Canvas files it under \"Week 1 - Introduction\", a folder named for Week 1. \
+                            Under Weeks/Week 01 — Introduction, it counts among the sources of Week 1 — \
+                            Introduction."
+                    .into(),
+            }
+        );
+        let alt = week_alternative(&slots, true, "Coding Material/Week 3 Coding Material/Intro.Rmd").expect("nested");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 Coding Material/Intro.Rmd");
+        // The file's own week wins over its folder's.
+        let alt = week_alternative(&slots, true, "Week 1 - Introduction/Week 3 reading.pdf").expect("the file first");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf");
+        // A week the course lacks, a name and folder carrying none, a
+        // destination already under its week folder at any depth, no weeks.
+        assert_eq!(week_alternative(&slots, true, "Reading Material/Week 9 reading.pdf"), None);
+        assert_eq!(week_alternative(&slots, true, "AI Design Project/Guidelines.pdf"), None);
+        assert_eq!(week_alternative(&slots, true, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf"), None);
+        assert_eq!(week_alternative(&slots, true, "Weeks/Week 03 — Data Quality/Slides/Week 3 reading.pdf"), None);
+        assert_eq!(week_alternative(&[], true, "Reading Material/Week 4 Sampling.pdf"), None);
+    }
+
+    /// SPEC §10: the queue derives the alternative on a Canvas card and on no
+    /// other, from the course's rows as they stand.
+    #[test]
+    fn the_queue_carries_the_alternative_on_a_canvas_card_alone() {
+        let root = std::env::temp_dir().join(format!("classhub-card-alternative-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 4 — Probability', 4, '2026-09-10', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        let class_dir = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        for name in ["Week 4 Sampling.pdf", "Week 4 Notes.pdf", "Biostatistics_Module4_Slides_class.pptx"] {
+            fs::write(class_dir.join(INBOX_DIR).join(name), "%PDF").expect("inbox file");
+        }
+        let card = |source: &str, name: &str, dest: &str, confidence: Option<&str>| {
+            upsert_proposal(&conn, 3, source, &format!("{INBOX_DIR}/{name}"), dest, "because", confidence)
+                .expect("proposed")
+        };
+        card("canvas", "Week 4 Sampling.pdf", "Reading Material/Week 4 Sampling.pdf", None);
+        card("sort_job", "Week 4 Notes.pdf", "Slides/Week 4 Notes.pdf", Some("high"));
+        card("canvas", "Biostatistics_Module4_Slides_class.pptx", "Slides/Biostatistics_Module4_Slides_class.pptx", None);
+
+        let state = sort_state(&conn, 3).expect("state");
+        let by_name: std::collections::HashMap<&str, &Proposal> =
+            state.proposals.iter().map(|p| (p.source_rel_path.as_str(), p)).collect();
+        let reading = by_name["_Inbox/Week 4 Sampling.pdf"].alternative.as_ref().expect("the reading's card");
+        assert_eq!((reading.week, reading.dest_rel_path.as_str()), (4, "Weeks/Week 04 — Probability/Week 4 Sampling.pdf"));
+        let deck = by_name["_Inbox/Biostatistics_Module4_Slides_class.pptx"].alternative.as_ref().expect("the deck's card");
+        assert_eq!(deck.dest_rel_path, "Weeks/Week 04 — Probability/Biostatistics_Module4_Slides_class.pptx");
+        assert!(by_name["_Inbox/Week 4 Notes.pdf"].alternative.is_none(), "a sort card offers none");
+
+        // A scan that records a numbered module turns the module reading off;
+        // the week word still reads.
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, source)
+             VALUES (3, 2, 'module', 'Module 1', 1, 'syllabus')",
+            [],
+        )
+        .expect("module");
+        let state = sort_state(&conn, 3).expect("state");
+        let alternatives: Vec<Option<i64>> = state
+            .proposals
+            .iter()
+            .map(|p| p.alternative.as_ref().map(|a| a.week))
+            .collect();
+        assert_eq!(alternatives, vec![Some(4), None, None]);
         let _ = fs::remove_dir_all(&root);
     }
 }

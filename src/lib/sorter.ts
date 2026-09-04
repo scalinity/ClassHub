@@ -31,6 +31,21 @@ export interface MoveProposal {
    *  the file's own name carrying a week, clicked on its Materials row. */
   source: "chat" | "sort_job" | "canvas" | "by_name";
   createdAt: number;
+  /** On a Canvas card whose destination names a week — in the file's name, a
+   *  module the course reads as a week, or Canvas's own folder — the week
+   *  folder as a second destination (SPEC §10), derived on every read and
+   *  never stored. Absent on every other card. */
+  alternative?: WeekAlternative;
+}
+
+/** The week folder a Canvas card also offers: where the file's row would
+ *  propose it once it landed where Canvas put it, offered a step earlier. */
+export interface WeekAlternative {
+  week: number;
+  destRelPath: string;
+  /** The by-name card's own words: the reading, and the division that
+   *  counts the file under that folder. */
+  reasoning: string;
 }
 
 export interface SortState {

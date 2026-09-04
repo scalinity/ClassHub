@@ -33,7 +33,9 @@ function collectDirs(nodes: readonly TreeNode[], out: string[] = []): string[] {
  * SPEC §10 steps 3–5: the drop-to-sort confirm queue. One card per pending
  * proposal — destination route, reasoning, confidence — with Approve /
  * Move to… (folder picker) / Leave in inbox; chat-filed proposals render in
- * the same queue. Inbox files nothing has proposed for yet list below, with
+ * the same queue, and a Canvas card whose destination names a week also
+ * offers the week folder as a second route (SPEC §10). Inbox files nothing
+ * has proposed for yet list below, with
  * a manual SORT INBOX trigger when no sort job is active.
  */
 export function InboxQueue({
@@ -257,6 +259,9 @@ function ProposalCard({
   // the sort as the same row rewritten, so a held flag would outlive the run.
   const [sortStarting, setSortStarting] = useState(false);
   const [sortJobId, setSortJobId] = useState<number | null>(null);
+  // Which approval is in flight, so each button says what it is doing and
+  // the other keeps its name.
+  const [filing, setFiling] = useState(false);
   const awaitingJob = sortJobId !== null && !jobIds.has(sortJobId);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -270,6 +275,7 @@ function ProposalCard({
     proposal.destRelPath.lastIndexOf("/") + 1,
   );
   const fromInbox = source.startsWith(`${INBOX_DIR}/`);
+  const alternative = proposal.alternative;
   const fromDir = source.includes("/")
     ? source.slice(0, source.lastIndexOf("/"))
     : "";
@@ -281,7 +287,14 @@ function ProposalCard({
     resolveProposal(proposal.id, approve, destOverride).catch((e) => {
       setError(String(e));
       setBusy(false);
+      setFiling(false);
     });
+  };
+  // The week folder in place of Canvas's, through the override the folder
+  // picker uses: the ordinary approval, audit row and index row included.
+  const fileUnderWeek = (dest: string) => {
+    setFiling(true);
+    resolve(true, dest);
   };
 
   const sortNow = () => {
@@ -307,6 +320,22 @@ function ProposalCard({
       </div>
 
       <RouteLine proposal={proposal} dirSet={dirSet} />
+      {alternative && (
+        // The second destination, in the first's own register: the reader
+        // sees both before choosing, and the week folder is dash-underlined
+        // while it has yet to be created.
+        <p className="mt-0.5 flex flex-wrap items-center gap-y-0.5 font-mono text-[11px] leading-relaxed">
+          <span className="text-muted-foreground/70">or</span>
+          <span aria-hidden className="px-1.5 text-(--accent)">
+            →
+          </span>
+          <DestPath
+            dest={alternative.destRelPath}
+            fromName={fileName}
+            dirSet={dirSet}
+          />
+        </p>
+      )}
 
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
         {proposal.reasoning}
@@ -319,8 +348,25 @@ function ProposalCard({
           disabled={held}
           className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
         >
-          {busy ? "WORKING…" : "APPROVE"}
+          {busy && !filing ? "WORKING…" : "APPROVE"}
         </button>
+        {alternative && (
+          // The row's own action, a step earlier: the reading that would
+          // offer FILE UNDER WEEK once the file landed where Canvas put it,
+          // offered on the card so one approval does the work of two.
+          // Canvas's folder stays the filled default beside it.
+          <button
+            type="button"
+            onClick={() => fileUnderWeek(alternative.destRelPath)}
+            disabled={held}
+            title={alternative.reasoning}
+            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+          >
+            {busy && filing
+              ? "FILING…"
+              : `FILE UNDER WEEK ${String(alternative.week).padStart(2, "0")}`}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setPickerOpen((open) => !open)}
@@ -427,7 +473,28 @@ function RouteLine({
     : "class folder";
   const fromName = source.slice(source.lastIndexOf("/") + 1);
 
-  const dest = proposal.destRelPath;
+  return (
+    <p className="mt-1.5 flex flex-wrap items-center gap-y-0.5 font-mono text-[11px] leading-relaxed">
+      <span className="text-muted-foreground">{fromDir}</span>
+      <span aria-hidden className="px-1.5 text-(--accent)">
+        →
+      </span>
+      <DestPath dest={proposal.destRelPath} fromName={fromName} dirSet={dirSet} />
+    </p>
+  );
+}
+
+/** A destination's folders, each not yet on disk marked, and its file name
+ *  only where the move renames the file. */
+function DestPath({
+  dest,
+  fromName,
+  dirSet,
+}: {
+  dest: string;
+  fromName: string;
+  dirSet: ReadonlySet<string> | null;
+}) {
   const lastSlash = dest.lastIndexOf("/");
   const destDir = lastSlash === -1 ? "" : dest.slice(0, lastSlash);
   const destName = dest.slice(lastSlash + 1);
@@ -440,11 +507,7 @@ function RouteLine({
   const hasNew = parts.some((p) => p.isNew);
 
   return (
-    <p className="mt-1.5 flex flex-wrap items-center gap-y-0.5 font-mono text-[11px] leading-relaxed">
-      <span className="text-muted-foreground">{fromDir}</span>
-      <span aria-hidden className="px-1.5 text-(--accent)">
-        →
-      </span>
+    <>
       {parts.map((part, i) => (
         <span key={i} className="flex items-center">
           <span
@@ -471,7 +534,7 @@ function RouteLine({
           NEW FOLDER
         </span>
       )}
-    </p>
+    </>
   );
 }
 
