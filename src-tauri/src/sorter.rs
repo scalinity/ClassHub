@@ -540,7 +540,7 @@ fn week_target(
 /// `resolve_proposal` runs `validate_dest` and nothing else, so `sort_state`
 /// withholds an alternative another pending card already claims — the half of
 /// `refuse_held` a by-name card gets — and a collision is never offered.
-pub(crate) fn week_alternative(
+fn week_alternative(
     slots: &[crate::units::WeekSlot],
     modules_are_weeks: bool,
     dest_rel: &str,
