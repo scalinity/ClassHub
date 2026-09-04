@@ -32,7 +32,16 @@ import {
   type TreeNode,
 } from "@/lib/materials";
 import { proposeWeekFiling } from "@/lib/sorter";
-import { monoAction } from "@/lib/styles";
+import {
+  buttonChip,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  errorLine,
+  meta,
+  pulseDot,
+  statusLine,
+} from "@/lib/styles";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   pptx: Presentation,
@@ -48,6 +57,10 @@ const KIND_ICONS: Record<string, LucideIcon> = {
   caption: Captions,
   media: AudioLines,
 };
+
+/** A tree row: no hairlines here, the indent guides carry the structure. */
+const treeRow =
+  "group flex min-h-9 w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/40";
 
 /**
  * The week folder an entry's name files under (SPEC §10), offered while the
@@ -95,8 +108,8 @@ function FilingAction({
 }) {
   if (proposed) {
     return (
-      <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-        PROPOSED — SEE INBOX
+      <span className="px-2 text-fine text-muted-foreground">
+        Proposed · see inbox
       </span>
     );
   }
@@ -106,14 +119,14 @@ function FilingAction({
       title={title}
       onClick={onPropose}
       disabled={proposing}
-      className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+      className={buttonText}
     >
       {/* The inbox card's second approval carries this label word for word
           (InboxQueue.tsx, ProposalCard): the card offers the row's own action,
           and the two must read the same. */}
       {proposing
-        ? "PROPOSING…"
-        : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
+        ? "Proposing…"
+        : `File under Week ${String(filing.week).padStart(2, "0")}`}
     </button>
   );
 }
@@ -149,7 +162,7 @@ export function FileTree({
    *  week folder (SPEC §10). */
   weekSlots: readonly WeekSlot[];
   /** Sources of the pending move proposals — the queue's own fact, so a row
-   *  reads PROPOSED exactly while its card waits. */
+   *  reads proposed exactly while its card waits. */
   pendingSources: ReadonlySet<string>;
   guideControls?: ModuleGuideControls;
 }) {
@@ -164,7 +177,7 @@ export function FileTree({
     });
 
   return (
-    <div className="space-y-1">
+    <div>
       {nodes.map((node) => (
         <Node
           key={node.relPath}
@@ -252,13 +265,13 @@ function DirNode({
   };
 
   return (
-    <div className={isModule ? "not-first:mt-3" : undefined}>
-      <div className="group flex h-8 w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
+    <div className={isModule ? "not-first:mt-4" : undefined}>
+      <div className={`${treeRow} ${isModule ? "min-h-10" : ""}`}>
         <button
           type="button"
           aria-expanded={!isCollapsed}
           onClick={() => onToggle(node.relPath)}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
         >
           <ChevronRight
             size={13}
@@ -267,13 +280,13 @@ function DirNode({
             className={
               "shrink-0 transition-transform duration-150 " +
               (isCollapsed ? "" : "rotate-90 ") +
-              (isModule ? "text-(--accent)" : "text-muted-foreground/70")
+              (isModule ? "text-(--accent-ink)" : "text-muted-foreground")
             }
           />
           <span
             className={
               "min-w-0 truncate " +
-              (isModule ? "text-[14px] font-semibold" : "text-[13px] font-medium")
+              (isModule ? "text-[15px] font-semibold" : "text-body font-medium")
             }
           >
             {node.name}
@@ -294,19 +307,17 @@ function DirNode({
           <GuideCluster scope={node.relPath} controls={guideControls} />
         )}
         {isModule && (
-          <span className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-            {fileCount} {fileCount === 1 ? "FILE" : "FILES"}
+          <span className={`shrink-0 ${meta}`}>
+            {fileCount} {fileCount === 1 ? "file" : "files"}
           </span>
         )}
       </div>
       {filingError && (
-        <p className="ml-8 pb-1 font-mono text-[11px] text-destructive">
-          NOT PROPOSED — {filingError}
-        </p>
+        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not proposed: {filingError}</p>
       )}
 
       {!isCollapsed && node.children.length > 0 && (
-        <div className="ml-[15px] border-l border-border pl-2">
+        <div className="ml-[15px] border-l border-border/70 pl-2">
           {node.children.map((child) => (
             <Node
               key={child.relPath}
@@ -331,10 +342,10 @@ function DirNode({
 /**
  * SPEC §8.1 / §8.3: a folder guide's state, on the rows `DirNode` offers it —
  * a top-level folder named as a division is, or one with a guide or a job
- * already. Synthesis is manual only; staleness is always visible, the
- * token-costing resynthesize action stays quiet until the guide is actually
- * stale. The practice exam draws on the same sources, so it sits beside the
- * guide in every state the cluster appears in.
+ * already. Writing is manual only; staleness is always visible, the
+ * token-costing rewrite stays quiet until the guide is actually stale. The
+ * practice exam draws on the same sources, so it sits beside the guide in
+ * every state the cluster appears in.
  */
 function GuideCluster({
   scope,
@@ -355,12 +366,9 @@ function GuideCluster({
   if (active) {
     return (
       <span className="flex shrink-0 items-center gap-0.5">
-        <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-          <span
-            aria-hidden
-            className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-          />
-          SYNTHESIZING…
+        <span className={`px-2 ${statusLine}`}>
+          <span aria-hidden className={pulseDot} />
+          Writing the guide…
         </span>
         {practice}
       </span>
@@ -373,9 +381,9 @@ function GuideCluster({
         <button
           type="button"
           onClick={() => controls.onSynthesize(scope)}
-          className={`${monoAction} text-muted-foreground hover:bg-(--accent)/12 hover:text-(--accent)`}
+          className={buttonTextMuted}
         >
-          SYNTHESIZE GUIDE
+          Write guide
         </button>
         {practice}
       </span>
@@ -387,19 +395,19 @@ function GuideCluster({
       {guide.stale ? (
         <button
           type="button"
-          title="Sources changed since this guide was generated"
+          title="Sources changed since this guide was written"
           onClick={() => controls.onSynthesize(scope)}
-          className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+          className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
         >
-          STALE — RESYNTHESIZE
+          Rewrite · sources changed
         </button>
       ) : (
         <button
           type="button"
-          title="Resynthesize guide"
+          title="Rewrite the guide"
           aria-label={`Resynthesize the ${scope} guide`}
           onClick={() => controls.onSynthesize(scope)}
-          className="cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent) group-focus-within:opacity-100 group-hover:opacity-100"
+          className={`${buttonIcon} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
         >
           <RefreshCw size={12} aria-hidden />
         </button>
@@ -408,9 +416,9 @@ function GuideCluster({
       <button
         type="button"
         onClick={() => controls.onView(scope)}
-        className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+        className={buttonText}
       >
-        VIEW GUIDE
+        Read guide
       </button>
     </span>
   );
@@ -447,8 +455,8 @@ function FileRow({
 
   return (
     <div>
-      <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
-        <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
+      <div className={treeRow}>
+        <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
         <button
           type="button"
           title={viewable ? `View ${node.name}` : `Open ${node.name} in its default app`}
@@ -457,7 +465,7 @@ function FileRow({
               ? onViewFile(node)
               : run(openInDefaultApp(classId, node.relPath))
           }
-          className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-body transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
         >
           {node.name}
         </button>
@@ -477,7 +485,7 @@ function FileRow({
             title="Show in Finder"
             aria-label={`Show ${node.name} in Finder`}
             onClick={() => run(revealInFinder(classId, node.relPath))}
-            className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            className={buttonIcon}
           >
             <FolderSearch size={13} aria-hidden />
           </button>
@@ -486,20 +494,18 @@ function FileRow({
             title="Open in default app"
             aria-label={`Open ${node.name} in its default app`}
             onClick={() => run(openInDefaultApp(classId, node.relPath))}
-            className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            className={buttonIcon}
           >
             <ArrowUpRight size={13} aria-hidden />
           </button>
         </span>
 
-        <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
+        <span className={`w-14 shrink-0 text-right ${meta}`}>
           {formatSize(node.size ?? 0)}
         </span>
       </div>
       {filingError && (
-        <p className="ml-8 pb-1 font-mono text-[11px] text-destructive">
-          NOT PROPOSED — {filingError}
-        </p>
+        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not proposed: {filingError}</p>
       )}
     </div>
   );

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft } from "lucide-react";
 
+import { SectionHeading } from "@/components/SectionHeading";
+import { shortModel } from "@/lib/answer";
 import {
   formatSyncedAt,
   getCanvasStatus,
@@ -23,7 +25,20 @@ import {
   setJobEffort,
   setJobModel,
 } from "@/lib/settings";
-import { monoActionNeutral } from "@/lib/styles";
+import {
+  buttonFilledNeutral,
+  buttonTextNeutral,
+  errorLine,
+  inputNeutral,
+  meta,
+  optionDot,
+  optionDotIdle,
+  optionDotSelected,
+  optionRow,
+  optionRowIdle,
+  optionRowSelected,
+} from "@/lib/styles";
+import { sentence } from "@/lib/utils";
 
 /**
  * SPEC §12 Settings view: the AIBHS library root and the job runner's model,
@@ -60,43 +75,28 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
   };
 
   return (
-    <main className="mx-auto max-w-4xl px-8 pt-16 pb-20 animate-in fade-in duration-200">
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex cursor-pointer items-center gap-1 font-mono text-[11px] tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
-      >
-        <ChevronLeft size={12} aria-hidden />
-        DASHBOARD
+    <main className="mx-auto max-w-4xl px-8 pt-12 pb-20 animate-in fade-in duration-200 motion-reduce:animate-none">
+      <button type="button" onClick={onBack} className={`${buttonTextNeutral} -ml-2`}>
+        <ChevronLeft size={14} aria-hidden />
+        Dashboard
       </button>
 
-      <header className="mt-6">
-        <p className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          CONFIGURATION
-        </p>
-        <h1 className="mt-2 text-[28px] font-semibold leading-tight tracking-tight">
-          Settings
-        </h1>
+      <header className="mt-4">
+        <h1 className="text-display">Settings</h1>
       </header>
 
       {error ? (
-        <p className="mt-16 text-center font-mono text-xs text-destructive">
-          FAILED TO LOAD SETTINGS — {String(error)}
+        <p className={`${errorLine} mt-16 text-center`}>
+          Couldn't load the settings: {String(error)}
         </p>
       ) : settings === undefined ? (
-        <p className="mt-16 text-center font-mono text-xs text-muted-foreground">
-          LOADING…
-        </p>
+        <p className="mt-16 text-center text-body text-muted-foreground">Loading…</p>
       ) : (
         <>
-          {actionError && (
-            <p className="mt-6 font-mono text-[11px] text-destructive">
-              ✕ {actionError}
-            </p>
-          )}
+          {actionError && <p className={`${errorLine} mt-6`}>{actionError}</p>}
 
           <Section
-            title="LIBRARY"
+            title="Library"
             lead="Where the class folders live. ClassHub reads this tree directly
               and writes only inside its own folders — Study Guides, Notes, the
               inbox and the extract cache."
@@ -107,15 +107,15 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               present={settings.aibhsRootPresent}
               pending={pending}
               label="AIBHS root folder path"
-              apply="USE THIS FOLDER"
-              missing="FOLDER NOT FOUND — nothing can scan until this points at a real folder."
+              apply="Use this folder"
+              missing="Folder not found: nothing can scan until this points at a real folder."
               hint="The folder must already exist — this picks a library, it never creates one. ~/ works."
               onApply={(path) => apply(setAibhsRoot(path), true)}
             />
           </Section>
 
           <Section
-            title="LECTURE TRANSCRIPTION"
+            title="Lecture transcription"
             lead="Recordings without a caption track are transcribed on this Mac
               with Parakeet, which ships inside LocalFlow. Nothing is uploaded,
               and no tokens are spent — but an update to LocalFlow can move the
@@ -127,8 +127,8 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               present={settings.parakeetPresent}
               pending={pending}
               label="Python interpreter for Parakeet"
-              apply="USE THIS PYTHON"
-              missing="INTERPRETER NOT FOUND — transcription will fail until this points at a real Python. Zoom's own transcripts still work."
+              apply="Use this Python"
+              missing="Interpreter not found: transcription will fail until this points at a real Python. Zoom's own transcripts still work."
               hint="A Python with parakeet-mlx installed. Clear the field to restore the default that ships with LocalFlow."
               allowEmpty
               onApply={(path) => apply(setParakeetPython(path))}
@@ -136,15 +136,13 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
           </Section>
 
           <Section
-            title="SYNTHESIS JOBS"
+            title="Synthesis jobs"
             lead="Extraction, study guides, sorting and syllabus scans spawn
               Claude Code on the Max subscription with these settings. A change
               applies from the next job to start — running jobs keep what they
               started with."
           >
-            <p className="mt-4 font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-              MODEL
-            </p>
+            <p className="mt-5 text-[15px] font-semibold">Model</p>
             <div className="mt-2 space-y-1">
               {settings.jobModels.map((id) => {
                 const copy = optionCopy(JOB_MODEL_COPY, id);
@@ -161,10 +159,8 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               })}
             </div>
 
-            <p className="mt-6 font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-              EFFORT
-            </p>
-            <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
+            <p className="mt-6 text-[15px] font-semibold">Effort</p>
+            <p className="mt-1 text-body text-muted-foreground">
               How long a job may read and reason before it writes.
             </p>
             <div className="mt-2 space-y-1">
@@ -183,10 +179,8 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               })}
             </div>
 
-            <p className="mt-6 font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-              CONCURRENCY
-            </p>
-            <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
+            <p className="mt-6 text-[15px] font-semibold">Concurrency</p>
+            <p className="mt-1 text-body text-muted-foreground">
               How many jobs run at once. A semester master always runs alone,
               whatever this says.
             </p>
@@ -201,19 +195,17 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
                     aria-label={`Run up to ${count} job${count === 1 ? "" : "s"} at once`}
                     onClick={() => apply(setJobConcurrency(count))}
                     className={
-                      "flex size-8 cursor-pointer items-center justify-center rounded-md border font-mono text-[12px] transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none " +
+                      "flex size-8 cursor-pointer items-center justify-center rounded-md text-body tabular-nums transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none " +
                       (settings.jobConcurrency === count
-                        ? "border-foreground/25 bg-muted/60 font-semibold"
-                        : "border-transparent text-muted-foreground hover:bg-muted/40")
+                        ? "bg-muted/70 font-semibold ring-1 ring-border"
+                        : "text-muted-foreground hover:bg-muted/40")
                     }
                   >
                     {count}
                   </button>
                 ),
               )}
-              <span className="ml-2 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                AT ONCE
-              </span>
+              <span className={`ml-2 ${meta}`}>at once</span>
             </div>
           </Section>
 
@@ -255,7 +247,7 @@ function CanvasSection() {
 
   return (
     <Section
-      title="CANVAS"
+      title="Canvas"
       lead="Canvas holds the authoritative version of each course — its own
         structure, its files, and its assignments with real due dates. ClassHub
         reads it through a Canvas window you sign in to, and keeps that
@@ -265,29 +257,23 @@ function CanvasSection() {
         saved session is still live and the last sync is a day old — never on
         a schedule."
     >
-      <dl className="mt-4 space-y-1.5 font-mono text-[11px]">
+      <dl className="mt-5 space-y-1.5 text-body">
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            LAST SYNC
-          </dt>
-          <dd>{formatSyncedAt(status?.lastSyncedAt ?? null)}</dd>
+          <dt className={`w-24 shrink-0 ${meta}`}>Last sync</dt>
+          <dd className="tabular-nums">{formatSyncedAt(status?.lastSyncedAt ?? null)}</dd>
         </div>
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            CLASSES
-          </dt>
+          <dt className={`w-24 shrink-0 ${meta}`}>Classes</dt>
           <dd>
             {status === undefined
               ? "—"
               : status.classesLinked === 0
-                ? "NONE MATCHED YET"
-                : `${status.classesLinked} MATCHED TO A COURSE`}
+                ? "None matched yet"
+                : `${status.classesLinked} matched to a course`}
           </dd>
         </div>
         <div className="flex gap-3">
-          <dt className="w-24 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            READS
-          </dt>
+          <dt className={`w-24 shrink-0 ${meta}`}>Reads</dt>
           <dd className="min-w-0 truncate text-muted-foreground">
             {status?.host ?? "ufl.instructure.com"} · never writes
           </dd>
@@ -298,26 +284,22 @@ function CanvasSection() {
         type="button"
         disabled={running}
         onClick={() => void start()}
-        className={`${monoActionNeutral} mt-4 bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-40`}
+        className={`${buttonFilledNeutral} mt-4`}
       >
-        {running ? "SYNCING…" : "SYNC ALL CLASSES"}
+        {running ? "Syncing…" : "Sync all classes"}
       </button>
 
       {/* The sync never began — one is already running, started from a class
           workspace. Distinct from one that started and failed. */}
-      {refused && (
-        <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-destructive">
-          NOT STARTED — {refused}
-        </p>
-      )}
+      {refused && <p className={`${errorLine} max-w-xl`}>Not started: {refused}</p>}
       <SyncReport progress={progress} />
 
-      <p className="mt-3 max-w-xl text-[11.5px] leading-relaxed text-muted-foreground">
+      <p className="mt-4 max-w-xl text-body text-muted-foreground">
         You will be asked to sign in when Canvas ends the session, not every
         time you open the app, and never by the launch's own sync. Assignments
         arrive as deadline cards and files land in each class's inbox — both
         wait for your approval, the same as everything else that moves
-        material. Announcements go straight to the class's NOTICES, and its
+        material. Announcements go straight to the class's Notices, and its
         Canvas Pages into the extract cache, where chat searches them.
       </p>
     </Section>
@@ -330,12 +312,12 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
 
   if (!progress.done) {
     return (
-      <p className="mt-3 flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] text-muted-foreground">
+      <p className={`mt-3 flex items-center gap-2 ${meta}`}>
         <span
           aria-hidden
           className="size-1.5 shrink-0 rounded-full bg-foreground animate-pulse motion-reduce:animate-none"
         />
-        {progress.stage.toUpperCase()}
+        {sentence(progress.stage)}
       </p>
     );
   }
@@ -345,41 +327,33 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
   // ask. A note, not a stopped sync; any other failure on launch still is one.
   if (progress.error && progress.signInNeeded) {
     return (
-      <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-muted-foreground">
-        {progress.launch ? "NOT SYNCED ON LAUNCH" : "NOT SYNCED"} — {progress.error}
+      <p className="mt-3 max-w-xl text-body text-muted-foreground">
+        {progress.launch ? "Not synced on launch" : "Not synced"}: {progress.error}
       </p>
     );
   }
   if (progress.error) {
     return (
-      <p className="mt-3 max-w-xl font-mono text-[11px] leading-relaxed text-destructive">
-        SYNC STOPPED — {progress.error}
-      </p>
+      <p className={`${errorLine} max-w-xl`}>Sync stopped: {progress.error}</p>
     );
   }
 
   return (
     <dl className="mt-4 max-w-xl space-y-2.5">
-      {progress.launch && (
-        <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-          SYNCED ON LAUNCH
-        </p>
-      )}
+      {progress.launch && <p className={meta}>Synced on launch</p>}
       {(progress.results ?? []).map((outcome) => (
         <div key={outcome.classId}>
           <dt className="flex items-baseline gap-2">
-            <span className="text-[12.5px] font-medium">
-              {outcome.className}
-            </span>
+            <span className="text-body font-medium">{outcome.className}</span>
             {outcome.canvasCourse && (
-              <span className="min-w-0 truncate font-mono text-[10px] tracking-[0.12em] text-muted-foreground/70">
+              <span className="min-w-0 truncate text-fine text-muted-foreground">
                 {outcome.canvasCourse}
               </span>
             )}
           </dt>
           <dd
             className={
-              "text-[11.5px] leading-snug " +
+              "text-meta leading-snug " +
               (outcome.error ? "text-destructive" : "text-muted-foreground")
             }
           >
@@ -388,7 +362,7 @@ function SyncReport({ progress }: { progress: SyncProgress | null }) {
           {outcome.notes.map((note, index) => (
             <dd
               key={`${outcome.classId}-${index}`}
-              className="text-[11.5px] leading-snug text-muted-foreground/70"
+              className="text-meta leading-snug text-muted-foreground/70"
             >
               {note}
             </dd>
@@ -410,12 +384,8 @@ function Section({
 }) {
   return (
     <section className="mt-12" aria-label={title}>
-      <div className="border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          {title}
-        </h2>
-      </div>
-      <p className="mt-3 max-w-xl text-[12.5px] leading-relaxed text-muted-foreground">
+      <SectionHeading title={title} />
+      <p className="mt-3 max-w-xl text-[14px] leading-[1.55] text-muted-foreground">
         {lead}
       </p>
       {children}
@@ -442,25 +412,15 @@ function OptionRow({
       disabled={disabled}
       aria-pressed={selected}
       onClick={onSelect}
-      className={
-        "flex w-full max-w-xl cursor-pointer items-center gap-2.5 rounded-md border px-2.5 py-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none " +
-        (selected
-          ? "border-foreground/25 bg-muted/60"
-          : "border-transparent hover:bg-muted/40")
-      }
+      className={`${optionRow} max-w-xl ${selected ? optionRowSelected : optionRowIdle}`}
     >
       <span
         aria-hidden
-        className={
-          "size-1.5 shrink-0 rounded-full " +
-          (selected ? "bg-foreground" : "bg-muted-foreground/25")
-        }
+        className={`${optionDot} ${selected ? optionDotSelected : optionDotIdle}`}
       />
       <span className="min-w-0 flex-1">
-        <span className="block font-mono text-[10px] font-medium tracking-[0.12em]">
-          {label}
-        </span>
-        <span className="block text-[11.5px] leading-snug text-muted-foreground">
+        <span className="block text-body font-medium">{label}</span>
+        <span className="block text-fine leading-snug text-muted-foreground">
           {note}
         </span>
       </span>
@@ -497,9 +457,7 @@ function PathForm({
 
   return (
     <div className="mt-4 max-w-xl">
-      {!present && (
-        <p className="mb-2 font-mono text-[11px] text-destructive">{missing}</p>
-      )}
+      {!present && <p className="mb-2 text-body text-destructive">{missing}</p>}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -513,19 +471,17 @@ function PathForm({
           onChange={(e) => setPath(e.target.value)}
           spellCheck={false}
           aria-label={label}
-          className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2.5 font-mono text-[12px] focus-visible:outline-2 focus-visible:outline-ring"
+          className={`${inputNeutral} min-w-0 flex-1 font-mono text-code`}
         />
         <button
           type="submit"
           disabled={pending || !changed}
-          className={`${monoActionNeutral} bg-primary px-2.5 text-primary-foreground hover:opacity-90 disabled:pointer-events-none disabled:opacity-30`}
+          className={buttonFilledNeutral}
         >
-          {pending ? "APPLYING…" : apply}
+          {pending ? "Applying…" : apply}
         </button>
       </form>
-      <p className="mt-2 text-[11.5px] leading-relaxed text-muted-foreground">
-        {hint}
-      </p>
+      <p className="mt-2 text-body text-muted-foreground">{hint}</p>
     </div>
   );
 }
@@ -535,45 +491,41 @@ function ChatSection() {
   const chat = useChat();
   const effortLabel =
     EFFORT_LEVELS.find((l) => l.id === (chat.settings?.effort ?? ""))?.label ??
-    "MODEL DEFAULT";
+    "Model default";
 
   return (
     <Section
-      title="CHAT"
+      title="Chat"
       lead="The chat sidebar bills its own console API key, so a heavy
         synthesis job can never rate-limit a conversation. Its key, model and
         effort live in the sidebar's settings pane — at hand mid-conversation."
     >
-      <dl className="mt-4 space-y-1.5 font-mono text-[11px]">
+      <dl className="mt-5 space-y-1.5 text-body">
         <div className="flex gap-3">
-          <dt className="w-20 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            API KEY
-          </dt>
+          <dt className={`w-20 shrink-0 ${meta}`}>API key</dt>
           <dd className={chat.settings?.hasKey ? "" : "text-destructive"}>
-            {chat.settings?.hasKey ? "IN THE MACOS KEYCHAIN" : "NOT SAVED YET"}
+            {chat.settings?.hasKey ? "In the macOS Keychain" : "Not saved yet"}
           </dd>
         </div>
         <div className="flex gap-3">
-          <dt className="w-20 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            MODEL
-          </dt>
+          <dt className={`w-20 shrink-0 ${meta}`}>Model</dt>
           <dd className="min-w-0 truncate">
-            {chat.settings?.model?.toUpperCase() ?? "PICKED ON FIRST USE"}
+            {chat.settings?.model
+              ? shortModel(chat.settings.model)
+              : "Picked on first use"}
           </dd>
         </div>
         <div className="flex gap-3">
-          <dt className="w-20 shrink-0 tracking-[0.14em] text-muted-foreground/70">
-            EFFORT
-          </dt>
+          <dt className={`w-20 shrink-0 ${meta}`}>Effort</dt>
           <dd>{effortLabel}</dd>
         </div>
       </dl>
       <button
         type="button"
         onClick={openChatSettings}
-        className={`${monoActionNeutral} mt-4 border px-2.5 text-muted-foreground hover:bg-muted hover:text-foreground`}
+        className={`${buttonTextNeutral} mt-4 ring-1 ring-border`}
       >
-        OPEN CHAT SETTINGS
+        Open chat settings
       </button>
     </Section>
   );

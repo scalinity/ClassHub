@@ -5,8 +5,9 @@ import { X } from "lucide-react";
 import { docShell, renderMarkdown } from "@/lib/document";
 import { readClassFile, revealInFinder, saveNote } from "@/lib/materials";
 import { queryClient } from "@/lib/query";
+import { formatClock } from "@/lib/schedule";
 import { dragWindow } from "@/lib/window";
-import { headerAction } from "@/lib/styles";
+import { buttonIcon, buttonTextMuted, meta } from "@/lib/styles";
 
 export interface EditedNote {
   /** null starts a blank note; a title opens `Notes/<title>.md`. */
@@ -40,8 +41,10 @@ export function NoteEditor({
   if (existing && data === undefined) {
     return (
       <Chrome onClose={onClose} title={note.title ?? ""} status={null}>
-        <p className="py-16 text-center font-mono text-xs text-muted-foreground">
-          {error ? `COULD NOT LOAD NOTE — ${String(error)}` : "LOADING…"}
+        <p
+          className={`py-16 text-center text-body ${error ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {error ? `Couldn't load the note: ${String(error)}` : "Loading…"}
         </p>
       </Chrome>
     );
@@ -107,11 +110,7 @@ function EditorBody({
         setRelPath(savedPath);
         setSavedContent(content);
         setTitleFixed(true);
-        setSavedLabel(
-          new Date()
-            .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-            .toUpperCase(),
-        );
+        setSavedLabel(formatClock(new Date()));
         setBusy(false);
         if (thenClose) onClose();
       })
@@ -143,16 +142,16 @@ function EditorBody({
   };
 
   const status = busy
-    ? { label: "SAVING…", tone: "muted" as const }
+    ? { label: "Saving…", tone: "muted" as const }
     : saveError
-      ? { label: `✕ ${saveError}`, tone: "error" as const }
+      ? { label: saveError, tone: "error" as const }
       : dirty
         ? {
-            label: savable ? "EDITED — SAVES ON CLOSE" : "NEEDS A TITLE",
+            label: savable ? "Edited · saves on close" : "Needs a title",
             tone: "amber" as const,
           }
         : savedLabel
-          ? { label: `SAVED ${savedLabel}`, tone: "muted" as const }
+          ? { label: `Saved ${savedLabel}`, tone: "muted" as const }
           : null;
 
   return (
@@ -171,7 +170,7 @@ function EditorBody({
             aria-label="Note title"
             autoFocus
             spellCheck={false}
-            className="w-full min-w-0 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground/60"
+            className="w-full min-w-0 bg-transparent text-[15px] font-medium outline-none placeholder:text-muted-foreground/60"
           />
         )
       }
@@ -181,9 +180,9 @@ function EditorBody({
             type="button"
             onClick={() => save(false)}
             disabled={busy || !dirty || !savable}
-            className={`${headerAction} disabled:pointer-events-none disabled:opacity-40`}
+            className={buttonTextMuted}
           >
-            SAVE
+            Save
           </button>
           {relPath !== null && (
             <button
@@ -193,9 +192,9 @@ function EditorBody({
                   setSaveError(String(e)),
                 )
               }
-              className={headerAction}
+              className={buttonTextMuted}
             >
-              SHOW IN FINDER
+              Show in Finder
             </button>
           )}
         </>
@@ -215,7 +214,7 @@ function EditorBody({
           aria-label="Note content in Markdown"
           autoFocus={titleFixed}
           spellCheck={false}
-          className="h-full w-full resize-none border-r bg-transparent px-6 py-5 font-mono text-[12.5px] leading-relaxed outline-none placeholder:text-muted-foreground/50"
+          className="h-full w-full resize-none border-r border-border/70 bg-transparent px-6 py-5 font-mono text-[13px] leading-relaxed outline-none placeholder:text-muted-foreground/50"
         />
         {/* allow-same-origin (still no scripts) lets the in-place rewrite
             reach the document — the FileViewer live-mode pattern. */}
@@ -271,23 +270,19 @@ function Chrome({
     >
       <header
         onMouseDown={dragWindow}
-        className="flex h-12 shrink-0 items-center gap-2.5 border-b bg-card pl-24 pr-3"
+        className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border/70 bg-surface pl-24 pr-3"
       >
-        <p className="pointer-events-none shrink-0 font-mono text-[11px] tracking-[0.18em] text-(--accent)">
-          NOTE
-        </p>
-        <div className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
-          {title}
-        </div>
+        <p className={`pointer-events-none shrink-0 ${meta}`}>Note</p>
+        <div className="min-w-0 flex-1 truncate text-[15px] font-medium">{title}</div>
         {status && (
           <span
             className={
-              "pointer-events-none min-w-0 shrink-[2] truncate font-mono text-[10px] tracking-[0.14em] " +
+              "pointer-events-none min-w-0 shrink-[2] truncate text-meta " +
               (status.tone === "error"
                 ? "text-destructive"
                 : status.tone === "amber"
                   ? "text-class-amber"
-                  : "text-muted-foreground/70")
+                  : "text-muted-foreground")
             }
           >
             {status.label}
@@ -298,7 +293,7 @@ function Chrome({
           type="button"
           aria-label="Close note editor"
           onClick={onClose}
-          className="shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={buttonIcon}
         >
           <X size={14} aria-hidden />
         </button>

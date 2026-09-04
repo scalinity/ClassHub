@@ -19,39 +19,39 @@ export interface AppSettings {
 
 /**
  * Display copy for the backend-served option ids. The backend owns which ids
- * exist; an id without copy here still renders (bare, uppercased).
+ * exist; an id without copy here still renders, bare.
  */
 export const JOB_MODEL_COPY: Record<string, { label: string; note: string }> = {
   opus: {
-    label: "OPUS",
+    label: "Opus",
     note: "The deepest model — the shipped default for guides and extraction.",
   },
   sonnet: {
-    label: "SONNET",
+    label: "Sonnet",
     note: "Mid-tier. Faster and lighter on the subscription window.",
   },
   haiku: {
-    label: "HAIKU",
+    label: "Haiku",
     note: "Fastest and cheapest. Fine for throwaway probes, thin for synthesis.",
   },
 };
 
 export const JOB_EFFORT_COPY: Record<string, { label: string; note: string }> = {
-  low: { label: "LOW", note: "Fewest tokens, fastest turnaround." },
-  medium: { label: "MEDIUM", note: "Balanced reading and reasoning." },
-  high: { label: "HIGH", note: "The CLI's own default." },
+  low: { label: "Low", note: "Fewest tokens, fastest turnaround." },
+  medium: { label: "Medium", note: "Balanced reading and reasoning." },
+  high: { label: "High", note: "The CLI's own default." },
   xhigh: {
-    label: "XHIGH",
-    note: "Extra-high — the shipped default for study-guide quality.",
+    label: "Extra high",
+    note: "The shipped default for study-guide quality.",
   },
-  max: { label: "MAX", note: "No ceiling on reasoning. Slowest." },
+  max: { label: "Max", note: "No ceiling on reasoning. Slowest." },
 };
 
 export function optionCopy(
   copy: Record<string, { label: string; note: string }>,
   id: string,
 ): { label: string; note: string } {
-  return copy[id] ?? { label: id.toUpperCase(), note: "" };
+  return copy[id] ?? { label: id, note: "" };
 }
 
 export function getAppSettings(): Promise<AppSettings> {

@@ -7,6 +7,7 @@ import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
+import { SectionHeading } from "@/components/SectionHeading";
 import { SettingsScreen } from "@/components/Settings";
 import { WeekSchedule } from "@/components/WeekSchedule";
 import {
@@ -19,6 +20,7 @@ import {
 import { classesQuery, type ClassInfo } from "@/lib/classes";
 import { queryClient } from "@/lib/query";
 import { setDropTarget } from "@/lib/sorter";
+import { buttonIconNeutral, errorLine, meta } from "@/lib/styles";
 import { dragWindow } from "@/lib/window";
 
 function Dashboard({
@@ -30,60 +32,49 @@ function Dashboard({
 }) {
   const { data: classes, error } = useQuery(classesQuery());
 
-  const dateLabel = new Date()
-    .toLocaleDateString("en-US", {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-    })
-    .toUpperCase()
-    .replace(",", " ·");
+  // The day is the dashboard's headline: the question every week starts with
+  // is where each course is today (SPEC §8.5).
+  const dateLabel = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 
   return (
-    <main className="mx-auto max-w-4xl px-8 pt-16 pb-20">
-      <header>
-        <p className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          FALL 2026 · AI IN BIOMEDICAL &amp; HEALTH SCIENCES
-        </p>
-        <div className="mt-2 flex items-baseline justify-between">
-          <h1 className="text-[28px] font-semibold tracking-tight">
-            ClassHub
-          </h1>
-          <div className="flex flex-col items-end gap-1">
-            <div className="flex items-center gap-2.5">
-              <p className="font-mono text-xs text-muted-foreground">
-                {dateLabel}
-              </p>
-              <button
-                type="button"
-                aria-label="Open settings"
-                title="Settings"
-                onClick={onSettings}
-                className="cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
-              >
-                <Settings2 size={14} aria-hidden />
-              </button>
-            </div>
-            <CanvasLine onSettings={onSettings} />
+    <main className="mx-auto max-w-4xl px-8 pt-14 pb-20">
+      <header className="flex items-end justify-between gap-6">
+        <div>
+          <p className="text-title font-semibold text-muted-foreground">ClassHub</p>
+          <h1 className="mt-3 text-display">{dateLabel}</h1>
+        </div>
+        <div className="flex flex-col items-end gap-1 pb-1">
+          <div className="flex items-center gap-1.5">
+            <p className={meta}>Fall 2026 · AI in Biomedical &amp; Health Sciences</p>
+            <button
+              type="button"
+              aria-label="Open settings"
+              title="Settings"
+              onClick={onSettings}
+              className={buttonIconNeutral}
+            >
+              <Settings2 size={14} aria-hidden />
+            </button>
           </div>
+          <CanvasLine onSettings={onSettings} />
         </div>
       </header>
 
       {error ? (
-        <p className="mt-16 text-center font-mono text-xs text-destructive">
-          FAILED TO LOAD CLASSES — {String(error)}
+        <p className={`${errorLine} mt-16 text-center`}>
+          Couldn't load the classes: {String(error)}
         </p>
       ) : (
         <>
           {classes !== undefined && <WeekSchedule classes={classes} />}
           <DeadlineStrip />
-          <section className="mt-10" aria-label="Classes">
-            <div className="border-b pb-3">
-              <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-                CLASSES
-              </h2>
-            </div>
-            <div className="mt-5 grid gap-5 md:grid-cols-2">
+          <section className="mt-12" aria-label="Classes">
+            <SectionHeading title="Classes" />
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
               {(classes ?? []).map((cls) => (
                 <ClassCard key={cls.id} info={cls} onOpen={onOpen} />
               ))}
@@ -97,7 +88,7 @@ function Dashboard({
 
 /**
  * SPEC §12 — when Canvas data last came across, on the dashboard where it is
- * read every day: `CANVAS · SYNCED 6 DAYS AGO`, destructive past a week. On
+ * read every day: `Canvas synced 6 days ago`, destructive past a week. On
  * 2026-09-02 the answer was six days and nothing on screen said so. Opens
  * Settings, where the sync lives.
  */
@@ -117,11 +108,11 @@ function CanvasLine({ onSettings }: { onSettings: () => void }) {
       type="button"
       onClick={onSettings}
       title={running ? "A Canvas sync is running" : "Sync from Settings"}
-      className={`cursor-pointer rounded font-mono text-[10px] tracking-[0.14em] transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring ${
-        stale ? "text-destructive" : "text-muted-foreground/70"
+      className={`cursor-pointer rounded-sm text-meta tabular-nums transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring ${
+        stale ? "text-destructive" : "text-muted-foreground"
       }`}
     >
-      CANVAS · {syncAgeLabel(seconds, running)}
+      Canvas {syncAgeLabel(seconds, running)}
     </button>
   );
 }

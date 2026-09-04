@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
 import { queryClient } from "@/lib/query";
+import { sentence } from "@/lib/utils";
 
 export type JobStatus =
   | "queued"
@@ -331,21 +332,32 @@ export function formatElapsed(startSec: number, nowSec: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+/** What a job is called on screen, by its Rust kind. `module_guide` also
+ *  builds a guide for a Week or a Part (SPEC §8.1) — the kind kept its
+ *  original name, and the reader is never shown "module" for a division the
+ *  course calls something else. */
+const JOB_KIND_LABELS: Record<string, string> = {
+  self_check: "Self-check",
+  extract: "Extract",
+  module_guide: "Study guide",
+  master_guide: "Semester master",
+  practice: "Practice exam",
+  lecture_digest: "Lecture digest",
+  sort_proposal: "Sort",
+  syllabus_scan: "Syllabus scan",
+};
+
 export function jobKindLabel(kind: string): string {
-  // `module_guide` also builds a guide for a Week or a Part (SPEC §8.1) — the
-  // kind kept its original name, and the reader is never shown "module" for a
-  // division the course calls something else.
-  if (kind === "module_guide") return "STUDY GUIDE";
-  return kind.replace(/_/g, " ").toUpperCase();
+  return JOB_KIND_LABELS[kind] ?? sentence(kind.replace(/_/g, " "));
 }
 
 /**
  * SPEC §8.2 long-job UX: the run's real phases, derived from the stream.
- * ORIENT until the first source read; READ while extracts stream in; COMPOSE
+ * Orient until the first source read; Read while extracts stream in; Compose
  * once Write input starts streaming (`phase` events carry live byte counts);
- * VERIFY when the model greps/re-reads after writing.
+ * Verify when the model greps/re-reads after writing.
  */
-export const PHASES = ["ORIENT", "READ", "COMPOSE", "VERIFY"] as const;
+export const PHASES = ["Orient", "Read", "Compose", "Verify"] as const;
 
 export function derivePhase(events: readonly JobProgressEvent[]): {
   index: number;
@@ -372,18 +384,18 @@ export function derivePhase(events: readonly JobProgressEvent[]): {
       }
     }
   }
-  if (verifying) return { index: 3, detail: "VERIFYING OUTPUT" };
+  if (verifying) return { index: 3, detail: "Verifying the output" };
   if (composing) {
     return {
       index: 2,
-      detail: kb === null ? "COMPOSING GUIDE" : `COMPOSING · ~${kb} KB WRITTEN`,
+      detail: kb === null ? "Composing the guide" : `Composing · ~${kb} KB written`,
     };
   }
   if (reads > 0) {
     return {
       index: 1,
-      detail: `READING SOURCES · ${reads} ${reads === 1 ? "READ" : "READS"}`,
+      detail: `Reading sources · ${reads} ${reads === 1 ? "read" : "reads"}`,
     };
   }
-  return { index: 0, detail: "ORIENTING" };
+  return { index: 0, detail: "Orienting" };
 }

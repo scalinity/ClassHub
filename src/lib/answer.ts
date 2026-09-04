@@ -2,6 +2,7 @@ import { Marked } from "marked";
 import katex from "katex";
 
 import type { ClassInfo } from "@/lib/classes";
+import { sentence } from "@/lib/utils";
 
 /**
  * Model output is rendered into the app's own document, not a sandboxed frame,
@@ -162,7 +163,20 @@ export function formatArgs(json: string): string {
   }
 }
 
-/** Model ids carry a release date the composer footer does not need. */
+/**
+ * A model id as a name: the release date dropped, each word capitalised, and
+ * a trailing run of numbers joined with dots — `claude-sonnet-5` reads
+ * `Claude Sonnet 5`, `claude-opus-4-1-20250805` reads `Claude Opus 4.1`.
+ */
 export function shortModel(id: string): string {
-  return id.replace(/-\d{8}$/, "").toUpperCase();
+  const words: string[] = [];
+  for (const part of id.replace(/-\d{8}$/, "").split("-")) {
+    const last = words[words.length - 1];
+    if (/^\d+$/.test(part) && last !== undefined && /\d$/.test(last)) {
+      words[words.length - 1] = `${last}.${part}`;
+    } else {
+      words.push(sentence(part));
+    }
+  }
+  return words.join(" ");
 }

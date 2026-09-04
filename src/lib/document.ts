@@ -77,14 +77,16 @@ export function docShell(body: string): string {
      or material content rendered through this shell. -->
 
 <style>
+/* The app's own paper and ink (src/index.css), so a note previews on the
+   page it will be read on. */
 :root {
-  --paper: #fcfcfd; --ink: #1c1f24; --muted: #697079;
-  --hairline: #e3e5e9; --shade: rgba(28, 31, 36, 0.05);
+  --paper: oklch(0.978 0.005 90); --ink: oklch(0.24 0.03 270); --muted: oklch(0.5 0.02 270);
+  --hairline: oklch(0.9 0.008 90); --shade: rgba(28, 31, 36, 0.05);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #191b1f; --ink: #e6e8eb; --muted: #8f959d;
-    --hairline: rgba(255,255,255,0.12); --shade: rgba(255,255,255,0.05);
+    --paper: oklch(0.205 0.022 268); --ink: oklch(0.93 0.012 90); --muted: oklch(0.7 0.015 268);
+    --hairline: rgba(255,255,255,0.09); --shade: rgba(255,255,255,0.05);
   }
 }
 * { box-sizing: border-box; }
@@ -93,7 +95,7 @@ body {
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
 }
 main { max-width: 72ch; margin: 0 auto; padding: 3rem 2rem 5rem; overflow-wrap: break-word; }
-h1, h2, h3, h4 { font-family: ui-serif, "New York", Georgia, "Times New Roman", serif; line-height: 1.25; font-weight: 600; }
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; }
 h1 { font-size: 28px; margin: 0 0 0.6em; }
 h2 { font-size: 21px; margin: 2em 0 0.5em; padding-top: 1em; border-top: 1px solid var(--hairline); }
 h3 { font-size: 17px; margin: 1.6em 0 0.4em; }
@@ -114,7 +116,8 @@ pre.frontmatter { font-size: 11px; color: var(--muted); margin-bottom: 2rem; }
 blockquote { margin: 1em 0; padding-left: 1em; border-left: 2px solid var(--hairline); color: var(--muted); }
 table { border-collapse: collapse; margin: 1em 0; }
 th, td { border: 1px solid var(--hairline); padding: 0.45em 0.8em; text-align: left; }
-th { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+th { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; font-size: 12px; font-weight: 600; }
+td { font-size: 14px; }
 img { max-width: 100%; }
 hr { border: 0; border-top: 1px solid var(--hairline); margin: 2em 0; }
 a { color: inherit; }

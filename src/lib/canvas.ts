@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
 import { queryClient } from "@/lib/query";
-import { daysUntil, todayIso } from "@/lib/schedule";
+import { daysUntil, formatStamp, todayIso } from "@/lib/schedule";
 
 /**
  * SPEC §7.2 — reading course structure, files and assignments from Canvas.
@@ -185,15 +185,8 @@ export function useCanvasSync(): SyncProgress | null {
 // --- Display helpers ---
 
 export function formatSyncedAt(seconds: number | null): string {
-  if (seconds === null) return "NEVER";
-  return new Date(seconds * 1000)
-    .toLocaleString("en-US", {
-      day: "numeric",
-      month: "short",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-    .toUpperCase();
+  if (seconds === null) return "Never";
+  return formatStamp(new Date(seconds * 1000));
 }
 
 /** Past this many calendar days the dashboard's sync line turns destructive. */
@@ -205,15 +198,15 @@ export function daysSinceSync(seconds: number): number {
   return -daysUntil(todayIso(new Date(seconds * 1000)));
 }
 
-/** The dashboard's line (SPEC §12): `SYNCED 6 DAYS AGO`, `SYNCED TODAY`,
- *  `NEVER SYNCED`, or `SYNCING…` while one runs. */
+/** The dashboard's line (SPEC §12), after "Canvas": `synced 6 days ago`,
+ *  `synced today`, `never synced`, or `syncing…` while one runs. */
 export function syncAgeLabel(seconds: number | null, running: boolean): string {
-  if (running) return "SYNCING…";
-  if (seconds === null) return "NEVER SYNCED";
+  if (running) return "syncing…";
+  if (seconds === null) return "never synced";
   const days = daysSinceSync(seconds);
-  if (days <= 0) return "SYNCED TODAY";
-  if (days === 1) return "SYNCED YESTERDAY";
-  return `SYNCED ${days} DAYS AGO`;
+  if (days <= 0) return "synced today";
+  if (days === 1) return "synced yesterday";
+  return `synced ${days} days ago`;
 }
 
 /** One line summarizing what a class's sync brought across. */

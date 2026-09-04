@@ -7,7 +7,7 @@ import { docShell, renderMarkdown, withDocumentCsp } from "@/lib/document";
 import { derivePhase, useJobs } from "@/lib/jobs";
 import { openInDefaultApp, readClassFile, revealInFinder } from "@/lib/materials";
 import { dragWindow } from "@/lib/window";
-import { headerAction } from "@/lib/styles";
+import { buttonIcon, buttonTextMuted, meta } from "@/lib/styles";
 
 export interface ViewedFile {
   relPath: string;
@@ -36,14 +36,14 @@ const CONTINUE_MARKER = "<!-- CONTINUE -->";
 
 const KIND_LABELS: Record<string, string> = {
   html: "HTML",
-  md: "MARKDOWN",
-  rmd: "R MARKDOWN",
-  r: "R SCRIPT",
-  py: "PYTHON",
+  md: "Markdown",
+  rmd: "R Markdown",
+  r: "R script",
+  py: "Python",
   csv: "CSV",
-  ipynb: "NOTEBOOK EXTRACT",
+  ipynb: "Notebook extract",
   pdf: "PDF",
-  pptx: "SLIDES AS PDF",
+  pptx: "Slides as PDF",
 };
 
 /**
@@ -83,7 +83,7 @@ export function FileViewer({
   const phase = derivePhase(output.get(file.jobId ?? -1) ?? []);
   // Until the run's first Write lands, the file on disk is still the previous
   // generation. Fresh content carries CONTINUE_MARKER mid-composition; once
-  // the final Edit removes it the run is in VERIFY (index 3) or finished.
+  // the final Edit removes it the run is in Verify (index 3) or finished.
   const stale =
     jobActive &&
     phase.index < 3 &&
@@ -111,7 +111,7 @@ export function FileViewer({
     >
       <header
         onMouseDown={dragWindow}
-        className="flex h-12 shrink-0 items-center gap-2.5 border-b bg-card pl-24 pr-3"
+        className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border/70 bg-surface pl-24 pr-3"
       >
         {file.live && (
           <span
@@ -119,41 +119,41 @@ export function FileViewer({
             className={`size-1.5 shrink-0 rounded-full bg-(--accent) ${jobActive ? "animate-pulse motion-reduce:animate-none" : ""}`}
           />
         )}
-        <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
+        <p className={`pointer-events-none shrink-0 ${meta}`}>
           {file.live
-            ? `LIVE · ${
+            ? `Live · ${
                 jobActive
                   ? phase.detail
                   : liveJob !== undefined && liveJob.status !== "succeeded"
-                    ? "RUN STOPPED"
-                    : "COMPLETE"
+                    ? "run stopped"
+                    : "complete"
               }`
-            : `MATERIAL · ${KIND_LABELS[file.kind] ?? "FILE"}`}
+            : `Material · ${KIND_LABELS[file.kind] ?? "File"}`}
         </p>
-        <span className="pointer-events-none min-w-0 truncate text-[12px] text-muted-foreground">
+        <span className="pointer-events-none min-w-0 truncate text-[15px] font-medium">
           {file.name}
         </span>
         <span className="ml-auto" />
         <button
           type="button"
           onClick={() => void openInDefaultApp(classId, file.relPath)}
-          className={headerAction}
+          className={buttonTextMuted}
         >
-          OPEN IN DEFAULT APP
+          Open in default app
         </button>
         <button
           type="button"
           onClick={() => void revealInFinder(classId, file.relPath)}
-          className={headerAction}
+          className={buttonTextMuted}
         >
-          SHOW IN FINDER
+          Show in Finder
         </button>
         <button
           type="button"
           autoFocus
           aria-label="Close file viewer"
           onClick={onClose}
-          className="shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={buttonIcon}
         >
           <X size={14} aria-hidden />
         </button>
@@ -170,8 +170,8 @@ export function FileViewer({
           />
         ) : file.live ? (
           srcDoc === undefined || stale ? (
-            <p className="py-16 text-center font-mono text-xs text-muted-foreground">
-              WAITING FOR THE FIRST SECTION
+            <p className="py-16 text-center text-body text-muted-foreground">
+              Waiting for the first section
               {jobActive ? ` · ${phase.detail}` : "…"}
             </p>
           ) : (
@@ -185,12 +185,12 @@ export function FileViewer({
             />
           )
         ) : error ? (
-          <p className="py-16 text-center font-mono text-xs text-destructive">
-            COULD NOT LOAD FILE — {String(error)}
+          <p className="py-16 text-center text-body text-destructive">
+            Couldn't load the file: {String(error)}
           </p>
         ) : isPending || srcDoc === undefined ? (
-          <p className="py-16 text-center font-mono text-xs text-muted-foreground">
-            LOADING…
+          <p className="py-16 text-center text-body text-muted-foreground">
+            Loading…
           </p>
         ) : (
           // Class HTML notebooks need their own embedded scripts to unpack;
@@ -219,4 +219,3 @@ function syncLiveFrame(el: HTMLIFrameElement | null, html: string) {
   el.dataset.len = String(html.length);
   if (doc.scrollingElement) doc.scrollingElement.scrollTop = top;
 }
-

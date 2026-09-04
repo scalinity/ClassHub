@@ -24,15 +24,15 @@ export interface GradeCategory {
 }
 
 /** The tag a category or item the Canvas sync owns carries — the deadline
- *  row's VIA CANVAS, with what it means here. A hand edit is allowed and
+ *  row's "from Canvas", with what it means here. A hand edit is allowed and
  *  audited; the tag is what says it will not outlast the next sync. */
 export const CANVAS_CATEGORY_TAG = {
-  label: "VIA CANVAS",
+  label: "from Canvas",
   title:
     "One of the course's Canvas assignment groups — the sync keeps its name, and its weight where the course weights groups",
 };
 export const CANVAS_ITEM_TAG = {
-  label: "VIA CANVAS",
+  label: "from Canvas",
   title:
     "Read from Canvas — an edit here lasts until the next sync, which writes Canvas's score back",
 };

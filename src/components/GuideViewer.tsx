@@ -9,7 +9,7 @@ import {
 } from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
 import { dragWindow } from "@/lib/window";
-import { headerAction } from "@/lib/styles";
+import { buttonIcon, buttonTextMuted, chipAmber, meta } from "@/lib/styles";
 
 /**
  * SPEC §12: sandboxed in-app guide viewer. allow-scripts (without
@@ -48,43 +48,43 @@ export function GuideViewer({
       {/* pl clears the macOS traffic lights (overlay title bar). */}
       <header
         onMouseDown={dragWindow}
-        className="flex h-12 shrink-0 items-center gap-2.5 border-b bg-card pl-24 pr-3"
+        className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border/70 bg-surface pl-24 pr-3"
       >
-        <p className="pointer-events-none min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-(--accent)">
-          STUDY GUIDE ·{" "}
-          {guide.label.toUpperCase()}
+        <p className={`pointer-events-none shrink-0 ${meta}`}>Study guide</p>
+        <p className="pointer-events-none min-w-0 truncate text-[15px] font-medium">
+          {guide.label}
         </p>
         {guide.stale && (
           <span
-            title="Sources changed since this guide was generated"
-            className="shrink-0 rounded bg-class-amber/12 px-1.5 py-0.5 font-mono text-[10px] tracking-[0.14em] text-class-amber"
+            title="Sources changed since this guide was written"
+            className={chipAmber}
           >
-            STALE
+            stale
           </span>
         )}
-        <span className="ml-auto shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-          GENERATED {formatGeneratedAt(guide.generatedAt)}
+        <span className={`ml-auto shrink-0 ${meta}`}>
+          written {formatGeneratedAt(guide.generatedAt)}
         </span>
         <button
           type="button"
           onClick={() => void openInDefaultApp(classId, guide.relPath)}
-          className={headerAction}
+          className={buttonTextMuted}
         >
-          OPEN IN BROWSER
+          Open in browser
         </button>
         <button
           type="button"
           onClick={() => void revealInFinder(classId, guide.relPath)}
-          className={headerAction}
+          className={buttonTextMuted}
         >
-          SHOW IN FINDER
+          Show in Finder
         </button>
         <button
           type="button"
           autoFocus
           aria-label="Close guide viewer"
           onClick={onClose}
-          className="shrink-0 cursor-pointer rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={buttonIcon}
         >
           <X size={14} aria-hidden />
         </button>
@@ -92,12 +92,12 @@ export function GuideViewer({
 
       <div className="min-h-0 flex-1">
         {error ? (
-          <p className="py-16 text-center font-mono text-xs text-destructive">
-            COULD NOT LOAD GUIDE — {String(error)}
+          <p className="py-16 text-center text-body text-destructive">
+            Couldn't load the guide: {String(error)}
           </p>
         ) : isPending ? (
-          <p className="py-16 text-center font-mono text-xs text-muted-foreground">
-            LOADING GUIDE…
+          <p className="py-16 text-center text-body text-muted-foreground">
+            Loading the guide…
           </p>
         ) : (
           <iframe

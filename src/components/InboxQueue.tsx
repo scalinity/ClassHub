@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { File } from "lucide-react";
+import { File, X } from "lucide-react";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import { useJobs } from "@/lib/jobs";
 import { formatSize, type TreeNode } from "@/lib/materials";
 import {
@@ -14,10 +15,26 @@ import {
   useDragState,
   type MoveProposal,
 } from "@/lib/sorter";
-import { monoAction } from "@/lib/styles";
+import {
+  buttonFilled,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  chip,
+  chipAccent,
+  chipAmber,
+  chipMuted,
+  decisionCard,
+  errorLine,
+  meta,
+  pulseDot,
+  rowDense,
+  statusLine,
+} from "@/lib/styles";
 
-const chipBase =
-  "shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] tracking-[0.12em]";
+type SortState = Awaited<ReturnType<typeof getSortState>>;
+type Jobs = ReturnType<typeof useJobs>["jobs"];
+type DropNotice = ReturnType<typeof useDragState>["notice"];
 
 function collectDirs(nodes: readonly TreeNode[], out: string[] = []): string[] {
   for (const node of nodes) {
@@ -29,14 +46,64 @@ function collectDirs(nodes: readonly TreeNode[], out: string[] = []): string[] {
   return out;
 }
 
+/** What the queue holds, read once for the section and once for the nav. */
+function summarize(
+  data: SortState | undefined,
+  jobs: Jobs,
+  classId: number,
+  drop: DropNotice,
+) {
+  const sortJobs = jobs.filter(
+    (j) => j.kind === "sort_proposal" && j.classId === classId,
+  );
+  const active =
+    sortJobs.find((j) => j.status === "running" || j.status === "queued") ??
+    null;
+  // jobs arrive newest-first; a failure only matters while files remain unsorted.
+  const lastFailed =
+    !active && sortJobs[0]?.status === "failed" ? sortJobs[0] : null;
+  const inbox = data?.inbox ?? [];
+  const proposals = data?.proposals ?? [];
+  const proposedSources = new Set(proposals.map((p) => p.sourceRelPath));
+  const unproposed = inbox.filter(
+    (f) => !proposedSources.has(`${INBOX_DIR}/${f.name}`) && !f.dismissed,
+  );
+  // Dismissed files are decisions already made: shown quietly when the
+  // section is open for other reasons, never counted, never nagging.
+  const dismissed = inbox.filter(
+    (f) => f.dismissed && !proposedSources.has(`${INBOX_DIR}/${f.name}`),
+  );
+  const count = proposals.length + unproposed.length;
+  const notice = drop?.classId === classId ? drop.message : null;
+  return { active, lastFailed, proposals, unproposed, dismissed, count, notice };
+}
+
+/**
+ * Whether the section is on screen — the workspace's nav asks the same
+ * question the section answers, so both read one predicate. Dismissed files
+ * are not counted, but they still keep the section on screen: Sort the inbox
+ * is the documented way back out of a dismissal (sorter.rs runs manual sorts
+ * over every inbox file, dismissed included), and gating on `count` alone made
+ * it unreachable once everything was dismissed.
+ */
+export function inboxShown(
+  data: SortState | undefined,
+  jobs: Jobs,
+  classId: number,
+  drop: DropNotice,
+): boolean {
+  const s = summarize(data, jobs, classId, drop);
+  return !(s.count === 0 && s.dismissed.length === 0 && !s.active && !s.notice);
+}
+
 /**
  * SPEC §10 steps 3–5: the drop-to-sort confirm queue. One card per pending
  * proposal — destination route, reasoning, confidence — with Approve /
  * Move to… (folder picker) / Leave in inbox; chat-filed proposals render in
  * the same queue, and a Canvas card whose destination names a week also
  * offers the week folder as a second route (SPEC §10). Inbox files nothing
- * has proposed for yet list below, with
- * a manual SORT INBOX trigger when no sort job is active.
+ * has proposed for yet list below, with a manual Sort the inbox trigger when
+ * no sort job is active.
  */
 export function InboxQueue({
   classId,
@@ -56,39 +123,13 @@ export function InboxQueue({
   const drag = useDragState();
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const sortJobs = jobs.filter(
-    (j) => j.kind === "sort_proposal" && j.classId === classId,
-  );
-  const active =
-    sortJobs.find((j) => j.status === "running" || j.status === "queued") ??
-    null;
-  // jobs arrive newest-first; a failure only matters while files remain unsorted.
-  const lastFailed =
-    !active && sortJobs[0]?.status === "failed" ? sortJobs[0] : null;
   // Which jobs the snapshot knows: a card that started a sort holds itself
   // until the job it was handed shows up here.
   const jobIds: ReadonlySet<number> = new Set(jobs.map((j) => j.id));
+  const { active, lastFailed, proposals, unproposed, dismissed, count, notice } =
+    summarize(data, jobs, classId, drag.notice);
 
-  const inbox = data?.inbox ?? [];
-  const proposals = data?.proposals ?? [];
-  const proposedSources = new Set(proposals.map((p) => p.sourceRelPath));
-  const unproposed = inbox.filter(
-    (f) => !proposedSources.has(`${INBOX_DIR}/${f.name}`) && !f.dismissed,
-  );
-  // Dismissed files are decisions already made: shown quietly when the
-  // section is open for other reasons, never counted, never nagging.
-  const dismissed = inbox.filter(
-    (f) => f.dismissed && !proposedSources.has(`${INBOX_DIR}/${f.name}`),
-  );
-  const count = proposals.length + unproposed.length;
-  const notice = drag.notice?.classId === classId ? drag.notice.message : null;
-
-  // Dismissed files are not counted, but they still keep the section on
-  // screen: SORT INBOX is the documented way back out of a dismissal
-  // (sorter.rs runs manual sorts over every inbox file, dismissed included),
-  // and gating on `count` alone made it unreachable once everything was
-  // dismissed — the button's own branch below already contemplates this case.
-  if (count === 0 && dismissed.length === 0 && !active && !notice) return null;
+  if (!inboxShown(data, jobs, classId, drag.notice)) return null;
 
   const dirs = tree ? collectDirs(tree) : null;
   const dirSet: ReadonlySet<string> | null = dirs ? new Set(dirs) : null;
@@ -99,83 +140,68 @@ export function InboxQueue({
   };
 
   return (
-    <section className="mt-12" aria-label="Inbox — files waiting to be sorted">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          INBOX
-        </h2>
-        <div className="flex items-center gap-4">
-          {active ? (
+    <section
+      id="inbox"
+      className="mt-14 scroll-mt-20"
+      aria-label="Inbox — files waiting to be sorted"
+    >
+      <SectionHeading
+        title="Inbox"
+        count={count === 0 ? undefined : count === 1 ? "1 to sort" : `${count} to sort`}
+        actions={
+          active ? (
             // A scoped sort is one card's: that card carries the state, and a
             // second signal in the header would announce the same run twice.
-            active.scope === null && (
-              <span className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-                <span
-                  aria-hidden
-                  className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-                />
+            active.scope === null ? (
+              <span className={statusLine}>
+                <span aria-hidden className={pulseDot} />
                 {active.status === "running"
-                  ? "PROPOSING DESTINATIONS…"
-                  : "SORT QUEUED"}
+                  ? "Proposing destinations…"
+                  : "Sort queued"}
               </span>
-            )
-          ) : (
-            (unproposed.length > 0 || dismissed.length > 0) && (
-              <button
-                type="button"
-                onClick={sortNow}
-                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-              >
-                SORT INBOX
-              </button>
-            )
-          )}
-          {count > 0 && (
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-              {count === 1 ? "1 TO SORT" : `${count} TO SORT`}
-            </span>
-          )}
-        </div>
-      </div>
+            ) : undefined
+          ) : unproposed.length > 0 || dismissed.length > 0 ? (
+            <button type="button" onClick={sortNow} className={buttonText}>
+              Sort the inbox
+            </button>
+          ) : undefined
+        }
+      />
 
       {(notice ?? actionError) && (
-        <p className="mt-3 flex items-start gap-2 font-mono text-[11px] text-destructive">
-          <span className="min-w-0 flex-1">✕ {notice ?? actionError}</span>
+        <p className={`${errorLine} flex items-start gap-2`}>
+          <span className="min-w-0 flex-1">{notice ?? actionError}</span>
           {notice && (
             <button
               type="button"
               aria-label="Dismiss this notice"
               onClick={clearDropNotice}
-              className="shrink-0 cursor-pointer rounded px-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+              className={buttonIcon}
             >
-              ✕
+              <X size={12} aria-hidden />
             </button>
           )}
         </p>
       )}
       {lastFailed && unproposed.length > 0 && (
-        <p className="mt-3 flex items-center gap-2 font-mono text-[11px] text-destructive">
+        <p className={`${errorLine} flex items-center gap-2`}>
           <span className="min-w-0 truncate">
-            ✕ SORT FAILED — {lastFailed.error ?? "unknown error"}
+            The sort failed: {lastFailed.error ?? "unknown error"}
           </span>
-          <button
-            type="button"
-            onClick={sortNow}
-            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-          >
-            RETRY
+          <button type="button" onClick={sortNow} className={buttonText}>
+            Retry
           </button>
         </p>
       )}
 
-      <div className="mt-4 space-y-2">
+      <div className="mt-4 space-y-3">
         {proposals.map((p) => (
           <ProposalCard
             key={p.id}
             proposal={p}
             dirs={dirs}
             dirSet={dirSet}
-            // An explicit SORT BY CONTENT carries the file as the job's scope,
+            // An explicit Sort by content carries the file as the job's scope,
             // which is how this card knows the running sort is its own. Any
             // sort for the class blocks another, so every card learns that too.
             sorting={active !== null && active.scope === p.sourceRelPath}
@@ -183,48 +209,41 @@ export function InboxQueue({
             jobIds={jobIds}
           />
         ))}
-        {unproposed.map((f) => (
-          <div key={f.name} className="flex h-8 items-center gap-2 rounded-md px-2">
-            <File
-              size={14}
-              aria-hidden
-              className="shrink-0 text-muted-foreground/80"
-            />
-            <span className="min-w-0 flex-1 truncate text-[13px]">{f.name}</span>
-            {active && (
-              <span className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                AWAITING PROPOSAL
-              </span>
-            )}
-            <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
-              {formatSize(f.size)}
-            </span>
+        {(unproposed.length > 0 || dismissed.length > 0) && (
+          <div>
+            {unproposed.map((f) => (
+              <div key={f.name} className={rowDense}>
+                <File size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-body">{f.name}</span>
+                {active && (
+                  <span className="shrink-0 text-fine text-muted-foreground">
+                    awaiting a proposal
+                  </span>
+                )}
+                <span className={`w-14 shrink-0 text-right ${meta}`}>
+                  {formatSize(f.size)}
+                </span>
+              </div>
+            ))}
+            {dismissed.map((f) => (
+              <div key={f.name} className={`${rowDense} opacity-60`}>
+                <File size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-body text-muted-foreground">
+                  {f.name}
+                </span>
+                <span
+                  title="You chose to leave this file in the inbox — Sort the inbox proposes it again"
+                  className="shrink-0 text-fine text-muted-foreground"
+                >
+                  left in the inbox
+                </span>
+                <span className={`w-14 shrink-0 text-right ${meta}`}>
+                  {formatSize(f.size)}
+                </span>
+              </div>
+            ))}
           </div>
-        ))}
-        {dismissed.map((f) => (
-          <div
-            key={f.name}
-            className="flex h-8 items-center gap-2 rounded-md px-2 opacity-60"
-          >
-            <File
-              size={14}
-              aria-hidden
-              className="shrink-0 text-muted-foreground/60"
-            />
-            <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
-              {f.name}
-            </span>
-            <span
-              title="You chose to leave this file in the inbox — SORT INBOX proposes it again"
-              className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70"
-            >
-              LEFT IN INBOX
-            </span>
-            <span className="w-14 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
-              {formatSize(f.size)}
-            </span>
-          </div>
-        ))}
+        )}
       </div>
     </section>
   );
@@ -242,10 +261,10 @@ function ProposalCard({
   /** null while the tree is loading. */
   dirs: readonly string[] | null;
   dirSet: ReadonlySet<string> | null;
-  /** A SORT BY CONTENT job for this file is queued or running. */
+  /** A Sort by content job for this file is queued or running. */
   sorting: boolean;
   /** Any sort job for the class is queued or running: the backend allows one
-   *  at a time, so SORT BY CONTENT on another card could only be refused. */
+   *  at a time, so Sort by content on another card could only be refused. */
   sortActive: boolean;
   /** Every job id the jobs snapshot currently knows. */
   jobIds: ReadonlySet<number>;
@@ -269,7 +288,7 @@ function ProposalCard({
 
   const source = proposal.sourceRelPath;
   const fileName = source.slice(source.lastIndexOf("/") + 1);
-  // MOVE TO… changes only the folder: a rename the proposal carries survives
+  // Move to… changes only the folder: a rename the proposal carries survives
   // the redirect, so the picker override keeps the destination's file name.
   const destName = proposal.destRelPath.slice(
     proposal.destRelPath.lastIndexOf("/") + 1,
@@ -313,9 +332,9 @@ function ProposalCard({
   };
 
   return (
-    <div className="rounded-lg border bg-card px-4 py-3">
+    <div className={decisionCard}>
       <div className="flex items-start justify-between gap-3">
-        <p className="min-w-0 truncate text-[13px] font-medium">{fileName}</p>
+        <p className="min-w-0 truncate text-[15px] font-semibold">{fileName}</p>
         <ProposalChip proposal={proposal} />
       </div>
 
@@ -324,9 +343,9 @@ function ProposalCard({
         // The second destination, in the first's own register: the reader
         // sees both before choosing, and the week folder is dash-underlined
         // while it has yet to be created.
-        <p className="mt-0.5 flex flex-wrap items-center gap-y-0.5 font-mono text-[11px] leading-relaxed">
-          <span className="text-muted-foreground/70">or</span>
-          <span aria-hidden className="px-1.5 text-(--accent)">
+        <p className="mt-0.5 flex flex-wrap items-center gap-y-0.5 font-mono text-code">
+          <span className="text-muted-foreground">or</span>
+          <span aria-hidden className="px-1.5 text-(--accent-ink)">
             →
           </span>
           <DestPath
@@ -337,45 +356,43 @@ function ProposalCard({
         </p>
       )}
 
-      <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
-        {proposal.reasoning}
-      </p>
+      <p className="mt-2 text-body text-muted-foreground">{proposal.reasoning}</p>
       {alternative && (
         // The case for the second route, in the register the first's reason
         // uses and in the same order as the routes: the reader choosing
         // between two folders sees both arguments on any input, which a
         // tooltip — hover only — would not give the keyboard or touch.
-        <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">
+        <p className="mt-1 text-body text-muted-foreground">
           {alternative.reasoning}
         </p>
       )}
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-1">
+      <div className="mt-3 flex flex-wrap items-center gap-1">
         <button
           type="button"
           onClick={() => resolve(true)}
           disabled={held}
-          className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonFilled}
         >
-          {busy && !filing ? "WORKING…" : "APPROVE"}
+          {busy && !filing ? "Working…" : "Approve"}
         </button>
         {alternative && (
           // The row's own action, a step earlier: the reading that would
-          // offer FILE UNDER WEEK once the file landed where Canvas put it,
+          // offer File under Week once the file landed where Canvas put it,
           // offered on the card so one approval does the work of two.
           // Canvas's folder stays the filled default beside it.
           <button
             type="button"
             onClick={() => fileUnderWeek(alternative.destRelPath)}
             disabled={held}
-            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+            className={buttonText}
           >
             {/* The Materials row's label, word for word (FileTree.tsx,
                 FilingAction): the card offers the row's own action, and the
                 two must read the same. */}
             {busy && filing
-              ? "FILING…"
-              : `FILE UNDER WEEK ${String(alternative.week).padStart(2, "0")}`}
+              ? "Filing…"
+              : `File under Week ${String(alternative.week).padStart(2, "0")}`}
           </button>
         )}
         <button
@@ -383,13 +400,9 @@ function ProposalCard({
           onClick={() => setPickerOpen((open) => !open)}
           disabled={held}
           aria-expanded={pickerOpen}
-          className={`${monoAction} ${
-            pickerOpen
-              ? "bg-muted text-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          } disabled:pointer-events-none disabled:opacity-60`}
+          className={`${buttonTextMuted} ${pickerOpen ? "bg-muted text-foreground" : ""}`}
         >
-          MOVE TO…
+          Move to…
         </button>
         {proposal.source === "canvas" &&
           // Disagreeing with the professor's folder, explicitly: the sort's
@@ -397,12 +410,9 @@ function ProposalCard({
           // (SPEC §7.2). The result re-renders here as a sort proposal with
           // the Canvas folder still named in its reasoning.
           (sorting || sortStarting || awaitingJob ? (
-            <span className="flex items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-              <span
-                aria-hidden
-                className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-              />
-              SORTING BY CONTENT…
+            <span className={`px-2 ${statusLine}`}>
+              <span aria-hidden className={pulseDot} />
+              Sorting by content…
             </span>
           ) : (
             <button
@@ -414,29 +424,29 @@ function ProposalCard({
                   ? "A sort job for this class is already running — one at a time"
                   : "Ask a sort job to read the file and propose a folder in place of the one Canvas keeps it in"
               }
-              className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+              className={buttonTextMuted}
             >
-              SORT BY CONTENT
+              Sort by content
             </button>
           ))}
         <button
           type="button"
           onClick={() => resolve(false)}
           disabled={held}
-          className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonTextMuted}
         >
-          {fromInbox ? "LEAVE IN INBOX" : "DISMISS"}
+          {fromInbox ? "Leave in inbox" : "Dismiss"}
         </button>
       </div>
 
       {pickerOpen && !held && (
-        <div className="mt-2 max-h-44 overflow-y-auto rounded-md border p-1">
+        <div className="mt-2 max-h-44 overflow-y-auto rounded-md p-1 ring-1 ring-border">
           {pickerDirs === null ? (
-            <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
+            <p className="px-2 py-1.5 text-body text-muted-foreground">
               Folders are still loading…
             </p>
           ) : pickerDirs.length === 0 ? (
-            <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
+            <p className="px-2 py-1.5 text-body text-muted-foreground">
               No other folders yet — approving creates the proposed one.
             </p>
           ) : (
@@ -448,7 +458,7 @@ function ProposalCard({
                   setPickerOpen(false);
                   resolve(true, `${dir}/${destName}`);
                 }}
-                className="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                className="block w-full cursor-pointer truncate rounded-sm px-2 py-1 text-left font-mono text-code text-muted-foreground transition-colors hover:bg-(--accent)/10 hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
               >
                 {dir}/
               </button>
@@ -457,9 +467,7 @@ function ProposalCard({
         </div>
       )}
 
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">✕ {error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </div>
   );
 }
@@ -485,9 +493,9 @@ function RouteLine({
   const fromName = source.slice(source.lastIndexOf("/") + 1);
 
   return (
-    <p className="mt-1.5 flex flex-wrap items-center gap-y-0.5 font-mono text-[11px] leading-relaxed">
+    <p className="mt-1.5 flex flex-wrap items-center gap-y-0.5 font-mono text-code">
       <span className="text-muted-foreground">{fromDir}</span>
-      <span aria-hidden className="px-1.5 text-(--accent)">
+      <span aria-hidden className="px-1.5 text-(--accent-ink)">
         →
       </span>
       <DestPath dest={proposal.destRelPath} fromName={fromName} dirSet={dirSet} />
@@ -524,7 +532,7 @@ function DestPath({
           <span
             className={
               part.isNew
-                ? "text-(--accent) underline decoration-dashed underline-offset-4"
+                ? "text-(--accent-ink) underline decoration-dashed underline-offset-4"
                 : undefined
             }
           >
@@ -540,9 +548,9 @@ function DestPath({
       {hasNew && (
         <span
           title="This folder will be created when the move is approved"
-          className="ml-1.5 rounded bg-(--accent)/12 px-1 py-px text-[9px] font-medium tracking-[0.12em] text-(--accent)"
+          className={`${chipAccent} ml-1.5`}
         >
-          NEW FOLDER
+          new folder
         </span>
       )}
     </>
@@ -556,11 +564,8 @@ function DestPath({
 function ProposalChip({ proposal }: { proposal: MoveProposal }) {
   if (proposal.source === "chat") {
     return (
-      <span
-        title="Proposed in chat"
-        className={`${chipBase} bg-muted text-muted-foreground`}
-      >
-        VIA CHAT
+      <span title="Proposed in chat" className={chipMuted}>
+        from chat
       </span>
     );
   }
@@ -568,9 +573,9 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
     return (
       <span
         title="Downloaded from Canvas, into the folder Canvas keeps it in"
-        className={`${chipBase} bg-(--accent)/12 text-(--accent)`}
+        className={chipAccent}
       >
-        VIA CANVAS
+        from Canvas
       </span>
     );
   }
@@ -578,9 +583,9 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
     return (
       <span
         title="Its name carries the week — proposed from its row in Materials"
-        className={`${chipBase} bg-(--accent)/12 text-(--accent)`}
+        className={chipAccent}
       >
-        BY NAME
+        by name
       </span>
     );
   }
@@ -589,27 +594,27 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
       return (
         <span
           title="The sort job is confident about this destination"
-          className={`${chipBase} bg-(--accent)/12 text-(--accent)`}
+          className={chipAccent}
         >
-          HIGH
+          high confidence
         </span>
       );
     case "medium":
       return (
         <span
           title="The sort job is fairly sure — worth a glance"
-          className={`${chipBase} bg-class-amber/12 text-class-amber`}
+          className={chipAmber}
         >
-          MEDIUM
+          medium confidence
         </span>
       );
     case "low":
       return (
         <span
           title="The sort job is guessing — check the destination"
-          className={`${chipBase} border text-muted-foreground`}
+          className={`${chip} text-muted-foreground ring-1 ring-border`}
         >
-          LOW
+          low confidence
         </span>
       );
     default:

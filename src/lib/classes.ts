@@ -63,9 +63,20 @@ export function classesQuery() {
  *  dash, a spaced hyphen, or the colon a Part uses. */
 const DIVISION_SEPARATOR = /\s+[—–-]\s+|:\s+/;
 
-/** `Week 3 — Data Exploration` → `WEEK 3 · DATA EXPLORATION`: the card's line. */
-export function currentUnitLabel(name: string): string {
-  return name.replace(DIVISION_SEPARATOR, " · ").toUpperCase();
+
+/**
+ * `Week 3 — Data Exploration` → `{ label: "Week 3", topic: "Data Exploration" }`:
+ * the card's meta line and its headline. A division with no separator is all
+ * label and no topic (`Reading Days — No Class (Reading Days)` keeps its own
+ * dash-separated words as the topic, exactly as the syllabus wrote them).
+ */
+export function splitUnitName(name: string): { label: string; topic: string | null } {
+  const at = DIVISION_SEPARATOR.exec(name);
+  if (at === null || at.index === 0) return { label: name, topic: null };
+  return {
+    label: name.slice(0, at.index),
+    topic: name.slice(at.index + at[0].length) || null,
+  };
 }
 
 /** Class color name -> the CSS accent token (per-card `--accent` pattern). */

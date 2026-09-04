@@ -22,7 +22,16 @@ import {
   type JobProgressEvent,
 } from "@/lib/jobs";
 import { CLASS_ACCENTS } from "@/lib/classes";
+import { formatClock } from "@/lib/schedule";
 import { getAppSettings } from "@/lib/settings";
+import {
+  buttonIcon,
+  buttonTextNeutral,
+  chipMuted,
+  errorLine,
+  meta,
+  pulseDot,
+} from "@/lib/styles";
 
 function accentStyle(color: string | null): CSSProperties {
   return {
@@ -52,30 +61,28 @@ export function JobCenter() {
       {panelOpen && (
         <section
           aria-label="Job Center"
-          className="pointer-events-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-xl border bg-card shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none"
+          className="pointer-events-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-surface shadow-xl ring-1 ring-border animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none"
         >
-          <header className="flex items-center justify-between border-b px-4 py-2.5">
-            <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-              JOB CENTER
-            </h2>
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+          <header className="flex items-center justify-between border-b border-border/70 px-4 py-2.5">
+            <h2 className="text-[15px] font-semibold">Jobs</h2>
+            <span className={meta}>
               {active.length > 0
-                ? `${active.length} ACTIVE · MAX ${appSettings?.jobConcurrency ?? 2} CONCURRENT`
-                : "NO ACTIVE JOBS"}
+                ? `${active.length} active · up to ${appSettings?.jobConcurrency ?? 2} at once`
+                : "Nothing running"}
             </span>
           </header>
 
           {notice !== null && (
             <p
               role="alert"
-              className="border-b bg-destructive/5 px-4 py-2 font-mono text-[10.5px] leading-relaxed text-destructive"
+              className="border-b border-border/70 bg-destructive/5 px-4 py-2 text-body text-destructive"
             >
               {notice}
             </p>
           )}
 
           {jobs.length === 0 ? (
-            <p className="px-4 py-8 text-center text-[13px] text-muted-foreground">
+            <p className="px-4 py-8 text-center text-body text-muted-foreground">
               No jobs yet. Extraction and synthesis work will appear here.
             </p>
           ) : (
@@ -138,36 +145,33 @@ function Pill({
       aria-label="Toggle Job Center"
       onClick={toggleJobPanel}
       style={accentStyle(oldest?.classColor ?? null)}
-      className="pointer-events-auto flex h-9 cursor-pointer items-center gap-2 rounded-full border bg-card px-4 font-mono text-[11px] tracking-[0.14em] shadow-md transition-shadow hover:shadow-lg focus-visible:outline-2 focus-visible:outline-ring"
+      className="pointer-events-auto flex h-9 cursor-pointer items-center gap-2 rounded-full bg-surface px-4 text-body shadow-md ring-1 ring-border transition-shadow hover:shadow-lg focus-visible:outline-2 focus-visible:outline-ring"
     >
       {oldest ? (
         <>
-          <span
-            aria-hidden
-            className="size-2 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-          />
+          <span aria-hidden className={pulseDot} />
           <span className="font-medium">
             {running.length === 1
-              ? jobKindLabel(oldest.kind)
-              : `${running.length} RUNNING`}
+              ? `Jobs · ${jobKindLabel(oldest.kind)}`
+              : `Jobs · ${running.length} running`}
           </span>
-          <span className="text-muted-foreground">
+          <span className="tabular-nums text-muted-foreground">
             {formatElapsed(oldest.startedAt ?? nowSec, nowSec)}
           </span>
         </>
       ) : failedIdle ? (
         <>
-          <X size={11} aria-hidden className="text-destructive" />
-          <span className="text-destructive">JOB FAILED</span>
+          <X size={12} aria-hidden className="text-destructive" />
+          <span className="text-destructive">Jobs · failed</span>
         </>
       ) : (
-        <span className="text-muted-foreground">JOBS · IDLE</span>
+        <span className="text-muted-foreground">Jobs · idle</span>
       )}
       <ChevronUp
         size={12}
         aria-hidden
         className={
-          "text-muted-foreground/60 transition-transform duration-150 " +
+          "text-muted-foreground/70 transition-transform duration-150 " +
           (panelOpen ? "rotate-180" : "")
         }
       />
@@ -178,12 +182,7 @@ function Pill({
 function StatusIcon({ job }: { job: JobInfo }) {
   switch (job.status) {
     case "running":
-      return (
-        <span
-          aria-hidden
-          className="size-2 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-        />
-      );
+      return <span aria-hidden className={pulseDot} />;
     case "queued":
       return <Clock size={11} aria-hidden className="text-muted-foreground/70" />;
     case "succeeded":
@@ -212,18 +211,16 @@ function JobRow({
     job.status === "running"
       ? formatElapsed(job.startedAt ?? nowSec, nowSec)
       : job.status === "queued"
-        ? "QUEUED"
+        ? "queued"
         : job.finishedAt
-          ? new Date(job.finishedAt * 1000)
-              .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-              .toUpperCase()
+          ? formatClock(new Date(job.finishedAt * 1000))
           : "—";
 
   return (
     <li style={accentStyle(job.classColor)} className="px-1.5">
       <div
         className={
-          "flex h-9 items-center gap-2.5 rounded-md px-2.5 " +
+          "flex min-h-9 items-center gap-2.5 rounded-md px-2.5 " +
           (selected ? "bg-muted/70" : "hover:bg-muted/40")
         }
       >
@@ -231,24 +228,20 @@ function JobRow({
           type="button"
           onClick={onSelect}
           aria-label={`Show output of job ${job.id}`}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
         >
           <span className="flex w-4 shrink-0 justify-center">
             <StatusIcon job={job} />
           </span>
-          <span className="shrink-0 font-mono text-[11px] font-medium tracking-[0.1em]">
-            {jobKindLabel(job.kind)}
-          </span>
-          <span className="min-w-0 truncate text-[13px] text-muted-foreground">
-            {/* scope 'master' is redundant with the MASTER GUIDE kind label */}
+          <span className={chipMuted}>{jobKindLabel(job.kind)}</span>
+          <span className="min-w-0 truncate text-body text-muted-foreground">
+            {/* scope 'master' is redundant with the Semester master kind label */}
             {[job.className, job.scope === "master" ? null : job.scopeLabel]
               .filter(Boolean)
               .join(" · ")}
           </span>
         </button>
-        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-          {timeLabel}
-        </span>
+        <span className={`shrink-0 ${meta}`}>{timeLabel}</span>
         {isActive(job) && (
           <button
             type="button"
@@ -258,7 +251,7 @@ function JobRow({
               onError(null);
               cancelJob(job.id).catch((e) => onError(String(e)));
             }}
-            className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive focus-visible:outline-2 focus-visible:outline-(--accent)"
+            className={`${buttonIcon} hover:text-destructive`}
           >
             <X size={13} aria-hidden />
           </button>
@@ -276,7 +269,7 @@ function OutputLine({ event }: { event: JobProgressEvent }) {
     case "tool":
       return (
         <div className="text-muted-foreground">
-          <span className="text-(--accent)">»</span> {event.text}
+          <span className="text-(--accent-ink)">»</span> {event.text}
         </div>
       );
     case "tool_result":
@@ -301,7 +294,7 @@ function OutputLine({ event }: { event: JobProgressEvent }) {
     case "phase":
       return (
         <div className="text-muted-foreground">
-          <span className="text-(--accent)">◆</span> {event.text}
+          <span className="text-(--accent-ink)">◆</span> {event.text}
         </div>
       );
     case "retry":
@@ -329,7 +322,7 @@ function OutputPane({
   const stickRef = useRef(true);
 
   return (
-    <div style={accentStyle(job.classColor)} className="border-t">
+    <div style={accentStyle(job.classColor)} className="border-t border-border/70">
       <div
         onScroll={(e) => {
           const el = e.currentTarget;
@@ -339,7 +332,7 @@ function OutputPane({
         ref={(el) => {
           if (el && stickRef.current) el.scrollTop = el.scrollHeight;
         }}
-        className="h-52 space-y-1 overflow-y-auto bg-muted/30 px-4 py-3 font-mono text-[11px] leading-relaxed"
+        className="h-52 space-y-1 overflow-y-auto bg-muted/40 px-4 py-3 font-mono text-[12px] leading-relaxed"
       >
         {events.length === 0 ? (
           <p className="text-muted-foreground/70">
@@ -372,19 +365,17 @@ export function AuthWarning() {
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="auth-warning-title"
-        className="w-full max-w-md rounded-xl border bg-card p-6 shadow-2xl"
+        className="w-full max-w-md rounded-xl bg-surface p-6 shadow-2xl ring-1 ring-border"
       >
-        <p className="flex items-center gap-2 font-mono text-[11px] tracking-[0.18em] text-destructive">
+        <p className="flex items-center gap-2 text-body font-medium text-destructive">
           <CircleAlert size={13} aria-hidden />
-          SUBSCRIPTION AUTH CHECK FAILED
+          Subscription check failed
         </p>
-        <h2 id="auth-warning-title" className="mt-3 text-[17px] font-semibold">
+        <h2 id="auth-warning-title" className="mt-3 text-headline">
           Jobs are not using the Max subscription
         </h2>
-        <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
-          {auth.detail}
-        </p>
-        <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+        <p className="mt-2 text-body text-muted-foreground">{auth.detail}</p>
+        <p className="mt-2 text-body text-muted-foreground">
           Running jobs in this state would silently bill pay-per-token API
           credits. Fix the claude CLI login, then re-run the check.
         </p>
@@ -394,15 +385,11 @@ export function AuthWarning() {
             setRecheckError(null);
             rerunAuthCheck().catch((e) => setRecheckError(String(e)));
           }}
-          className="mt-5 cursor-pointer rounded-md border px-3.5 py-1.5 text-[12px] font-medium transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className={`${buttonTextNeutral} mt-5 ring-1 ring-border`}
         >
           Re-run check
         </button>
-        {recheckError !== null && (
-          <p className="mt-3 font-mono text-[10.5px] leading-relaxed text-destructive">
-            {recheckError}
-          </p>
-        )}
+        {recheckError !== null && <p className={errorLine}>{recheckError}</p>}
       </div>
     </div>
   );

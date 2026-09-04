@@ -48,22 +48,22 @@ export function nextMeeting(
   return best;
 }
 
-const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export function weekdayLabel(weekday: number): string {
   return WEEKDAYS[weekday - 1] ?? "?";
 }
 
-/** "16:05" -> "4:05 PM" (or without meridiem when told to omit it). */
+/** "16:05" -> "4:05 pm" (or without meridiem when told to omit it). */
 export function formatTime(time: string, withMeridiem = true): string {
   const [h, m] = time.split(":").map(Number);
-  const meridiem = h < 12 ? "AM" : "PM";
+  const meridiem = h < 12 ? "am" : "pm";
   const hour12 = h % 12 === 0 ? 12 : h % 12;
   const base = `${hour12}:${String(m).padStart(2, "0")}`;
   return withMeridiem ? `${base} ${meridiem}` : base;
 }
 
-/** "11:45".."13:40" -> "11:45 AM–1:40 PM"; same-meridiem ranges collapse: "4:05–7:05 PM". */
+/** "11:45".."13:40" -> "11:45 am–1:40 pm"; same-meridiem ranges collapse: "4:05–7:05 pm". */
 export function formatTimeRange(start: string, end: string): string {
   const sameMeridiem =
     (toMinutes(start) < 720) === (toMinutes(end) < 720);
@@ -71,24 +71,44 @@ export function formatTimeRange(start: string, end: string): string {
 }
 
 export function relativeLabel(next: NextMeeting): string {
-  if (next.inSession) return "IN SESSION";
-  if (next.daysUntil === 0) return "TODAY";
-  if (next.daysUntil === 1) return "TOMORROW";
-  return `IN ${next.daysUntil} DAYS`;
+  if (next.inSession) return "in session";
+  if (next.daysUntil === 0) return "today";
+  if (next.daysUntil === 1) return "tomorrow";
+  return `in ${next.daysUntil} days`;
+}
+
+/** A clock reading, "1:50 am". */
+export function formatClock(date: Date): string {
+  return date
+    .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+    .replace(" AM", " am")
+    .replace(" PM", " pm");
+}
+
+/** A calendar day, "Sep 3"; with its year when it is not this year's. */
+export function formatMonthDay(date: Date, now: Date = new Date()): string {
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+/** A moment, "Sep 3, 1:50 am" — the stamp under a guide, a sync, a note. */
+export function formatStamp(date: Date): string {
+  return `${formatMonthDay(date)}, ${formatClock(date)}`;
 }
 
 /**
- * Deadline due_at ("2026-09-03" or "2026-09-03T17:00") -> "SEP 3" (+ time when
- * present). Parsed by parts: `new Date("YYYY-MM-DD")` is UTC midnight, which
- * renders as the previous local day in negative offsets.
+ * Deadline due_at ("2026-09-03" or "2026-09-03T17:00") -> "Sep 3" (+ " at
+ * 5:00 pm" when present). Parsed by parts: `new Date("YYYY-MM-DD")` is UTC
+ * midnight, which renders as the previous local day in negative offsets.
  */
 export function formatDueDate(dueAt: string): string {
   const [datePart, timePart] = dueAt.split("T");
   const [y, m, d] = datePart.split("-").map(Number);
-  const label = new Date(y, (m || 1) - 1, d || 1)
-    .toLocaleDateString("en-US", { month: "short", day: "numeric" })
-    .toUpperCase();
-  return timePart ? `${label} ${formatTime(timePart.slice(0, 5))}` : label;
+  const label = formatMonthDay(new Date(y, (m || 1) - 1, d || 1));
+  return timePart ? `${label} at ${formatTime(timePart.slice(0, 5))}` : label;
 }
 
 /** Local midnight of an ISO date(-time)'s date part, parsed by parts (see above). */
@@ -104,20 +124,21 @@ export function daysUntil(iso: string, now: Date = new Date()): number {
 }
 
 /**
- * Deadline label with the day named: "OVERDUE · AUG 20", "TODAY", "TOMORROW",
- * "WED AUG 26" — plus the time when the deadline carries one.
+ * Deadline label with the day named: "overdue since Aug 20", "today at
+ * 11:59 pm", "tomorrow", "Wed, Aug 26 at 11:59 pm" — the time only when the
+ * deadline carries one.
  */
 export function dueDayLabel(dueAt: string): string {
   const days = daysUntil(dueAt);
   const timePart = dueAt.split("T")[1];
-  const time = timePart ? ` ${formatTime(timePart.slice(0, 5))}` : "";
-  if (days < 0) return `OVERDUE · ${formatDueDate(dueAt)}`;
-  if (days === 0) return `TODAY${time}`;
-  if (days === 1) return `TOMORROW${time}`;
-  const weekday = localMidnight(dueAt)
-    .toLocaleDateString("en-US", { weekday: "short" })
-    .toUpperCase();
-  return `${weekday} ${formatDueDate(dueAt)}`;
+  const time = timePart ? ` at ${formatTime(timePart.slice(0, 5))}` : "";
+  if (days < 0) return `overdue since ${formatMonthDay(localMidnight(dueAt))}`;
+  if (days === 0) return `today${time}`;
+  if (days === 1) return `tomorrow${time}`;
+  const weekday = localMidnight(dueAt).toLocaleDateString("en-US", {
+    weekday: "short",
+  });
+  return `${weekday}, ${formatDueDate(dueAt)}`;
 }
 
 /** Today as YYYY-MM-DD in local time (backend stamps and date-input defaults). */

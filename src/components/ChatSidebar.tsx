@@ -39,7 +39,7 @@ import {
   type ChatSnapshot,
 } from "@/lib/chat";
 import { openClassId } from "@/lib/sorter";
-import { iconAction } from "@/lib/styles";
+import { buttonIconNeutral, buttonTextNeutral } from "@/lib/styles";
 
 /**
  * The answer's document register, expressed as element rules so a rendered
@@ -47,25 +47,25 @@ import { iconAction } from "@/lib/styles";
  * anchored `button.cite` elements the markdown pass injects.
  */
 const PROSE = [
-  "text-[13.5px] leading-[1.65]",
+  "text-[14px] leading-[1.6]",
   "[&_p]:my-2 [&_p:first-child]:mt-0",
-  "[&_h1]:mt-4 [&_h1]:mb-1.5 [&_h1]:text-[15px] [&_h1]:font-semibold",
-  "[&_h2]:mt-4 [&_h2]:mb-1.5 [&_h2]:text-[14px] [&_h2]:font-semibold",
-  "[&_h3]:mt-3.5 [&_h3]:mb-1 [&_h3]:font-mono [&_h3]:text-[10.5px] [&_h3]:tracking-[0.16em] [&_h3]:uppercase [&_h3]:text-muted-foreground",
+  "[&_h1]:mt-4 [&_h1]:mb-1.5 [&_h1]:text-[16px] [&_h1]:font-semibold [&_h1]:tracking-tight",
+  "[&_h2]:mt-4 [&_h2]:mb-1.5 [&_h2]:text-[15px] [&_h2]:font-semibold",
+  "[&_h3]:mt-3.5 [&_h3]:mb-1 [&_h3]:text-[14px] [&_h3]:font-semibold",
   "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-4",
   "[&_li]:my-1 [&_li]:marker:text-muted-foreground/50",
   "[&_strong]:font-semibold [&_em]:italic",
   "[&_a]:underline [&_a]:decoration-dotted",
   "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
-  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:bg-muted/40 [&_pre]:p-2.5 [&_pre]:font-mono [&_pre]:text-[11.5px]",
-  "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:bg-muted [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[11.5px]",
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted/40 [&_pre]:p-2.5 [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:ring-1 [&_pre]:ring-border",
+  "[&_:not(pre)>code]:rounded-sm [&_:not(pre)>code]:bg-muted [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[12px]",
   "[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse",
-  "[&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-mono [&_th]:text-[10px] [&_th]:uppercase [&_th]:tracking-[0.1em] [&_th]:text-muted-foreground",
+  "[&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:text-[12px] [&_th]:font-semibold [&_th]:text-muted-foreground",
   "[&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top",
   "[&_hr]:my-3.5",
-  "[&_.katex]:text-[1.02em]",
+  "[&_.katex]:text-[1em]",
   "[&_.katex-display]:my-2.5 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5",
-  "[&_button.cite]:cursor-pointer [&_button.cite]:rounded [&_button.cite]:px-0.5 [&_button.cite]:font-mono [&_button.cite]:text-[11px] [&_button.cite]:text-(--cite) [&_button.cite]:underline [&_button.cite]:decoration-dotted [&_button.cite]:underline-offset-2 [&_button.cite]:hover:bg-muted",
+  "[&_button.cite]:cursor-pointer [&_button.cite]:rounded-sm [&_button.cite]:px-0.5 [&_button.cite]:font-mono [&_button.cite]:text-[12px] [&_button.cite]:text-(--cite) [&_button.cite]:underline [&_button.cite]:decoration-dotted [&_button.cite]:underline-offset-2 [&_button.cite]:hover:bg-muted",
 ].join(" ");
 
 /**
@@ -106,10 +106,14 @@ function pickStarters(
   return shuffled.slice(0, 3);
 }
 
+/** A dashed suggestion that fills in on hover — starters and follow-ups alike. */
+const suggestion =
+  "group flex w-full cursor-pointer items-baseline gap-2 rounded-md border border-dashed border-border px-2.5 py-2 text-left text-body text-muted-foreground transition-colors hover:border-solid hover:bg-muted/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring";
+
 /**
  * SPEC §9 — the ask panel: a right-edge overlay (⌘J) over whatever you were
  * reading, so a question never costs you your place. Answers stream as
- * documents rather than chat bubbles, tool calls collapse into mono chips, and
+ * documents rather than chat bubbles, tool calls collapse into chips, and
  * every cited path opens the file it names.
  */
 export function ChatSidebar() {
@@ -123,11 +127,11 @@ export function ChatSidebar() {
           type="button"
           aria-label="Ask ClassHub"
           onClick={toggleChat}
-          className="fixed right-4 bottom-4 z-40 flex h-9 cursor-pointer items-center gap-2 rounded-full border bg-card px-3.5 font-mono text-[11px] tracking-[0.14em] shadow-md transition-shadow hover:shadow-lg focus-visible:outline-2 focus-visible:outline-ring"
+          className="fixed right-4 bottom-4 z-40 flex h-9 cursor-pointer items-center gap-2 rounded-full bg-surface px-3.5 text-body font-medium shadow-md ring-1 ring-border transition-shadow hover:shadow-lg focus-visible:outline-2 focus-visible:outline-ring"
         >
-          <MessagesSquare size={12} aria-hidden />
-          ASK
-          <span aria-hidden className="text-muted-foreground/60">
+          <MessagesSquare size={13} aria-hidden />
+          Ask
+          <span aria-hidden className="text-meta text-muted-foreground">
             ⌘J
           </span>
         </button>
@@ -171,18 +175,16 @@ function Panel({
       onKeyDown={(e) => {
         if (e.key === "Escape") closeChat();
       }}
-      className="fixed inset-y-0 right-0 z-40 flex w-[min(30rem,90vw)] flex-col border-l bg-card shadow-2xl animate-in fade-in slide-in-from-right-4 duration-200 motion-reduce:animate-none"
+      className="fixed inset-y-0 right-0 z-40 flex w-[min(30rem,90vw)] flex-col bg-surface shadow-2xl ring-1 ring-border animate-in fade-in slide-in-from-right-4 duration-200 motion-reduce:animate-none"
     >
-      <header className="relative flex h-11 shrink-0 items-center gap-1 border-b px-2.5">
-        <p className="mr-auto pl-1 font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          ASK · CLASSHUB
-        </p>
+      <header className="relative flex h-11 shrink-0 items-center gap-1 border-b border-border/70 px-2.5">
+        <p className="mr-auto pl-1.5 text-[15px] font-semibold">Ask ClassHub</p>
         <button
           type="button"
           aria-label="New conversation"
           title="New conversation"
           onClick={newChat}
-          className={iconAction}
+          className={buttonIconNeutral}
         >
           <Plus size={14} aria-hidden />
         </button>
@@ -191,9 +193,9 @@ function Panel({
           aria-expanded={chat.pickerOpen}
           aria-label="Past conversations"
           onClick={togglePicker}
-          className="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+          className={buttonTextNeutral}
         >
-          HISTORY
+          History
           <ChevronDown
             size={11}
             aria-hidden
@@ -209,7 +211,7 @@ function Panel({
           aria-label="Chat settings"
           title="Chat settings"
           onClick={toggleSettings}
-          className={iconAction}
+          className={buttonIconNeutral}
         >
           <Settings2 size={14} aria-hidden />
         </button>
@@ -217,15 +219,15 @@ function Panel({
           type="button"
           aria-label="Close chat"
           onClick={closeChat}
-          className={iconAction}
+          className={buttonIconNeutral}
         >
           <X size={14} aria-hidden />
         </button>
 
         {chat.pickerOpen && (
-          <div className="absolute inset-x-0 top-11 z-10 max-h-80 overflow-y-auto border-b bg-card py-1 shadow-lg">
+          <div className="absolute inset-x-0 top-11 z-10 max-h-80 overflow-y-auto border-b border-border/70 bg-surface py-1 shadow-lg">
             {chat.sessions.length === 0 ? (
-              <p className="px-4 py-6 text-center text-[13px] text-muted-foreground">
+              <p className="px-4 py-6 text-center text-body text-muted-foreground">
                 No conversations yet.
               </p>
             ) : (
@@ -239,13 +241,13 @@ function Panel({
                     (s.id === chat.sessionId ? "bg-muted/70" : "hover:bg-muted/40")
                   }
                 >
-                  <span className="w-12 shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
+                  <span className="w-14 shrink-0 text-meta tabular-nums text-muted-foreground">
                     {formatSessionDate(s.createdAt)}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px]">
+                  <span className="min-w-0 flex-1 truncate text-body">
                     {s.title}
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">
+                  <span className="shrink-0 text-fine text-muted-foreground">
                     {s.messageCount}
                   </span>
                 </button>
@@ -279,8 +281,8 @@ function Panel({
             ) : (
               <>
                 {session && (
-                  <p className="mb-2 font-mono text-[10px] tracking-[0.16em] text-muted-foreground/60">
-                    {formatSessionDate(session.createdAt)} · CONVERSATION #
+                  <p className="mb-2 text-meta text-muted-foreground">
+                    {formatSessionDate(session.createdAt)} · conversation #
                     {session.id}
                   </p>
                 )}
@@ -294,34 +296,30 @@ function Panel({
                 ))}
                 {chat.streaming &&
                   chat.items[chat.items.length - 1]?.kind !== "answer" && (
-                    <p className="mt-2 animate-pulse font-mono text-[10.5px] tracking-[0.14em] text-muted-foreground motion-reduce:animate-none">
-                      WORKING…
+                    <p className="mt-2 animate-pulse text-meta text-muted-foreground motion-reduce:animate-none">
+                      Working…
                     </p>
                   )}
                 {!chat.streaming &&
                   chat.suggestionsFor === chat.sessionId &&
                   chat.suggestions.length > 0 && (
-                    <div className="mt-5 border-t pt-3">
-                      <p className="font-mono text-[10px] tracking-[0.16em] text-muted-foreground/60">
-                        FOLLOW UP
-                      </p>
+                    <div className="mt-5 border-t border-border/70 pt-3">
+                      <p className="text-meta text-muted-foreground">Follow up</p>
                       <div className="mt-2 space-y-1.5">
                         {chat.suggestions.map((text) => (
                           <button
                             key={text}
                             type="button"
                             onClick={() => submit(text)}
-                            className="group flex w-full cursor-pointer items-baseline gap-2 rounded-md border border-dashed px-2.5 py-2 text-left transition-colors hover:border-solid hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring"
+                            className={suggestion}
                           >
                             <span
                               aria-hidden
-                              className="shrink-0 font-mono text-[11px] text-muted-foreground/50 transition-colors group-hover:text-foreground"
+                              className="shrink-0 text-muted-foreground/60 transition-colors group-hover:text-foreground"
                             >
                               ›
                             </span>
-                            <span className="text-[12.5px] leading-snug text-muted-foreground transition-colors group-hover:text-foreground">
-                              {text}
-                            </span>
+                            <span className="leading-snug">{text}</span>
                           </button>
                         ))}
                       </div>
@@ -336,14 +334,12 @@ function Panel({
               e.preventDefault();
               submit(draft);
             }}
-            className="shrink-0 border-t p-2.5"
+            className="shrink-0 border-t border-border/70 p-2.5"
           >
             {chat.error && (
-              <p className="mb-2 px-1 font-mono text-[10.5px] leading-relaxed text-destructive">
-                {chat.error}
-              </p>
+              <p className="mb-2 px-1 text-body text-destructive">{chat.error}</p>
             )}
-            <div className="flex items-end gap-1.5 rounded-lg border bg-background px-2.5 py-2 focus-within:border-ring">
+            <div className="flex items-end gap-1.5 rounded-[10px] bg-background px-2.5 py-2 ring-1 ring-border focus-within:ring-ring">
               <textarea
                 rows={1}
                 autoFocus
@@ -362,14 +358,14 @@ function Panel({
                   el.style.height = "auto";
                   el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
                 }}
-                className="flex-1 resize-none bg-transparent text-[13.5px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
+                className="flex-1 resize-none bg-transparent text-[14px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
               />
               {chat.streaming ? (
                 <button
                   type="button"
                   aria-label="Stop answering"
                   onClick={stopChat}
-                  className="shrink-0 cursor-pointer rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                  className={buttonIconNeutral}
                 >
                   <Square size={12} aria-hidden fill="currentColor" />
                 </button>
@@ -378,19 +374,19 @@ function Panel({
                   type="submit"
                   aria-label="Send"
                   disabled={draft.trim() === ""}
-                  className="shrink-0 cursor-pointer rounded-md bg-primary p-1.5 text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-25 focus-visible:outline-2 focus-visible:outline-ring"
+                  className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground text-background transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:opacity-25"
                 >
                   <ArrowUp size={12} aria-hidden strokeWidth={2.5} />
                 </button>
               )}
             </div>
-            <div className="mt-1.5 flex items-center justify-between px-1 font-mono text-[10px] tracking-[0.12em] text-muted-foreground/60">
+            <div className="mt-1.5 flex items-center justify-between px-1 text-fine text-muted-foreground">
               <span className="truncate">
                 {chat.settings?.model
                   ? shortModel(chat.settings.model)
-                  : "DIRECT API · NO MODEL SET"}
+                  : "Direct API · no model set"}
               </span>
-              <span className="shrink-0 pl-2">⏎ SEND · ⇧⏎ NEWLINE</span>
+              <span className="shrink-0 pl-2">⏎ send · ⇧⏎ newline</span>
             </div>
           </form>
         </>
@@ -418,10 +414,8 @@ function EmptyState({
   if (!hasKey) {
     return (
       <div className="mt-6">
-        <p className="font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-          NO API KEY YET
-        </p>
-        <p className="mt-2.5 text-[13px] leading-relaxed text-muted-foreground">
+        <p className="text-[15px] font-semibold">No API key yet</p>
+        <p className="mt-2.5 text-body text-muted-foreground">
           Asking runs on the Anthropic API with your own key, stored in the macOS
           Keychain. It is deliberately separate from the Max subscription the
           synthesis jobs use, so a rate-limited job never costs you an answer.
@@ -429,9 +423,9 @@ function EmptyState({
         <button
           type="button"
           onClick={toggleSettings}
-          className="mt-4 cursor-pointer rounded-md border px-3 py-1.5 font-mono text-[10.5px] tracking-[0.14em] transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className={`${buttonTextNeutral} mt-4 ring-1 ring-border`}
         >
-          ADD KEY
+          Add key
         </button>
       </div>
     );
@@ -439,15 +433,12 @@ function EmptyState({
 
   return (
     <div className="mt-6">
-      <p className="font-mono text-[10.5px] tracking-[0.16em] text-muted-foreground">
-        READS YOUR MATERIAL · ACTS ON IT
-      </p>
-      <p className="mt-2.5 text-[13px] leading-relaxed text-muted-foreground">
+      <p className="text-[15px] font-semibold">Reads your material, and acts on it</p>
+      <p className="mt-2.5 text-body text-muted-foreground">
         Questions are answered from the extracted slides, notebooks, notes and
         study guides in your classes, with every file it read cited inline. Ask
-        and it also records deadlines and grades, writes notes, and kicks off
-        guide synthesis or a practice exam. File moves stay proposals you
-        approve.
+        and it also records deadlines and grades, writes notes, and starts a
+        study guide or a practice exam. File moves stay proposals you approve.
       </p>
       <div className="mt-4 space-y-1.5">
         {starters.map((text) => (
@@ -455,9 +446,9 @@ function EmptyState({
             key={text}
             type="button"
             onClick={() => onAsk(text)}
-            className="block w-full cursor-pointer rounded-md border border-dashed px-2.5 py-2 text-left text-[12.5px] leading-snug text-muted-foreground transition-colors hover:border-solid hover:bg-muted/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            className={suggestion}
           >
-            {text}
+            <span className="leading-snug">{text}</span>
           </button>
         ))}
       </div>
@@ -481,7 +472,7 @@ const Turn = memo(function Turn({
   switch (item.kind) {
     case "question":
       return (
-        <p className="mt-5 border-l-2 border-foreground/30 pl-2.5 text-[13.5px] font-medium leading-snug whitespace-pre-wrap first:mt-0">
+        <p className="mt-5 border-l-2 border-foreground/30 pl-2.5 text-[14px] font-medium leading-snug whitespace-pre-wrap first:mt-0">
           {item.text}
         </p>
       );
@@ -493,7 +484,7 @@ const Turn = memo(function Turn({
       return <Answer item={item} classes={classes} streaming={streaming} />;
     case "notice":
       return (
-        <p className="mt-2.5 rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 font-mono text-[10.5px] leading-relaxed text-destructive">
+        <p className="mt-2.5 rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-body text-destructive">
           {item.text}
         </p>
       );
@@ -583,16 +574,14 @@ function ThinkingBlock({
         <span
           aria-hidden
           className={
-            "shrink-0 font-mono text-[11px] " +
+            "shrink-0 text-body " +
             (item.done ? "" : "animate-pulse motion-reduce:animate-none")
           }
         >
           ◇
         </span>
-        <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em]">
-          THINKING
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] italic opacity-70">
+        <span className="shrink-0 text-fine font-semibold">Thinking</span>
+        <span className="min-w-0 flex-1 truncate text-meta italic opacity-70">
           {preview ?? "…"}
         </span>
         <ChevronRight
@@ -601,7 +590,7 @@ function ThinkingBlock({
           className="shrink-0 opacity-40 transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none"
         />
       </summary>
-      <p className="mt-1.5 mb-1 ml-1 border-l pl-3 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+      <p className="mt-1.5 mb-1 ml-1 border-l border-border pl-3 text-meta leading-relaxed whitespace-pre-wrap text-muted-foreground">
         {item.text}
       </p>
     </details>
@@ -613,27 +602,27 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
 
   return (
     <details className="group mt-2.5">
-      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md border bg-muted/30 px-2 py-1.5 transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md bg-muted/40 px-2 py-1.5 ring-1 ring-border/60 transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
         <span
           aria-hidden
           className={
-            "shrink-0 font-mono text-[11px] " +
+            "shrink-0 text-body " +
             (pending
               ? "animate-pulse text-foreground motion-reduce:animate-none"
               : item.isError
                 ? "text-destructive"
-                : "text-muted-foreground/50")
+                : "text-muted-foreground/60")
           }
         >
           {/* ✎ marks a chip that changed something; » only ever read. */}
           {isWriteTool(item) ? "✎" : "»"}
         </span>
-        <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em]">
+        <span className="shrink-0 text-fine font-semibold">
           {toolLabel(item.name)}
         </span>
         <span
           className={
-            "min-w-0 flex-1 truncate text-[11.5px] " +
+            "min-w-0 flex-1 truncate text-meta " +
             (item.isError ? "text-destructive" : "text-muted-foreground")
           }
         >
@@ -645,12 +634,12 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
           className="shrink-0 text-muted-foreground/40 transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none"
         />
       </summary>
-      <div className="mt-1.5 mb-1 ml-1 space-y-1.5 border-l pl-3">
-        <pre className="whitespace-pre-wrap font-mono text-[10.5px] leading-relaxed text-foreground/70">
+      <div className="mt-1.5 mb-1 ml-1 space-y-1.5 border-l border-border pl-3">
+        <pre className="whitespace-pre-wrap font-mono text-fine leading-relaxed text-foreground/70">
           {formatArgs(item.input)}
         </pre>
         {item.detail !== undefined && (
-          <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap font-mono text-[10.5px] leading-relaxed text-muted-foreground">
+          <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap font-mono text-fine leading-relaxed text-muted-foreground">
             {item.detail}
           </pre>
         )}
@@ -671,4 +660,3 @@ function openCitation(cite: HTMLElement) {
     kind: cite.dataset.kind ?? "md",
   });
 }
-

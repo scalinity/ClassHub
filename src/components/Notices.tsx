@@ -2,20 +2,26 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Megaphone } from "lucide-react";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import { listAnnouncements, type Announcement } from "@/lib/canvas";
-import { formatDueDate, formatTime } from "@/lib/schedule";
+import { formatDueDate } from "@/lib/schedule";
+import { meta, readingText } from "@/lib/styles";
 
-/** `SEP 2 3:03 PM`, and `SEP 2 2025 3:03 PM` when the notice is from another
- *  year — a course site can carry a term's worth of old posts, and "AUG 20"
- *  alone reads as this term's. */
+/** The one query the section and the workspace's nav share — TanStack dedupes
+ *  it, so the nav's link costs no second request. */
+export function announcementsQuery(classId: number) {
+  return {
+    queryKey: ["announcements", classId] as const,
+    queryFn: () => listAnnouncements(classId),
+    placeholderData: (prev: Announcement[] | undefined) => prev,
+  };
+}
+
+/** `Sep 2 at 3:03 pm`, and `Sep 2, 2025 at 3:03 pm` when the notice is from
+ *  another year — a course site can carry a term's worth of old posts, and
+ *  "Aug 20" alone reads as this term's. */
 function noticeStamp(postedAt: string): string {
-  const [date, time] = postedAt.split("T");
-  const year = Number(date.slice(0, 4));
-  const day =
-    year === new Date().getFullYear()
-      ? formatDueDate(date)
-      : `${formatDueDate(date)} ${year}`;
-  return time ? `${day} ${formatTime(time.slice(0, 5))}` : day;
+  return formatDueDate(postedAt);
 }
 
 /**
@@ -26,26 +32,18 @@ function noticeStamp(postedAt: string): string {
  * app never renders Canvas's HTML.
  */
 export function NoticesSection({ classId }: { classId: number }) {
-  const { data: notices } = useQuery({
-    queryKey: ["announcements", classId],
-    queryFn: () => listAnnouncements(classId),
-    placeholderData: (prev) => prev,
-  });
+  const { data: notices } = useQuery(announcementsQuery(classId));
   if (notices === undefined || notices.length === 0) return null;
 
   return (
-    <section className="mt-12" aria-label="Notices">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          NOTICES
-        </h2>
-        <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-          {notices.length === 1
-            ? "1 FROM CANVAS"
-            : `${notices.length} FROM CANVAS`}
-        </span>
-      </div>
-      <div className="mt-3 space-y-1">
+    <section id="notices" className="mt-14 scroll-mt-20" aria-label="Notices">
+      <SectionHeading
+        title="Notices"
+        count={
+          notices.length === 1 ? "1 from Canvas" : `${notices.length} from Canvas`
+        }
+      />
+      <div className="mt-3">
         {notices.map((notice) => (
           <NoticeRow key={notice.id} notice={notice} />
         ))}
@@ -59,29 +57,27 @@ export function NoticesSection({ classId }: { classId: number }) {
 function NoticeRow({ notice }: { notice: Announcement }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-md px-2 py-1.5 transition-colors hover:bg-muted/60">
+    <div className="border-b border-border/70 py-3 last:border-b-0">
       <button
         type="button"
         aria-expanded={open}
         title={open ? "Collapse" : "Read the whole notice"}
         onClick={() => setOpen((prev) => !prev)}
-        className="flex w-full cursor-pointer items-center gap-2 text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
+        className="flex w-full cursor-pointer items-baseline gap-2.5 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-(--accent)"
       >
         <Megaphone
           size={14}
           aria-hidden
-          className="shrink-0 text-muted-foreground/80"
+          className="shrink-0 translate-y-0.5 text-muted-foreground"
         />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+        <span className="min-w-0 flex-1 truncate text-[15px] font-medium">
           {notice.title}
         </span>
-        <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
-          {noticeStamp(notice.postedAt)}
-        </span>
+        <span className={`shrink-0 ${meta}`}>{noticeStamp(notice.postedAt)}</span>
       </button>
       {notice.body !== "" && (
         <p
-          className={`mt-1 pl-6 text-[12.5px] leading-relaxed whitespace-pre-line text-muted-foreground ${
+          className={`mt-1.5 pl-6.5 whitespace-pre-line ${readingText} text-muted-foreground ${
             open ? "" : "line-clamp-3"
           }`}
         >

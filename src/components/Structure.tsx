@@ -10,9 +10,24 @@ import {
   type Unit,
 } from "@/lib/canvas";
 import { PracticeAction } from "@/components/PracticeAction";
+import { SectionHeading } from "@/components/SectionHeading";
 import { unitScope, type GuideInfo } from "@/lib/guides";
 import { listLectureContributions } from "@/lib/lectures";
-import { monoAction } from "@/lib/styles";
+import { formatMonthDay } from "@/lib/schedule";
+import {
+  buttonChip,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  chipAmber,
+  errorLine,
+  meta,
+  pulseDot,
+  readingText,
+  row,
+  statusLine,
+} from "@/lib/styles";
+import { sentence } from "@/lib/utils";
 
 /** What a division's guide needs from the workspace to be triggered and read. */
 export interface UnitGuideControls {
@@ -35,7 +50,7 @@ export interface UnitGuideControls {
  * are a sequence, and a reader looking for "week 7" is looking for a position.
  *
  * Only what a course declares appears. A folder is where material sits, which
- * the Materials tree above already shows; listing folders here put a second
+ * the Materials tree already shows; listing folders here put a second
  * numbering sequence under the course's own and labelled it as a guess.
  *
  * This is also where a lecture lands. A session filed under `Weeks/` feeds the
@@ -78,13 +93,13 @@ export function StructureSection({
     setJobError(null);
     controls
       .onSynthesize(unitId)
-      .catch((e) => setJobError(`NO GUIDE — ${String(e)}`));
+      .catch((e) => setJobError(`No guide: ${String(e)}`));
   };
   const practice = (scope: string) => {
     setJobError(null);
     controls
       .onPractice(scope)
-      .catch((e) => setJobError(`NO PRACTICE EXAM — ${String(e)}`));
+      .catch((e) => setJobError(`No practice exam: ${String(e)}`));
   };
   const outcome = progress?.done
     ? progress.results?.find((r) => r.classId === classId)
@@ -100,68 +115,49 @@ export function StructureSection({
   }
 
   return (
-    <section className="mt-12" aria-label="Structure">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          STRUCTURE
-        </h2>
-        <button
-          type="button"
-          disabled={running}
-          onClick={() => void start()}
-          className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-40`}
-        >
-          {running ? "SYNCING…" : "SYNC CANVAS"}
-        </button>
-      </div>
+    <section id="structure" className="mt-14 scroll-mt-20" aria-label="Structure">
+      <SectionHeading
+        title="Structure"
+        actions={
+          <button
+            type="button"
+            disabled={running}
+            onClick={() => void start()}
+            className={buttonText}
+          >
+            {running ? "Syncing…" : "Sync Canvas"}
+          </button>
+        }
+      />
 
       {running && (
-        <p className="mt-3 flex items-center gap-2 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-          <span
-            aria-hidden
-            className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-          />
-          {progress.stage.toUpperCase()}
+        <p className={`mt-3 ${statusLine}`}>
+          <span aria-hidden className={pulseDot} />
+          {sentence(progress.stage)}
         </p>
       )}
       {/* The sync never began — one is already running. Distinct from a sync
           that started and failed, and it clears on the next attempt. */}
-      {refused && (
-        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
-          NOT STARTED — {refused}
-        </p>
-      )}
+      {refused && <p className={errorLine}>Not started: {refused}</p>}
       {progress?.done && progress.error && (
-        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
-          SYNC STOPPED — {progress.error}
-        </p>
+        <p className={errorLine}>Sync stopped: {progress.error}</p>
       )}
       {/* A class that failed inside a sync that otherwise finished. Carried in
           the same ink as a stopped sync, because it is a failure and not a
           remark about one. */}
       {outcome?.error && (
-        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
-          THIS CLASS DID NOT SYNC — {outcome.error}
-        </p>
+        <p className={errorLine}>This class did not sync: {outcome.error}</p>
       )}
-      {jobError && (
-        <p className="mt-3 font-mono text-[11px] leading-relaxed text-destructive">
-          {jobError}
-        </p>
-      )}
+      {jobError && <p className={errorLine}>{jobError}</p>}
       <SyncNotes outcome={outcome} />
 
       <div className="mt-3">
         {error ? (
-          <p className="py-2 font-mono text-[11px] text-destructive">
-            COULD NOT READ THE STRUCTURE — {String(error)}
-          </p>
+          <p className={errorLine}>Couldn't read the structure: {String(error)}</p>
         ) : units === undefined ? (
-          <p className="py-2 font-mono text-[11px] text-muted-foreground">
-            LOADING…
-          </p>
+          <p className="py-2 text-body text-muted-foreground">Loading…</p>
         ) : units.length === 0 ? (
-          <p className="max-w-xl py-2 text-[13px] leading-relaxed text-muted-foreground">
+          <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
             Nothing yet. Scan this course's syllabus from the Deadlines section
             — the weekly schedule is usually in the same document as the due
             dates. Syncing Canvas picks up any modules the course publishes,
@@ -169,14 +165,14 @@ export function StructureSection({
           </p>
         ) : (
           <>
-            <p className="max-w-xl text-[12px] leading-relaxed text-muted-foreground">
+            <p className="max-w-xl text-body text-muted-foreground">
               {provenance(units)}
               {/* Without this, seventeen rows with no action on any of them
                   read as a list the app does nothing with. */}
               {distilledPerUnit.size === 0 &&
                 " Each one can have its own study guide, built from the lectures filed under it — add a lecture and distill it to start one."}
             </p>
-            <ol className="mt-2 space-y-0.5">
+            <ol className="mt-3">
               {units.map((unit) => (
                 <UnitRow
                   key={unit.id}
@@ -204,7 +200,7 @@ function SyncNotes({ outcome }: { outcome: ClassOutcome | undefined }) {
       {outcome.notes.map((note, index) => (
         <li
           key={`${outcome.classId}-${index}`}
-          className="text-[12px] leading-relaxed text-muted-foreground"
+          className="text-body text-muted-foreground"
         >
           {note}
         </li>
@@ -242,23 +238,20 @@ function UnitRow({
     canBuild || guide !== undefined || controls.activePracticeScopes.has(scope);
 
   return (
-    <li
-      aria-current={current ? "true" : undefined}
-      className="group flex h-8 items-center gap-3 rounded-md px-2 transition-colors hover:bg-muted/60"
-    >
+    <li aria-current={current ? "true" : undefined} className={row}>
       <span
         aria-hidden
-        className="w-5 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground/60"
+        className="w-6 shrink-0 text-right text-meta tabular-nums text-muted-foreground/70"
       >
         {unit.ordinal}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[13px]">{unit.name}</span>
+      <span className="min-w-0 flex-1 truncate text-body">{unit.name}</span>
       {/* The list marks where the course is; it does not scroll there. A
           still dot, because nothing is running — the pulse means a job. */}
       {current && (
-        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
+        <span className="flex shrink-0 items-center gap-1.5 text-fine font-medium text-(--accent-ink)">
           <span aria-hidden className="size-1.5 rounded-full bg-(--accent)" />
-          NOW
+          now
         </span>
       )}
       {distilled > 0 && (
@@ -268,9 +261,9 @@ function UnitRow({
               ? "One distilled lecture feeds this guide"
               : `${distilled} distilled lectures feed this guide`
           }
-          className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70"
+          className="shrink-0 text-fine text-muted-foreground"
         >
-          {distilled === 1 ? "1 LECTURE" : `${distilled} LECTURES`}
+          {distilled === 1 ? "1 lecture" : `${distilled} lectures`}
         </span>
       )}
       {hasGuideCluster && (
@@ -286,7 +279,7 @@ function UnitRow({
         />
       )}
       {unit.startsOn && (
-        <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
+        <span className={`w-12 shrink-0 text-right ${meta}`}>
           {formatUnitDate(unit.startsOn)}
         </span>
       )}
@@ -296,7 +289,7 @@ function UnitRow({
 
 /**
  * SPEC §8.1 — a division's guide, in the same words the Materials tree uses for
- * a folder's: synthesis is manual, staleness is always visible, and the
+ * a folder's: writing is manual, staleness is always visible, and the
  * token-costing action stays quiet until the guide has actually gone stale.
  * The practice exam (SPEC §8.3) draws on the same sources as the guide, so it
  * is offered exactly when a guide could be built.
@@ -336,12 +329,9 @@ function UnitGuideCluster({
   if (controls.activeScopes.has(scope)) {
     return (
       <span className="flex shrink-0 items-center gap-0.5">
-        <span className="flex shrink-0 items-center gap-1.5 px-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-          <span
-            aria-hidden
-            className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-          />
-          SYNTHESIZING…
+        <span className={`px-2 ${statusLine}`}>
+          <span aria-hidden className={pulseDot} />
+          Writing the guide…
         </span>
         {practice}
       </span>
@@ -354,9 +344,9 @@ function UnitGuideCluster({
         <button
           type="button"
           onClick={() => onSynthesize(unitId)}
-          className={`${monoAction} text-muted-foreground opacity-0 transition-opacity hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+          className={`${buttonTextMuted} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
         >
-          SYNTHESIZE GUIDE
+          Write guide
         </button>
         {practice}
       </span>
@@ -369,26 +359,26 @@ function UnitGuideCluster({
         // Stale with nothing left to rebuild from: said, not offered.
         <span
           title="Its sources are gone — refile a lecture here to rebuild it"
-          className="px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-class-amber"
+          className={chipAmber}
         >
-          STALE
+          stale
         </span>
       ) : guide.stale ? (
         <button
           type="button"
-          title="Sources changed since this guide was generated"
+          title="Sources changed since this guide was written"
           onClick={() => onSynthesize(unitId)}
-          className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+          className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
         >
-          STALE — RESYNTHESIZE
+          Rewrite · sources changed
         </button>
       ) : !canBuild ? null : (
         <button
           type="button"
-          title="Resynthesize guide"
+          title="Rewrite the guide"
           aria-label={`Resynthesize the ${unitName} guide`}
           onClick={() => onSynthesize(unitId)}
-          className="cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent) group-focus-within:opacity-100 group-hover:opacity-100"
+          className={`${buttonIcon} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
         >
           <RefreshCw size={12} aria-hidden />
         </button>
@@ -397,9 +387,9 @@ function UnitGuideCluster({
       <button
         type="button"
         onClick={() => controls.onView(scope)}
-        className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+        className={buttonText}
       >
-        VIEW GUIDE
+        Read guide
       </button>
     </span>
   );
@@ -422,12 +412,10 @@ function provenance(units: Unit[]): string {
   return `${units.length} ${plural}, read from ${from}.`;
 }
 
-/** `2026-09-03` → `SEP 3`. Parsed as parts, never through `new Date(iso)` —
+/** `2026-09-03` → `Sep 3`. Parsed as parts, never through `new Date(iso)` —
  *  that reads a bare date as UTC and renders the day before in this zone. */
 function formatUnitDate(iso: string): string {
   const [year, month, day] = iso.split("-").map(Number);
   if (!year || !month || !day) return "";
-  return new Date(year, month - 1, day)
-    .toLocaleDateString("en-US", { month: "short", day: "numeric" })
-    .toUpperCase();
+  return formatMonthDay(new Date(year, month - 1, day));
 }

@@ -4430,3 +4430,140 @@ through `scripts/gate.sh`. What future sessions should know:
 - The reviewers' first message truncates near 4,000 characters; batches of
   three findings by number arrived whole when asked for under about 1,000
   characters each.
+
+## M30 — The facelift (2026-09-04)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database (`user_version` 13, 37 file
+rows, jobs at 312, no active job, every `canvas_synced_at` 2026-09-03 02:15), under the code
+at 84454ad:
+
+- **The register's footprint**: 145 `tracking-[` sites, 229 `font-mono` sites and 26
+  `toUpperCase()` calls under `src/`; fourteen arbitrary pixel sizes from 9 to 28px; one
+  `tabular-nums`. After: 0, 21 (paths, code, logs, keys and the raw note editor) and 2
+  (`utils.ts`'s `sentence`, and `guides.ts`'s footer stamp for the generated guides).
+- **The "before"**: seventeen dark-mode and seven light-mode captures of the installed app,
+  through `ax` and `screencapture -l`, kept in the session's scratchpad beside the "after".
+- **Dead weight**: `@import "shadcn/tailwind.css"` contributed variants, utilities and
+  keyframes nothing in `src` used; six of `ui/card.tsx`'s seven exports had no consumer and
+  the seventh had one; `radix-ui` and `class-variance-authority` are installed and imported
+  nowhere (left in `package.json`: the facelift changes no dependency).
+- **The compiled radius scale**: bare `rounded` was 4px, `rounded-sm` 6, `rounded-md` 8,
+  `rounded-xl` 14 — so surfaces take `rounded-xl`, controls `rounded-md`, chips
+  `rounded-sm`, and the 43 bare `rounded` sites went with their primitives.
+- `ui-serif` resolves to New York in this webview (the note preview's headings already used
+  it), which the first pass relied on and the accepted design does not.
+
+### What was built
+
+- **The token layer** (`src/index.css`): paper and ink in both modes, `--surface`,
+  `--wash-strength` (9% light, 13% dark), the four class colours, and eight type roles as
+  `--text-*` theme values so `text-display` … `text-code` are utilities. A base rule on
+  `[style*="--accent"]` derives `--accent-ink` (`color-mix` toward the foreground, 30%) and
+  `--wash` (the accent at the wash strength over the background) for every class-scoped
+  container, so the seven inline `--accent` sites and any future one get both for free. The
+  unreferenced shadcn bindings (`popover`, `secondary`, `accent`, `input`, `sidebar-*`,
+  `chart-*`, `--font-heading`) and the shadcn stylesheet import are gone; `tw-animate-css`
+  stays for the fade-ins.
+- **The primitives** (`src/lib/styles.ts`): `buttonFilled`/`buttonFilledNeutral`,
+  `buttonText`/`buttonTextMuted`/`buttonTextNeutral`, `buttonChip`, `buttonIcon`/
+  `buttonIconNeutral`, `chip` + `chipAccent`/`chipAmber`/`chipMuted`, `meta`, `errorLine`,
+  `pulseDot`, `statusLine`, `row`/`rowDense`, `decisionCard`, `washCard`, `readingText`,
+  `input`/`inputNeutral`, and the option-row set; the six mono constants are gone with their
+  last consumers, as is `ui/card.tsx`. `SectionHeading` (`src/components/SectionHeading.tsx`)
+  replaces the sixteen copies of the eyebrow-on-a-rule header.
+- **Formatters** in `src/lib`: sentence-case dates and times (`schedule.ts` gained
+  `formatClock`, `formatMonthDay`, `formatStamp`; `dueDayLabel` reads `overdue since Sep 3`,
+  `today at 11:59 pm`, `Thu, Sep 24 at 11:59 pm`), `splitUnitName` in `classes.ts` in place of
+  the uppercasing `currentUnitLabel`, label tables for the Rust job kinds (`jobs.ts`), the
+  effort ladder, the source tags (`from the syllabus`, `from Canvas`, `from chat`), and
+  `shortModel` reading `claude-opus-4-1-20250805` as `Claude Opus 4.1`. `utils.ts` gained
+  `sentence`, the one capitaliser, for the progress-stage words Rust sends.
+- **The dashboard**: the day as the display headline, the semester and the sync age as meta
+  beside the settings icon; the schedule grid's slabs as washes with weighted names; the due
+  strip as class-washed chips; the class card as an `<article>` on its wash — name in the
+  class ink, the meeting line, `Week 3` over the topic in the headline role, the nearest
+  deadline as one sentence, chips along a bottom row pinned with `mt-auto` so the four align.
+- **The workspace**: `main` lost its max-width; a full-width band in the wash holds the back
+  link, the class name, the current division and one meta row (meetings, room, credits,
+  instructors — the card's former footer); a `nav` that is a direct child of `main` sticks at
+  the top with 36px of padding for the traffic lights and lists the sections present, in the
+  page's order, each a button that calls `scrollIntoView` (smooth unless the reader asked for
+  less motion — no observer, no effect). `InboxQueue.tsx` exports `inboxShown` and
+  `Notices.tsx` exports `announcementsQuery` so the nav reads exactly what the sections do;
+  every section carries an `id` and `scroll-mt-20`. Rows are hairline-separated lists
+  (`min-h-11`, dense tree rows and grade items `min-h-9`); proposals and forms are cards on
+  `--surface`; the Materials tree keeps its indent guides and drops the hairlines.
+- **Overlays and rooms**: the jobs pill and panel, the chat sidebar (its `PROSE` list retuned
+  in place: sans throughout, h3 and `th` no longer mono uppercase), the chat settings pane,
+  the three rooms' 44px bars, the Add lecture dialog, Settings — and `docShell` on the app's
+  own paper and ink with sans headings, so the note preview matches the chrome around it.
+- SPEC §12 states the design; §7.2, §8.3, §8.5, §10, §11 cite the labels by their new names;
+  §14 carries the entry; CLAUDE.md names the two driving controls that changed.
+
+#### Design system (keep consistent in future UI milestones)
+
+Supersedes M1's subsection where they differ.
+
+- One sans (SF Pro) with weight and tracking carrying the hierarchy; eight type roles, used by
+  name (`text-display`, `text-headline`, `text-title`, `text-body`, `text-meta`, `text-fine`,
+  `text-reading`, `text-code`); mono only for code, paths, logs and the raw note editor.
+  Never uppercase, never tracked, never a status code where a sentence will do.
+- Paper and ink; `--surface` one step off the ground; the class colours as washes and inks
+  through `--accent` → `--accent-ink`/`--wash`; amber the one staleness colour; radii by
+  hierarchy (14/8/6); shadows only on floating things.
+- Labels are sentence case and say what happens; counts are phrases; dates `Thu, Sep 24`,
+  times `11:59 pm`; middle dots only inside one meta row.
+- Sections: `SectionHeading` (title, count, actions, an optional line under), rows separated
+  by hairlines, decisions as `decisionCard`. New controls come from `styles.ts`; a new colour
+  does not get added.
+
+### Verified
+
+`cargo test`: unchanged — nothing under `src-tauri/` changed (`git diff pre-facelift..facelift
+--stat -- src-tauri/ package.json` is empty). `npx tsc --noEmit` clean after every file, and
+the register greps read 0 / code-and-paths / 2.
+
+Live on the dev build beside the installed app 84454ad, in dark and light mode (the
+appearance flipped through System Events for the pass and flipped back), at the 1168×734
+window and at the 920×600 minimum: the dashboard top and cards, the workspace band and nav
+(unstuck and stuck), Notices, Structure, Deadlines, Grades, Materials, Lectures, Practice
+exams, Notes, the inbox cards, the proposal queue, the chat and its settings pane, the jobs
+panel, the Add lecture dialog, and the guide, material and note rooms. The nav lists the
+inbox only where the queue shows and the practice exams only where there are any, and each
+link lands its section under the stuck nav.
+
+Not run: any chat turn, any digest, any guide, any scan, any sync by hand. The dev build's
+launch found nothing stale to extract. Session cost: nothing on the subscription, nothing on
+credits.
+
+### Left as it is
+
+- The generated guides, practice exams and session documents keep their own design, which the
+  prompts under `src-tauri/prompts/` write; the guide room's bar is the app's, the page inside
+  is the document's.
+- Seven `aria-label`s follow their visible titles (Settings' five section names, the master
+  strip's phase name, and the card's "Meets on" line, which left with the tick row). Nothing
+  drives by them.
+- The nav has no active-section state; it is a jump list.
+- `radix-ui` and `class-variance-authority` stay in `package.json`, unused.
+- The Applied Generative AI card, whose course publishes no dates, shows no division and so
+  reads shorter than its neighbours; the grid stretches it and the chip row sits at the
+  bottom.
+
+### Gotchas
+
+- A first pass set the headlines and reading surfaces in New York (`ui-serif`); it read as
+  Times and was declined on sight. The brief's own words — clean and modern — decide, and the
+  pivot cost one `perl` pass over seventeen `font-serif` sites and two lines of `index.css`.
+- Driving the dev build with `ax` needs it frontmost; a keystroke sent through System Events
+  while the terminal is in front lands in the terminal. Activate the process by pid, confirm
+  it is frontmost, and close a dialog through its own Close button rather than Escape.
+- `ax focus '<name>'` scrolls a row into view and reveals its hover cluster, which is how the
+  section captures were framed; the first `press` after a raise can miss, so `dump` first.
+- `perl -0pi` with a literal that ends at a line break has to match the file's own line; the
+  scratchpad's `swap.sh` counts matches before it writes, and refuses anything but one.
+- Tailwind v4's `--text-<role>--font-weight` and `--letter-spacing` modifiers make a type role
+  one utility; `font-variant-numeric` is not a modifier, so `tabular-nums` rides in the `meta`
+  string.

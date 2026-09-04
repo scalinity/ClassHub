@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import { canvasSyllabus } from "@/lib/canvas";
 import {
   approveDeadlineProposals,
@@ -21,7 +22,20 @@ import {
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
 import { daysUntil, dueDayLabel, formatDueDate } from "@/lib/schedule";
-import { monoAction, inputBase } from "@/lib/styles";
+import {
+  buttonFilled,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  chipMuted,
+  decisionCard,
+  errorLine,
+  input,
+  pulseDot,
+  readingText,
+  row,
+  statusLine,
+} from "@/lib/styles";
 
 function collectFiles(
   nodes: readonly TreeNode[],
@@ -85,7 +99,7 @@ export function DeadlinesSection({
   const open = deadlines.filter((d) => d.status === "open");
   const done = deadlines.filter((d) => d.status === "done");
   const cards = (proposals ?? []).filter((p) => !resolvedIds.has(p.id));
-  // A date already gone is not what ADD ALL is for: it may be a real deadline
+  // A date already gone is not what Add all is for: it may be a real deadline
   // entered late, or a scan misreading last year's syllabus, and only its own
   // card can tell. Each stays addable one at a time.
   const pastCards = cards.filter((p) => daysUntil(p.dueAt) < 0);
@@ -134,9 +148,7 @@ export function DeadlinesSection({
           return next;
         });
         if (outcome.skipped.length > 0) {
-          setActionError(
-            `Not added — ${outcome.skipped.join(" · ")}`,
-          );
+          setActionError(`Not added: ${outcome.skipped.join(" · ")}`);
         }
         setAddingAll(false);
       })
@@ -147,83 +159,74 @@ export function DeadlinesSection({
   };
 
   return (
-    <section className="mt-12" aria-label="Deadlines">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          DEADLINES
-        </h2>
-        <div className="flex items-center gap-4">
-          {activeScan ? (
-            <span className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] text-(--accent)">
-              <span
-                aria-hidden
-                className="size-1.5 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-              />
-              {activeScan.status === "running"
-                ? "SCANNING FOR DEADLINES…"
-                : "SCAN QUEUED"}
-            </span>
-          ) : (
+    <section id="deadlines" className="mt-14 scroll-mt-20" aria-label="Deadlines">
+      <SectionHeading
+        title="Deadlines"
+        count={
+          open.length === 0
+            ? undefined
+            : open.length === 1
+              ? "1 open"
+              : `${open.length} open`
+        }
+        actions={
+          <>
+            {activeScan ? (
+              <span className={`px-2 ${statusLine}`}>
+                <span aria-hidden className={pulseDot} />
+                {activeScan.status === "running"
+                  ? "Scanning for deadlines…"
+                  : "Scan queued"}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setPickerOpen((prev) => !prev)}
+                aria-expanded={pickerOpen}
+                className={`${buttonTextMuted} ${pickerOpen ? "bg-muted text-foreground" : ""}`}
+              >
+                Scan the syllabus
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setPickerOpen((prev) => !prev)}
-              aria-expanded={pickerOpen}
-              className={`${monoAction} ${
-                pickerOpen
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              }`}
+              onClick={() => setEditing("new")}
+              className={buttonText}
             >
-              SCAN SYLLABUS
+              Add deadline
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setEditing("new")}
-            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-          >
-            ADD DEADLINE
-          </button>
-          {open.length > 0 && (
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-              {open.length === 1 ? "1 OPEN" : `${open.length} OPEN`}
+          </>
+        }
+      >
+        {actionError && <p className={errorLine}>{actionError}</p>}
+        {lastFailed && (
+          <p className={`${errorLine} flex items-center gap-2`}>
+            <span className="min-w-0 truncate">
+              The scan failed: {lastFailed.error ?? "unknown error"}
             </span>
-          )}
-        </div>
-      </div>
-
-      {actionError && (
-        <p className="mt-3 font-mono text-[11px] text-destructive">
-          ✕ {actionError}
-        </p>
-      )}
-      {lastFailed && (
-        <p className="mt-3 flex items-center gap-2 font-mono text-[11px] text-destructive">
-          <span className="min-w-0 truncate">
-            ✕ SCAN FAILED — {lastFailed.error ?? "unknown error"}
-          </span>
-          <button
-            type="button"
-            onClick={() => startScan(lastFailed.scope)}
-            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-          >
-            RETRY
-          </button>
-        </p>
-      )}
+            <button
+              type="button"
+              onClick={() => startScan(lastFailed.scope)}
+              className={buttonText}
+            >
+              Retry
+            </button>
+          </p>
+        )}
+      </SectionHeading>
 
       {pickerOpen && !activeScan && (
-        <div className="mt-3 max-h-52 overflow-y-auto rounded-md border p-1">
-          <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
+        <div className="mt-3 max-h-52 overflow-y-auto rounded-md p-1 ring-1 ring-border">
+          <p className="px-2 py-1.5 text-body text-muted-foreground">
             Pick the file to scan for dated items — or scan everything.
           </p>
           <button
             type="button"
             onClick={() => startScan(null)}
             disabled={scanStarting}
-            className="block w-full cursor-pointer rounded px-2 py-1 text-left font-mono text-[11px] font-medium text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+            className="block w-full cursor-pointer rounded-sm px-2 py-1 text-left text-body font-medium text-(--accent-ink) transition-colors hover:bg-(--accent)/10 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
           >
-            WHOLE CLASS FOLDER
+            Whole class folder
           </button>
           {canvasSyllabusPath && (
             <button
@@ -231,13 +234,13 @@ export function DeadlinesSection({
               title={canvasSyllabusPath}
               onClick={() => startScan(canvasSyllabusPath)}
               disabled={scanStarting}
-              className="block w-full cursor-pointer rounded px-2 py-1 text-left font-mono text-[11px] font-medium text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+              className="block w-full cursor-pointer rounded-sm px-2 py-1 text-left text-body font-medium text-(--accent-ink) transition-colors hover:bg-(--accent)/10 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
             >
-              CANVAS SYLLABUS PAGE
+              Canvas syllabus page
             </button>
           )}
           {tree === undefined ? (
-            <p className="px-2 py-1.5 text-[12px] text-muted-foreground">
+            <p className="px-2 py-1.5 text-body text-muted-foreground">
               Files are still loading…
             </p>
           ) : (
@@ -247,7 +250,7 @@ export function DeadlinesSection({
                 type="button"
                 onClick={() => startScan(file.relPath)}
                 disabled={scanStarting}
-                className="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-(--accent)/12 hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+                className="block w-full cursor-pointer truncate rounded-sm px-2 py-1 text-left font-mono text-code text-muted-foreground transition-colors hover:bg-(--accent)/10 hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
               >
                 {file.relPath}
               </button>
@@ -257,19 +260,19 @@ export function DeadlinesSection({
       )}
 
       {cards.length > 0 && (
-        <div className="mt-4 space-y-2">
-          <div className="flex items-center justify-between">
+        <div className="mt-4 space-y-3">
+          <div className="flex items-center justify-between gap-4">
             {/* Two readers land in this queue now, and each card says which
                 one proposed it. The line above them carries the promise that
                 covers all of them. */}
-            <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-              NOTHING IS ADDED UNTIL YOU CONFIRM
+            <p className="text-meta text-muted-foreground">
+              Nothing is added until you confirm
               {pastCards.length > 0 && (
-                <span className="text-muted-foreground/60">
-                  {" · ADD ALL SKIPS "}
+                <span className="text-muted-foreground/70">
+                  {" · Add all skips "}
                   {pastCards.length === 1
-                    ? "1 PAST DATE"
-                    : `${pastCards.length} PAST DATES`}
+                    ? "1 past date"
+                    : `${pastCards.length} past dates`}
                 </span>
               )}
             </p>
@@ -278,9 +281,9 @@ export function DeadlinesSection({
                 type="button"
                 onClick={addAll}
                 disabled={addingAll}
-                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+                className={buttonText}
               >
-                {addingAll ? "ADDING…" : `ADD ALL ${addable.length}`}
+                {addingAll ? "Adding…" : `Add all ${addable.length}`}
               </button>
             )}
           </div>
@@ -307,9 +310,9 @@ export function DeadlinesSection({
         />
       )}
 
-      <div className="mt-3 space-y-0.5">
+      <div className="mt-3">
         {open.length === 0 && cards.length === 0 && editing === null && (
-          <p className="py-2 text-[13px] text-muted-foreground">
+          <p className={`py-2 ${readingText} text-muted-foreground`}>
             No open deadlines — add one, or scan the syllabus for dates.
           </p>
         )}
@@ -329,20 +332,20 @@ export function DeadlinesSection({
             type="button"
             onClick={() => setShowDone((prev) => !prev)}
             aria-expanded={showDone}
-            className="flex cursor-pointer items-center gap-1 rounded px-2 py-1 font-mono text-[10px] tracking-[0.14em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            className={`${buttonTextMuted} -ml-2`}
           >
             <ChevronRight
-              size={11}
+              size={12}
               aria-hidden
               className={
                 "transition-transform duration-150 " +
                 (showDone ? "rotate-90" : "")
               }
             />
-            {done.length} DONE
+            {done.length} done
           </button>
           {showDone && (
-            <div className="mt-1 space-y-0.5">
+            <div className="mt-1">
               {done.map((deadline) => (
                 <DeadlineRow
                   key={deadline.id}
@@ -371,6 +374,7 @@ function DeadlineRow({
   const [busy, setBusy] = useState(false);
   const isDone = deadline.status === "done";
   const overdue = !isDone && daysUntil(deadline.dueAt) < 0;
+  const badge = deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId);
 
   const run = (action: Promise<void>) => {
     setBusy(true);
@@ -383,12 +387,7 @@ function DeadlineRow({
   };
 
   return (
-    <div
-      className={
-        "group flex h-9 items-center gap-2.5 rounded-md px-2 transition-colors hover:bg-muted/60 " +
-        (isDone ? "opacity-60" : "")
-      }
-    >
+    <div className={`${row} ${isDone ? "opacity-60" : ""}`}>
       <button
         type="button"
         title={isDone ? "Reopen this deadline" : "Mark done"}
@@ -400,44 +399,27 @@ function DeadlineRow({
         className={
           "flex size-[15px] shrink-0 cursor-pointer items-center justify-center rounded-full border transition-colors focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none " +
           (isDone
-            ? "border-(--accent) bg-(--accent) text-white"
+            ? "border-(--accent) bg-(--accent) text-white dark:text-background"
             : "border-muted-foreground/40 hover:border-(--accent)")
         }
       >
         {isDone && <Check size={10} strokeWidth={3} aria-hidden />}
       </button>
       <span
-        className={
-          "shrink-0 font-mono text-[11px] font-medium " +
-          (isDone
-            ? "text-muted-foreground"
-            : overdue
-              ? "text-destructive"
-              : "text-(--accent)")
-        }
-      >
-        {isDone ? formatDueDate(deadline.dueAt) : dueDayLabel(deadline.dueAt)}
-      </span>
-      <span
         title={deadline.notes ?? undefined}
         className={
-          "min-w-0 flex-1 truncate text-[13px] " +
+          "min-w-0 flex-1 truncate text-title " +
           (isDone ? "text-muted-foreground line-through" : "")
         }
       >
         {deadline.title}
       </span>
       {deadline.kind !== "other" && (
-        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] tracking-[0.12em] text-muted-foreground">
-          {deadline.kind.toUpperCase()}
-        </span>
+        <span className={chipMuted}>{deadline.kind}</span>
       )}
-      {deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId) && (
-        <span
-          title={deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId)?.title}
-          className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
-        >
-          {deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId)?.label}
+      {badge && (
+        <span title={badge.title} className="shrink-0 text-fine text-muted-foreground">
+          {badge.label}
         </span>
       )}
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
@@ -447,7 +429,7 @@ function DeadlineRow({
           aria-label={`Edit ${deadline.title}`}
           disabled={busy}
           onClick={onEdit}
-          className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={buttonIcon}
         >
           <Pencil size={12} aria-hidden />
         </button>
@@ -457,10 +439,22 @@ function DeadlineRow({
           aria-label={`Delete ${deadline.title}`}
           disabled={busy}
           onClick={() => run(deleteDeadline(deadline.id))}
-          className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={`${buttonIcon} hover:text-destructive`}
         >
           <Trash2 size={12} aria-hidden />
         </button>
+      </span>
+      <span
+        className={
+          "shrink-0 text-meta tabular-nums " +
+          (isDone
+            ? "text-muted-foreground"
+            : overdue
+              ? "font-medium text-destructive"
+              : "font-medium text-(--accent-ink)")
+        }
+      >
+        {isDone ? formatDueDate(deadline.dueAt) : dueDayLabel(deadline.dueAt)}
       </span>
     </div>
   );
@@ -506,11 +500,11 @@ function DeadlineForm({
   };
 
   return (
-    <div className="mt-4 rounded-lg border bg-card px-4 py-3">
-      <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-        {deadline ? "EDIT DEADLINE" : "NEW DEADLINE"}
+    <div className={`${decisionCard} mt-4`}>
+      <p className="text-[15px] font-semibold">
+        {deadline ? "Edit deadline" : "New deadline"}
       </p>
-      <div className="mt-2.5 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         <input
           type="text"
           value={title}
@@ -518,13 +512,13 @@ function DeadlineForm({
           placeholder="What is due"
           aria-label="Deadline title"
           autoFocus
-          className={`${inputBase} min-w-40 flex-1`}
+          className={`${input} min-w-40 flex-1`}
         />
         <select
           value={kind}
           onChange={(e) => setKind(e.target.value as DeadlineKind)}
           aria-label="Deadline kind"
-          className={`${inputBase} cursor-pointer`}
+          className={`${input} cursor-pointer`}
         >
           {DEADLINE_KINDS.map((k) => (
             <option key={k} value={k}>
@@ -539,14 +533,14 @@ function DeadlineForm({
           value={date}
           onChange={(e) => setDate(e.target.value)}
           aria-label="Due date"
-          className={`${inputBase} font-mono text-[12px]`}
+          className={`${input} tabular-nums`}
         />
         <input
           type="time"
           value={time}
           onChange={(e) => setTime(e.target.value)}
           aria-label="Due time (optional)"
-          className={`${inputBase} font-mono text-[12px]`}
+          className={`${input} tabular-nums`}
         />
         <input
           type="text"
@@ -554,7 +548,7 @@ function DeadlineForm({
           onChange={(e) => setNotes(e.target.value)}
           placeholder="Notes (optional)"
           aria-label="Deadline notes"
-          className={`${inputBase} min-w-40 flex-1`}
+          className={`${input} min-w-40 flex-1`}
         />
       </div>
       <div className="mt-3 flex items-center gap-1">
@@ -562,22 +556,20 @@ function DeadlineForm({
           type="button"
           onClick={save}
           disabled={busy || !canSave}
-          className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonFilled}
         >
-          {busy ? "SAVING…" : "SAVE DEADLINE"}
+          {busy ? "Saving…" : "Save deadline"}
         </button>
         <button
           type="button"
           onClick={onClose}
           disabled={busy}
-          className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonTextMuted}
         >
-          CANCEL
+          Cancel
         </button>
       </div>
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">✕ {error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </div>
   );
 }
@@ -594,9 +586,10 @@ function ProposalCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Before today: shown in the muted register with a PAST tag rather than as
-  // OVERDUE — nothing is overdue until it is a deadline.
+  // Before today: shown in the muted register with a "past" tag rather than
+  // as overdue — nothing is overdue until it is a deadline.
   const past = daysUntil(proposal.dueAt) < 0;
+  const badge = deadlineSourceBadge(proposal.source);
 
   const resolve = (approve: boolean) => {
     setBusy(true);
@@ -610,63 +603,56 @@ function ProposalCard({
   };
 
   return (
-    <div className="rounded-lg border bg-card px-4 py-3">
+    <div className={decisionCard}>
       <div className="flex items-start justify-between gap-3">
-        <p className="min-w-0 truncate text-[13px] font-medium">
+        <p className="min-w-0 truncate text-[15px] font-semibold">
           {proposal.title}
         </p>
-        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] tracking-[0.12em] text-muted-foreground">
-          {proposal.kind.toUpperCase()}
-        </span>
+        <span className={chipMuted}>{proposal.kind}</span>
       </div>
       <p
         className={
-          "mt-1 flex items-baseline gap-2 font-mono text-[11px] font-medium " +
-          (past ? "text-muted-foreground" : "text-(--accent)")
+          "mt-1 flex flex-wrap items-baseline gap-2 text-meta tabular-nums " +
+          (past ? "text-muted-foreground" : "font-medium text-(--accent-ink)")
         }
       >
         {past ? formatDueDate(proposal.dueAt) : dueDayLabel(proposal.dueAt)}
         {past && (
           <span
             title="This date has already passed — add it only if it is a real deadline entered late"
-            className="rounded border px-1 py-px text-[9px] font-normal tracking-[0.12em] text-muted-foreground"
+            className={chipMuted}
           >
-            PAST
+            past
           </span>
         )}
-        <span
-          title={deadlineSourceBadge(proposal.source)?.title}
-          className="font-normal tracking-[0.12em] text-[9px] text-muted-foreground/60"
-        >
-          {deadlineSourceBadge(proposal.source)?.label}
-        </span>
+        {badge && (
+          <span title={badge.title} className="text-fine font-normal text-muted-foreground">
+            {badge.label}
+          </span>
+        )}
       </p>
       {proposal.notes && (
-        <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
-          {proposal.notes}
-        </p>
+        <p className="mt-1.5 text-body text-muted-foreground">{proposal.notes}</p>
       )}
-      <div className="mt-2.5 flex items-center gap-1">
+      <div className="mt-3 flex items-center gap-1">
         <button
           type="button"
           onClick={() => resolve(true)}
           disabled={busy || disabled}
-          className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonFilled}
         >
-          {busy ? "WORKING…" : "ADD DEADLINE"}
+          {busy ? "Working…" : "Add deadline"}
         </button>
         <button
           type="button"
           onClick={() => resolve(false)}
           disabled={busy || disabled}
-          className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonTextMuted}
         >
-          SKIP
+          Skip
         </button>
       </div>
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">✕ {error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </div>
   );
 }

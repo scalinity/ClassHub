@@ -17,13 +17,23 @@ import {
   useJobs,
   type JobProgressEvent,
 } from "@/lib/jobs";
-import { monoAction } from "@/lib/styles";
+import {
+  buttonChip,
+  buttonFilled,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  errorLine,
+  meta,
+  pulseDot,
+  statusLine,
+} from "@/lib/styles";
 
 function PhaseRail({ current }: { current: number }) {
   return (
     <span
       aria-label={`Phase ${current + 1} of ${PHASES.length}: ${PHASES[current]}`}
-      className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] tracking-[0.14em]"
+      className="flex shrink-0 items-center gap-1.5 text-fine"
     >
       {PHASES.map((phase, i) => (
         <Fragment key={phase}>
@@ -38,10 +48,10 @@ function PhaseRail({ current }: { current: number }) {
           <span
             className={
               i === current
-                ? "font-bold text-(--accent)"
+                ? "font-semibold text-(--accent-ink)"
                 : i < current
-                  ? "text-(--accent)/60"
-                  : "text-muted-foreground/40"
+                  ? "text-(--accent-ink)/60"
+                  : "text-muted-foreground/50"
             }
           >
             {phase}
@@ -90,47 +100,45 @@ export function MasterGuideStrip({
   const start = () => {
     setError(null);
     synthesizeMaster(classId).catch((e) =>
-      setError(`MASTER NOT STARTED — ${String(e)}`),
+      setError(`Not started: ${String(e)}`),
     );
   };
   const resume = (jobId: number) => {
     setError(null);
     resumeMasterGuide(jobId).catch((e) =>
-      setError(`MASTER NOT STARTED — ${String(e)}`),
+      setError(`Not started: ${String(e)}`),
     );
   };
   const practice = () => {
     setError(null);
     generatePractice(classId, "master").catch((e) =>
-      setError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+      setError(`The practice exam didn't start: ${String(e)}`),
     );
   };
 
   return (
     <section
       aria-label="Semester master"
-      className="mt-8 rounded-xl border px-5 py-4"
+      className="mt-8 rounded-xl bg-surface px-5 py-4 ring-1 ring-border"
     >
-      <div className="flex min-h-7 items-center justify-between gap-4">
-        <h2 className="shrink-0 font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          SEMESTER MASTER
-        </h2>
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <h2 className="shrink-0 text-[17px] font-semibold">Semester master</h2>
 
         {/* The practice action sits outside the master's own state: a
             semester-wide exam neither waits for the master nor blocks it,
             so it is offered — and its pulse shown — during a master run too. */}
-        <span className="flex min-w-0 items-center gap-1.5">
+        <span className="flex min-w-0 flex-wrap items-center gap-1.5">
           {active ? (
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
+            <span className={meta}>
               {active.status === "running"
-                ? `ELAPSED ${formatElapsed(active.startedAt ?? nowSec, nowSec)}`
-                : "QUEUED"}
+                ? `${formatElapsed(active.startedAt ?? nowSec, nowSec)} elapsed`
+                : "queued"}
             </span>
           ) : (
             <>
               {guide && (
-                <span className="min-w-0 truncate font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                  GENERATED {formatGeneratedAt(guide.generatedAt)}
+                <span className={`min-w-0 truncate ${meta}`}>
+                  written {formatGeneratedAt(guide.generatedAt)}
                 </span>
               )}
               {failed ? (
@@ -140,47 +148,39 @@ export function MasterGuideStrip({
                       type="button"
                       title="Continue the failed run from its claude session"
                       onClick={() => resume(failed.id)}
-                      className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20`}
+                      className={buttonFilled}
                     >
-                      RESUME
+                      Resume
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={start}
-                    className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground`}
-                  >
-                    START OVER
+                  <button type="button" onClick={start} className={buttonTextMuted}>
+                    Start over
                   </button>
                 </>
               ) : guide ? (
                 guide.stale ? (
                   <button
                     type="button"
-                    title="Sources changed since this master was generated"
+                    title="Sources changed since this master was written"
                     onClick={start}
-                    className={`${monoAction} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+                    className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
                   >
-                    STALE — REGENERATE
+                    Rewrite · sources changed
                   </button>
                 ) : (
                   <button
                     type="button"
-                    title="Regenerate the semester master"
+                    title="Rewrite the semester master"
                     aria-label="Regenerate the semester master"
                     onClick={start}
-                    className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+                    className={buttonIcon}
                   >
                     <RefreshCw size={12} aria-hidden />
                   </button>
                 )
               ) : (
-                <button
-                  type="button"
-                  onClick={start}
-                  className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-                >
-                  GENERATE SEMESTER MASTER
+                <button type="button" onClick={start} className={buttonText}>
+                  Write the semester master
                 </button>
               )}
             </>
@@ -191,12 +191,8 @@ export function MasterGuideStrip({
             onSelect={practice}
           />
           {!active && guide && (
-            <button
-              type="button"
-              onClick={onView}
-              className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
-            >
-              VIEW GUIDE
+            <button type="button" onClick={onView} className={buttonText}>
+              Read guide
             </button>
           )}
         </span>
@@ -204,7 +200,7 @@ export function MasterGuideStrip({
 
       {active ? (
         <>
-          <div className="mt-2.5 flex items-center justify-between gap-4">
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <ActiveDetail
               running={active.status === "running"}
               events={output.get(active.id) ?? []}
@@ -219,17 +215,17 @@ export function MasterGuideStrip({
                     ensureTail(active.id);
                     setSourceOpen((open) => !open);
                   }}
-                  className={`${monoAction} ${sourceOpen ? "bg-(--accent)/12 text-(--accent)" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+                  className={`${buttonTextMuted} ${sourceOpen ? "bg-muted text-foreground" : ""}`}
                 >
-                  SOURCE
+                  Source
                 </button>
                 <button
                   type="button"
                   title="Watch the document grow as it is written"
                   onClick={() => onWatchLive(active.id)}
-                  className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+                  className={buttonText}
                 >
-                  WATCH LIVE
+                  Watch live
                 </button>
                 <PhaseRail
                   current={derivePhase(output.get(active.id) ?? []).index}
@@ -242,21 +238,19 @@ export function MasterGuideStrip({
           )}
         </>
       ) : failed ? (
-        <p className="mt-2 truncate font-mono text-[11px] text-destructive">
-          ✕ LAST RUN FAILED — {failed.error ?? "unknown error"}
+        <p className={`${errorLine} truncate`}>
+          The last run failed: {failed.error ?? "unknown error"}
         </p>
       ) : (
         !guide && (
-          <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 text-body text-muted-foreground">
             Reads every module's material fresh and synthesizes cross-module
             connections. Runs alone — expect 30 minutes or more.
           </p>
         )
       )}
 
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">{error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </section>
   );
 }
@@ -273,9 +267,9 @@ function SourceFeed({ text }: { text: string }) {
       ref={(el) => {
         if (el) el.scrollTop = el.scrollHeight;
       }}
-      className="mt-3 h-44 overflow-y-auto rounded-lg border bg-muted/30 px-3.5 py-2.5 font-mono text-[10px] leading-[1.6] whitespace-pre-wrap break-all text-muted-foreground"
+      className="mt-3 h-44 overflow-y-auto rounded-md bg-muted/40 px-3.5 py-2.5 font-mono text-[11px] leading-[1.6] whitespace-pre-wrap break-all text-muted-foreground ring-1 ring-border"
     >
-      {text || "WAITING FOR THE WRITER…"}
+      {text || "Waiting for the writer…"}
     </pre>
   );
 }
@@ -289,13 +283,10 @@ function ActiveDetail({
 }) {
   const detail = running
     ? derivePhase(events).detail
-    : "WAITING FOR RUNNING JOBS TO FINISH — RUNS ALONE";
+    : "Waiting for running jobs to finish · runs alone";
   return (
-    <span className="flex min-w-0 items-center gap-2 font-mono text-[11px] tracking-[0.14em] text-(--accent)">
-      <span
-        aria-hidden
-        className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-      />
+    <span className={`min-w-0 ${statusLine}`}>
+      <span aria-hidden className={pulseDot} />
       <span className="min-w-0 truncate">{detail}</span>
     </span>
   );

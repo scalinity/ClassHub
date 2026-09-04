@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import { CLASS_ACCENTS, type ClassInfo, type Meeting } from "@/lib/classes";
 import {
   daysUntil,
@@ -12,8 +13,9 @@ import {
   weekdayLabel,
   type NextMeeting,
 } from "@/lib/schedule";
+import { chip, readingText } from "@/lib/styles";
 
-const DAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI"];
+const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 /** Vertical scale of the time canvas. */
 const PX_PER_HOUR = 26;
 
@@ -24,11 +26,10 @@ interface Block {
 }
 
 /**
- * SPEC §11 — the weekly schedule grid: the class cards' M T W T F tick row
- * grown into a time-true instrument. Five weekday columns over a proportional
- * time canvas with mono hour rules; meetings render as accent slabs placed by
- * their real start and duration, today's column is washed, and a meeting in
- * session inverts to solid accent (the same inversion as the card chip).
+ * SPEC §11 — the weekly schedule grid, a time-true instrument: five weekday
+ * columns over a proportional time canvas with hour rules; meetings render as
+ * washed slabs placed by their real start and duration, today's column is
+ * tinted, and a meeting in session fills with its class colour.
  */
 export function WeekSchedule({ classes }: { classes: ClassInfo[] }) {
   const now = new Date();
@@ -58,18 +59,13 @@ export function WeekSchedule({ classes }: { classes: ClassInfo[] }) {
   );
 
   return (
-    <section className="mt-10" aria-label="Weekly schedule">
-      <div className="flex items-baseline justify-between gap-4 border-b pb-3">
-        <h2 className="shrink-0 font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          THIS WEEK
-        </h2>
-        <NextClassChip classes={classes} />
-      </div>
+    <section className="mt-12" aria-label="Weekly schedule">
+      <SectionHeading title="This week" actions={<NextClassChip classes={classes} />} />
 
       {blocks.length > 0 ? (
         <WeekCanvas blocks={blocks} today={today} />
       ) : (
-        <p className="mt-3 text-[13px] text-muted-foreground">
+        <p className={`mt-3 ${readingText} text-muted-foreground`}>
           Nothing meets on weekdays.
         </p>
       )}
@@ -115,10 +111,10 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
           <div
             key={label}
             className={
-              "flex items-center justify-center gap-1.5 font-mono text-[10px] tracking-[0.18em] " +
+              "flex items-center justify-center gap-1.5 text-meta " +
               (today === i + 1
-                ? "font-bold text-foreground"
-                : "text-muted-foreground/70")
+                ? "font-semibold text-foreground"
+                : "text-muted-foreground")
             }
           >
             {today === i + 1 && (
@@ -136,23 +132,23 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
             its own width and let the two drift. */}
         <div
           aria-hidden
-          className="absolute top-0 right-0 left-10 border-t border-border/60"
+          className="absolute top-0 right-0 left-10 border-t border-border/70"
         />
         <div
           aria-hidden
-          className="absolute right-0 bottom-0 left-10 border-b border-border/60"
+          className="absolute right-0 bottom-0 left-10 border-b border-border/70"
         />
         {hourMarks.map((h) => (
           <div key={h} aria-hidden>
             <div
-              className="absolute right-0 left-10 border-t border-border/60"
+              className="absolute right-0 left-10 border-t border-border/70"
               style={{ top: `${pct(h * 60)}%` }}
             />
             <span
-              className="absolute left-0 w-8 -translate-y-1/2 text-right font-mono text-[9px] whitespace-nowrap text-muted-foreground/60"
+              className="absolute left-0 w-8 -translate-y-1/2 text-right text-fine tabular-nums whitespace-nowrap text-muted-foreground"
               style={{ top: `${pct(h * 60)}%` }}
             >
-              {h % 12 === 0 ? 12 : h % 12} {h < 12 ? "AM" : "PM"}
+              {h % 12 === 0 ? 12 : h % 12} {h < 12 ? "am" : "pm"}
             </span>
           </div>
         ))}
@@ -162,8 +158,8 @@ function WeekCanvas({ blocks, today }: { blocks: Block[]; today: number }) {
             <div
               key={label}
               className={
-                "relative border-l border-border/60 last:border-r " +
-                (today === i + 1 ? "bg-muted/50" : "")
+                "relative border-l border-border/70 last:border-r " +
+                (today === i + 1 ? "bg-muted/60" : "")
               }
             >
               {layoutLanes(
@@ -238,22 +234,15 @@ function MeetingBlock({
       title={`${cls.displayName} · ${formatTimeRange(meeting.startTime, meeting.endTime)}`}
       style={style}
       className={
-        "absolute overflow-hidden rounded-[5px] py-1 pr-1.5 pl-2.5 " +
+        "absolute overflow-hidden rounded-md px-2 py-1 " +
         (inSession ? "bg-(--accent)" : "bg-(--accent)/12")
       }
     >
-      <span
-        aria-hidden
-        className={
-          "absolute inset-y-0 left-0 w-[3px] " +
-          (inSession ? "bg-white/40" : "bg-(--accent)")
-        }
-      />
       <p
         className={
-          "text-[11px] leading-[1.25] font-medium " +
+          "text-[13px] leading-[1.2] font-medium " +
           (heightPx >= 50 ? "line-clamp-2 " : "truncate ") +
-          (inSession ? "text-white" : "text-(--accent)")
+          (inSession ? "text-white dark:text-background" : "text-(--accent-ink)")
         }
       >
         {cls.displayName}
@@ -261,8 +250,8 @@ function MeetingBlock({
       {heightPx >= 44 && (
         <p
           className={
-            "mt-0.5 truncate font-mono text-[9.5px] " +
-            (inSession ? "text-white/80" : "text-muted-foreground")
+            "mt-0.5 truncate text-fine tabular-nums " +
+            (inSession ? "text-white/80 dark:text-background/80" : "text-muted-foreground")
           }
         >
           {formatTimeRange(meeting.startTime, meeting.endTime)}
@@ -298,27 +287,21 @@ function NextClassChip({ classes }: { classes: ClassInfo[] }) {
     return (
       <span
         style={style}
-        className="flex min-w-0 items-center gap-2 rounded-full bg-(--accent) px-2.5 py-1"
+        className={`${chip} h-6 min-w-0 gap-1.5 bg-(--accent) text-white dark:text-background`}
       >
-        <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em] text-white">
-          IN SESSION
-        </span>
-        <span className="min-w-0 truncate text-[12px] text-white/90">
-          {best.cls.displayName}
-        </span>
+        <span className="shrink-0">In session</span>
+        <span className="min-w-0 truncate font-normal">{best.cls.displayName}</span>
       </span>
     );
   }
   return (
-    <span style={style} className="flex min-w-0 items-baseline gap-2">
-      <span className="shrink-0 font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-        NEXT
-      </span>
-      <span className="shrink-0 font-mono text-[11px] font-medium tracking-[0.06em] text-(--accent)">
+    <span style={style} className="flex min-w-0 items-baseline gap-1.5 text-body">
+      <span className="shrink-0 text-muted-foreground">Next</span>
+      <span className="shrink-0 font-medium tabular-nums text-(--accent-ink)">
         {weekdayLabel(best.next.meeting.weekday)}{" "}
         {formatTime(best.next.meeting.startTime)}
       </span>
-      <span className="min-w-0 truncate text-[12.5px] text-muted-foreground">
+      <span className="min-w-0 truncate text-muted-foreground">
         {best.cls.displayName}
       </span>
     </span>
@@ -331,7 +314,7 @@ function ExamChip({ cls }: { cls: ClassInfo }) {
   if (!start) return null;
   const days = daysUntil(start);
   const countdown =
-    days === 0 ? "FINAL TODAY" : days === 1 ? "FINAL TOMORROW" : `FINAL IN ${days} DAYS`;
+    days === 0 ? "Final today" : days === 1 ? "Final tomorrow" : `Final in ${days} days`;
   const style = {
     "--accent": CLASS_ACCENTS[cls.color] ?? "var(--class-blue)",
   } as CSSProperties;
@@ -339,17 +322,13 @@ function ExamChip({ cls }: { cls: ClassInfo }) {
   return (
     <span
       style={style}
-      className="flex max-w-full items-baseline gap-2 rounded-md bg-(--accent)/12 px-2.5 py-1.5"
+      className="flex max-w-full items-baseline gap-1.5 rounded-md bg-(--accent)/10 px-2.5 py-1.5 text-body"
     >
-      <span className="shrink-0 font-mono text-[10px] font-medium tracking-[0.12em] text-(--accent)">
-        {countdown}
-      </span>
-      <span className="shrink-0 font-mono text-[10px] tracking-[0.12em] text-muted-foreground">
+      <span className="shrink-0 font-medium text-(--accent-ink)">{countdown}</span>
+      <span className="shrink-0 tabular-nums text-muted-foreground">
         {formatDueDate(start)}
       </span>
-      <span className="min-w-0 truncate text-[12px] text-foreground/80">
-        {cls.displayName}
-      </span>
+      <span className="min-w-0 truncate text-muted-foreground">{cls.displayName}</span>
     </span>
   );
 }

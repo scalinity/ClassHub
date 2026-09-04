@@ -57,15 +57,24 @@ session rather than from a prompt.
   controls; `text` includes static text. `scripts/ax-driver/winid` prints window ids for
   `screencapture -l`. Raise, then dump twice; reopen the workspace before each dump, since the
   owner may be using the window. A modal (the Add lecture form) hides the rest of the page
-  from AX, and the WEEK popup's menu is not in the tree — `press '<full item title>'` still
+  from AX, and the Week popup's menu is not in the tree — `press '<full item title>'` still
   picks an item.
 - Add lecture form: `setvalue 'Recording link or file' <path>` first, then each date segment
   with `focus month|day|year` and a System Events keystroke (expect a second pass); the digest
-  checkbox is on by default once a week is picked — uncheck it before ADD LECTURE on a fixture.
+  checkbox is on by default once a week is picked — uncheck it before Add lecture on a fixture
+  (the dialog's own button is the second of that name).
 - Fixtures: a `.md` under `Weeks/` reads as a lecture; use a `.csv`, which extracts locally
   for nothing. Never edit source material to test staleness — add a file beside it.
 - Vite HMR of `query.ts` creates a second `QueryClient`; verify cache changes after a full
   reload (`touch index.html`), not after HMR.
+
+## The facelift branch (M30)
+
+- The redesigned UI lives on the `facelift` branch; `main` holds the original at the
+  `pre-facelift` tag. Both build against the one database. `git switch main && npm run
+  install-app` restores the original look; `git switch main && git merge --ff-only facelift`
+  keeps the new one. Until that merge, main and the branch must not be edited in the same
+  session.
 
 ## Commit pipeline
 

@@ -39,9 +39,9 @@ const DEADLINE_SOURCE_COPY: Record<
   Exclude<DeadlineSource, "manual">,
   { label: string; title: string }
 > = {
-  syllabus: { label: "VIA SYLLABUS", title: "Read from a syllabus scan" },
-  canvas: { label: "VIA CANVAS", title: "Read from Canvas, with its own due date" },
-  agent: { label: "VIA CHAT", title: "Added in chat" },
+  syllabus: { label: "from the syllabus", title: "Read from a syllabus scan" },
+  canvas: { label: "from Canvas", title: "Read from Canvas, with its own due date" },
+  agent: { label: "from chat", title: "Added in chat" },
 };
 
 /** The badge for a deadline the Canvas sync tracks — the same words as the
@@ -49,7 +49,7 @@ const DEADLINE_SOURCE_COPY: Record<
  *  until the next sync. It outranks the source, since a syllabus row Canvas
  *  has claimed is Canvas's now. */
 const CANVAS_TRACKED_COPY = {
-  label: "VIA CANVAS",
+  label: "from Canvas",
   title:
     "Tracked from Canvas — its due date follows the next sync, and handing the assignment in marks it done",
 };

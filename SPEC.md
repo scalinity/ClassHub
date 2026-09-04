@@ -807,7 +807,7 @@ through a window that stays hidden whatever happens: Canvas wanting a sign-in en
 rather than prompting for one, whether it is found at the first probe or when the session
 lapses mid-sync, and the stored copy is discarded on the same evidence a manual sync acts on —
 a 401 or a bounce to SSO, never a 403, which is Canvas declining one call — so the next press
-asks. The Settings report says `SYNCED ON LAUNCH`, or `NOT SYNCED ON LAUNCH` with the reason
+asks. The Settings report says `Synced on launch`, or `Not synced on launch` with the reason
 as a quiet line when a sign-in is what it needed; any other failure is a stopped sync, on
 launch as by hand. It follows the launch scan on the same thread, so its duplicate check reads
 a fresh index, and nothing schedules a second one. The dashboard header names the sync's age
@@ -845,7 +845,7 @@ assignment's id on first contact, with an audit row of its own, and is found by 
 tracked deadline follows Canvas's due date, with an audit row holding the one it had, and is
 marked done the moment Canvas holds a submission for it, with an audit row naming the
 submission — an assignment Canvas has stopped dating still closes the deadline it is tracked
-by. From then on the row's badge reads `VIA CANVAS` whoever first put it on the list, the same
+by. From then on the row's badge reads `from Canvas` whoever first put it on the list, the same
 words the grade item's tag uses, since the same thing is true of both: an edit lasts until
 the next sync. Nothing reopens: a deadline done by hand stays done. The ids are also what
 make a re-sync an update in place rather than a second card — an assignment whose due date
@@ -880,7 +880,7 @@ it proposed, and a failed grades read is a line in it rather than the class's fa
 upserts them on the Canvas id, the body stripped to text through the extractor's stripper —
 Canvas HTML is never rendered in the app, and its images and links are dropped with the tags. A
 delayed announcement carries no `posted_at` and is skipped, as a student would not see it; an
-edited one is the same row, updated. The workspace shows them as a `NOTICES` section, newest
+edited one is the same row, updated. The workspace shows them as a `Notices` section, newest
 first and absent while there are none, with no unread state; the chat overview carries the
 latest three (§9). A re-sync of an unchanged course writes no row, an announcement the table
 would not take is a line in the report, and a failed read of announcements or Pages is a line
@@ -911,12 +911,12 @@ never replaces a Canvas destination on its own.** Where Canvas filed a file is a
 the professor put it there — and a sort job's destination is an inference from a filename and a
 tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
 reader asking, so it retargets. Disagreeing with the placement takes one of three explicit
-routes on the card: "change destination" names the folder directly; **SORT BY CONTENT**
+routes on the card: "change destination" names the folder directly; **Sort by content**
 runs a sort job over that one file and, because it was asked for, lets the sort's destination
 replace Canvas's, and the card then re-renders as a sort proposal with the Canvas folder named
 in its reasoning, so the professor's placement stays visible; and where the destination names
 a week — in the file's name, a module the course reads as a week, or Canvas's own folder —
-the card also offers the week folder as its alternative destination, `FILE UNDER WEEK NN`,
+the card also offers the week folder as its alternative destination, `File under Week NN`,
 the destination the file's row would offer once it landed where Canvas put it (§10 step 8),
 so the week's material reaches its division in one approval instead of two. Explicit, never
 heuristic: for every file nobody asked about, Canvas's placement still outranks a content
@@ -973,7 +973,7 @@ plus a "Cross-module threads" section. This is a long-running exclusive job (pot
 
 ### 8.3 Practice exams (`practice` job)
 
-Triggered from chat, or from the `PRACTICE EXAM` action that sits beside `VIEW GUIDE` in
+Triggered from chat, or from the `Practice exam` action that sits beside `Read guide` in
 every guide cluster of the workspace — a folder's row in Materials, a division's row in the
 Structure list, and the semester-master strip. A folder's row carries the cluster when the
 folder is named the way a division is — a kind and a number, `Module 1`, the read §7.2
@@ -988,8 +988,8 @@ its guide (§8.5) — its folder, if it has one, and its distilled lectures — 
 offered on a division's row exactly when a guide could be built, and a division with neither
 is refused by name. One exam per scope at a time, the same duplicate-active guard as guides.
 Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style questions with hidden
-answers + scoring rubric; the row shows `GENERATING EXAM…` while it is written, and the
-exam appears in the workspace's PRACTICE EXAMS listing when the job succeeds.
+answers + scoring rubric; the row shows `Writing the exam…` while it is written, and the
+exam appears in the workspace's Practice exams listing when the job succeeds.
 
 ### 8.4 Session documents (`lecture_digest` job)
 
@@ -1048,7 +1048,7 @@ containing today — whatever the course calls it: a syllabus row stored as `mod
 name opens with neither "Week" nor "Part" (`Reading Days — No Class`) is no less a division than
 one called a week. Two starting on one day go to the week over a coarser division it sits
 inside, then to the later ordinal. One query answers for every reader: the class card, the
-workspace eyebrow, the Structure list (a `NOW` mark on the row, matched by id; the list marks it
+workspace eyebrow, the Structure list (a `now` mark on the row, matched by id; the list marks it
 and does not scroll to it) and the chat overview's `Now:` line — and the query is keyed by the
 day, so a dashboard left open across midnight asks again. A course that published no dates has
 no current division and the app shows nothing, because the only alternative is a week from
@@ -1202,7 +1202,7 @@ its meetings.
    inbox path through a drop is a fresh proposal, and a Canvas re-sync, which matches files by
    name and size against the tree, never re-proposes one.
  7. A file whose name carries a week the course declares — `CAI6734_Week2_….pdf` — offers
-   `FILE UNDER WEEK 02` on its row in Materials while it sits outside that week's folder.
+   `File under Week 02` on its row in Materials while it sits outside that week's folder.
    So does a folder whose name carries one (`Week 3 Coding Material`) while it holds a
    file, and, on a course whose divisions are weeks and that declares no numbered module, a
    file whose name carries a module (`Biostatistics_Module3_Slides_class.pptx`): such a
@@ -1215,7 +1215,7 @@ its meetings.
    before any card is written and the cards written in one transaction, so a collision
    names the file and writes nothing. The cards are approved one at a time — the price of
    a confirmation and an audit row per move, so a folder of several files is that many
-   approvals. The card carries a `BY NAME` chip and is approved, redirected or left like
+   approvals. The card carries a `by name` chip and is approved, redirected or left like
    any other, and approval is the ordinary move, so the extract travels with the file and
    nothing is re-extracted. Explicit by design: Canvas may have placed the file where it
    is (§7.2), an automatic sort never overrides that, and the module reading is not
@@ -1237,10 +1237,10 @@ its meetings.
    does, none for a destination already under its week folder, and none for a destination
    another pending card already claims, which only the second approval could refuse. The
    card shows both routes, each with its reason — Canvas's, then the by-name card's own —
-   and offers `FILE UNDER WEEK NN` beside APPROVE; the click is the ordinary
+   and offers `File under Week NN` beside Approve; the click is the ordinary
    approval with the week folder as its destination, the folder picker's path, so the move
    carries its audit row and the file's index row. Canvas's placement stays the default:
-   APPROVE still takes Canvas's folder, no sort runs, and because nothing is stored on the
+   Approve still takes Canvas's folder, no sort runs, and because nothing is stored on the
    row, a rescan that records a numbered module withdraws the module reading from every
    card at once, and a renamed week's folder follows its name.
 
@@ -1258,16 +1258,16 @@ its meetings.
   is still read as the deadline list alone. The divisions and the weights are recorded
   before the deadlines, and a scan demoted for an unusable deadline list still reports
   what those two parts wrote.
-  The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `CANVAS SYLLABUS PAGE`
+  The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `Canvas syllabus page`
   when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
   so a scan of it finds no dates and says so.
-  Proposals still waiting, from either reader, are counted on the class card (`N PROPOSED`) and
+  Proposals still waiting, from either reader, are counted on the class card (`N proposed deadlines`) and
   in the chat overview, since the queue itself lives inside the workspace. A proposal dated
-  before today is tagged `PAST` and left out of ADD ALL: a past date may be a real deadline
+  before today is tagged `past` and left out of Add all: a past date may be a real deadline
   entered late or a scan misreading last year's syllabus, and only its own card can say, so it
   stays individually addable. A deadline that is a Canvas assignment is closed by the sync
   once Canvas holds a submission for it, with an audit row naming the submission (§7.2), and
-  its badge reads `VIA CANVAS` however it was first added; the row's checkbox still reopens
+  its badge reads `from Canvas` however it was first added; the row's checkbox still reopens
   it, and the sync never does.
 - **Notes**: markdown files in `<Class>/Notes/`. Lightweight editor (textarea + live preview,
   no heavy editor dependency). Notes are included in `search_material` scope.
@@ -1275,7 +1275,7 @@ its meetings.
   otherwise). Items with score/max. Computed: current weighted grade over graded items,
   displayed on the class card and Grades tab. A Canvas sync fills the section without anyone
   typing (§7.2): the course's assignment groups as categories and every graded, posted score
-  as an item, each tagged `VIA CANVAS` — the deadline row's source tag, reused. A Canvas-owned
+  as an item, each tagged `from Canvas` — the deadline row's source tag, reused. A Canvas-owned
   score can be edited by hand, audited like any edit, and the tag's tooltip says the next sync
   writes Canvas's number back.
 
@@ -1295,51 +1295,6 @@ its meetings.
   Project 30 · Survey left at 0 — the syllabus does not weight it`. A rescan of an unchanged
   syllabus writes nothing and leaves no row. Whether the weights add up is the section's own
   ≠100% warning's job, and chat's weights line reports the same sum.
-
-## 12. UI specification & design language
-
-**Any milestone session that touches UI MUST first read the frontend-design skill**
-(`/Users/danny/.claude/plugins/cache/claude-plugins-official/frontend-design/unknown/skills/frontend-design/SKILL.md`)
-and apply it. Non-negotiable per project owner.
-
-- Minimalist, modern, generous whitespace; light + dark mode; system font stack or a single
-  bundled variable font (no CDN fetches).
-- Per-class accent colors: blue, orange, green, amber (matching the enrollment screenshot's
-  card edge bars). Class cards show a left accent bar, `display_name` only (never course
-  codes), next meeting, the current division (§8.5) as one mono accent line in the course's
-  own words — `WEEK 3 · DATA EXPLORATION, PROCESSING, AND QUALITY`, and a "No Class" week
-  exactly as the syllabus wrote it — staleness, inbox and proposal badges, current grade,
-  nearest deadline. The division line truncates rather than wraps, so the deadline under it
-  keeps its space; a course with no current division shows no line.
-- **Views**: Dashboard (4 class cards + deadlines strip + exam countdowns + job status pill,
-  and under the date one mono line naming the Canvas sync's age — `CANVAS · SYNCED 6 DAYS
-  AGO`, `SYNCED TODAY`, `NEVER SYNCED`, `SYNCING…` — in the destructive colour from seven
-  days, opening Settings where the sync lives)
-  · Class Workspace (accent header whose eyebrow names the current division after the
-  meeting time; a `NOTICES` section of the professor's Canvas announcements, newest first,
-  each row a title and posting time with the text clamped beneath it until opened, absent
-  while there are none; tabs: Materials, Study Guides, Notes, Grades, Deadlines)
-  · Guide viewer (sandboxed iframe rendering the HTML file + Open in Browser / Show in Finder)
-  · Material viewer (the same reading room for a class file: markdown, R and Python
-  scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
-  a Jupyter notebook as its extract, and a PDF — or a slide deck, through its converted
-  twin — in WebKit's own PDF view framed over the asset protocol (§13); a deck whose twin
-  is missing or out of date, and a notebook whose extract the index does not yet hold,
-  open in their default app instead)
-  · Chat sidebar (global, overlays right side, keyboard shortcut) · Job Center (bottom bar
-  pill expanding to a panel with live logs) · Settings.
-- Empty states matter: a class with no modules yet (3 of 4 classes today) shows a friendly
-  drop-target hero, not a blank pane.
-- A row in Materials offers `FILE UNDER WEEK NN` when its name files under a week the
-  course declares — a week in the name, or a module where the course reads modules as
-  weeks — and it sits outside that week's folder; a folder's row offers it while the
-  folder holds a file and reads `PROPOSED — SEE INBOX` once every file under it has a
-  card (§10). The inbox card of a Canvas file whose destination names a week shows the
-  week folder as a second route under Canvas's — `or → Weeks/Week 04 — …/`, the folder
-  dash-underlined while it has yet to be created — its reason under Canvas's, and `FILE
-  UNDER WEEK NN` beside APPROVE, which stays the filled default (§10 step 8).
- The Add lecture form says
-  when a course declares no weeks and keeps ADD LECTURE off, naming the syllabus scan (§7.1).
 
 ## 13. Engineering conventions
 
@@ -1687,6 +1642,20 @@ Mark the checkbox when the acceptance criteria pass.
   week and one approval puts the file under the week folder with an audit row and no job,
   the other cards offer nothing new, and, where the recordings exist, each session is
   filed with a note and a session document and the guides are built with their costs in §1.
+
+- [x] **M30 — The facelift.** (`milestones/M30-facelift.md`)
+  The chrome was one register — monospace tracked capitals for every label, date, count and
+  button, a rule under every heading, a near-black ground — and read as a generated dashboard.
+  The design language becomes one clean sans with weight and tracking carrying the hierarchy,
+  paper and ink grounds, the class colours as washes, sentence-case labels that say what
+  happens, and a workspace band with a sticky row of section links; the document register
+  follows the app's paper and ink. Purely `src/` and the documents, on the `facelift` branch
+  beside a `pre-facelift` tag on `main`, so the original is one install away.
+  *Accepted when:* every surface renders in the new language in light and dark and at the
+  920×600 minimum with no clipped or uppercase-tracked chrome, the note preview and chat
+  answers share the app's paper and ink, the section links reach every section present,
+  `/Applications/ClassHub.app` runs the facelift commit, and `git switch main && npm run
+  install-app` restores the original.
 
 ## 15. Risks & trade-offs (accepted)
 

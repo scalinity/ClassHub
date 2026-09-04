@@ -2,8 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncExternalStore } from "react";
 
-import { todayIso } from "@/lib/schedule";
+import { formatClock, formatMonthDay, todayIso } from "@/lib/schedule";
 import { openClassId } from "@/lib/sorter";
+import { sentence } from "@/lib/utils";
 
 export interface ChatSettings {
   hasKey: boolean;
@@ -14,12 +15,12 @@ export interface ChatSettings {
 
 /** SPEC §9 effort ladder, cheapest first. */
 export const EFFORT_LEVELS = [
-  { id: "", label: "MODEL DEFAULT", note: "Whatever the model does unasked — high, on current models." },
-  { id: "low", label: "LOW", note: "Fewest tokens and fastest. Quick lookups, one or two reads." },
-  { id: "medium", label: "MEDIUM", note: "Balanced. Solid on routine questions about a module." },
-  { id: "high", label: "HIGH", note: "Reads more widely before answering. The API's own default." },
-  { id: "xhigh", label: "XHIGH", note: "Extended searching across classes. Slower, costlier." },
-  { id: "max", label: "MAX", note: "No ceiling on reasoning. For the hardest synthesis questions." },
+  { id: "", label: "Model default", note: "Whatever the model does unasked — high, on current models." },
+  { id: "low", label: "Low", note: "Fewest tokens and fastest. Quick lookups, one or two reads." },
+  { id: "medium", label: "Medium", note: "Balanced. Solid on routine questions about a module." },
+  { id: "high", label: "High", note: "Reads more widely before answering. The API's own default." },
+  { id: "xhigh", label: "Extra high", note: "Extended searching across classes. Slower, costlier." },
+  { id: "max", label: "Max", note: "No ceiling on reasoning. For the hardest synthesis questions." },
 ] as const;
 
 export interface ModelOption {
@@ -629,17 +630,12 @@ function todayLabel(): string {
 export function formatSessionDate(unixSec: number): string {
   const created = new Date(unixSec * 1000);
   const sameDay = created.toDateString() === new Date().toDateString();
-  return created
-    .toLocaleString("en-US",
-      sameDay
-        ? { hour: "numeric", minute: "2-digit" }
-        : { month: "short", day: "numeric" },
-    )
-    .toUpperCase();
+  return sameDay ? formatClock(created) : formatMonthDay(created);
 }
 
+/** `search_material` → `Search material`. */
 export function toolLabel(name: string): string {
-  return name.replace(/_/g, " ").toUpperCase();
+  return sentence(name.replace(/_/g, " "));
 }
 
 /** M8 write tools — their chips carry a pen glyph instead of the read arrows. */

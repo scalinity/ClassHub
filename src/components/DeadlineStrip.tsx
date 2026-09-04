@@ -1,15 +1,17 @@
 import type { CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import { CLASS_ACCENTS } from "@/lib/classes";
 import { listDeadlines, type Deadline } from "@/lib/deadlines";
 import { daysUntil, dueDayLabel } from "@/lib/schedule";
+import { readingText } from "@/lib/styles";
 
 /**
  * SPEC §11 — the dashboard's next-7-days deadline strip: every open deadline
  * across the hub due inside a week, overdue ones included and first (they are
- * the most urgent thing on the dashboard). The accent dot ties each chip to
- * its class card below.
+ * the most urgent thing on the dashboard). Each chip is washed in its class's
+ * colour, which ties it to the card below.
  */
 export function DeadlineStrip() {
   const { data } = useQuery({
@@ -23,23 +25,23 @@ export function DeadlineStrip() {
   );
 
   return (
-    <section className="mt-10" aria-label="Deadlines in the next 7 days">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          NEXT 7 DAYS
-        </h2>
-        {upcoming.length > 0 && (
-          <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-            {upcoming.length === 1 ? "1 DUE" : `${upcoming.length} DUE`}
-          </span>
-        )}
-      </div>
+    <section className="mt-12" aria-label="Deadlines in the next 7 days">
+      <SectionHeading
+        title="Due in the next 7 days"
+        count={
+          upcoming.length === 0
+            ? undefined
+            : upcoming.length === 1
+              ? "1 due"
+              : `${upcoming.length} due`
+        }
+      />
       {upcoming.length === 0 ? (
-        <p className="mt-3 text-[13px] text-muted-foreground">
+        <p className={`mt-3 ${readingText} text-muted-foreground`}>
           Nothing due in the next 7 days.
         </p>
       ) : (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           {upcoming.map((deadline) => (
             <DeadlineChip key={deadline.id} deadline={deadline} />
           ))}
@@ -59,18 +61,19 @@ function DeadlineChip({ deadline }: { deadline: Deadline }) {
     <span
       style={style}
       title={`${deadline.title} — ${deadline.className}`}
-      className="flex max-w-full items-center gap-2 rounded-lg border bg-card px-3 py-2"
+      className="flex max-w-full items-baseline gap-1.5 rounded-md bg-(--accent)/10 px-2.5 py-1.5 text-body"
     >
-      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-(--accent)" />
+      <span className="min-w-0 truncate font-medium text-(--accent-ink)">
+        {deadline.title}
+      </span>
       <span
         className={
-          "shrink-0 font-mono text-[10px] font-medium tracking-[0.1em] " +
-          (overdue ? "text-destructive" : "text-(--accent)")
+          "shrink-0 tabular-nums " +
+          (overdue ? "text-destructive" : "text-muted-foreground")
         }
       >
-        {dueDayLabel(deadline.dueAt)}
+        · {dueDayLabel(deadline.dueAt)}
       </span>
-      <span className="min-w-0 truncate text-[12.5px]">{deadline.title}</span>
     </span>
   );
 }

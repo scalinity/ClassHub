@@ -1,18 +1,28 @@
 import type { CSSProperties } from "react";
 
-import { Card } from "@/components/ui/card";
-import { CLASS_ACCENTS, currentUnitLabel, type ClassInfo } from "@/lib/classes";
+import { CLASS_ACCENTS, splitUnitName, type ClassInfo } from "@/lib/classes";
 import { formatPercent } from "@/lib/grades";
 import {
-  formatDueDate,
+  chip,
+  chipAccent,
+  chipAmber,
+  errorLine,
+  meta,
+  washCard,
+} from "@/lib/styles";
+import {
+  dueDayLabel,
   formatTimeRange,
   nextMeeting,
   relativeLabel,
   weekdayLabel,
 } from "@/lib/schedule";
 
-const WEEKDAY_LETTERS = ["M", "T", "W", "T", "F"];
-
+/**
+ * SPEC §12 — a class card: the wash is the card, the week's topic is its
+ * headline. One full-surface button opens the workspace, so nothing else on
+ * the card is a target.
+ */
 export function ClassCard({
   info,
   onOpen,
@@ -21,145 +31,112 @@ export function ClassCard({
   onOpen: (cls: ClassInfo) => void;
 }) {
   const next = nextMeeting(info.meetings);
-  const meetingDays = new Set(info.meetings.map((m) => m.weekday));
+  const division = info.currentUnit ? splitUnitName(info.currentUnit.name) : null;
   const style = {
     "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
   return (
-    <Card
-      style={style}
-      className="relative gap-0 overflow-hidden p-6 transition-shadow duration-200 hover:shadow-md"
-    >
+    <article style={style} className={washCard}>
       <button
         type="button"
         aria-label={`Open ${info.displayName}`}
         onClick={() => onOpen(info)}
         className="absolute inset-0 z-[1] cursor-pointer rounded-[inherit] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent)"
       />
-      <span
-        aria-hidden
-        className="absolute inset-y-0 left-0 w-[3px] bg-(--accent) transition-[width] duration-200 group-hover/card:w-[6px]"
-      />
 
-      <div className="flex items-start justify-between gap-4">
-        <h2 className="text-[17px] font-semibold leading-snug tracking-tight">
-          {info.displayName}
-        </h2>
-        <div
-          aria-label={`Meets on ${info.meetings.map((m) => weekdayLabel(m.weekday)).join(", ")}`}
-          className="flex shrink-0 gap-1.5 pt-1.5 font-mono text-[10px] leading-none"
-        >
-          {WEEKDAY_LETTERS.map((letter, i) => (
-            <span
-              key={i}
-              className={
-                meetingDays.has(i + 1)
-                  ? "font-bold text-(--accent)"
-                  : "text-muted-foreground/40"
-              }
-            >
-              {letter}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <p className="mt-1 text-[13px] text-muted-foreground">{info.instructors}</p>
-
-      <div className="mt-6 font-mono text-[12.5px]">
-        <div className="flex items-center justify-between gap-3">
-          {next ? (
-            <p className="font-medium">
-              {weekdayLabel(next.meeting.weekday)}{" "}
-              {formatTimeRange(next.meeting.startTime, next.meeting.endTime)}
-            </p>
-          ) : (
-            <p className="text-muted-foreground">NO SCHEDULED MEETINGS</p>
-          )}
-          {next && (
-            <span
-              className={
-                "shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium tracking-[0.12em] " +
-                (next.inSession
-                  ? "bg-(--accent) text-white"
-                  : "bg-(--accent)/12 text-(--accent)")
-              }
-            >
-              {relativeLabel(next)}
-            </span>
-          )}
-        </div>
-        {/* Where the course is in its own sequence (SPEC §8.5). One line that
-            truncates rather than wraps: the deadline under it is the more
-            urgent line and keeps its space. */}
-        {info.currentUnit && (
-          <p className="mt-1.5 truncate text-[11px] font-medium tracking-[0.06em] text-(--accent)">
-            {currentUnitLabel(info.currentUnit.name)}
-          </p>
-        )}
-        {info.nextDeadline && (
-          <p className="mt-1.5 flex items-baseline gap-2 text-[11.5px]">
-            <span className="shrink-0 font-medium tracking-[0.06em] text-(--accent)">
-              DUE {formatDueDate(info.nextDeadline.dueAt)}
-            </span>
-            <span className="min-w-0 truncate text-muted-foreground">
-              {info.nextDeadline.title}
-            </span>
-          </p>
-        )}
-        <div className="mt-1.5 flex items-center justify-between gap-3">
-          <p className="text-muted-foreground">
-            {info.room} · {info.credits} CR
-          </p>
-          <span className="flex shrink-0 items-center gap-1.5">
-            {info.currentGrade != null && (
-              <span
-                title="Current weighted grade over graded items"
-                className="rounded bg-(--accent)/12 px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-[0.08em] text-(--accent)"
-              >
-                {formatPercent(info.currentGrade)}
-              </span>
-            )}
-            {info.pendingDeadlineProposals > 0 && (
-              <span
-                title="Proposed deadlines waiting for your decision in the workspace"
-                className="rounded bg-(--accent)/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-(--accent)"
-              >
-                {info.pendingDeadlineProposals === 1
-                  ? "1 PROPOSED"
-                  : `${info.pendingDeadlineProposals} PROPOSED`}
-              </span>
-            )}
-            {info.inboxPending > 0 && (
-              <span
-                title="Files waiting in the drop-to-sort inbox"
-                className="rounded bg-(--accent)/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-(--accent)"
-              >
-                {info.inboxPending === 1
-                  ? "1 TO SORT"
-                  : `${info.inboxPending} TO SORT`}
-              </span>
-            )}
-            {info.staleGuides > 0 && (
-              <span
-                title="A study guide's sources changed since it was generated"
-                className="rounded bg-class-amber/12 px-1.5 py-0.5 text-[10px] font-medium tracking-[0.12em] text-class-amber"
-              >
-                {info.staleGuides === 1
-                  ? "GUIDE STALE"
-                  : `${info.staleGuides} GUIDES STALE`}
-              </span>
-            )}
+      <h2 className="text-[15px] font-semibold leading-snug text-(--accent-ink)">
+        {info.displayName}
+      </h2>
+      {next ? (
+        <p className={`mt-1 flex items-center gap-2 ${meta}`}>
+          <span>
+            {weekdayLabel(next.meeting.weekday)}{" "}
+            {formatTimeRange(next.meeting.startTime, next.meeting.endTime)}
           </span>
-        </div>
-      </div>
+          {next.inSession ? (
+            <span className={`${chip} bg-(--accent) text-white dark:text-background`}>
+              In session
+            </span>
+          ) : (
+            <span>· {relativeLabel(next)}</span>
+          )}
+        </p>
+      ) : (
+        <p className={`mt-1 ${meta}`}>No scheduled meetings</p>
+      )}
 
-      {!info.folderPresent && (
-        <p className="mt-3 font-mono text-[10px] tracking-[0.14em] text-destructive">
-          FOLDER NOT FOUND IN AIBHS
+      {/* Where the course is in its own sequence (SPEC §8.5), in its own words;
+          a course that publishes no dates shows nothing here. */}
+      {division && (
+        <div className="mt-5">
+          {division.topic === null ? (
+            <p className="text-headline">{division.label}</p>
+          ) : (
+            <>
+              <p className={meta}>{division.label}</p>
+              <p className="mt-0.5 text-headline">{division.topic}</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {info.nextDeadline && (
+        <p className="mt-5 text-body">
+          <span className="font-medium">{info.nextDeadline.title}</span>{" "}
+          <span className="text-muted-foreground">
+            {dueDayLabel(info.nextDeadline.dueAt).startsWith("overdue")
+              ? dueDayLabel(info.nextDeadline.dueAt)
+              : `due ${dueDayLabel(info.nextDeadline.dueAt)}`}
+          </span>
         </p>
       )}
-    </Card>
+
+      {(info.currentGrade != null ||
+        info.pendingDeadlineProposals > 0 ||
+        info.inboxPending > 0 ||
+        info.staleGuides > 0) && (
+        <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-5">
+          {info.currentGrade != null && (
+            <span
+              title="Current weighted grade over graded items"
+              className={chipAccent}
+            >
+              Grade {formatPercent(info.currentGrade)}
+            </span>
+          )}
+          {info.pendingDeadlineProposals > 0 && (
+            <span
+              title="Proposed deadlines waiting for your decision in the workspace"
+              className={chipAccent}
+            >
+              {info.pendingDeadlineProposals === 1
+                ? "1 proposed deadline"
+                : `${info.pendingDeadlineProposals} proposed deadlines`}
+            </span>
+          )}
+          {info.inboxPending > 0 && (
+            <span
+              title="Files waiting in the drop-to-sort inbox"
+              className={chipAccent}
+            >
+              {info.inboxPending === 1 ? "1 to sort" : `${info.inboxPending} to sort`}
+            </span>
+          )}
+          {info.staleGuides > 0 && (
+            <span
+              title="A study guide's sources changed since it was written"
+              className={chipAmber}
+            >
+              {info.staleGuides === 1 ? "1 guide stale" : `${info.staleGuides} guides stale`}
+            </span>
+          )}
+        </div>
+      )}
+
+      {!info.folderPresent && (
+        <p className={errorLine}>Folder not found in AIBHS</p>
+      )}
+    </article>
   );
 }

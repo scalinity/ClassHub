@@ -16,17 +16,13 @@ import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
 import { GradesSection } from "@/components/Grades";
 import { GuideViewer } from "@/components/GuideViewer";
-import { InboxQueue } from "@/components/InboxQueue";
+import { InboxQueue, inboxShown } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
-import { NoticesSection } from "@/components/Notices";
+import { announcementsQuery, NoticesSection } from "@/components/Notices";
+import { SectionHeading } from "@/components/SectionHeading";
 import { StructureSection } from "@/components/Structure";
-import {
-  CLASS_ACCENTS,
-  classesQuery,
-  currentUnitLabel,
-  type ClassInfo,
-} from "@/lib/classes";
+import { CLASS_ACCENTS, classesQuery, type ClassInfo } from "@/lib/classes";
 import {
   formatGeneratedAt,
   generatePractice,
@@ -53,8 +49,26 @@ import {
   type ManagedFile,
   type TreeNode,
 } from "@/lib/materials";
-import { formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
+import { formatClock, formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { getSortState, useDragState } from "@/lib/sorter";
+import {
+  buttonText,
+  buttonTextMuted,
+  errorLine,
+  meta,
+  pulseDot,
+  readingText,
+  row,
+  statusLine,
+} from "@/lib/styles";
+
+/** Smooth unless the reader asked for less motion. No observer, no effect: a click. */
+function jumpTo(id: string) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document
+    .getElementById(id)
+    ?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+}
 
 export function ClassWorkspace({
   info: snapshot,
@@ -195,13 +209,13 @@ export function ClassWorkspace({
   const handleSynthesize = (scope: string) => {
     setMaterialsError(null);
     synthesizeModule(info.id, scope).catch((e) =>
-      setMaterialsError(`SYNTHESIS NOT STARTED — ${String(e)}`),
+      setMaterialsError(`The guide didn't start: ${String(e)}`),
     );
   };
   const handlePractice = (scope: string) => {
     setMaterialsError(null);
     generatePractice(info.id, scope).catch((e) =>
-      setMaterialsError(`PRACTICE EXAM NOT STARTED — ${String(e)}`),
+      setMaterialsError(`The practice exam didn't start: ${String(e)}`),
     );
   };
   /**
@@ -227,7 +241,7 @@ export function ClassWorkspace({
             : setViewFile({ ...file, pdfPath }),
         )
         .catch((e) =>
-          setMaterialsError(`COULD NOT OPEN ${node.name} — ${String(e)}`),
+          setMaterialsError(`Couldn't open ${node.name}: ${String(e)}`),
         );
       return;
     }
@@ -244,393 +258,395 @@ export function ClassWorkspace({
     "--accent": CLASS_ACCENTS[info.color] ?? "var(--class-blue)",
   } as CSSProperties;
 
-  const meetingLine = [
+  const metaLine = [
     ...info.meetings.map(
       (m) =>
         `${weekdayLabel(m.weekday)} ${formatTimeRange(m.startTime, m.endTime)}`,
     ),
-    ...(info.currentUnit ? [currentUnitLabel(info.currentUnit.name)] : []),
     info.room,
-    `${info.credits} CR`,
+    `${info.credits} ${info.credits === 1 ? "credit" : "credits"}`,
+    info.instructors,
   ].join(" · ");
 
   const scannedLabel =
-    dataUpdatedAt > 0
-      ? new Date(dataUpdatedAt)
-          .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-          .toUpperCase()
-      : null;
+    dataUpdatedAt > 0 ? formatClock(new Date(dataUpdatedAt)) : null;
+
+  // The nav lists a section only while it is on screen (SPEC §12): the inbox
+  // and the notices read the same truth their sections do, and the practice
+  // exams the same gate as their section below.
+  const { data: announcements } = useQuery(announcementsQuery(info.id));
+  const hasPractice = activePractice.length > 0 || (practice?.length ?? 0) > 0;
+  const links = [
+    inboxShown(sortState, jobs, info.id, drag.notice) && {
+      id: "inbox",
+      label: "Inbox",
+    },
+    (announcements?.length ?? 0) > 0 && { id: "notices", label: "Notices" },
+    { id: "structure", label: "Structure" },
+    { id: "deadlines", label: "Deadlines" },
+    { id: "grades", label: "Grades" },
+    { id: "materials", label: "Materials" },
+    { id: "lectures", label: "Lectures" },
+    hasPractice && { id: "practice-exams", label: "Practice exams" },
+    { id: "notes", label: "Notes" },
+  ].filter((l): l is { id: string; label: string } => l !== false);
 
   return (
     <main
       style={style}
-      className="mx-auto max-w-4xl px-8 pt-16 pb-20 animate-in fade-in duration-200"
+      className="animate-in fade-in duration-200 motion-reduce:animate-none"
     >
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex cursor-pointer items-center gap-1 font-mono text-[11px] tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
-      >
-        <ChevronLeft size={12} aria-hidden />
-        DASHBOARD
-      </button>
-
-      <header className="relative mt-6 pl-5">
-        <span
-          aria-hidden
-          className="absolute inset-y-1 left-0 w-[3px] rounded-full bg-(--accent)"
-        />
-        <p className="font-mono text-[11px] tracking-[0.18em] text-(--accent)">
-          {meetingLine.toUpperCase()}
-        </p>
-        <h1 className="mt-2 text-[28px] font-semibold leading-tight tracking-tight">
-          {info.displayName}
-        </h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          {info.instructors}
-        </p>
+      {/* The band bleeds to the window edges; the fixed drag strip (36px)
+          overlays its top, so the first control sits below it. */}
+      <header className="bg-(--wash)">
+        <div className="mx-auto max-w-4xl px-8 pt-12">
+          <button type="button" onClick={onBack} className={`${buttonText} -ml-2`}>
+            <ChevronLeft size={14} aria-hidden />
+            Dashboard
+          </button>
+          <h1 className="mt-4 text-display">{info.displayName}</h1>
+          {info.currentUnit && (
+            <p className="mt-1.5 text-headline font-medium text-(--accent-ink)">
+              {info.currentUnit.name}
+            </p>
+          )}
+          <p className={`mt-3 ${meta}`}>{metaLine}</p>
+        </div>
       </header>
 
-      {tree !== undefined && tree.length > 0 && (
-        <MasterGuideStrip
+      {/* A direct child of main, not of the header: a sticky element only
+          sticks within its parent's box. pt-9 is the band's last-row spacing
+          when unstuck and the traffic-light clearance when stuck; z-[5] keeps
+          it under the z-10 drag strip so dragging still works over that 36px. */}
+      <nav aria-label="Sections" className="sticky top-0 z-[5] bg-(--wash) pt-9">
+        <div className="mx-auto flex max-w-4xl flex-wrap gap-x-4 gap-y-1 px-8 pb-3">
+          {links.map((link) => (
+            <button
+              key={link.id}
+              type="button"
+              onClick={() => jumpTo(link.id)}
+              className="cursor-pointer rounded-sm text-body font-medium text-(--accent-ink) transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent)"
+            >
+              {link.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      <div className="mx-auto max-w-4xl px-8 pb-20">
+        {tree !== undefined && tree.length > 0 && (
+          <MasterGuideStrip
+            classId={info.id}
+            practiceActive={activePracticeScopes.has("master")}
+            guide={guideMap.get("master")}
+            onView={() => setViewScope("master")}
+            onWatchLive={(jobId) =>
+              setViewFile({
+                relPath: MASTER_OUTPUT_PATH,
+                name: "Semester Master",
+                kind: "html",
+                live: true,
+                jobId,
+              })
+            }
+          />
+        )}
+
+        <InboxQueue classId={info.id} tree={tree} />
+
+        <NoticesSection classId={info.id} />
+
+        <StructureSection
           classId={info.id}
-          practiceActive={activePracticeScopes.has("master")}
-          guide={guideMap.get("master")}
-          onView={() => setViewScope("master")}
-          onWatchLive={(jobId) =>
-            setViewFile({
-              relPath: MASTER_OUTPUT_PATH,
-              name: "Semester Master",
-              kind: "html",
-              live: true,
-              jobId,
-            })
-          }
+          currentUnitId={info.currentUnit?.id ?? null}
+          controls={{
+            guides: guideMap,
+            activeScopes,
+            activePracticeScopes,
+            onSynthesize: (unitId) => synthesizeUnit(info.id, unitId),
+            onPractice: (scope) => generatePractice(info.id, scope),
+            onView: setViewScope,
+          }}
         />
-      )}
 
-      <InboxQueue classId={info.id} tree={tree} />
+        <DeadlinesSection classId={info.id} tree={tree} />
 
-      <NoticesSection classId={info.id} />
+        <GradesSection classId={info.id} />
 
-      <StructureSection
-        classId={info.id}
-        currentUnitId={info.currentUnit?.id ?? null}
-        controls={{
-          guides: guideMap,
-          activeScopes,
-          activePracticeScopes,
-          onSynthesize: (unitId) => synthesizeUnit(info.id, unitId),
-          onPractice: (scope) => generatePractice(info.id, scope),
-          onView: setViewScope,
-        }}
-      />
-
-      <DeadlinesSection classId={info.id} tree={tree} />
-
-      <GradesSection classId={info.id} />
-
-      <section className="mt-12">
-        <div className="flex items-baseline justify-between border-b pb-3">
-          <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-            MATERIALS
-          </h2>
-          <div className="flex items-baseline gap-4">
-            {scannedLabel && (
-              <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                SCANNED {scannedLabel}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none"
-            >
-              <RefreshCw
-                size={11}
-                aria-hidden
-                className={isFetching ? "animate-spin" : undefined}
-              />
-              RESCAN
-            </button>
-          </div>
-        </div>
-
-        {materialsError && (
-          <p className="mt-3 font-mono text-[11px] text-destructive">
-            {materialsError}
-          </p>
-        )}
-
-        <div className="mt-4">
-          {error ? (
-            <p className="py-10 text-center font-mono text-xs text-destructive">
-              SCAN FAILED — {String(error)}
-            </p>
-          ) : isPending || tree === undefined ? (
-            <p className="py-10 text-center font-mono text-xs text-muted-foreground">
-              SCANNING…
-            </p>
-          ) : tree.length === 0 ? (
-            <EmptyMaterials classId={info.id} />
-          ) : (
-            <FileTree
-              classId={info.id}
-              nodes={tree}
-              onEntryMissing={() => refetch()}
-              onViewFile={openMaterial}
-              weekSlots={weeks?.slots ?? []}
-              pendingSources={pendingSources}
-              guideControls={{
-                guides: guideMap,
-                activeScopes,
-                activePracticeScopes,
-                onSynthesize: handleSynthesize,
-                onPractice: handlePractice,
-                onView: setViewScope,
-              }}
-            />
-          )}
-        </div>
-      </section>
-
-      <section className="mt-12" aria-label="Lectures">
-        <div className="flex items-baseline justify-between border-b pb-3">
-          <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-            LECTURES
-          </h2>
-          <div className="flex items-baseline gap-4">
-            <button
-              type="button"
-              onClick={() => setAddingLecture(true)}
-              className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent)"
-            >
-              ADD LECTURE
-            </button>
-            {sessions.length > 0 && (
-              <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                {sessions.length === 1
-                  ? "1 SESSION"
-                  : `${sessions.length} SESSIONS`}
-              </span>
-            )}
-          </div>
-        </div>
-        {digestError && (
-          <p className="mt-3 font-mono text-[11px] text-destructive">
-            NO SESSION DOCUMENT — {digestError}
-          </p>
-        )}
-        <div className="mt-3 space-y-1">
-          {sessions.length === 0 &&
-            activeDigests.length === 0 &&
-            pendingTranscripts.length === 0 && (
-              <p className="max-w-xl py-2 text-[13px] leading-relaxed text-muted-foreground">
-                Nothing recorded yet. Add a Zoom link or a recording and
-                ClassHub transcribes it, files it under the week it belongs to,
-                and writes both a summary of the session and the note that
-                week's study guide is built from.
-              </p>
-            )}
-          {pendingTranscripts.map((transcript) => (
-            <div
-              key={transcript.relPath}
-              className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60"
-            >
-              <Mic
-                size={14}
-                aria-hidden
-                className="shrink-0 text-muted-foreground/80"
-              />
+        <section id="materials" className="mt-14 scroll-mt-20">
+          <SectionHeading
+            title="Materials"
+            count={scannedLabel ? `scanned ${scannedLabel}` : undefined}
+            actions={
               <button
                 type="button"
-                title={`View ${transcript.name}`}
-                onClick={() =>
-                  setViewFile({
-                    relPath: transcript.relPath,
-                    name: transcript.name.replace(/\.md$/i, ""),
-                    kind: "md",
-                  })
-                }
-                className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                onClick={() => refetch()}
+                disabled={isFetching}
+                className={buttonTextMuted}
               >
-                {transcript.name.replace(/\.md$/i, "")}
-              </button>
-              <FeedsUnit unitName={unitFor.get(transcript.relPath)} />
-              <button
-                type="button"
-                onClick={() => {
-                  setDigestError(null);
-                  digestLecture(
-                    info.id,
-                    transcript.relPath,
-                    dateFromFileName(transcript.name) ?? todayIso(),
-                  ).catch((e) => setDigestError(String(e)));
-                }}
-                className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
-              >
-                DISTILL
-              </button>
-            </div>
-          ))}
-          {activeDigests.map((job) => (
-            <div
-              key={job.id}
-              className="flex h-8 items-center gap-2 rounded-md px-2 font-mono text-[10px] tracking-[0.14em] text-(--accent)"
-            >
-              <span
-                aria-hidden
-                className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-              />
-              {job.status === "running" ? "DISTILLING" : "QUEUED"}
-              <span className="min-w-0 truncate font-normal text-muted-foreground/70">
-                · {job.scope?.split("/").pop() ?? "LECTURE"}
-              </span>
-            </div>
-          ))}
-          {sessions.map((session) => (
-            <ManagedRow
-              key={session.scope}
-              icon={Mic}
-              file={{
-                name: session.relPath.split("/").pop() ?? session.relPath,
-                relPath: session.relPath,
-                modifiedAt: session.generatedAt,
-              }}
-              strippedExt=".html"
-              stamp={formatGeneratedAt(session.generatedAt)}
-              badge={
-                <FeedsUnit
-                  unitName={unitFor.get(
-                    session.scope.slice(SESSION_SCOPE_PREFIX.length),
-                  )}
+                <RefreshCw
+                  size={12}
+                  aria-hidden
+                  className={isFetching ? "animate-spin" : undefined}
                 />
-              }
-              // Digesting removes the transcript from the pending list, so a
-              // session whose transcript has since changed had no way back.
-              action={
-                session.stale
-                  ? {
-                      label: "REDISTILL",
-                      onSelect: () => {
-                        const relPath = session.scope.slice(
-                          SESSION_SCOPE_PREFIX.length,
-                        );
-                        setDigestError(null);
-                        digestLecture(
-                          info.id,
-                          relPath,
-                          dateFromFileName(relPath.split("/").pop() ?? "") ??
-                            todayIso(),
-                        ).catch((e) => setDigestError(String(e)));
-                      },
-                    }
-                  : undefined
-              }
-              onView={() => setViewScope(session.scope)}
-            />
-          ))}
-        </div>
-      </section>
+                Rescan
+              </button>
+            }
+          >
+            {materialsError && <p className={errorLine}>{materialsError}</p>}
+          </SectionHeading>
 
-      {(activePractice.length > 0 || (practice?.length ?? 0) > 0) && (
-        <section className="mt-12">
-          <div className="flex items-baseline justify-between border-b pb-3">
-            <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-              PRACTICE EXAMS
-            </h2>
-            <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-              {(practice?.length ?? 0) === 1
-                ? "1 EXAM"
-                : `${practice?.length ?? 0} EXAMS`}
-            </span>
+          <div className="mt-4">
+            {error ? (
+              <p className={`${errorLine} py-8 text-center`}>
+                The scan failed: {String(error)}
+              </p>
+            ) : isPending || tree === undefined ? (
+              <p className="py-10 text-center text-body text-muted-foreground">
+                Scanning…
+              </p>
+            ) : tree.length === 0 ? (
+              <EmptyMaterials classId={info.id} />
+            ) : (
+              <FileTree
+                classId={info.id}
+                nodes={tree}
+                onEntryMissing={() => refetch()}
+                onViewFile={openMaterial}
+                weekSlots={weeks?.slots ?? []}
+                pendingSources={pendingSources}
+                guideControls={{
+                  guides: guideMap,
+                  activeScopes,
+                  activePracticeScopes,
+                  onSynthesize: handleSynthesize,
+                  onPractice: handlePractice,
+                  onView: setViewScope,
+                }}
+              />
+            )}
           </div>
-          <div className="mt-3 space-y-1">
-            {activePractice.map((job) => (
+        </section>
+
+        <section id="lectures" className="mt-14 scroll-mt-20" aria-label="Lectures">
+          <SectionHeading
+            title="Lectures"
+            count={
+              sessions.length === 0
+                ? undefined
+                : sessions.length === 1
+                  ? "1 session"
+                  : `${sessions.length} sessions`
+            }
+            actions={
+              <button
+                type="button"
+                onClick={() => setAddingLecture(true)}
+                className={buttonText}
+              >
+                Add lecture
+              </button>
+            }
+          >
+            {digestError && (
+              <p className={errorLine}>No session document: {digestError}</p>
+            )}
+          </SectionHeading>
+          <div className="mt-3">
+            {sessions.length === 0 &&
+              activeDigests.length === 0 &&
+              pendingTranscripts.length === 0 && (
+                <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
+                  Nothing recorded yet. Add a Zoom link or a recording and
+                  ClassHub transcribes it, files it under the week it belongs to,
+                  and writes both a summary of the session and the note that
+                  week's study guide is built from.
+                </p>
+              )}
+            {pendingTranscripts.map((transcript) => (
+              <div key={transcript.relPath} className={row}>
+                <Mic size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                <button
+                  type="button"
+                  title={`View ${transcript.name}`}
+                  onClick={() =>
+                    setViewFile({
+                      relPath: transcript.relPath,
+                      name: transcript.name.replace(/\.md$/i, ""),
+                      kind: "md",
+                    })
+                  }
+                  className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-title transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                >
+                  {transcript.name.replace(/\.md$/i, "")}
+                </button>
+                <FeedsUnit unitName={unitFor.get(transcript.relPath)} />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDigestError(null);
+                    digestLecture(
+                      info.id,
+                      transcript.relPath,
+                      dateFromFileName(transcript.name) ?? todayIso(),
+                    ).catch((e) => setDigestError(String(e)));
+                  }}
+                  className={`${buttonText} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
+                >
+                  Distill
+                </button>
+              </div>
+            ))}
+            {activeDigests.map((job) => (
               <div
                 key={job.id}
-                className="flex h-8 items-center gap-2 rounded-md px-2 font-mono text-[10px] tracking-[0.14em] text-(--accent)"
+                className="flex min-h-11 items-center gap-2.5 border-b border-border/70 px-1 last:border-b-0"
               >
-                <span
-                  aria-hidden
-                  className="size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none"
-                />
-                {job.status === "running" ? "GENERATING" : "QUEUED"}
-                {` — ${job.scope && job.scope !== "master" ? (job.scopeLabel ?? job.scope).toUpperCase() : "SEMESTER"}`}
-                <span className="font-normal text-muted-foreground/70">
-                  · LIVE IN THE JOB CENTER
+                <span className={statusLine}>
+                  <span aria-hidden className={pulseDot} />
+                  {job.status === "running" ? "Distilling" : "Queued"}
+                </span>
+                <span className="min-w-0 truncate text-meta text-muted-foreground">
+                  · {job.scope?.split("/").pop() ?? "lecture"}
                 </span>
               </div>
             ))}
-            {(practice ?? []).map((exam) => (
+            {sessions.map((session) => (
               <ManagedRow
-                key={exam.relPath}
-                icon={FileQuestion}
-                file={exam}
+                key={session.scope}
+                icon={Mic}
+                file={{
+                  name: session.relPath.split("/").pop() ?? session.relPath,
+                  relPath: session.relPath,
+                  modifiedAt: session.generatedAt,
+                }}
                 strippedExt=".html"
-                stamp={formatGeneratedAt(exam.modifiedAt)}
+                stamp={formatGeneratedAt(session.generatedAt)}
+                badge={
+                  <FeedsUnit
+                    unitName={unitFor.get(
+                      session.scope.slice(SESSION_SCOPE_PREFIX.length),
+                    )}
+                  />
+                }
+                // Digesting removes the transcript from the pending list, so a
+                // session whose transcript has since changed had no way back.
+                action={
+                  session.stale
+                    ? {
+                        label: "Distill again",
+                        onSelect: () => {
+                          const relPath = session.scope.slice(
+                            SESSION_SCOPE_PREFIX.length,
+                          );
+                          setDigestError(null);
+                          digestLecture(
+                            info.id,
+                            relPath,
+                            dateFromFileName(relPath.split("/").pop() ?? "") ??
+                              todayIso(),
+                          ).catch((e) => setDigestError(String(e)));
+                        },
+                      }
+                    : undefined
+                }
+                onView={() => setViewScope(session.scope)}
+              />
+            ))}
+          </div>
+        </section>
+
+        {hasPractice && (
+          <section id="practice-exams" className="mt-14 scroll-mt-20">
+            <SectionHeading
+              title="Practice exams"
+              count={
+                (practice?.length ?? 0) === 1
+                  ? "1 exam"
+                  : `${practice?.length ?? 0} exams`
+              }
+            />
+            <div className="mt-3">
+              {activePractice.map((job) => (
+                <div
+                  key={job.id}
+                  className="flex min-h-11 items-center gap-2.5 border-b border-border/70 px-1 last:border-b-0"
+                >
+                  <span className={statusLine}>
+                    <span aria-hidden className={pulseDot} />
+                    {job.status === "running" ? "Writing" : "Queued"}
+                    {` · ${job.scope && job.scope !== "master" ? (job.scopeLabel ?? job.scope) : "semester"}`}
+                  </span>
+                  <span className="text-meta text-muted-foreground">· live in Jobs</span>
+                </div>
+              ))}
+              {(practice ?? []).map((exam) => (
+                <ManagedRow
+                  key={exam.relPath}
+                  icon={FileQuestion}
+                  file={exam}
+                  strippedExt=".html"
+                  stamp={formatGeneratedAt(exam.modifiedAt)}
+                  onView={(name) =>
+                    setViewFile({ relPath: exam.relPath, name, kind: "html" })
+                  }
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section id="notes" className="mt-14 scroll-mt-20" aria-label="Notes">
+          <SectionHeading
+            title="Notes"
+            count={
+              (notes?.length ?? 0) === 0
+                ? undefined
+                : notes?.length === 1
+                  ? "1 note"
+                  : `${notes?.length} notes`
+            }
+            actions={
+              <button
+                type="button"
+                onClick={() => setEditingNote({ title: null, relPath: null })}
+                className={buttonText}
+              >
+                New note
+              </button>
+            }
+          />
+          <div className="mt-3">
+            {notes !== undefined && notes.length === 0 && (
+              <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
+                No notes yet — start one, or ask the chat to draft one from the
+                material. They live as Markdown in the class's Notes folder.
+              </p>
+            )}
+            {(notes ?? []).map((note) => (
+              <ManagedRow
+                key={note.relPath}
+                icon={NotepadText}
+                file={note}
+                strippedExt=".md"
+                stamp={formatGeneratedAt(note.modifiedAt)}
                 onView={(name) =>
-                  setViewFile({ relPath: exam.relPath, name, kind: "html" })
+                  setEditingNote({ title: name, relPath: note.relPath })
                 }
               />
             ))}
           </div>
         </section>
-      )}
-
-      <section className="mt-12" aria-label="Notes">
-        <div className="flex items-baseline justify-between border-b pb-3">
-          <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-            NOTES
-          </h2>
-          <div className="flex items-baseline gap-4">
-            <button
-              type="button"
-              onClick={() => setEditingNote({ title: null, relPath: null })}
-              className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) transition-colors hover:bg-(--accent)/12 focus-visible:outline-2 focus-visible:outline-(--accent)"
-            >
-              NEW NOTE
-            </button>
-            {(notes?.length ?? 0) > 0 && (
-              <span className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground/70">
-                {notes?.length === 1 ? "1 NOTE" : `${notes?.length} NOTES`}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="mt-3 space-y-1">
-          {notes !== undefined && notes.length === 0 && (
-            <p className="py-2 text-[13px] text-muted-foreground">
-              No notes yet — start one, or ask the chat to draft one from the
-              material. They live as Markdown in the class's Notes folder.
-            </p>
-          )}
-          {(notes ?? []).map((note) => (
-            <ManagedRow
-              key={note.relPath}
-              icon={NotepadText}
-              file={note}
-              strippedExt=".md"
-              stamp={formatGeneratedAt(note.modifiedAt)}
-              onView={(name) =>
-                setEditingNote({ title: name, relPath: note.relPath })
-              }
-            />
-          ))}
-        </div>
-      </section>
+      </div>
 
       {drag.active && (
         <div
           aria-hidden
-          className="pointer-events-none fixed inset-0 z-40 bg-background/70 p-4 backdrop-blur-[2px] animate-in fade-in duration-150"
+          className="pointer-events-none fixed inset-0 z-40 bg-background/70 p-4 backdrop-blur-[2px] animate-in fade-in duration-150 motion-reduce:animate-none"
         >
           <div className="flex h-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-(--accent)">
-            <p className="font-mono text-[13px] font-bold tracking-[0.22em] text-(--accent)">
-              DROP TO SORT
-            </p>
-            <p className="text-[13px] text-muted-foreground">
+            <p className="text-headline text-(--accent-ink)">Drop to sort</p>
+            <p className="text-body text-muted-foreground">
               Copies land in the inbox — originals stay put, and nothing moves
               without your approval.
             </p>
@@ -685,7 +701,7 @@ function ManagedRow({
   stamp: string;
   /** A quiet standing label, e.g. the division a lecture feeds. */
   badge?: React.ReactNode;
-  /** An optional second affordance, shown on hover the way DISTILL is. */
+  /** An optional second affordance, shown on hover the way Distill is. */
   action?: { label: string; onSelect: () => void };
   onView: (name: string) => void;
 }) {
@@ -693,13 +709,13 @@ function ManagedRow({
     ? file.name.slice(0, -strippedExt.length)
     : file.name;
   return (
-    <div className="group flex h-8 items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
-      <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground/80" />
+    <div className={row}>
+      <Icon size={14} aria-hidden className="shrink-0 text-muted-foreground" />
       <button
         type="button"
         title={`View ${name}`}
         onClick={() => onView(name)}
-        className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] transition-colors hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-(--accent)"
+        className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-title transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
       >
         {name}
       </button>
@@ -708,14 +724,12 @@ function ManagedRow({
         <button
           type="button"
           onClick={action.onSelect}
-          className="shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10px] tracking-[0.14em] text-(--accent) opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={`${buttonText} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
         >
           {action.label}
         </button>
       )}
-      <span className="shrink-0 font-mono text-[10px] tracking-[0.1em] text-muted-foreground">
-        {stamp}
-      </span>
+      <span className={`shrink-0 ${meta}`}>{stamp}</span>
     </div>
   );
 }
@@ -735,32 +749,28 @@ function FeedsUnit({ unitName }: { unitName: string | undefined }) {
           ? `Feeds the ${unitName} guide`
           : "Not mapped to any of this course's divisions — refile it under a week to change that"
       }
-      className={`hidden shrink-0 truncate font-mono text-[10px] tracking-[0.14em] sm:block sm:max-w-[16rem] ${
-        unitName ? "text-muted-foreground/70" : "text-muted-foreground/50"
+      className={`hidden shrink-0 truncate text-fine sm:block sm:max-w-[16rem] ${
+        unitName ? "text-muted-foreground" : "text-muted-foreground/60"
       }`}
     >
-      {unitName ? unitName.toUpperCase() : "NO DIVISION"}
+      {unitName ?? "no division"}
     </span>
   );
 }
 
 function EmptyMaterials({ classId }: { classId: number }) {
   return (
-    <div className="rounded-xl border border-dashed px-8 py-14 text-center">
-      <FolderOpen
-        size={22}
-        aria-hidden
-        className="mx-auto text-muted-foreground/50"
-      />
-      <p className="mt-4 text-[13px] font-medium">No material yet</p>
-      <p className="mx-auto mt-1 max-w-sm text-[13px] text-muted-foreground">
+    <div className="rounded-xl border border-dashed border-border px-8 py-14 text-center">
+      <FolderOpen size={22} aria-hidden className="mx-auto text-muted-foreground/60" />
+      <p className="mt-4 text-[17px] font-semibold">No material yet</p>
+      <p className="mx-auto mt-1 max-w-sm text-body text-muted-foreground">
         Drop files anywhere in this window to sort them in — or add them to the
         class folder in Finder and rescan.
       </p>
       <button
         type="button"
         onClick={() => void openInDefaultApp(classId, "")}
-        className="mt-6 cursor-pointer rounded-md border px-3.5 py-1.5 text-[12px] font-medium transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-(--accent)"
+        className={`${buttonTextMuted} mt-6 ring-1 ring-border`}
       >
         Open folder in Finder
       </button>

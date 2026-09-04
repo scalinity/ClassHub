@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 
+import { SectionHeading } from "@/components/SectionHeading";
 import {
   CANVAS_CATEGORY_TAG,
   CANVAS_ITEM_TAG,
@@ -15,7 +16,19 @@ import {
   type GradeCategory,
   type GradeItem,
 } from "@/lib/grades";
-import { monoAction, inputBase, iconActionAccent } from "@/lib/styles";
+import {
+  buttonFilled,
+  buttonIcon,
+  buttonText,
+  buttonTextMuted,
+  decisionCard,
+  errorLine,
+  input,
+  meta,
+  readingText,
+  row,
+  rowDense,
+} from "@/lib/styles";
 
 type Editing =
   | { kind: "category"; target: GradeCategory | "new" }
@@ -46,45 +59,37 @@ export function GradesSection({ classId }: { classId: number }) {
     data !== undefined && categories.length > 0 && Math.abs(offBy) >= 0.01;
 
   return (
-    <section className="mt-12" aria-label="Grades">
-      <div className="flex items-baseline justify-between border-b pb-3">
-        <h2 className="font-mono text-[11px] tracking-[0.18em] text-muted-foreground">
-          GRADES
-        </h2>
-        <div className="flex items-baseline gap-4">
+    <section id="grades" className="mt-14 scroll-mt-20" aria-label="Grades">
+      <SectionHeading
+        title="Grades"
+        count={
+          data?.currentGrade != null
+            ? `Current ${formatPercent(data.currentGrade)}`
+            : undefined
+        }
+        actions={
           <button
             type="button"
             onClick={() => setEditing({ kind: "category", target: "new" })}
-            className={`${monoAction} text-(--accent) hover:bg-(--accent)/12`}
+            className={buttonText}
           >
-            ADD CATEGORY
+            Add category
           </button>
-          {data?.currentGrade != null && (
-            <span className="font-mono text-[11px] font-medium tracking-[0.14em] text-(--accent)">
-              CURRENT {formatPercent(data.currentGrade)}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {error != null && (
-        <p className="mt-3 font-mono text-[11px] text-destructive">
-          ✕ GRADES DIDN&apos;T LOAD — {String(error)}
-        </p>
-      )}
-      {actionError && (
-        <p className="mt-3 font-mono text-[11px] text-destructive">
-          ✕ {actionError}
-        </p>
-      )}
-      {showWeightWarning && (
-        <p className="mt-3 font-mono text-[11px] tracking-[0.06em] text-class-amber">
-          WEIGHTS SUM {formatPercent(weightTotal)} —{" "}
-          {offBy < 0
-            ? `${formatPercent(-offBy)} UNASSIGNED`
-            : `${formatPercent(offBy)} OVER 100`}
-        </p>
-      )}
+        }
+      >
+        {error != null && (
+          <p className={errorLine}>The grades didn't load: {String(error)}</p>
+        )}
+        {actionError && <p className={errorLine}>{actionError}</p>}
+        {showWeightWarning && (
+          <p className="mt-3 text-body text-class-amber">
+            Weights sum to {formatPercent(weightTotal)},{" "}
+            {offBy < 0
+              ? `${formatPercent(-offBy)} unassigned`
+              : `${formatPercent(offBy)} over 100`}
+          </p>
+        )}
+      </SectionHeading>
 
       {editing?.kind === "category" && (
         // Keyed by target: the form seeds its fields in useState initializers,
@@ -98,14 +103,14 @@ export function GradesSection({ classId }: { classId: number }) {
       )}
 
       {data !== undefined && categories.length === 0 && editing === null && (
-        <p className="py-2 text-[13px] text-muted-foreground">
+        <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
           No grades tracked yet — sync Canvas to bring in the course's
           categories and every posted score, or add the syllabus categories
           and record scores by hand. The chat can fill this in too.
         </p>
       )}
 
-      <div className="mt-3 space-y-2">
+      <div className="mt-3">
         {categories.map((category) => (
           <div key={category.id}>
             <CategoryRow
@@ -118,7 +123,7 @@ export function GradesSection({ classId }: { classId: number }) {
             />
             {(category.items.length > 0 ||
               (editing?.kind === "item" && editing.categoryId === category.id)) && (
-              <div className="mt-0.5 ml-[13px] space-y-0.5 border-l pl-3">
+              <div className="my-1 ml-[13px] border-l border-border/70 pl-3">
                 {category.items.map((item) =>
                   editing?.kind === "item" &&
                   editing.target !== "new" &&
@@ -188,26 +193,19 @@ function CategoryRow({
   };
 
   return (
-    <div className="group flex h-9 items-center gap-2.5 rounded-md px-2 transition-colors hover:bg-muted/60">
-      <span className="w-10 shrink-0 text-right font-mono text-[11px] font-medium text-(--accent)">
+    <div className={row}>
+      <span className="w-10 shrink-0 text-right text-meta font-medium tabular-nums text-(--accent-ink)">
         {formatPercent(category.weight)}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
-        {category.name}
-      </span>
+      <span className="min-w-0 flex-1 truncate text-title">{category.name}</span>
       {category.canvasGroupId !== null && (
         <span
           title={CANVAS_CATEGORY_TAG.title}
-          className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
+          className="shrink-0 text-fine text-muted-foreground"
         >
           {CANVAS_CATEGORY_TAG.label}
         </span>
       )}
-      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-        {category.percent == null
-          ? "NO SCORES YET"
-          : `${category.items.length > 1 ? `${category.items.length} · ` : ""}${formatPercent(category.percent)}`}
-      </span>
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         <button
           type="button"
@@ -215,7 +213,7 @@ function CategoryRow({
           aria-label={`Record a score in ${category.name}`}
           disabled={busy}
           onClick={onAddItem}
-          className={`${iconActionAccent} hover:text-(--accent)`}
+          className={`${buttonIcon} hover:text-(--accent-ink)`}
         >
           <Plus size={12} aria-hidden />
         </button>
@@ -225,7 +223,7 @@ function CategoryRow({
           aria-label={`Edit ${category.name}`}
           disabled={busy}
           onClick={onEdit}
-          className={`${iconActionAccent} hover:text-foreground`}
+          className={buttonIcon}
         >
           <Pencil size={12} aria-hidden />
         </button>
@@ -235,10 +233,15 @@ function CategoryRow({
           aria-label={`Delete ${category.name}`}
           disabled={busy}
           onClick={remove}
-          className={`${iconActionAccent} hover:text-destructive`}
+          className={`${buttonIcon} hover:text-destructive`}
         >
           <Trash2 size={12} aria-hidden />
         </button>
+      </span>
+      <span className={`shrink-0 ${meta}`}>
+        {category.percent == null
+          ? "No scores yet"
+          : `${category.items.length > 1 ? `${category.items.length} · ` : ""}${formatPercent(category.percent)}`}
       </span>
     </div>
   );
@@ -264,22 +267,16 @@ function ItemRow({
   };
 
   return (
-    <div className="group flex h-8 items-center gap-2.5 rounded-md px-2 transition-colors hover:bg-muted/60">
-      <span className="min-w-0 flex-1 truncate text-[13px]">{item.name}</span>
+    <div className={rowDense}>
+      <span className="min-w-0 flex-1 truncate text-body">{item.name}</span>
       {item.canvasAssignmentId !== null && (
         <span
           title={CANVAS_ITEM_TAG.title}
-          className="shrink-0 font-mono text-[9px] tracking-[0.12em] text-muted-foreground/60"
+          className="shrink-0 text-fine text-muted-foreground"
         >
           {CANVAS_ITEM_TAG.label}
         </span>
       )}
-      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-        {formatScore(item.score, item.maxScore)}
-      </span>
-      <span className="w-12 shrink-0 text-right font-mono text-[11px] text-muted-foreground/70">
-        {formatPercent((item.score / item.maxScore) * 100)}
-      </span>
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         <button
           type="button"
@@ -287,7 +284,7 @@ function ItemRow({
           aria-label={`Edit ${item.name}`}
           disabled={busy}
           onClick={onEdit}
-          className={`${iconActionAccent} hover:text-foreground`}
+          className={buttonIcon}
         >
           <Pencil size={12} aria-hidden />
         </button>
@@ -297,10 +294,16 @@ function ItemRow({
           aria-label={`Delete ${item.name}`}
           disabled={busy}
           onClick={remove}
-          className={`${iconActionAccent} hover:text-destructive`}
+          className={`${buttonIcon} hover:text-destructive`}
         >
           <Trash2 size={12} aria-hidden />
         </button>
+      </span>
+      <span className={`shrink-0 ${meta}`}>
+        {formatScore(item.score, item.maxScore)}
+      </span>
+      <span className={`w-12 shrink-0 text-right ${meta}`}>
+        {formatPercent((item.score / item.maxScore) * 100)}
       </span>
     </div>
   );
@@ -348,11 +351,11 @@ function CategoryForm({
   };
 
   return (
-    <div className="mt-4 rounded-lg border bg-card px-4 py-3">
-      <p className="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-        {category ? "EDIT CATEGORY" : "NEW CATEGORY"}
+    <div className={`${decisionCard} mt-4`}>
+      <p className="text-[15px] font-semibold">
+        {category ? "Edit category" : "New category"}
       </p>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <input
           type="text"
           value={name}
@@ -360,7 +363,7 @@ function CategoryForm({
           placeholder="Category — Homework, Quizzes, Final…"
           aria-label="Category name"
           autoFocus
-          className={`${inputBase} min-w-40 flex-1`}
+          className={`${input} min-w-40 flex-1`}
         />
         <label className="flex items-center gap-1.5">
           <input
@@ -372,11 +375,9 @@ function CategoryForm({
             step="any"
             placeholder="30"
             aria-label="Weight as a percentage of the final grade"
-            className={`${inputBase} w-20 font-mono text-[12px]`}
+            className={`${input} w-20 tabular-nums`}
           />
-          <span className="font-mono text-[11px] text-muted-foreground">
-            % OF GRADE
-          </span>
+          <span className={meta}>% of grade</span>
         </label>
       </div>
       <div className="mt-3 flex items-center gap-1">
@@ -384,22 +385,20 @@ function CategoryForm({
           type="button"
           onClick={save}
           disabled={busy || !canSave}
-          className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonFilled}
         >
-          {busy ? "SAVING…" : "SAVE CATEGORY"}
+          {busy ? "Saving…" : "Save category"}
         </button>
         <button
           type="button"
           onClick={onClose}
           disabled={busy}
-          className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonTextMuted}
         >
-          CANCEL
+          Cancel
         </button>
       </div>
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">✕ {error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </div>
   );
 }
@@ -449,7 +448,7 @@ function ItemForm({
   };
 
   return (
-    <div className="rounded-md border bg-card px-3 py-2.5">
+    <div className="my-1 rounded-md bg-surface p-3 ring-1 ring-border">
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="text"
@@ -458,7 +457,7 @@ function ItemForm({
           placeholder="What was graded — Quiz 1, Homework 2…"
           aria-label="Item name"
           autoFocus
-          className={`${inputBase} min-w-36 flex-1`}
+          className={`${input} min-w-36 flex-1`}
         />
         <input
           type="number"
@@ -468,9 +467,9 @@ function ItemForm({
           step="any"
           placeholder="9"
           aria-label="Score earned"
-          className={`${inputBase} w-16 font-mono text-[12px]`}
+          className={`${input} w-16 tabular-nums`}
         />
-        <span className="font-mono text-[12px] text-muted-foreground">/</span>
+        <span className={meta}>/</span>
         <input
           type="number"
           value={maxScore}
@@ -479,28 +478,26 @@ function ItemForm({
           step="any"
           placeholder="10"
           aria-label="Maximum score"
-          className={`${inputBase} w-16 font-mono text-[12px]`}
+          className={`${input} w-16 tabular-nums`}
         />
         <button
           type="button"
           onClick={save}
           disabled={busy || !canSave}
-          className={`${monoAction} bg-(--accent)/12 text-(--accent) hover:bg-(--accent)/20 disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonFilled}
         >
-          {busy ? "SAVING…" : "SAVE"}
+          {busy ? "Saving…" : "Save"}
         </button>
         <button
           type="button"
           onClick={onClose}
           disabled={busy}
-          className={`${monoAction} text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-60`}
+          className={buttonTextMuted}
         >
-          CANCEL
+          Cancel
         </button>
       </div>
-      {error && (
-        <p className="mt-2 font-mono text-[11px] text-destructive">✕ {error}</p>
-      )}
+      {error && <p className={errorLine}>{error}</p>}
     </div>
   );
 }

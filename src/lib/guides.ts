@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import { todayIso } from "@/lib/schedule";
+import { formatStamp, todayIso } from "@/lib/schedule";
 
 /** Mirrors the backend MASTER_OUTPUT constant (guides.rs). */
 export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
@@ -117,12 +117,5 @@ export function resumeMasterGuide(jobId: number): Promise<number> {
 }
 
 export function formatGeneratedAt(unixSec: number): string {
-  return new Date(unixSec * 1000)
-    .toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-    .toUpperCase();
+  return formatStamp(new Date(unixSec * 1000));
 }
