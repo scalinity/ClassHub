@@ -21,6 +21,7 @@ use tauri::AppHandle;
 
 use crate::db::{EXTRACTS_DIR, INBOX_DIR, WEEKS_DIR, emit_hub_change, now, with_conn};
 use crate::scanner::APP_MANAGED_DIRS;
+use crate::units::WeekReading;
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
 
@@ -341,23 +342,28 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     if !source_abs.is_file() {
         bail!("'{source_rel}' is not on disk — rescan the class");
     }
-    // The week the name carries, else the module it names where this course's
-    // modules are its weeks; the reason says which reading it was.
+    // The one reading the walk also takes (`units::named_week_reading`), so
+    // the row's offer and this destination cannot part; the reason says which
+    // reading it was.
     let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
-    let (week, reading) = match crate::units::week_in_name(name) {
-        Some(week) => (week, format!("Its name carries Week {week}.")),
-        None => {
-            let module = crate::units::module_in_name(name)
-                .filter(|_| modules_are_weeks)
-                .with_context(|| format!("'{name}' carries no week in its name"))?;
-            (
-                module,
-                format!(
-                    "Its name carries Module {module}, and this course divides itself into \
-                     weeks, so Module {module} is Week {module}."
-                ),
-            )
-        }
+    let (week, reading) = match crate::units::named_week_reading(name, modules_are_weeks) {
+        Some((week, WeekReading::Week)) => (week, format!("Its name carries Week {week}.")),
+        Some((module, WeekReading::Module)) => (
+            module,
+            format!(
+                "Its name carries Module {module}, and this course divides itself into \
+                 weeks, so Module {module} is Week {module}."
+            ),
+        ),
+        // A module this course does not read as a week: a row still offering
+        // it was drawn before a scan recorded the course's own modules.
+        None => match crate::units::module_in_name(name) {
+            Some(module) => bail!(
+                "'{name}' names Module {module}, and this course does not read a module as a \
+                 week — rescan to refresh the row"
+            ),
+            None => bail!("'{name}' carries no week in its name"),
+        },
     };
     let (slot, folder_rel) = week_target(conn, class_id, &source_rel, name, week)?;
     let dest_rel = format!("{folder_rel}/{name}");
@@ -2033,7 +2039,7 @@ mod tests {
 
         let applied = crate::scanner::class_dir(&conn, 4).expect("class dir");
         let err = week_filing(&conn, 4, &applied, deck).err().expect("a Part course");
-        assert!(format!("{err:#}").contains("carries no week"), "{err:#}");
+        assert!(format!("{err:#}").contains("does not read a module as a week"), "{err:#}");
         let _ = fs::remove_dir_all(&root);
     }
 }

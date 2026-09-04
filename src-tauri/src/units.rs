@@ -1209,11 +1209,32 @@ pub fn module_in_name(name: &str) -> Option<i64> {
     number_after_word(name, "module")
 }
 
-/// The week a name files under, given how the course reads a module (SPEC
-/// §10): the week its name carries, else the module it names where
-/// `modules_read_as_weeks` says the course's modules are its weeks.
+/// Which reading gave a name its week (SPEC §10): the word `week` in it, or a
+/// module the course reads as a week.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeekReading {
+    Week,
+    Module,
+}
+
+/// The week a name files under, and the reading that found it: the week the
+/// name carries first, else the module it names where `modules_read_as_weeks`
+/// says the course's modules are its weeks. The one decision the walk and the
+/// filing both take, so the row's offer and the click's destination cannot
+/// part; the filing keeps the reading for the card's reason.
+pub fn named_week_reading(name: &str, modules_are_weeks: bool) -> Option<(i64, WeekReading)> {
+    if let Some(week) = week_in_name(name) {
+        return Some((week, WeekReading::Week));
+    }
+    modules_are_weeks
+        .then(|| module_in_name(name))
+        .flatten()
+        .map(|module| (module, WeekReading::Module))
+}
+
+/// The week alone, for the walk (SPEC §10).
 pub fn named_week(name: &str, modules_are_weeks: bool) -> Option<i64> {
-    week_in_name(name).or_else(|| modules_are_weeks.then(|| module_in_name(name)).flatten())
+    named_week_reading(name, modules_are_weeks).map(|(week, _)| week)
 }
 
 /// Whether `Module N` in a file's name is this course's week N. True for a
@@ -2256,6 +2277,13 @@ mod tests {
         assert_eq!(named_week("Module 2 Week 3 lab.R", true), Some(3));
         assert_eq!(named_week("Biostatistics_Module3_Slides_class.pptx", false), None);
         assert_eq!(named_week("Biostatistics_Module3_Slides_class.pptx", true), Some(3));
+        // The reading rides with the week, for the card's reason.
+        assert_eq!(
+            named_week_reading("Biostatistics_Module3_Slides_class.pptx", true),
+            Some((3, WeekReading::Module))
+        );
+        assert_eq!(named_week_reading("Module 2 Week 3 lab.R", true), Some((3, WeekReading::Week)));
+        assert_eq!(named_week_reading("Biostatistics_Module3_Slides_class.pptx", false), None);
 
         let conn = db();
         // A Part-numbered course has no week rows: no reading.
