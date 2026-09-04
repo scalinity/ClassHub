@@ -856,7 +856,7 @@ mod tests {
         // none carry nothing.
         assert_eq!(file.week, None);
         let slides = tree.iter().find(|n| n.name == "Slides").expect("Slides");
-        assert_eq!(slides.week, None, "a folder carries no week");
+        assert_eq!(slides.week, None, "a folder named for a kind of file carries no week");
         let deck = slides.children.iter().find(|n| n.name == "CAI6734_Week2_Foundations.pdf").expect("deck");
         assert_eq!(deck.week, Some(2));
         let module_deck = slides.children.iter().find(|n| n.name.contains("Module3")).expect("module deck");

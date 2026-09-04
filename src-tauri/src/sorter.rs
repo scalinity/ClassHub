@@ -1996,7 +1996,7 @@ mod tests {
         )
         .expect("week");
         let folder = "Coding Material/Week 3 Coding Material";
-        for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", ".DS_Store"] {
+        for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", "R/deep/helpers.R", ".DS_Store"] {
             let path = class_dir.join(folder).join(file);
             fs::create_dir_all(path.parent().expect("parent")).expect("dir");
             fs::write(path, "x").expect("file");
@@ -2010,7 +2010,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("outside-dir"), class_dir.join(folder).join("Linked")).expect("dir link");
 
         let filed = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
-        assert_eq!(filed.cards, 3);
+        assert_eq!(filed.cards, 4);
         let dest = filed.dest_rel;
         assert_eq!(dest, "Weeks/Week 03 — Data Quality/Week 3 Coding Material");
         let mut stmt = conn
@@ -2024,11 +2024,13 @@ mod tests {
             .expect("rows")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        assert_eq!(rows.len(), 3, "one card per file, none for the dot-entry or the symlinks: {rows:?}");
-        assert_eq!(rows[0].0, format!("{folder}/R/sketchpad.R"));
-        assert_eq!(rows[0].1, format!("{dest}/R/sketchpad.R"));
-        assert_eq!(rows[2].0, format!("{folder}/intro.html"));
-        assert_eq!(rows[2].1, format!("{dest}/intro.html"));
+        assert_eq!(rows.len(), 4, "one card per file, none for the dot-entry or the symlinks: {rows:?}");
+        // Two levels deep, the path inside the folder is kept whole.
+        assert_eq!(rows[0].0, format!("{folder}/R/deep/helpers.R"));
+        assert_eq!(rows[0].1, format!("{dest}/R/deep/helpers.R"));
+        assert_eq!(rows[1].1, format!("{dest}/R/sketchpad.R"));
+        assert_eq!(rows[3].0, format!("{folder}/intro.html"));
+        assert_eq!(rows[3].1, format!("{dest}/intro.html"));
         assert!(rows.iter().all(|r| r.2 == "by_name"));
         // The reason names the week folder, which is true of the nested card too.
         assert!(
@@ -2085,12 +2087,19 @@ mod tests {
         let pending: i64 = conn
             .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
             .expect("count");
-        assert_eq!(pending, 3, "the twin's click wrote cards");
+        assert_eq!(pending, 4, "the twin's click wrote cards");
         conn.execute("DELETE FROM move_proposals", []).expect("clear");
         fs::remove_dir_all(class_dir.join("Labs")).expect("drop twin");
 
-        // Where filing lands is never filed; a folder under its week folder is
-        // already counted; a folder with nothing in it has nothing to file.
+        // Where filing lands is never filed, nor is the inbox itself; a folder
+        // under its week folder is already counted; a folder with nothing in it
+        // has nothing to file; a week the course lacks has no folder.
+        let err = week_filing(&conn, 3, &class_dir, INBOX_DIR).err().expect("the inbox");
+        assert!(format!("{err:#}").contains("in the inbox"), "{err:#}");
+        fs::create_dir_all(class_dir.join("Labs/Week 17 Coding")).expect("week 17");
+        fs::write(class_dir.join("Labs/Week 17 Coding/lab.R"), "x").expect("week 17 file");
+        let err = week_filing(&conn, 3, &class_dir, "Labs/Week 17 Coding").err().expect("no week 17");
+        assert!(format!("{err:#}").contains("declares no week 17"), "{err:#}");
         let err = week_filing(&conn, 3, &class_dir, WEEKS_DIR).err().expect("Weeks");
         assert!(format!("{err:#}").contains("where lectures are filed"), "{err:#}");
         let err = week_filing(&conn, 3, &class_dir, "Weeks/Week 03 — Data Quality").err().expect("week folder");
@@ -2149,6 +2158,13 @@ mod tests {
             )
             .expect("row");
         assert!(reasoning.starts_with("Its name carries Module 3, and this course divides itself into weeks"), "{reasoning}");
+
+        // A folder named for a module is a module's folder, not a filing, even
+        // on the course that reads a module-named file as a week.
+        fs::create_dir_all(biostat.join("Module 1")).expect("module folder");
+        fs::write(biostat.join("Module 1/notes.pdf"), "%PDF").expect("module file");
+        let err = week_filing(&conn, 3, &biostat, "Module 1").err().expect("a module folder");
+        assert!(format!("{err:#}").contains("carries no week"), "{err:#}");
 
         let applied = crate::scanner::class_dir(&conn, 4).expect("class dir");
         let err = week_filing(&conn, 4, &applied, deck).err().expect("a Part course");
