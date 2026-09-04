@@ -3,10 +3,12 @@
  *
  * Two focus rings, not one: `--accent` is the class colour, and it only exists
  * inside a class-scoped container. Screens that sit outside one (Settings, the
- * chat sidebar and its settings pane, the dashboard header, the job pill) take
- * the neutral `ring` instead — that is the reason the two variants differ, so
- * reach for the `Neutral` name deliberately rather than letting a copy drift
- * onto the wrong ring. `--accent-ink` and `--wash` are derived from `--accent`
+ * chat sidebar and its settings pane, the dashboard header) take the neutral
+ * `ring` instead — that is the reason the two variants differ, so reach for
+ * the `Neutral` name deliberately rather than letting a copy drift onto the
+ * wrong ring. The job pill sets `--accent` for its running job's colour but
+ * keeps the neutral ring, since that accent falls back to the muted foreground
+ * whenever nothing runs. `--accent-ink` and `--wash` are derived from `--accent`
  * by the base rule in index.css.
  */
 

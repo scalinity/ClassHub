@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { meta } from "@/lib/styles";
 
 /**
- * A section's first row (SPEC §12): the serif title, its count as meta beside
+ * A section's first row (SPEC §12): the headline, its count as meta beside
  * it, text actions far right. No rule under it — the rows below are separated
  * by hairlines because they are a list.
  */
