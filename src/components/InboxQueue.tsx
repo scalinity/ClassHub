@@ -92,7 +92,11 @@ export function inboxShown(
   classId: number,
   drop: DropNotice,
 ): boolean {
-  const s = summarize(data, jobs, classId, drop);
+  return shown(summarize(data, jobs, classId, drop));
+}
+
+/** Absent with nothing to decide, nothing dismissed, nothing running and nothing to say. */
+function shown(s: ReturnType<typeof summarize>): boolean {
   return !(s.count === 0 && s.dismissed.length === 0 && !s.active && !s.notice);
 }
 
@@ -126,10 +130,11 @@ export function InboxQueue({
   // Which jobs the snapshot knows: a card that started a sort holds itself
   // until the job it was handed shows up here.
   const jobIds: ReadonlySet<number> = new Set(jobs.map((j) => j.id));
+  const summary = summarize(data, jobs, classId, drag.notice);
   const { active, lastFailed, proposals, unproposed, dismissed, count, notice } =
-    summarize(data, jobs, classId, drag.notice);
+    summary;
 
-  if (!inboxShown(data, jobs, classId, drag.notice)) return null;
+  if (!shown(summary)) return null;
 
   const dirs = tree ? collectDirs(tree) : null;
   const dirSet: ReadonlySet<string> | null = dirs ? new Set(dirs) : null;
