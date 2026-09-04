@@ -230,9 +230,14 @@ function DirNode({
   // A folder named for a week the course declares files what it holds by one
   // click (SPEC §10): one card per file, under the folder's own name in the
   // week folder. Offered while the folder sits outside that folder and holds
-  // a file; read as proposed while every file under it has a card.
+  // a file; read as proposed while every file under it has a card — the file
+  // row's rule, a card for what is here whatever its destination, since the
+  // inbox is where that card is resolved and the backend refuses a click over
+  // another route's card by name. Derived only where the action is offered.
   const filing = fileCount > 0 ? filingSlot(node, weekSlots) : undefined;
-  const proposed = filesUnder(node).every((p) => pendingSources.has(p));
+  const proposed =
+    filing !== undefined &&
+    filesUnder(node).every((p) => pendingSources.has(p));
   const [proposing, setProposing] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
   const propose = () => {
@@ -277,7 +282,7 @@ function DirNode({
               filing={filing}
               proposed={proposed}
               proposing={proposing}
-              title={`Propose moving its ${fileCount} ${fileCount === 1 ? "file" : "files"} into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them`}
+              title={`Propose moving its files into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them`}
               onPropose={propose}
             />
           </span>
