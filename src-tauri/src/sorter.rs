@@ -418,11 +418,19 @@ fn folder_filing(
          sources of {}.",
         slot.unit_name
     );
+    // One transaction, so the promise holds on the write as on the validation:
+    // an error on the k-th card — the other build holding the write lock past
+    // the busy timeout — rolls the first k-1 back rather than leaving a partial
+    // set behind a row that says NOT PROPOSED. The guard inside is the same
+    // insurance the file path carries, and dropping the transaction on its
+    // bail is what makes it mean something here.
+    let tx = conn.unchecked_transaction()?;
     for (from, to) in &moves {
-        if !upsert_proposal(conn, class_id, "by_name", from, to, &reasoning, None)? {
+        if !upsert_proposal(&tx, class_id, "by_name", from, to, &reasoning, None)? {
             bail!("the proposal for '{from}' was not recorded — another card holds this file");
         }
     }
+    tx.commit()?;
     Ok(dest_folder)
 }
 
