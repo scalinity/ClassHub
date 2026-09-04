@@ -340,6 +340,15 @@ function ProposalCard({
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
         {proposal.reasoning}
       </p>
+      {alternative && (
+        // The case for the second route, in the register the first's reason
+        // uses and in the same order as the routes: the reader choosing
+        // between two folders sees both arguments on any input, which a
+        // tooltip — hover only — would not give the keyboard or touch.
+        <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">
+          {alternative.reasoning}
+        </p>
+      )}
 
       <div className="mt-2.5 flex flex-wrap items-center gap-1">
         <button
@@ -359,7 +368,6 @@ function ProposalCard({
             type="button"
             onClick={() => fileUnderWeek(alternative.destRelPath)}
             disabled={held}
-            title={alternative.reasoning}
             className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
           >
             {busy && filing

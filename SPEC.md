@@ -1236,8 +1236,8 @@ its meetings.
    so a name reading a week the course lacks yields to its folder; none when no reading
    does, none for a destination already under its week folder, and none for a destination
    another pending card already claims, which only the second approval could refuse. The
-   card shows both routes and offers `FILE UNDER WEEK
-   NN` beside APPROVE, its tooltip the by-name card's own reason; the click is the ordinary
+   card shows both routes, each with its reason — Canvas's, then the by-name card's own —
+   and offers `FILE UNDER WEEK NN` beside APPROVE; the click is the ordinary
    approval with the week folder as its destination, the folder picker's path, so the move
    carries its audit row and the file's index row. Canvas's placement stays the default:
    APPROVE still takes Canvas's folder, no sort runs, and because nothing is stored on the
@@ -1336,8 +1336,8 @@ and apply it. Non-negotiable per project owner.
   folder holds a file and reads `PROPOSED — SEE INBOX` once every file under it has a
   card (§10). The inbox card of a Canvas file whose destination names a week shows the
   week folder as a second route under Canvas's — `or → Weeks/Week 04 — …/`, the folder
-  dash-underlined while it has yet to be created — and `FILE UNDER WEEK NN` beside
-  APPROVE, which stays the filled default (§10 step 8).
+  dash-underlined while it has yet to be created — its reason under Canvas's, and `FILE
+  UNDER WEEK NN` beside APPROVE, which stays the filled default (§10 step 8).
  The Add lecture form says
   when a course declares no weeks and keeps ADD LECTURE off, naming the syllabus scan (§7.1).
 
