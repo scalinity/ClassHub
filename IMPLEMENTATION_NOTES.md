@@ -4168,3 +4168,73 @@ an ignored probe test in `guides.rs`, under the code at a6aa6cc:
   src-tauri/Cargo.toml` from the repo root avoids it.
 - Job 311's `Read` calls are one `grep -o` away in `job-311.jsonl`:
   `"name":"Read","input":{"file_path":"…"`.
+
+## Post-M28 — Review fixes (2026-09-04)
+
+A two-agent review of the M28 changeset since a6aa6cc (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, seven warnings and nine suggestions once the two reports were
+merged, one warning raised by both reviewers. Each fix was its own commit
+through `scripts/gate.sh`. What future sessions should know:
+
+- **A folder's cards are written in one transaction** (both reviewers).
+  Validation was all-or-none and the write loop was not: an error on the
+  k-th `upsert_proposal` — the other build holding the write lock past the
+  busy timeout — left k-1 cards behind a row reading NOT PROPOSED. The loop
+  runs under `unchecked_transaction` and commits once; the bail inside,
+  unreachable for a by-name caller today, is kept as insurance and now
+  rolls back.
+- **The reading is decided once.** `named_week` and `week_filing` each
+  spelled week-then-module, equal by coincidence. `units::named_week_reading`
+  returns the week with its `WeekReading`; the walk wraps it, the filing
+  matches the variant for the reason. A module the course does not read as
+  a week is refused in its own words — "does not read a module as a week —
+  rescan to refresh the row" — since a row still offering it was drawn before
+  a scan recorded the course's modules.
+- **A symlinked source is refused.** `is_dir`/`is_file` follow a link; the
+  walk, `collect_files` and the destination guard all refused links and the
+  source did not. Not reachable from a row, since the tree shows no symlink;
+  refused before either route all the same.
+- **The queue is consulted before a card is written.** A folder click ran
+  `upsert_proposal` over every file under it, rewriting a pending chat card
+  for one of them with no word; two sources sharing a leaf name both
+  proposed one destination, the second failing only at approval.
+  `refuse_held` runs in the validation pass on both filing paths: a source
+  held by another route is named, as is a destination another pending card
+  claims; a by-name card of the click's own is still refreshed. The folder
+  row's `PROPOSED` keeps the file row's rule — a card exists for what is
+  here, whatever its destination — rather than matching on the destination,
+  because the inbox is where that card is resolved and the click is now
+  refused by name over it.
+- **A folder's reason names the week folder**, the claim true of a nested
+  card too; `propose_week_filing` returns `WeekFiling { dest_rel, cards }`
+  instead of a `String` that was a file's destination on one branch and a
+  folder's on the other.
+- **The folder row derives `proposed` only where it offers the action**, so
+  `filesUnder` no longer walks every subtree on every render and an empty
+  folder no longer reads as proposed through `[].every`; the tooltip stops
+  counting the cached tree's files, since the click counts the disk.
+- **Tests**: a two-level nested file, the bare inbox folder, a folder naming
+  a week the course lacks, a module-named folder on the course that reads a
+  module-named file as a week, a linked file and a linked folder inside a
+  clicked folder, a linked source of each shape, a chat card left untouched,
+  a twin folder refused; the walk test's message names the rule it checks.
+- **Left as it is.** One propose click is several approve clicks — the price
+  of a confirmation and an audit row per move, now stated in SPEC §10.
+  Approving every card leaves the source folder and its subfolders empty on
+  disk; the row reads `0 FILES` and offers nothing, and removing folders on
+  a per-file approve path would be worse than the skeleton. No cap on the
+  cards one click writes, at a forty-file scale. A module-named file
+  already under a different week's folder still offers its module's week,
+  as a week-named file did after M27: a click and an approval, never a move
+  on its own.
+- **Tests**: 242 pass; `npx tsc --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- perl `q{…}` counts nested braces, so a quoted Rust or TSX fragment with an
+  unbalanced `{` swallows the terminator; heredoc literals (`<<'RS'`) inside
+  the script are what worked.
+- The reviewers' reports arrive in pieces near 4,000 characters each; asking
+  for three-finding batches by number worked, and an agent that promised
+  "follows next" and went idle needed the batch requested again.

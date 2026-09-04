@@ -1207,15 +1207,20 @@ its meetings.
    `Weeks/<week folder>/` with source `by_name` and a reason naming the reading and the
    division that reads the folder; a folder's click proposes one card per file, each
    destined for the folder's own name under the week folder, every destination validated
-   before any card is written, so a collision names the file and writes nothing. The card
-   carries a `BY NAME` chip and is approved, redirected or left like any other, and
-   approval is the ordinary move, so the extract travels with the file and nothing is
-   re-extracted. Explicit by design: Canvas may have placed the file where it is (§7.2), an
-   automatic sort never overrides that, and the module reading is not universal — Design
-   Studio's `Module 2` page spans its weeks 2 and 3 — so a wrong reading costs a dismissal,
-   never a move. Its source is a file or a folder in the tree, never one in `_Inbox/`, so a
-   by-name row never replaces a Canvas card; a source already under its week folder, at
-   any depth, is refused, as are `Weeks/` and a week folder, which are where filing lands.
+   before any card is written and the cards written in one transaction, so a collision
+   names the file and writes nothing. The cards are approved one at a time — the price of
+   a confirmation and an audit row per move, so a folder of several files is that many
+   approvals. The card carries a `BY NAME` chip and is approved, redirected or left like
+   any other, and approval is the ordinary move, so the extract travels with the file and
+   nothing is re-extracted. Explicit by design: Canvas may have placed the file where it
+   is (§7.2), an automatic sort never overrides that, and the module reading is not
+   universal — Design Studio's `Module 2` page spans its weeks 2 and 3 — so a wrong
+   reading costs a dismissal, never a move. Its source is a file or a folder in the tree,
+   never one in `_Inbox/`, so a by-name row never replaces a Canvas card; a source another
+   route's card already holds — chat's — is refused by name rather than retargeted, and so
+   is a destination another pending card claims. A source already under its week folder,
+   at any depth, is refused, as are `Weeks/` and a week folder, which are where filing
+   lands, and a symlink, which the tree never shows.
 
 ## 11. Hub features
 
