@@ -37,6 +37,10 @@ import {
   statusLine,
 } from "@/lib/styles";
 
+/** One item of the scan picker: a text action laid out as a menu row. */
+const pickerItem =
+  "block w-full cursor-pointer rounded-sm px-2 py-1 text-left text-body font-medium text-(--accent-ink) transition-colors hover:bg-(--accent)/10 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60";
+
 function collectFiles(
   nodes: readonly TreeNode[],
   out: TreeNode[] = [],
@@ -224,7 +228,7 @@ export function DeadlinesSection({
             type="button"
             onClick={() => startScan(null)}
             disabled={scanStarting}
-            className="block w-full cursor-pointer rounded-sm px-2 py-1 text-left text-body font-medium text-(--accent-ink) transition-colors hover:bg-(--accent)/10 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+            className={pickerItem}
           >
             Whole class folder
           </button>
@@ -234,7 +238,7 @@ export function DeadlinesSection({
               title={canvasSyllabusPath}
               onClick={() => startScan(canvasSyllabusPath)}
               disabled={scanStarting}
-              className="block w-full cursor-pointer rounded-sm px-2 py-1 text-left text-body font-medium text-(--accent-ink) transition-colors hover:bg-(--accent)/10 focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none disabled:opacity-60"
+              className={pickerItem}
             >
               Canvas syllabus page
             </button>

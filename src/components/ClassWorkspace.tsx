@@ -62,6 +62,10 @@ import {
   statusLine,
 } from "@/lib/styles";
 
+/** A row's title as its one target: a lecture, a note. */
+const rowTitle =
+  "min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-title transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)";
+
 /** Smooth unless the reader asked for less motion. No observer, no effect: a click. */
 function jumpTo(id: string) {
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -317,7 +321,10 @@ export function ClassWorkspace({
       {/* A direct child of main, not of the header: a sticky element only
           sticks within its parent's box. pt-9 is the band's last-row spacing
           when unstuck and the traffic-light clearance when stuck; z-[5] keeps
-          it under the z-10 drag strip so dragging still works over that 36px. */}
+          it under the z-10 drag strip so dragging still works over that 36px.
+          Sections carry scroll-mt-20: stuck, the nav is pt-9 + one body line +
+          pb-3, about 68px, and 80 leaves air under it; if the link row ever
+          wraps at the 920px minimum, raise the offset with it. */}
       <nav aria-label="Sections" className="sticky top-0 z-[5] bg-(--wash) pt-9">
         <div className="mx-auto flex max-w-4xl flex-wrap gap-x-4 gap-y-1 px-8 pb-3">
           {links.map((link) => (
@@ -476,7 +483,7 @@ export function ClassWorkspace({
                       kind: "md",
                     })
                   }
-                  className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-title transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                  className={rowTitle}
                 >
                   {transcript.name.replace(/\.md$/i, "")}
                 </button>
@@ -715,7 +722,7 @@ function ManagedRow({
         type="button"
         title={`View ${name}`}
         onClick={() => onView(name)}
-        className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-title transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
+        className={rowTitle}
       >
         {name}
       </button>
