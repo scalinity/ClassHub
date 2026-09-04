@@ -336,6 +336,12 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
         .and_then(|n| n.to_str())
         .context("the path names no file")?;
     let source_abs = class_dir.join(&source_rel);
+    // The walk shows no symlink and follows none (SPEC §7), so no row offers
+    // one; a filing that followed it would enumerate the link's target and
+    // propose moving what sits outside the class folder.
+    if fs::symlink_metadata(&source_abs).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("'{source_rel}' is a symlink — the tree shows none, and filing follows none");
+    }
     if source_abs.is_dir() {
         return folder_filing(conn, class_id, class_dir, &source_rel, name);
     }
@@ -1946,6 +1952,13 @@ mod tests {
             fs::create_dir_all(path.parent().expect("parent")).expect("dir");
             fs::write(path, "x").expect("file");
         }
+        // A symlink inside the folder — to a file and to a folder outside the
+        // class — is skipped the way the walk skips it, so neither earns a card.
+        fs::write(root.join("outside.R"), "y <- 2").expect("outside file");
+        fs::create_dir_all(root.join("outside-dir")).expect("outside dir");
+        fs::write(root.join("outside-dir/inner.R"), "z <- 3").expect("outside inner");
+        std::os::unix::fs::symlink(root.join("outside.R"), class_dir.join(folder).join("link.R")).expect("link");
+        std::os::unix::fs::symlink(root.join("outside-dir"), class_dir.join(folder).join("Linked")).expect("dir link");
 
         let dest = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
         assert_eq!(dest, "Weeks/Week 03 — Data Quality/Week 3 Coding Material");
@@ -1960,7 +1973,7 @@ mod tests {
             .expect("rows")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        assert_eq!(rows.len(), 3, "one card per file, none for the dot-entry: {rows:?}");
+        assert_eq!(rows.len(), 3, "one card per file, none for the dot-entry or the symlinks: {rows:?}");
         assert_eq!(rows[0].0, format!("{folder}/R/sketchpad.R"));
         assert_eq!(rows[0].1, format!("{dest}/R/sketchpad.R"));
         assert_eq!(rows[2].0, format!("{folder}/intro.html"));
@@ -1994,6 +2007,13 @@ mod tests {
         fs::create_dir_all(class_dir.join("Labs/Week 3 empty")).expect("empty");
         let err = week_filing(&conn, 3, &class_dir, "Labs/Week 3 empty").err().expect("empty");
         assert!(format!("{err:#}").contains("holds no file"), "{err:#}");
+        // A symlinked source, folder or file, is refused before either route.
+        std::os::unix::fs::symlink(root.join("outside-dir"), class_dir.join("Labs/Week 3 Linked")).expect("source link");
+        let err = week_filing(&conn, 3, &class_dir, "Labs/Week 3 Linked").err().expect("linked folder");
+        assert!(format!("{err:#}").contains("is a symlink"), "{err:#}");
+        std::os::unix::fs::symlink(root.join("outside.R"), class_dir.join("Labs/Week 3 notes.R")).expect("file link");
+        let err = week_filing(&conn, 3, &class_dir, "Labs/Week 3 notes.R").err().expect("linked file");
+        assert!(format!("{err:#}").contains("is a symlink"), "{err:#}");
         let _ = fs::remove_dir_all(&root);
     }
 
