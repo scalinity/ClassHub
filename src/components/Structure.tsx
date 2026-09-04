@@ -13,7 +13,6 @@ import { PracticeAction } from "@/components/PracticeAction";
 import { SectionHeading } from "@/components/SectionHeading";
 import { unitScope, type GuideInfo } from "@/lib/guides";
 import { listLectureContributions } from "@/lib/lectures";
-import { formatMonthDay } from "@/lib/schedule";
 import {
   buttonChip,
   buttonIcon,
@@ -417,5 +416,9 @@ function provenance(units: Unit[]): string {
 function formatUnitDate(iso: string): string {
   const [year, month, day] = iso.split("-").map(Number);
   if (!year || !month || !day) return "";
-  return formatMonthDay(new Date(year, month - 1, day));
+  // Never the year: the list is one term's and the column is 3rem wide.
+  return new Date(year, month - 1, day).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
 }
