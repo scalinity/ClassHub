@@ -2330,6 +2330,13 @@ mod tests {
         );
         let alt = week_alternative(&slots, true, "Coding Material/Week 3 Coding Material/Intro.Rmd").expect("nested");
         assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 Coding Material/Intro.Rmd");
+        // A module-named folder is a module's folder, on the card as on the
+        // row, even where the course reads a module-named file as a week.
+        assert_eq!(week_alternative(&slots, true, "Module 3/deck.pptx"), None);
+        // The outermost week-bearing folder decides, and everything inside it
+        // travels, as that folder's row would file it.
+        let alt = week_alternative(&slots, true, "Week 1 Materials/Week 3 Slides/x.pdf").expect("the outermost");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 01 — Introduction/Week 1 Materials/Week 3 Slides/x.pdf");
         // The file's own week wins over its folder's.
         let alt = week_alternative(&slots, true, "Week 1 - Introduction/Week 3 reading.pdf").expect("the file first");
         assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf");
