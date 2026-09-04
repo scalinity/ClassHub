@@ -1232,8 +1232,11 @@ its meetings.
    reads modules as weeks — landing at `Weeks/<week folder>/<name>`; else the first folder
    on Canvas's path whose name carries a week (Design Studio's `Week 1 - Introduction`),
    landing under that folder's own name inside the week folder, as a folder's click files
-   its contents. None for a week the course does not declare, and none for a destination
-   already under its week folder. The card shows both routes and offers `FILE UNDER WEEK
+   its contents. The first of those readings that names a week the course declares decides,
+   so a name reading a week the course lacks yields to its folder; none when no reading
+   does, none for a destination already under its week folder, and none for a destination
+   another pending card already claims, which only the second approval could refuse. The
+   card shows both routes and offers `FILE UNDER WEEK
    NN` beside APPROVE, its tooltip the by-name card's own reason; the click is the ordinary
    approval with the week folder as its destination, the folder picker's path, so the move
    carries its audit row and the file's index row. Canvas's placement stays the default:

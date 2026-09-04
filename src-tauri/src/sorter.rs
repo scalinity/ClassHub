@@ -531,9 +531,11 @@ fn week_target(
 /// first, through the reading the row takes (`units::named_week_reading`),
 /// landing at `Weeks/<week folder>/<name>`; else the first folder on Canvas's
 /// path whose name carries a week, landing under that folder's own name inside
-/// the week folder, the way a folder's row files its contents. None for a week
-/// the course does not declare, and for a destination already under its week
-/// folder. Pure over the course's slots, so `sort_state` reads the rows once
+/// the week folder, the way a folder's row files its contents. The first of
+/// those readings that names a week the course declares decides, so a name
+/// reading a week the course lacks yields to its folder, as the folder's own
+/// row would file it; none when no reading does, and none for a destination
+/// already under its week folder. Pure over the course's slots, so `sort_state` reads the rows once
 /// per queue. The click that takes it is an approval, not a proposal:
 /// `resolve_proposal` runs `validate_dest` and nothing else, so `sort_state`
 /// withholds an alternative another pending card already claims — the half of
@@ -544,22 +546,24 @@ pub(crate) fn week_alternative(
     dest_rel: &str,
 ) -> Option<WeekAlternative> {
     let (folder, name) = dest_rel.rsplit_once('/').unwrap_or(("", dest_rel));
-    let (week, reading, tail) = match crate::units::named_week_reading(name, modules_are_weeks) {
-        Some((week, reading)) => (week, reading_words(week, reading), name.to_string()),
-        None => {
-            let segments: Vec<&str> = folder.split('/').collect();
-            let (at, week) = segments
-                .iter()
-                .enumerate()
-                .find_map(|(i, s)| crate::units::week_in_name(s).map(|week| (i, week)))?;
-            (
-                week,
-                format!("Canvas files it under \"{}\", a folder named for Week {week}.", segments[at]),
-                format!("{}/{name}", segments[at..].join("/")),
-            )
-        }
-    };
-    let slot = slots.iter().find(|slot| slot.week == week)?;
+    let segments: Vec<&str> = folder.split('/').collect();
+    let named = crate::units::named_week_reading(name, modules_are_weeks)
+        .map(|(week, reading)| (week, reading_words(week, reading), name.to_string()));
+    let from_folder = segments.iter().enumerate().filter_map(|(at, segment)| {
+        let week = crate::units::week_in_name(segment)?;
+        Some((
+            week,
+            format!("Canvas files it under \"{segment}\", a folder named for Week {week}."),
+            format!("{}/{name}", segments[at..].join("/")),
+        ))
+    });
+    let (week, reading, tail, slot) = named
+        .into_iter()
+        .chain(from_folder)
+        .find_map(|(week, reading, tail)| {
+            let slot = slots.iter().find(|slot| slot.week == week)?;
+            Some((week, reading, tail, slot))
+        })?;
     let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
     if dest_rel.starts_with(&format!("{folder_rel}/")) {
         return None;
@@ -2323,8 +2327,15 @@ mod tests {
         // The file's own week wins over its folder's.
         let alt = week_alternative(&slots, true, "Week 1 - Introduction/Week 3 reading.pdf").expect("the file first");
         assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf");
-        // A week the course lacks, a name and folder carrying none, a
-        // destination already under its week folder at any depth, no weeks.
+        // A name reading a week the course lacks yields to its folder, as the
+        // folder's own row would file it; so does a folder reading one.
+        let alt = week_alternative(&slots, true, "Week 1 - Introduction/Week 9 reading.pdf").expect("the folder's week");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 01 — Introduction/Week 1 - Introduction/Week 9 reading.pdf");
+        let alt = week_alternative(&slots, true, "Week 9 Materials/Week 3 Slides/x.pdf").expect("the inner folder's week");
+        assert_eq!(alt.dest_rel_path, "Weeks/Week 03 — Data Quality/Week 3 Slides/x.pdf");
+        // A week the course lacks with nothing to yield to, a name and folder
+        // carrying none, a destination already under its week folder at any
+        // depth, no weeks.
         assert_eq!(week_alternative(&slots, true, "Reading Material/Week 9 reading.pdf"), None);
         assert_eq!(week_alternative(&slots, true, "AI Design Project/Guidelines.pdf"), None);
         assert_eq!(week_alternative(&slots, true, "Weeks/Week 03 — Data Quality/Week 3 reading.pdf"), None);
