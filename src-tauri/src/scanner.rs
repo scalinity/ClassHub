@@ -39,9 +39,12 @@ pub struct TreeNode {
     /// top-level ones, which are the rows that carry a guide.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labelled: bool,
-    /// The week the file's name carries (`units::week_in_name`), for its
-    /// Materials row to offer the week's folder (SPEC §10). Absent on a folder
-    /// and on a file named for no week.
+    /// The week the name files under (SPEC §10) — the week it carries, or on a
+    /// course that reads modules as weeks the module it names
+    /// (`units::named_week`) — for the Materials row to offer the week's
+    /// folder. A folder carries the week its own name does, since its files
+    /// are filed together; a week folder under `Weeks/`, which is where filing
+    /// lands, carries none. Absent on a name that carries no week.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub week: Option<i64>,
     pub children: Vec<TreeNode>,
@@ -98,18 +101,19 @@ pub fn scan_class(
     db: &std::sync::Mutex<Connection>,
     class_id: i64,
 ) -> Result<Scan> {
-    let (dir, existing) = {
+    let (dir, existing, modules_are_weeks) = {
         let conn = crate::db::lock(db);
         let dir = class_dir(&conn, class_id)?;
         if !dir.is_dir() {
             bail!("class folder not found: {}", dir.display());
         }
         let existing = load_existing(&conn, class_id)?;
-        (dir, existing)
+        let modules_are_weeks = crate::units::modules_read_as_weeks(&conn, class_id)?;
+        (dir, existing, modules_are_weeks)
     };
 
     let mut files = Vec::new();
-    let tree = walk_dir(&dir, &dir, 0, &existing, &mut files)
+    let tree = walk_dir(&dir, &dir, 0, &existing, modules_are_weeks, &mut files)
         .with_context(|| format!("scanning {}", dir.display()))?;
 
     let seen: HashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
@@ -452,6 +456,7 @@ fn walk_dir(
     class_dir: &Path,
     depth: usize,
     existing: &ExistingIndex,
+    modules_are_weeks: bool,
     out: &mut Vec<ScannedFile>,
 ) -> Result<Vec<TreeNode>> {
     let mut dirs = Vec::new();
@@ -478,8 +483,11 @@ fn walk_dir(
             .into_owned();
 
         if file_type.is_dir() {
-            let children = walk_dir(&path, class_dir, depth + 1, existing, out)?;
+            let children = walk_dir(&path, class_dir, depth + 1, existing, modules_are_weeks, out)?;
             let labelled = crate::units::label_number(&name).is_some();
+            // A week folder is where filing lands, whatever its name carries.
+            let week_folder = depth == 1 && dir.file_name().is_some_and(|d| d == crate::db::WEEKS_DIR);
+            let week = if week_folder { None } else { crate::units::week_in_name(&name) };
             dirs.push(TreeNode {
                 name,
                 rel_path,
@@ -488,7 +496,7 @@ fn walk_dir(
                 size: None,
                 extract_rel_path: None,
                 labelled,
-                week: None,
+                week,
                 children,
             });
         } else {
@@ -518,7 +526,7 @@ fn walk_dir(
                 mtime,
                 kind: kind.clone(),
             });
-            let week = crate::units::week_in_name(&name);
+            let week = crate::units::named_week(&name, modules_are_weeks);
             files.push(TreeNode {
                 name,
                 rel_path,
@@ -824,14 +832,18 @@ mod tests {
     /// The tree marks a folder named as a division is — a kind and a number —
     /// and not one named for a kind of file or for the calendar: `Module 1`
     /// is a guide's scope in the Materials tree, `Slides` and `Weeks` are
-    /// storage (SPEC §8.3). A file named for a week carries it, for its row
-    /// to offer the week folder (SPEC §10); a folder never does.
+    /// storage (SPEC §8.3). A file or a folder named for a week carries it,
+    /// for its row to offer the week folder (SPEC §10); a week folder under
+    /// `Weeks/`, where filing lands, carries none, and a module in a name is
+    /// no week on a Part-numbered course.
     #[test]
     fn the_walk_marks_a_labelled_folder_and_a_file_named_for_a_week() {
         let (db, dir) = part_numbered_class("classhub-scan-labelled");
         write(dir.join("Module 1/notes.pdf"), "%PDF");
         write(dir.join("Slides/deck.pdf"), "%PDF");
         write(dir.join("Slides/CAI6734_Week2_Foundations.pdf"), "%PDF");
+        write(dir.join("Slides/Biostatistics_Module3_Slides_class.pptx"), "PK");
+        write(dir.join("Coding Material/Week 3 Coding Material/lab.R"), "x <- 1");
         write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF");
         let tree = scan_class(&db, 4).expect("scan").tree;
         let labelled = |name: &str| tree.iter().find(|n| n.name == name).expect(name).labelled;
@@ -847,7 +859,47 @@ mod tests {
         assert_eq!(slides.week, None, "a folder carries no week");
         let deck = slides.children.iter().find(|n| n.name == "CAI6734_Week2_Foundations.pdf").expect("deck");
         assert_eq!(deck.week, Some(2));
+        let module_deck = slides.children.iter().find(|n| n.name.contains("Module3")).expect("module deck");
+        assert_eq!(module_deck.week, None, "a Part-numbered course reads no module as a week");
+        // A folder named for a week carries it, and its files carry their own
+        // names' — none here; the week folder itself carries none.
+        let coding = &tree.iter().find(|n| n.name == "Coding Material").expect("Coding Material").children[0];
+        assert_eq!((coding.name.as_str(), coding.dir, coding.week), ("Week 3 Coding Material", true, Some(3)));
+        assert_eq!(coding.children[0].week, None);
+        let weeks = tree.iter().find(|n| n.name == "Weeks").expect("Weeks");
+        assert_eq!(weeks.week, None);
+        let week_folder = &weeks.children[0];
+        assert_eq!((week_folder.name.as_str(), week_folder.week), ("Week 04", None), "a week folder is where filing lands");
         let _ = fs::remove_dir_all(dir.parent().expect("root"));
+    }
+
+    /// On a course whose divisions are weeks and that declares no module, a
+    /// file named for a module carries that week (SPEC §10): Biostatistics'
+    /// `Module3` deck is its Week 3 deck. A folder so named is a module's
+    /// folder and carries none.
+    #[test]
+    fn the_walk_reads_a_module_as_a_week_where_the_course_does() {
+        let (db, applied) = part_numbered_class("classhub-scan-module-week");
+        let root = applied.parent().expect("root").to_path_buf();
+        let folder: String = crate::db::lock(&db)
+            .query_row("SELECT folder_name FROM classes WHERE id = 3", [], |row| row.get(0))
+            .expect("class");
+        let dir = root.join(folder);
+        crate::db::lock(&db)
+            .execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, number, source)
+                 VALUES (3, 1, 'week', 'Week 3 — Data Quality', 3, 'syllabus')",
+                [],
+            )
+            .expect("week");
+        write(dir.join("Slides/Biostatistics_Module3_Slides_class.pptx"), "PK");
+        write(dir.join("Module 1/notes.pdf"), "%PDF");
+        let tree = scan_class(&db, 3).expect("scan").tree;
+        let deck = &tree.iter().find(|n| n.name == "Slides").expect("Slides").children[0];
+        assert_eq!(deck.week, Some(3));
+        let module = tree.iter().find(|n| n.name == "Module 1").expect("Module 1");
+        assert_eq!((module.labelled, module.week), (true, None), "a module folder is a guide scope, not a filing");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A transcript with a session document and no contribution row — one

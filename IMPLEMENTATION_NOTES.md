@@ -4015,3 +4015,156 @@ raised by both reviewers. Each was addressed as its own commit through
   came in its own message.
 - `TaskOutput` does not know a named teammate; their replies are delivered
   as messages, so a turn has to end for them to arrive.
+
+## M28 — Named for the week (2026-09-03)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database
+(`user_version` 13, 36 file rows, 4 contributions, 9 guides, jobs at 311,
+audit at 165, no active job, every `canvas_synced_at` 2026-09-03) through
+an ignored probe test in `guides.rs`, under the code at a6aa6cc:
+
+- **The Structure rows.** `unit_context` refused for units 25, 42 and 9 —
+  nothing filed, no folder, nothing distilled — so those rows offer nothing.
+  Unit 37: a five-entry manifest (two transcripts, both decks, the notebook),
+  the three files in the files block, two notes; row 7 stale. Unit 8: a
+  one-entry manifest, the transcript; an empty files block; the one note;
+  row 9 fresh. Stale from before this milestone: Biostatistics' `Module 1`
+  guide (row 1) and its Semester Master (row 2).
+- **Outside `Weeks/`, across all four trees:** a week on a folder twice, both
+  Biostatistics — `Coding Material/Week 3 Coding Material/` (three files) and
+  `Module 1/Reading Material/Week 1/` (one) — and a module in a file's name
+  five times, all Biostatistics decks: `Slides/…Module2…`, `Slides/…Module3…`,
+  `Module 1/Slides/…Module1…class2.pptx` and its `_correction`, and
+  `Module 2/Slides/…Module2…v4 sharing before class.pptx`. Fundamentals,
+  Design Studio and Applied: none.
+- **The Week 3 guide's manifest** names the transcript alone. Job 311's log
+  holds seven distinct `Read`s beyond its own output: the corpus note and six
+  extracts — the two `Reading Material/Week 3 …` readings, the three
+  `Coding Material/Week 3 Coding Material/` files and
+  `Slides/Biostatistics_Module3_Slides_class.pptx` — reached through
+  `Glob **/*Week 3*` and `Glob *`. Six, not the kickoff's five: the coding
+  folder holds an `.Rmd`, its `.html` and an `.R`.
+- **`week_in_name` / `label_number`:** `Week 3 Coding Material` 3 / 3; each
+  of the three coding files none / none; each `ModuleN` deck none / none;
+  `Module 1` none / 1; `Week 1` 1 / 1; the Week 3 reading 3 / 3; `Week 03 —
+  Data Exploration, Processing, and Quality` 3 / 3; `Weeks`, `Coding
+  Material` and `Reading Material` none / none.
+- **The forms:** Fundamentals Sept 8 → week 3, unit 25, dated; Design Studio
+  Sept 9 → week 3, unit 42; Biostatistics Sept 10 → week 4, unit 9; Applied
+  Sept 8 → no default among 16 undated slots.
+- **What "Module" means on Canvas**, read from the mirrored Pages:
+  Biostatistics' `Module 2: Study Designs` opens "This week", `Module 3:
+  Data Exploration…` "In this week's module", and the Module 3 deck's title
+  slide is dated 9/3/2026; Fundamentals' `Module 1`–`Module 4` are
+  Introduction, Responsible AI, Biomedical Data Foundations and Data
+  Quality — its Weeks 1–4 by name, the fourth posted 2026-09-01 ahead of its
+  week; Design Studio's `Module 2: HiPerGator and NaviGator` spans what its
+  syllabus calls Weeks 2 and 3 (NaviGator I and II). Applied keeps no
+  Module page.
+
+### What was built
+
+- **A module reads as a week where the course says so.**
+  `units::module_in_name` reads `Module N` through the scanner
+  `week_in_name` uses (`number_after_word`); `units::modules_read_as_weeks`
+  is true for a course with week rows and no numbered module row; and
+  `units::named_week` is the week a name files under — the week word first,
+  else the module where the course reads it so. The walk takes the course's
+  reading once per scan and sets `TreeNode.week` on a file through it.
+- **A folder carries its week.** The walk sets `week` on a folder whose name
+  carries one and leaves it unset on `Weeks/`'s own children — the week
+  folders, where filing lands. A folder named for a module carries none: it
+  is a module's folder and a guide scope (`labelled`).
+- **`week_filing` takes a folder.** `folder_filing` refuses `Weeks/`, a week
+  folder, an inbox folder and an empty one; walks the folder's files by the
+  scanner's rule — no dot-entries, no symlinks (`collect_files`); validates
+  every destination `Weeks/<week folder>/<folder name>/<path inside>`
+  through `validate_dest` before writing; then upserts one by-name card per
+  file with a reason naming the folder and the division. `week_target` is
+  the slot-and-prefix check both paths share. A file's reason says which
+  reading it was: "Its name carries Week 3." or "Its name carries Module 3,
+  and this course divides itself into weeks, so Module 3 is Week 3."
+- **The folder row.** `FileTree`'s `filingSlot` and `FilingAction` serve
+  both rows. `DirNode` offers `FILE UNDER WEEK NN` in a hover cluster while
+  the folder holds a file, sits outside its week folder and the course
+  declares the week, the tooltip naming the file count, the destination and
+  the division; it reads `PROPOSED — SEE INBOX` once every file under it
+  (`filesUnder`) holds a pending card, and offers the click again while some
+  do not. A refusal is a line under the row, as on a file row.
+- SPEC §8.5, §10 step 7, §12, §13 and §14 state the design.
+
+### Verified
+
+- `cargo test`: 242 pass, four new — the module shapes with `named_week`,
+  and `modules_read_as_weeks` across a Part course, a week course with a
+  filler row and one that declares a module; the walk's module reading on a
+  week course beside a module folder; a folder click's one card per file
+  with the dot-entry skipped, the all-or-none collision, and the `Weeks`,
+  week-folder, already-under and empty refusals; a module-named deck
+  proposed with the module reason on a week course and refused on a Part
+  course — and one extended: the walk marks the coding folder's week, its
+  files' none, the Part course's module deck none, and the week folder's
+  none. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 67849) beside the installed app a6aa6cc; the
+  launch scan enqueued nothing. The Biostatistics tree offered `FILE UNDER
+  WEEK 03` on `Week 3 Coding Material` — a folder row, its three files
+  offering nothing — on the Module 3 deck and on the two Week 3 readings;
+  `FILE UNDER WEEK 01` on `Module 1/Reading Material/Week 1/` and the two
+  Module 1 decks; `FILE UNDER WEEK 02` on the two Module 2 decks and the two
+  Week 2 readings; nothing on `Module 1`, `Module 2`, `Weeks`, the week
+  folder or `Coding Material`. Fundamentals, Design Studio and Applied
+  offered nothing.
+- **Four clicks, six cards.** The folder's click put three `BY NAME` cards
+  in the queue (proposals 42–44: "Its folder is named for Week 3. Under
+  Weeks/Week 03 — …/Week 3 Coding Material, it counts among the sources of
+  Week 3 — …") and its row read `PROPOSED — SEE INBOX`; the two readings
+  (45, 46: "Its name carries Week 3.") and the deck (47: "Its name carries
+  Module 3, and this course divides itself into weeks, so Module 3 is Week
+  3."). Six APPROVEs: the six files under `Weeks/Week 03 — Data Exploration,
+  Processing, and Quality/`, the coding files under `Week 3 Coding
+  Material/` there, every extract moved with them — the deck's `.pptx.md`,
+  `.pptx.pdf` and `.sha256` sidecar included — files rows 26, 28, 29, 33, 34
+  and 35 keeping their ids with fresh extracts, audit rows 166–171
+  (`sort.move`, `proposedBy: by_name`), jobs still at 311. The emptied
+  `Coding Material/Week 3 Coding Material/` stays, holding `.RData` and
+  `.Rhistory`, and offers nothing; `Coding Material` reads `0 FILES`.
+- `unit_context(3, 8)` on a fresh backup: seven entries — the transcript
+  and the six files, the six in the files block with the deck's converted
+  twin named for re-inspection, the one note. The Week 3 Structure row reads
+  `STALE — RESYNTHESIZE`, which is the truth and is left so.
+- Not run: any chat turn, any digest, any guide. Session cost: nothing.
+
+### Left as it is
+
+- **The Sept 8–10 lectures.** Asked before the filing phase: none existed
+  (today is Sept 3). Fundamentals' Week 3, Applied's Week 3 feeding Part I
+  (row 7 stale), Design Studio's Week 3 and Biostatistics' Week 4 wait for
+  their recordings; every form resolves its day (Phase 0). §1 gains no cost
+  this milestone.
+- The Week 3 guide (row 9) reads stale over seven entries it already read
+  six of; a rebuild is a button away and outside the budget.
+- Biostatistics' `Module 1` guide and Semester Master were stale before this
+  milestone and stay so; the Weeks 1 and 2 readings and the Module 1 and 2
+  decks offer their weeks and were not clicked.
+- Design Studio's three Canvas cards (25–27) wait in its inbox from an
+  earlier sync.
+- A folder's `PROPOSED` is derived from its files' cards, so a folder some
+  of whose files were approved offers the click again, which proposes the
+  rest.
+
+### Gotchas
+
+- `screencapture -l` takes the first field of `winid`'s line, the window
+  number; `focus <name>` scrolls a row into view, and its focus-within
+  reveals the hover cluster, which is how a row's action was photographed.
+- The `PROPOSED` label and the `BY NAME` chip are static text: `ax text`,
+  not `ax dump`.
+- perl `s{}{}` with a brace delimiter breaks on an unescaped `}` in the
+  replacement; a script file with `~` delimiters, or `index`/`substr`
+  splicing, is what worked for multi-line Rust and TSX edits.
+- A `cd src-tauri` persists across Bash calls; `cargo test --manifest-path
+  src-tauri/Cargo.toml` from the repo root avoids it.
+- Job 311's `Read` calls are one `grep -o` away in `job-311.jsonl`:
+  `"name":"Read","input":{"file_path":"…"`.

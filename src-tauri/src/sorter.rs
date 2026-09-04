@@ -308,7 +308,11 @@ pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
 /// `Slides/`, where Canvas filed it, and Part I reads it only once it is under
 /// `Weeks/Week 02/` (SPEC §8.5); Canvas's placement outranks an automatic sort
 /// (SPEC §7.2), so the proposal exists because the row was clicked. Approval
-/// is the ordinary move, extract and all. Returns the destination.
+/// is the ordinary move, extract and all. A folder named for a week files its
+/// contents the same way, one card per file (`folder_filing`); a file named
+/// for a module files under that week where the course reads its modules as
+/// weeks (`units::modules_read_as_weeks`), and the card says so. Returns the
+/// destination — the file's, or the folder's under the week folder.
 pub fn propose_week_filing(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<String> {
     let dest = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
@@ -323,31 +327,43 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     // An inbox file is the sorter's, and Canvas may have placed it: the row
     // never offers one, and a caller that asked would be replacing a Canvas
     // card by a route the record does not argue for (`upsert_proposal`).
-    if source_rel.starts_with(&format!("{INBOX_DIR}/")) {
+    if source_rel == INBOX_DIR || source_rel.starts_with(&format!("{INBOX_DIR}/")) {
         bail!("'{source_rel}' is in the inbox — its card there is the way to file it");
     }
     let name = Path::new(&source_rel)
         .file_name()
         .and_then(|n| n.to_str())
         .context("the path names no file")?;
-    if !class_dir.join(&source_rel).is_file() {
+    let source_abs = class_dir.join(&source_rel);
+    if source_abs.is_dir() {
+        return folder_filing(conn, class_id, class_dir, &source_rel, name);
+    }
+    if !source_abs.is_file() {
         bail!("'{source_rel}' is not on disk — rescan the class");
     }
-    let week = crate::units::week_in_name(name)
-        .with_context(|| format!("'{name}' carries no week in its name"))?;
-    let slot = crate::units::slot_for_week(conn, class_id, week)?
-        .with_context(|| format!("this course declares no week {week}"))?;
-    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
-    // Already under the week's folder at any depth: the division counts it
-    // there (SPEC §8.5), and lifting it out of a subfolder is not a filing.
-    // The row hides the action by the same rule; this is the enforcement.
-    if source_rel.starts_with(&format!("{folder_rel}/")) {
-        bail!("'{name}' is already under {folder_rel}");
-    }
+    // The week the name carries, else the module it names where this course's
+    // modules are its weeks; the reason says which reading it was.
+    let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
+    let (week, reading) = match crate::units::week_in_name(name) {
+        Some(week) => (week, format!("Its name carries Week {week}.")),
+        None => {
+            let module = crate::units::module_in_name(name)
+                .filter(|_| modules_are_weeks)
+                .with_context(|| format!("'{name}' carries no week in its name"))?;
+            (
+                module,
+                format!(
+                    "Its name carries Module {module}, and this course divides itself into \
+                     weeks, so Module {module} is Week {module}."
+                ),
+            )
+        }
+    };
+    let (slot, folder_rel) = week_target(conn, class_id, &source_rel, name, week)?;
     let dest_rel = format!("{folder_rel}/{name}");
     validate_dest(class_dir, &source_rel, &dest_rel)?;
     let reasoning = format!(
-        "Its name carries Week {week}. Under {folder_rel}, it counts among the sources of {}.",
+        "{reading} Under {folder_rel}, it counts among the sources of {}.",
         slot.unit_name
     );
     // Written or refused, never silently kept out: a row saying PROPOSED over
@@ -356,6 +372,101 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
         bail!("the proposal for '{name}' was not recorded — another card holds this file");
     }
     Ok(dest_rel)
+}
+
+/// A folder named for a week files what it holds: one card per file, each
+/// destined for the folder's own name under the week folder, so the
+/// professor's grouping survives and a division, which counts a file under
+/// its week folder at any depth (SPEC §8.5), reads them all. Every destination
+/// is validated before any card is written, so a collision names the file and
+/// writes nothing. `Weeks/` and a week folder are where filing lands and are
+/// refused; so is a folder holding no file.
+fn folder_filing(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    name: &str,
+) -> Result<String> {
+    if source_rel == WEEKS_DIR {
+        bail!("'{WEEKS_DIR}' is where lectures are filed, not something to file");
+    }
+    if source_rel
+        .strip_prefix(&format!("{WEEKS_DIR}/"))
+        .is_some_and(|rest| !rest.contains('/'))
+    {
+        bail!("'{name}' is a week folder — filing lands there");
+    }
+    let week = crate::units::week_in_name(name)
+        .with_context(|| format!("'{name}' carries no week in its name"))?;
+    let (slot, folder_rel) = week_target(conn, class_id, source_rel, name, week)?;
+    let dest_folder = format!("{folder_rel}/{name}");
+    let mut inside = Vec::new();
+    collect_files(&class_dir.join(source_rel), "", &mut inside)?;
+    if inside.is_empty() {
+        bail!("'{name}' holds no file to file");
+    }
+    let moves: Vec<(String, String)> = inside
+        .iter()
+        .map(|path| (format!("{source_rel}/{path}"), format!("{dest_folder}/{path}")))
+        .collect();
+    for (from, to) in &moves {
+        validate_dest(class_dir, from, to).with_context(|| format!("'{from}'"))?;
+    }
+    let reasoning = format!(
+        "Its folder is named for Week {week}. Under {dest_folder}, it counts among the \
+         sources of {}.",
+        slot.unit_name
+    );
+    for (from, to) in &moves {
+        if !upsert_proposal(conn, class_id, "by_name", from, to, &reasoning, None)? {
+            bail!("the proposal for '{from}' was not recorded — another card holds this file");
+        }
+    }
+    Ok(dest_folder)
+}
+
+/// The week folder a filing lands in, refused for a week the course does not
+/// declare and for a source already under that folder at any depth — the
+/// division counts it there (SPEC §8.5), and lifting it out of a subfolder is
+/// not a filing. The row hides the action by the same rule; this is the
+/// enforcement.
+fn week_target(
+    conn: &Connection,
+    class_id: i64,
+    source_rel: &str,
+    name: &str,
+    week: i64,
+) -> Result<(crate::units::WeekSlot, String)> {
+    let slot = crate::units::slot_for_week(conn, class_id, week)?
+        .with_context(|| format!("this course declares no week {week}"))?;
+    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+    if source_rel.starts_with(&format!("{folder_rel}/")) {
+        bail!("'{name}' is already under {folder_rel}");
+    }
+    Ok((slot, folder_rel))
+}
+
+/// The files under a folder, as paths relative to it, by the scanner's rule:
+/// no dot-entries, no symlinks. Sorted, so the cards land in one order.
+fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || entry.file_type()?.is_symlink() {
+            continue;
+        }
+        let rel = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        if entry.file_type()?.is_dir() {
+            collect_files(&entry.path(), &rel, out)?;
+        } else {
+            out.push(rel);
+        }
+    }
+    Ok(())
 }
 
 fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {
@@ -1797,6 +1908,124 @@ mod tests {
             )
             .expect("count");
         assert_eq!(pending, 1, "one pending row per source");
+        let _ = fs::remove_dir_all(&root);
+    }
+    /// SPEC §10: a folder named for a week files what it holds — one card per
+    /// file, under the folder's own name inside the week folder, all or none —
+    /// while `Weeks/`, a week folder and an empty folder are refused.
+    #[test]
+    fn a_folder_named_for_a_week_files_its_contents_one_card_per_file() {
+        let root = std::env::temp_dir().join(format!("classhub-folder-filing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 3 — Data Quality', 3, '2026-09-03', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        let folder = "Coding Material/Week 3 Coding Material";
+        for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", ".DS_Store"] {
+            let path = class_dir.join(folder).join(file);
+            fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            fs::write(path, "x").expect("file");
+        }
+
+        let dest = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
+        assert_eq!(dest, "Weeks/Week 03 — Data Quality/Week 3 Coding Material");
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_rel_path, dest_rel_path, source, reasoning FROM move_proposals
+                 WHERE class_id = 3 AND status = 'pending' ORDER BY source_rel_path",
+            )
+            .expect("stmt");
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(rows.len(), 3, "one card per file, none for the dot-entry: {rows:?}");
+        assert_eq!(rows[0].0, format!("{folder}/R/sketchpad.R"));
+        assert_eq!(rows[0].1, format!("{dest}/R/sketchpad.R"));
+        assert_eq!(rows[2].0, format!("{folder}/intro.html"));
+        assert_eq!(rows[2].1, format!("{dest}/intro.html"));
+        assert!(rows.iter().all(|r| r.2 == "by_name"));
+        assert!(
+            rows[0].3.contains("named for Week 3") && rows[0].3.contains("Week 3 — Data Quality"),
+            "{}",
+            rows[0].3
+        );
+
+        // A collision at one destination refuses the click and writes nothing.
+        conn.execute("DELETE FROM move_proposals", []).expect("clear");
+        fs::create_dir_all(class_dir.join(&dest)).expect("dest dir");
+        fs::write(class_dir.join(&dest).join("intro.Rmd"), "already here").expect("collision");
+        let err = week_filing(&conn, 3, &class_dir, folder).err().expect("collision");
+        assert!(format!("{err:#}").contains("intro.Rmd") && format!("{err:#}").contains("already exists"), "{err:#}");
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(pending, 0, "a refused click wrote cards");
+
+        // Where filing lands is never filed; a folder under its week folder is
+        // already counted; a folder with nothing in it has nothing to file.
+        let err = week_filing(&conn, 3, &class_dir, WEEKS_DIR).err().expect("Weeks");
+        assert!(format!("{err:#}").contains("where lectures are filed"), "{err:#}");
+        let err = week_filing(&conn, 3, &class_dir, "Weeks/Week 03 — Data Quality").err().expect("week folder");
+        assert!(format!("{err:#}").contains("is a week folder"), "{err:#}");
+        let err = week_filing(&conn, 3, &class_dir, &dest).err().expect("already under");
+        assert!(format!("{err:#}").contains("already under"), "{err:#}");
+        fs::create_dir_all(class_dir.join("Labs/Week 3 empty")).expect("empty");
+        let err = week_filing(&conn, 3, &class_dir, "Labs/Week 3 empty").err().expect("empty");
+        assert!(format!("{err:#}").contains("holds no file"), "{err:#}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// SPEC §10: a file named for a module files under that week on a course
+    /// whose divisions are weeks and that declares no module, with the reason
+    /// saying so; a Part-numbered course reads no module as a week.
+    #[test]
+    fn a_module_in_a_name_is_a_week_where_the_course_reads_it_so() {
+        let root = std::env::temp_dir().join(format!("classhub-module-filing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 3 — Data Quality', 3, '2026-09-03', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (4, 1, 'part', 'Part I: Deep Learning', 1, 1, 8, 'syllabus')",
+            [],
+        )
+        .expect("part");
+        let deck = "Slides/Biostatistics_Module3_Slides_class.pptx";
+        for class in [3, 4] {
+            let class_dir = crate::scanner::class_dir(&conn, class).expect("class dir");
+            fs::create_dir_all(class_dir.join("Slides")).expect("slides");
+            fs::write(class_dir.join(deck), "PK").expect("deck");
+        }
+
+        let biostat = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        let dest = week_filing(&conn, 3, &biostat, deck).expect("proposed");
+        assert_eq!(dest, "Weeks/Week 03 — Data Quality/Biostatistics_Module3_Slides_class.pptx");
+        let reasoning: String = conn
+            .query_row(
+                "SELECT reasoning FROM move_proposals WHERE class_id = 3 AND source_rel_path = ?1",
+                [deck],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert!(reasoning.starts_with("Its name carries Module 3, and this course divides itself into weeks"), "{reasoning}");
+
+        let applied = crate::scanner::class_dir(&conn, 4).expect("class dir");
+        let err = week_filing(&conn, 4, &applied, deck).err().expect("a Part course");
+        assert!(format!("{err:#}").contains("carries no week"), "{err:#}");
         let _ = fs::remove_dir_all(&root);
     }
 }

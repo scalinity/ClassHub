@@ -49,6 +49,72 @@ const KIND_ICONS: Record<string, LucideIcon> = {
   media: AudioLines,
 };
 
+/**
+ * The week folder an entry's name files under (SPEC §10), offered while the
+ * course declares the week and the entry sits outside that folder — where
+ * the division that reads the week counts it. Proposed from the row, approved
+ * in the inbox queue above: an explicit ask, since Canvas may have placed the
+ * file where it is. The prefix rule is the affordance; the backend enforces
+ * the same rule.
+ */
+function filingSlot(
+  node: TreeNode,
+  weekSlots: readonly WeekSlot[],
+): WeekSlot | undefined {
+  const slot =
+    node.week === undefined
+      ? undefined
+      : weekSlots.find((s) => s.week === node.week);
+  return slot && !node.relPath.startsWith(`${WEEKS_DIR}/${slot.folder}/`)
+    ? slot
+    : undefined;
+}
+
+/** Every file under a folder, for its row to read as proposed once each holds a card. */
+function filesUnder(node: TreeNode): string[] {
+  return node.children.flatMap((c) => (c.dir ? filesUnder(c) : [c.relPath]));
+}
+
+/**
+ * The by-name action in a row's hover cluster: the click, or the queue's own
+ * word while the card waits. Whether a card is waiting is read from the same
+ * query the queue renders, so a dismissal or an approval changes it there.
+ */
+function FilingAction({
+  filing,
+  proposed,
+  proposing,
+  title,
+  onPropose,
+}: {
+  filing: WeekSlot;
+  proposed: boolean;
+  proposing: boolean;
+  title: string;
+  onPropose: () => void;
+}) {
+  if (proposed) {
+    return (
+      <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
+        PROPOSED — SEE INBOX
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onPropose}
+      disabled={proposing}
+      className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
+    >
+      {proposing
+        ? "PROPOSING…"
+        : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
+    </button>
+  );
+}
+
 /** Guide state + actions for depth-0 module rows (SPEC §8.1 / M5). */
 export interface ModuleGuideControls {
   guides: ReadonlyMap<string, GuideInfo>;
@@ -161,6 +227,22 @@ function DirNode({
     controls.activeScopes.has(node.relPath) ||
     controls.activePracticeScopes.has(node.relPath);
 
+  // A folder named for a week the course declares files what it holds by one
+  // click (SPEC §10): one card per file, under the folder's own name in the
+  // week folder. Offered while the folder sits outside that folder and holds
+  // a file; read as proposed while every file under it has a card.
+  const filing = fileCount > 0 ? filingSlot(node, weekSlots) : undefined;
+  const proposed = filesUnder(node).every((p) => pendingSources.has(p));
+  const [proposing, setProposing] = useState(false);
+  const [filingError, setFilingError] = useState<string | null>(null);
+  const propose = () => {
+    setFilingError(null);
+    setProposing(true);
+    proposeWeekFiling(classId, node.relPath)
+      .catch((e) => setFilingError(String(e)))
+      .finally(() => setProposing(false));
+  };
+
   return (
     <div className={isModule ? "not-first:mt-3" : undefined}>
       <div className="group flex h-8 w-full items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/60">
@@ -189,6 +271,17 @@ function DirNode({
             {node.name}
           </span>
         </button>
+        {filing && (
+          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+            <FilingAction
+              filing={filing}
+              proposed={proposed}
+              proposing={proposing}
+              title={`Propose moving its ${fileCount} ${fileCount === 1 ? "file" : "files"} into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them`}
+              onPropose={propose}
+            />
+          </span>
+        )}
         {isModule && guideControls && offersGuide(guideControls) && (
           <GuideCluster scope={node.relPath} controls={guideControls} />
         )}
@@ -198,6 +291,11 @@ function DirNode({
           </span>
         )}
       </div>
+      {filingError && (
+        <p className="ml-8 pb-1 font-mono text-[11px] text-destructive">
+          NOT PROPOSED — {filingError}
+        </p>
+      )}
 
       {!isCollapsed && node.children.length > 0 && (
         <div className="ml-[15px] border-l border-border pl-2">
@@ -320,23 +418,9 @@ function FileRow({
 }: NodeProps) {
   const Icon = KIND_ICONS[node.kind ?? ""] ?? File;
   const viewable = VIEWABLE_KINDS.has(node.kind ?? "");
-  // A file named for a week the course declares, sitting outside that week's
-  // folder, offers the one move that puts it among a division's sources
-  // (SPEC §10): the week folder is where the division that reads the week
-  // counts it. Proposed from here, approved in the inbox queue above — an
-  // explicit ask, since Canvas may have placed the file where it is. The
-  // prefix rule is the affordance; the backend enforces the same rule.
-  const weekSlot =
-    node.week === undefined
-      ? undefined
-      : weekSlots.find((s) => s.week === node.week);
-  const filing =
-    weekSlot && !node.relPath.startsWith(`${WEEKS_DIR}/${weekSlot.folder}/`)
-      ? weekSlot
-      : undefined;
-  // Whether a card is waiting is the queue's fact, read from the same query
-  // the queue renders: a dismissal or an approval changes it there, and a
-  // card left pending from an earlier session shows as pending here.
+  // The week folder its name files under, if any (SPEC §10).
+  const filing = filingSlot(node, weekSlots);
+  // The queue's fact: a card left pending from an earlier session shows here.
   const proposed = pendingSources.has(node.relPath);
   const [proposing, setProposing] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
@@ -371,24 +455,15 @@ function FileRow({
         </button>
 
         <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-          {filing &&
-            (proposed ? (
-              <span className="px-1.5 font-mono text-[10px] tracking-[0.14em] text-muted-foreground">
-                PROPOSED — SEE INBOX
-              </span>
-            ) : (
-              <button
-                type="button"
-                title={`Propose moving it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it`}
-                onClick={propose}
-                disabled={proposing}
-                className={`${monoAction} text-(--accent) hover:bg-(--accent)/12 disabled:pointer-events-none disabled:opacity-60`}
-              >
-                {proposing
-                  ? "PROPOSING…"
-                  : `FILE UNDER WEEK ${String(filing.week).padStart(2, "0")}`}
-              </button>
-            ))}
+          {filing && (
+            <FilingAction
+              filing={filing}
+              proposed={proposed}
+              proposing={proposing}
+              title={`Propose moving it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it`}
+              onPropose={propose}
+            />
+          )}
           <button
             type="button"
             title="Show in Finder"

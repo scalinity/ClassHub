@@ -1188,20 +1188,66 @@ pub fn week_from_rel_path(rel_path: &str) -> Option<i64> {
     parse_week_range(folder).map(|(first, _)| first)
 }
 
-/// The week a file's name carries: `CAI6734_Week2_Foundations.pdf` is 2,
-/// `Week01_Course_Overview.pdf` is 1, `Week 3 2017 Feder.pdf` is 3. Read at
-/// a word boundary and only for the word `week`, so `Weekly Readings.pdf`,
-/// `Midweek 2.pdf`, a `class2` and a `Module1` carry none; a range (`Weeks
-/// 1-3`, `Week 1-3`) spans more than one and carries none either. The first
-/// such word decides, once it carries a number. The walk sets it on a file (`scanner::TreeNode`) so its Materials
-/// row can offer the week's folder, where the division that reads the week
-/// counts it (SPEC §10).
+/// The week a name carries: `CAI6734_Week2_Foundations.pdf` is 2,
+/// `Week01_Course_Overview.pdf` is 1, `Week 3 2017 Feder.pdf` is 3, and the
+/// folder `Week 3 Coding Material` is 3. Read at a word boundary and only for
+/// the word `week`, so `Weekly Readings.pdf`, `Midweek 2.pdf`, a `class2` and
+/// a `Module1` carry none; a range (`Weeks 1-3`, `Week 1-3`) spans more than
+/// one and carries none either. The first such word decides, once it carries
+/// a number. The walk sets it on a file and on a folder
+/// (`scanner::TreeNode`) so the Materials row can offer the week's folder,
+/// where the division that reads the week counts it (SPEC §10).
 pub fn week_in_name(name: &str) -> Option<i64> {
+    number_after_word(name, "week")
+}
+
+/// The module a name carries, read the way `week_in_name` reads a week:
+/// `Biostatistics_Module3_Slides_class.pptx` is 3 and `Module 1` is 1;
+/// `Modular arithmetic.pdf` and `Modules 1-3` carry none. On its own it names
+/// no week — `named_week` reads it as one only where the course does.
+pub fn module_in_name(name: &str) -> Option<i64> {
+    number_after_word(name, "module")
+}
+
+/// The week a name files under, given how the course reads a module (SPEC
+/// §10): the week its name carries, else the module it names where
+/// `modules_read_as_weeks` says the course's modules are its weeks.
+pub fn named_week(name: &str, modules_are_weeks: bool) -> Option<i64> {
+    week_in_name(name).or_else(|| modules_are_weeks.then(|| module_in_name(name)).flatten())
+}
+
+/// Whether `Module N` in a file's name is this course's week N. True for a
+/// course whose divisions are weeks and that declares no numbered module:
+/// Biostatistics and Fundamentals keep one Canvas `Module N` page per week
+/// and name their decks for it, while declaring only weeks. A course that
+/// declares modules has a folder for each, and a Part-numbered course has no
+/// week rows at all, so neither reads a module as a week. Decided from
+/// `units`, so a rescan that records a module turns the reading off.
+pub fn modules_read_as_weeks(conn: &Connection, class_id: i64) -> Result<bool> {
+    let (weeks, modules): (i64, i64) = conn.query_row(
+        "SELECT SUM(kind = 'week'), SUM(kind = 'module' AND number IS NOT NULL)
+         FROM units WHERE class_id = ?1",
+        [class_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            ))
+        },
+    )?;
+    Ok(weeks > 0 && modules == 0)
+}
+
+/// The number that follows `word` in a name, at a word boundary, past any
+/// separator (`Week 3`, `Week_3`, `Week-3`, `Week3`); a number followed by a
+/// range separator and a second number is a range and carries none. A first
+/// candidate out of the week range yields to the next occurrence.
+fn number_after_word(name: &str, word: &str) -> Option<i64> {
     let lower = name.to_lowercase();
     let mut cursor = 0usize;
-    while let Some(at) = lower[cursor..].find("week") {
+    while let Some(at) = lower[cursor..].find(word) {
         let start = cursor + at;
-        cursor = start + "week".len();
+        cursor = start + word.len();
         let bounded = lower[..start]
             .chars()
             .next_back()
@@ -1211,8 +1257,8 @@ pub fn week_in_name(name: &str) -> Option<i64> {
         }
         let rest = lower[cursor..]
             .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | '#' | '.'));
-        if let Some((week, after)) = leading_number(rest) {
-            if !(1..=MAX_WEEK).contains(&week) {
+        if let Some((number, after)) = leading_number(rest) {
+            if !(1..=MAX_WEEK).contains(&number) {
                 continue;
             }
             // `Week 1-3` spans more than one, like the plural, and carries
@@ -1223,7 +1269,7 @@ pub fn week_in_name(name: &str) -> Option<i64> {
                 .or_else(|| after.strip_prefix("to "))
                 .or_else(|| after.strip_prefix("through "))
                 .is_some_and(|tail| leading_number(tail.trim_start()).is_some());
-            return if range { None } else { Some(week) };
+            return if range { None } else { Some(number) };
         }
     }
     None
@@ -2186,6 +2232,44 @@ mod tests {
         assert_eq!(week_in_name("Week 3 - lecture notes.pdf"), Some(3));
         // A first candidate out of range yields to the next word.
         assert_eq!(week_in_name("Week 2026 Week 3 plan.pdf"), Some(3));
+        // A folder reads the same way; a week folder's name reads too, and the
+        // walk is what leaves it unset.
+        assert_eq!(week_in_name("Week 3 Coding Material"), Some(3));
+        assert_eq!(week_in_name("Week 03 — Data Exploration, Processing, and Quality"), Some(3));
+        assert_eq!(week_in_name("Weeks"), None);
+    }
+    /// SPEC §10: a module in a name reads the way a week does, and files under
+    /// a week only where the course reads its modules as weeks.
+    #[test]
+    fn reads_a_module_out_of_a_name_and_files_it_where_the_course_says() {
+        assert_eq!(module_in_name("Biostatistics_Module3_Slides_class.pptx"), Some(3));
+        assert_eq!(module_in_name("Biostatistics_Module2_Slides_v4 sharing before class.pptx"), Some(2));
+        assert_eq!(module_in_name("Module 1"), Some(1));
+        assert_eq!(module_in_name("module-4 notes.md"), Some(4));
+        assert_eq!(module_in_name("Modular arithmetic.pdf"), None);
+        assert_eq!(module_in_name("Modules 1-3 review.pdf"), None);
+        assert_eq!(module_in_name("Submodule 2.pdf"), None);
+        assert_eq!(module_in_name("CAI6734_Week2_Foundations.pdf"), None);
+        // The week word wins where both appear; the module counts only where
+        // the course reads it as a week.
+        assert_eq!(named_week("Module 2 Week 3 lab.R", false), Some(3));
+        assert_eq!(named_week("Module 2 Week 3 lab.R", true), Some(3));
+        assert_eq!(named_week("Biostatistics_Module3_Slides_class.pptx", false), None);
+        assert_eq!(named_week("Biostatistics_Module3_Slides_class.pptx", true), Some(3));
+
+        let conn = db();
+        // A Part-numbered course has no week rows: no reading.
+        write(&conn, 4, &NewUnit { weeks: Some((1, 8)), ..unit(1, "part", "Part I: Foundations", None) });
+        assert!(!modules_read_as_weeks(&conn, 4).expect("parts"));
+        // A week-numbered course reads its modules as weeks, an unnumbered
+        // filler row notwithstanding, until it declares a numbered module.
+        write(&conn, 3, &unit(1, "week", "Week 1 — Introduction", Some("2026-08-20")));
+        write(&conn, 3, &unit(2, "week", "Reading Days — No Class", Some("2026-12-03")));
+        assert!(modules_read_as_weeks(&conn, 3).expect("weeks"));
+        write(&conn, 3, &unit(3, "module", "Module 1", None));
+        assert!(!modules_read_as_weeks(&conn, 3).expect("a declared module"));
+        // A course with nothing declared reads nothing.
+        assert!(!modules_read_as_weeks(&conn, 1).expect("nothing"));
     }
     /// Two Parts that both claim a week: the earlier keeps it, and the claim
     /// is named once for the writer to report — the text that reaches a job

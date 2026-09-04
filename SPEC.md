@@ -1085,10 +1085,13 @@ professor's exact words when the distillation is not enough. The prompt lists th
 their extracts and the transcripts only through their notes, and the Structure row offers a
 guide exactly when a file or a note exists (§8.3) — the backend's own refusal, read the other
 way. `.classhub/corpus/` joins the extract cache in `search_material`'s scope (§9), so chat
-retrieves it too. A file named for a week that sits outside its week folder — Applied's Week 2
-deck under `Slides/`, where Canvas filed it — reaches the division through a move into that
-folder, proposed from the file's own row (§10, §12), never through a widening of the sources to
-files named for a week.
+retrieves it too. Material named for a week that sits outside its week folder reaches the
+division through a move into that folder, proposed from its own row (§10, §12), never
+through a widening of the sources to names: a file named for the week — Applied's Week 2
+deck under `Slides/`, where Canvas filed it — a folder named for it, whose files move
+together under the folder's own name, or, on a course whose divisions are weeks and that
+declares no module, a file named for the module the course numbers its weeks' Canvas pages
+by (Biostatistics' `Module3` deck).
 
 A contribution is recorded as applied when it is written, because the filing decision it follows
 is the user's own rather than a model's reading. Correcting one means refiling the lecture into
@@ -1195,13 +1198,24 @@ its meetings.
    name and size against the tree, never re-proposes one.
  7. A file whose name carries a week the course declares — `CAI6734_Week2_….pdf` — offers
    `FILE UNDER WEEK 02` on its row in Materials while it sits outside that week's folder.
-   The click proposes the move into `Weeks/<week folder>/` with source `by_name` and a reason
-   naming the division that reads the folder; the card carries a `BY NAME` chip and is
-   approved, redirected or left like any other, and approval is the ordinary move, so the
-   extract travels with the file and nothing is re-extracted. Explicit by design: Canvas may
-   have placed the file where it is (§7.2), and an automatic sort never overrides that. Its
-   source is a file in the tree, never one in `_Inbox/`, so a by-name row never replaces a
-   Canvas card; a file already under its week folder, at any depth, is refused.
+   So does a folder whose name carries one (`Week 3 Coding Material`) while it holds a
+   file, and, on a course whose divisions are weeks and that declares no numbered module, a
+   file whose name carries a module (`Biostatistics_Module3_Slides_class.pptx`): such a
+   course — Biostatistics, Fundamentals — numbers its Canvas `Module N` pages by week and
+   names its decks for them, so its Module 3 is its Week 3. A folder named for a module is a
+   module's folder (§8.3) and is not read so. The click proposes the move into
+   `Weeks/<week folder>/` with source `by_name` and a reason naming the reading and the
+   division that reads the folder; a folder's click proposes one card per file, each
+   destined for the folder's own name under the week folder, every destination validated
+   before any card is written, so a collision names the file and writes nothing. The card
+   carries a `BY NAME` chip and is approved, redirected or left like any other, and
+   approval is the ordinary move, so the extract travels with the file and nothing is
+   re-extracted. Explicit by design: Canvas may have placed the file where it is (§7.2), an
+   automatic sort never overrides that, and the module reading is not universal — Design
+   Studio's `Module 2` page spans its weeks 2 and 3 — so a wrong reading costs a dismissal,
+   never a move. Its source is a file or a folder in the tree, never one in `_Inbox/`, so a
+   by-name row never replaces a Canvas card; a source already under its week folder, at
+   any depth, is refused, as are `Weeks/` and a week folder, which are where filing lands.
 
 ## 11. Hub features
 
@@ -1289,8 +1303,12 @@ and apply it. Non-negotiable per project owner.
   pill expanding to a panel with live logs) · Settings.
 - Empty states matter: a class with no modules yet (3 of 4 classes today) shows a friendly
   drop-target hero, not a blank pane.
-- A file row in Materials offers `FILE UNDER WEEK NN` when its name carries a week the
-  course declares and it sits outside that week's folder (§10). The Add lecture form says
+- A row in Materials offers `FILE UNDER WEEK NN` when its name files under a week the
+  course declares — a week in the name, or a module where the course reads modules as
+  weeks — and it sits outside that week's folder; a folder's row offers it while the
+  folder holds a file and reads `PROPOSED — SEE INBOX` once every file under it has a
+  card (§10).
+ The Add lecture form says
   when a course declares no weeks and keeps ADD LECTURE off, naming the syllabus scan (§7.1).
 
 ## 13. Engineering conventions
@@ -1363,7 +1381,8 @@ and apply it. Non-negotiable per project owner.
   that is not there is silent until a guide reads it), what a vanished file leaves in the
   mirror (§7 — an extract nothing points at is silent until chat cites it), and which folders
   the tree marks as a guide's scope (§8.3 — a guide offered on `Weeks` is a second guide,
-  quietly), a file's week read off its name and a by-name proposal's destination (§10 — a deck
+  quietly), a name's week — the week word, or a module where the course reads modules as weeks — and
+  a by-name proposal's destination, a folder's one card per file included (§10 — a deck
   proposed into the wrong week is silent until a guide reads it), and a claimed week named once
   by the scan that wrote it (§8.5). UI and job plumbing are exercised by running the app.
 
@@ -1608,6 +1627,19 @@ Mark the checkbox when the acceptance criteria pass.
   deck reaches `Weeks/Week 02/` through an approved by-name proposal and Part I's manifest names
   it, and, where the recordings exist, each session is filed with a note and a session
   document and the three guides are built with their costs in §1.
+
+- [x] **M28 — Named for the week.** (`milestones/M28-named-for-the-week.md`)
+  M27's Week 3 guide read six Week 3 files no manifest names: readings the by-name action
+  reaches, a folder named for the week, and a deck named for a module. A folder named for a
+  week files its contents by one click on its row, one card per file under the folder's own
+  name; a course whose divisions are weeks and that declares no module reads `Module N` in a
+  file's name as week N, and the card says so. Both stay explicit proposals, never a sort.
+  The Sept 8–10 lectures go through the form, the digest and the guide where they exist.
+  *Accepted when:* the coding folder's row and the Module 3 deck's row offer `FILE UNDER
+  WEEK 03` beside the readings', four clicks yield six cards, the approvals put the six files
+  under the Week 3 folder with their extracts and the Week 3 guide reads stale over seven
+  entries, and, where the recordings exist, each session is filed with a note and a session
+  document and the guides are built with their costs in §1.
 
 ## 15. Risks & trade-offs (accepted)
 
