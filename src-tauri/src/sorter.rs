@@ -534,7 +534,10 @@ fn week_target(
 /// the week folder, the way a folder's row files its contents. None for a week
 /// the course does not declare, and for a destination already under its week
 /// folder. Pure over the course's slots, so `sort_state` reads the rows once
-/// per queue.
+/// per queue. The click that takes it is an approval, not a proposal:
+/// `resolve_proposal` runs `validate_dest` and nothing else, so `sort_state`
+/// withholds an alternative another pending card already claims — the half of
+/// `refuse_held` a by-name card gets — and a collision is never offered.
 pub(crate) fn week_alternative(
     slots: &[crate::units::WeekSlot],
     modules_are_weeks: bool,
@@ -998,8 +1001,15 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
     if proposals.iter().any(|p| p.source == "canvas") {
         let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
         let slots = crate::units::week_slots(conn, class_id)?;
+        // The queue's claims, as `refuse_held` reads them for a by-name card:
+        // a destination another pending card already heads for — a by-name
+        // card from a Materials row for a same-named file in the tree — is
+        // not offered again, since the second approval could only fail on it.
+        let mut taken: HashSet<String> =
+            proposals.iter().map(|p| p.dest_rel_path.clone()).collect();
         for card in proposals.iter_mut().filter(|p| p.source == "canvas") {
-            card.alternative = week_alternative(&slots, modules_are_weeks, &card.dest_rel_path);
+            card.alternative = week_alternative(&slots, modules_are_weeks, &card.dest_rel_path)
+                .filter(|alt| taken.insert(alt.dest_rel_path.clone()));
         }
     }
     Ok(SortState { inbox, proposals })
@@ -2373,6 +2383,30 @@ mod tests {
             .map(|p| p.alternative.as_ref().map(|a| a.week))
             .collect();
         assert_eq!(alternatives, vec![Some(4), None, None]);
+
+        // A by-name card from a Materials row already heading for the week
+        // destination: the Canvas card is not offered the same path, which
+        // only the second approval could refuse.
+        fs::create_dir_all(class_dir.join("Slides")).expect("slides");
+        fs::write(class_dir.join("Slides/Week 4 Sampling.pdf"), "%PDF").expect("tree twin");
+        upsert_proposal(
+            &conn,
+            3,
+            "by_name",
+            "Slides/Week 4 Sampling.pdf",
+            "Weeks/Week 04 — Probability/Week 4 Sampling.pdf",
+            "because",
+            None,
+        )
+        .expect("by-name card");
+        let state = sort_state(&conn, 3).expect("state");
+        let reading = state
+            .proposals
+            .iter()
+            .find(|p| p.source_rel_path == "_Inbox/Week 4 Sampling.pdf")
+            .expect("the reading's card");
+        assert!(reading.alternative.is_none(), "a destination another card claims is not offered");
+        assert_eq!(state.proposals.len(), 4);
         let _ = fs::remove_dir_all(&root);
     }
 }
