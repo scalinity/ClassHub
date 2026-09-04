@@ -81,8 +81,8 @@ export function relativeLabel(next: NextMeeting): string {
 export function formatClock(date: Date): string {
   return date
     .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-    .replace(" AM", " am")
-    .replace(" PM", " pm");
+    // ICU 72+ separates the day period with U+202F; match either space.
+    .replace(/\s(AM|PM)$/, (_, p: string) => ` ${p.toLowerCase()}`);
 }
 
 /** A calendar day, "Sep 3"; with its year when it is not this year's. */
@@ -125,8 +125,8 @@ export function daysUntil(iso: string, now: Date = new Date()): number {
 
 /**
  * Deadline label with the day named: "overdue since Aug 20", "today at
- * 11:59 pm", "tomorrow", "Wed, Aug 26 at 11:59 pm" — the time only when the
- * deadline carries one.
+ * 11:59 pm", "tomorrow", "Wed, Aug 26 at 11:59 pm". The time follows when the
+ * deadline carries one, except on an overdue one, where the day is the point.
  */
 export function dueDayLabel(dueAt: string): string {
   const days = daysUntil(dueAt);
