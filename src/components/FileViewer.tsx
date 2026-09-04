@@ -119,7 +119,7 @@ export function FileViewer({
             className={`size-1.5 shrink-0 rounded-full bg-(--accent) ${jobActive ? "animate-pulse motion-reduce:animate-none" : ""}`}
           />
         )}
-        <p className={`pointer-events-none shrink-0 ${meta}`}>
+        <p className={`pointer-events-none min-w-0 truncate ${meta}`}>
           {file.live
             ? `Live · ${
                 jobActive
