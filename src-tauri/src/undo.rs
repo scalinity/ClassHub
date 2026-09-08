@@ -476,3 +476,97 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
+
+#[cfg(test)]
+mod reissued_id_tests {
+    use super::*;
+
+    /// A rowid the deleted row freed and a later row took: the undo names a
+    /// row that is not the one it wrote, and refuses rather than deleting it.
+    #[test]
+    fn an_undo_refuses_a_row_the_id_now_names_something_else() {
+        let conn = db_for(|| ());
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+             VALUES (7, 1, 'Live coding session 09/08', 'assignment', '2026-09-08', 'open', 'syllabus')",
+            [],
+        )
+        .unwrap();
+        let inserted = crate::db::audit(
+            &conn,
+            "syllabus.insert_deadline",
+            json!({ "proposalId": 3, "deadlineId": 7, "classId": 1,
+                    "title": "Live coding session 09/08" }),
+        )
+        .unwrap();
+        let created = crate::db::audit(
+            &conn,
+            "ui.upsert_deadline",
+            json!({ "id": 7, "classId": 1, "title": "Live coding session 09/08", "created": true }),
+        )
+        .unwrap();
+        conn.execute("DELETE FROM deadlines WHERE id = 7", []).unwrap();
+        // The rowid a delete freed, reissued: modelled with the id stated.
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+             VALUES (7, 1, 'Final project', 'project', '2026-12-02', 'open', 'manual')",
+            [],
+        )
+        .unwrap();
+        for row in [inserted, created] {
+            let refused = undo_one(&conn, row).expect_err("a different row now");
+            assert!(refused.to_string().contains("different row now"), "{refused:#}");
+        }
+        let title: String =
+            conn.query_row("SELECT title FROM deadlines WHERE id = 7", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "Final project");
+
+        conn.execute(
+            "INSERT INTO grade_categories (id, class_id, name, weight) VALUES (4, 1, 'Quizzes', 20)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO grade_items (id, category_id, name, score, max_score) VALUES (5, 4, 'Quiz 1', 9, 10)",
+            [],
+        )
+        .unwrap();
+        let category = crate::db::audit(
+            &conn,
+            "ui.save_grade_category",
+            json!({ "id": 4, "classId": 1, "name": "Quizzes", "weight": 20, "created": true }),
+        )
+        .unwrap();
+        let item = crate::db::audit(
+            &conn,
+            "ui.save_grade_item",
+            json!({ "id": 5, "categoryId": 4, "classId": 1, "category": "Quizzes",
+                    "name": "Quiz 1", "score": 9, "maxScore": 10, "created": true }),
+        )
+        .unwrap();
+        conn.execute("DELETE FROM grade_items WHERE id = 5", []).unwrap();
+        conn.execute("DELETE FROM grade_categories WHERE id = 4", []).unwrap();
+        conn.execute(
+            "INSERT INTO grade_categories (id, class_id, name, weight) VALUES (4, 1, 'Exams', 40)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO grade_items (id, category_id, name, score, max_score) VALUES (5, 4, 'Midterm', 80, 100)",
+            [],
+        )
+        .unwrap();
+        for row in [category, item] {
+            let refused = undo_one(&conn, row).expect_err("a different row now");
+            assert!(refused.to_string().contains("different row now"), "{refused:#}");
+        }
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM grade_items WHERE name = 'Midterm'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    fn db_for(_: impl Fn()) -> Connection {
+        crate::db::memory_db()
+    }
+}

@@ -345,17 +345,41 @@ pub(crate) struct Undone {
     pub class_id: Option<i64>,
 }
 
+/// The row an audit entry names, checked to still be that row: `deadlines.id`
+/// is a plain rowid, which SQLite reissues once the highest is deleted, so a
+/// bare id could name a deadline created since. The title and the class on
+/// the payload settle it; a row the payload cannot vouch for is refused.
+/// Returns the row's title for the notice.
+fn same_deadline(
+    conn: &Connection,
+    id: i64,
+    expected_title: Option<&str>,
+    expected_class: Option<i64>,
+) -> Result<String> {
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT title, class_id FROM deadlines WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((title, class_id)) = row else {
+        bail!("{} is no longer on the list", expected_title.unwrap_or("the deadline"));
+    };
+    let same_title = expected_title.is_none_or(|t| t == title);
+    let same_class = expected_class.is_none_or(|c| c == class_id);
+    if !same_title || !same_class {
+        bail!("deadline #{id} is a different row now ({title}) — this cannot be undone");
+    }
+    Ok(title)
+}
+
 /// `ui.upsert_deadline` / `chat.upsert_deadline`: a created row is removed,
 /// an edited row takes its `before` back. Refused when the row is gone.
 pub(crate) fn undo_upsert(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
     let id = payload["id"].as_i64().context("the row names no deadline")?;
     let class_id = payload["classId"].as_i64();
-    let title: Option<String> = conn
-        .query_row("SELECT title FROM deadlines WHERE id = ?1", [id], |r| r.get(0))
-        .optional()?;
-    let Some(title) = title else {
-        bail!("deadline #{id} is no longer on the list");
-    };
+    let title = same_deadline(conn, id, payload["title"].as_str(), class_id)?;
     if payload["created"].as_bool() == Some(true) {
         conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
         return Ok(Undone { what: format!("Removed {title}"), class_id });
@@ -435,11 +459,8 @@ pub(crate) fn undo_status(conn: &Connection, payload: &serde_json::Value) -> Res
 /// queue. Refused when the deadline is already gone.
 pub(crate) fn undo_insert(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
     let id = payload["deadlineId"].as_i64().context("the row names no deadline")?;
-    let title = payload["title"].as_str().unwrap_or("the deadline").to_string();
-    let removed = conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
-    if removed == 0 {
-        bail!("{title} is no longer on the list");
-    }
+    let title = same_deadline(conn, id, payload["title"].as_str(), payload["classId"].as_i64())?;
+    conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
     if let Some(proposal_id) = payload["proposalId"].as_i64() {
         conn.execute(
             "UPDATE deadline_proposals SET status = 'pending', resolved_at = NULL WHERE id = ?1",

@@ -434,12 +434,22 @@ fn class_of_category(conn: &Connection, category_id: i64) -> Result<Option<i64>>
 pub(crate) fn undo_save_category(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
     let id = payload["id"].as_i64().context("the row names no category")?;
     let class_id = payload["classId"].as_i64();
-    let name: Option<String> = conn
-        .query_row("SELECT name FROM grade_categories WHERE id = ?1", [id], |r| r.get(0))
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT name, class_id FROM grade_categories WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    let Some(name) = name else {
+    let Some((name, held_by)) = row else {
         bail!("category #{id} is no longer on the list");
     };
+    // A plain rowid is reissued once the highest is deleted: the name and the
+    // class on the payload say whether this is still the row the audit names.
+    let expected = payload["name"].as_str().or(payload["after"]["name"].as_str());
+    if expected.is_some_and(|n| n != name) || class_id.is_some_and(|c| c != held_by) {
+        bail!("category #{id} is a different row now ({name}) — this cannot be undone");
+    }
     if payload["created"].as_bool() == Some(true) {
         let items: i64 = conn.query_row(
             "SELECT COUNT(*) FROM grade_items WHERE category_id = ?1",
@@ -521,6 +531,13 @@ pub(crate) fn undo_save_item(conn: &Connection, payload: &serde_json::Value) -> 
     let Some((name, category_id)) = row else {
         bail!("score #{id} is no longer on the list");
     };
+    // The same rowid check as a category's: the name and the category on the
+    // payload say whether this is still the row the audit names.
+    let expected = payload["name"].as_str().or(payload["after"]["name"].as_str());
+    let expected_category = payload["categoryId"].as_i64();
+    if expected.is_some_and(|n| n != name) || expected_category.is_some_and(|c| c != category_id) {
+        bail!("score #{id} is a different row now ({name}) — this cannot be undone");
+    }
     let class_id = class_of_category(conn, category_id)?;
     // A chat row carries no `created` flag; it is always a create.
     if payload["created"].as_bool() == Some(true) || payload["before"].is_null() {
