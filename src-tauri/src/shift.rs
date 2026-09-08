@@ -133,8 +133,17 @@ impl ShiftSettings {
 
 /// One of the shift's settings, validated by key and audited (SPEC §6).
 pub fn set_shift_setting(app: &AppHandle, key: &str, value: &str) -> Result<()> {
+    let stored = validate_shift_setting(key, value)?;
+    crate::settings::set_audited(app, key, &stored)?;
+    emit_changed(app);
+    Ok(())
+}
+
+/// What the webview may write: the shift's keys alone, each with its own
+/// shape — a switch, a clock, a bounded count — stored in one spelling.
+pub(crate) fn validate_shift_setting(key: &str, value: &str) -> Result<String> {
     let value = value.trim();
-    let stored = match key {
+    Ok(match key {
         ENABLED | IN_DEV_BUILD => match value {
             "1" | "true" | "on" => "1".to_string(),
             "0" | "false" | "off" => "0".to_string(),
@@ -156,10 +165,7 @@ pub fn set_shift_setting(app: &AppHandle, key: &str, value: &str) -> Result<()> 
             .map(|n| n.to_string())
             .with_context(|| format!("a cap is 0–{MAX_CAP}"))?,
         _ => bail!("no shift setting called {key}"),
-    };
-    crate::settings::set_audited(app, key, &stored)?;
-    emit_changed(app);
-    Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,7 +1423,7 @@ mod tests {
     use super::{
         capped, digest_candidates, finish_run, guide_candidates, in_window, insert_run,
         last_closed_night, meeting_end, meter, next_meeting, night_key, parse_idle,
-        should_start, startup_recovery, step_outcome, Conditions,
+        should_start, startup_recovery, step_outcome, validate_shift_setting, Conditions,
     };
     use crate::db::{memory_db, set_setting};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -1635,6 +1641,24 @@ mod tests {
         assert!(insert_run(&conn, "2026-09-08", "idle").unwrap().is_some());
         assert!(insert_run(&conn, "2026-09-08", "manual").unwrap().is_none());
         assert!(insert_run(&conn, "2026-09-09", "idle").unwrap().is_some());
+    }
+
+    /// The keys the webview may write and the shapes they take (SPEC §6): a
+    /// switch in one spelling, a clock normalised, a count within its bound;
+    /// anything else refused by name.
+    #[test]
+    fn a_shift_setting_is_validated_by_key_and_shape() {
+        assert_eq!(validate_shift_setting("shift_enabled", "on").unwrap(), "1");
+        assert_eq!(validate_shift_setting("shift_in_dev_build", "false").unwrap(), "0");
+        assert!(validate_shift_setting("shift_enabled", "maybe").is_err());
+        assert_eq!(validate_shift_setting("shift_start", " 9:05 ").unwrap(), "09:05");
+        assert!(validate_shift_setting("shift_end", "25:00").is_err());
+        assert_eq!(validate_shift_setting("shift_idle_minutes", "0").unwrap(), "0");
+        assert!(validate_shift_setting("shift_idle_minutes", "181").is_err());
+        assert_eq!(validate_shift_setting("shift_digests_per_night", "20").unwrap(), "20");
+        assert!(validate_shift_setting("shift_guides_per_night", "-1").is_err());
+        assert!(validate_shift_setting("job_model", "haiku").is_err(), "not the shift's key");
+        assert!(validate_shift_setting("aibhs_root", "/").is_err());
     }
 
     #[test]
