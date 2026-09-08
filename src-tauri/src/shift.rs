@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -459,8 +459,12 @@ fn tick(app: &AppHandle) {
     if state.running.load(Ordering::SeqCst) {
         return;
     }
-    // The tray's next-meeting line follows the clock.
-    crate::tray::refresh(app);
+    // The tray's next-meeting line follows the clock, on the hour: every
+    // change of state refreshes it on its own, and a meeting passing is the
+    // only thing a quiet hour changes.
+    if Local::now().minute() == 0 {
+        crate::tray::refresh(app);
+    }
     let decision = with_conn(app, |conn| {
         let s = settings(conn);
         let (start, end) = s.window();

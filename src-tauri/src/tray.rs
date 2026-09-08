@@ -19,8 +19,15 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app),
             "run" => {
+                // The tray has no other surface to answer on, so a refusal
+                // is a notification rather than a line on stderr.
                 if let Err(e) = crate::shift::run_now(app) {
-                    eprintln!("shift: not started from the tray — {e:#}");
+                    crate::notifications::notify(
+                        app,
+                        crate::settings::NOTIFY_SHIFT_FINISHED,
+                        "Shift not started",
+                        &format!("{e:#}"),
+                    );
                 }
             }
             "pause" | "resume" => {
@@ -37,26 +44,28 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Rebuilds the menu from what is true now. Menus are the main thread's, so
-/// the shift's and the scheduler's threads hand it over.
+/// Rebuilds the menu from what is true now. The summary — the database
+/// reads — is taken on the calling thread; only the menu, which is the main
+/// thread's, is handed over, so the window's event loop never waits on the
+/// database mutex for the tray.
 pub fn refresh(app: &AppHandle) {
+    let summary = crate::shift::tray_summary(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Err(e) = rebuild(&handle) {
+        if let Err(e) = rebuild(&handle, summary) {
             eprintln!("tray: menu not rebuilt — {e}");
         }
     });
 }
 
-/// What the menu last showed, so a minute that changed nothing rebuilds
-/// nothing: the scheduler asks every tick, and most ticks are alike.
+/// What the menu last showed, so a refresh that changed nothing rebuilds
+/// nothing — and never replaces a menu the owner may have open for no reason.
 static LAST_MENU: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-fn rebuild(app: &AppHandle) -> tauri::Result<()> {
+fn rebuild(app: &AppHandle, summary: crate::shift::TraySummary) -> tauri::Result<()> {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
     };
-    let summary = crate::shift::tray_summary(app);
     let (pause_id, pause_label) = if summary.paused {
         ("resume", "Resume tonight")
     } else {

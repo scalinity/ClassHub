@@ -1,4 +1,4 @@
-import { useId, useState, type KeyboardEvent } from "react";
+import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
 
 export interface PickerOption {
@@ -39,6 +39,7 @@ export function Picker({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const listId = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
   const selected = options.findIndex((o) => o.value === value);
   const ring = neutral ? "focus-visible:outline-ring" : "focus-visible:outline-(--accent)";
 
@@ -46,9 +47,14 @@ export function Picker({
     setActive(selected === -1 ? 0 : selected);
     setOpen(true);
   };
+  // Closing hands focus back to the control, where the keyboard left it.
+  const close = () => {
+    setOpen(false);
+    trigger.current?.focus();
+  };
   const pick = (index: number) => {
     const option = options[index];
-    setOpen(false);
+    close();
     if (option && option.value !== value) onChange(option.value);
   };
   const onKey = (e: KeyboardEvent<HTMLUListElement>) => {
@@ -62,7 +68,7 @@ export function Picker({
       e.preventDefault();
       pick(active);
     } else if (e.key === "Escape" || e.key === "Tab") {
-      setOpen(false);
+      close();
     } else if (e.key.length === 1 && e.key !== " ") {
       // A typed letter jumps to the next option opening with it, the way
       // the system's list does.
@@ -76,13 +82,16 @@ export function Picker({
   return (
     <div className={`relative ${className}`}>
       <button
+        ref={trigger}
         type="button"
         aria-label={label}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         disabled={disabled}
-        onClick={() => (open ? setOpen(false) : show())}
+        // While the list is open the overlay takes the click and closes it,
+        // so this only ever opens.
+        onClick={show}
         onKeyDown={(e) => {
           if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
             e.preventDefault();
