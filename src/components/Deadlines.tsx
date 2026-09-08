@@ -27,6 +27,8 @@ import {
   buttonIcon,
   buttonText,
   buttonTextMuted,
+  checkCircle,
+  checkCircleDone,
   chipMuted,
   decisionCard,
   errorLine,
@@ -401,10 +403,8 @@ function DeadlineRow({
         disabled={busy}
         onClick={() => run(setDeadlineStatus(deadline.id, !isDone))}
         className={
-          "flex size-[15px] shrink-0 cursor-pointer items-center justify-center rounded-full border transition-colors focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none " +
-          (isDone
-            ? "border-(--accent) bg-(--accent) text-white dark:text-background"
-            : "border-muted-foreground/40 hover:border-(--accent)")
+          `${checkCircle} cursor-pointer focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none ` +
+          (isDone ? checkCircleDone : "border-muted-foreground/40 hover:border-(--accent)")
         }
       >
         {isDone && <Check size={10} strokeWidth={3} aria-hidden />}

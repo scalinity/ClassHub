@@ -7,7 +7,7 @@ import { CLASS_ACCENTS } from "@/lib/classes";
 import { listDeadlines, setDeadlineStatus, type Deadline } from "@/lib/deadlines";
 import { queryClient } from "@/lib/query";
 import { daysUntil, dueDayLabel } from "@/lib/schedule";
-import { errorLine, readingText } from "@/lib/styles";
+import { checkCircle, checkCircleDone, errorLine, readingText } from "@/lib/styles";
 
 /**
  * SPEC §11 — the dashboard's next-7-days deadline strip: every open deadline
@@ -150,13 +150,11 @@ function DeadlineChip({
       <span
         aria-hidden
         className={
-          "flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors " +
-          (done
-            ? "border-(--accent) bg-(--accent) text-white dark:text-background"
-            : "border-(--accent-ink)/40 group-hover:border-(--accent)")
+          `${checkCircle} ` +
+          (done ? checkCircleDone : "border-(--accent-ink)/40 group-hover:border-(--accent)")
         }
       >
-        {done && <Check size={9} strokeWidth={3} />}
+        {done && <Check size={10} strokeWidth={3} />}
       </span>
       <span
         className={

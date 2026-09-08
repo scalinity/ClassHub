@@ -60,6 +60,15 @@ export const meta = "text-meta tabular-nums text-muted-foreground";
 /** A refusal or failure under a heading or a row — a sentence, never a code. */
 export const errorLine = "mt-3 text-body text-destructive";
 
+/** The mark-done control the Deadlines tab's row and the dashboard strip's
+ *  chip share: a 15px ring that fills with the accent and a check when done.
+ *  The caller appends `checkCircleDone`, or its own idle border — the ring
+ *  sits on the paper in the row and inside a class wash on the chip. */
+export const checkCircle =
+  "flex size-[15px] shrink-0 items-center justify-center rounded-full border transition-colors";
+export const checkCircleDone =
+  "border-(--accent) bg-(--accent) text-white dark:text-background";
+
 /** The running-job dot; every use keeps the reduced-motion guard. */
 export const pulseDot =
   "size-1.5 shrink-0 rounded-full bg-(--accent) animate-pulse motion-reduce:animate-none";
