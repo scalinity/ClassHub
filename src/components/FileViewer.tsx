@@ -105,14 +105,25 @@ export function FileViewer({
     data !== undefined &&
     !data.includes(CONTINUE_MARKER);
 
-  const srcDoc =
+  // The document and the sandbox it runs under are chosen together, because
+  // each is only safe with the other: a class HTML notebook keeps its scripts
+  // (allow-scripts, in an opaque origin, with the CSP injected into it closing
+  // every egress), while a document the register renders — untrusted
+  // transcript or note text through marked — runs no script at all (the
+  // shell's CSP admits none and the sandbox grants none), so same-origin costs
+  // nothing and lets the viewer scroll it to a flagged item's heading.
+  const framed =
     data === undefined
       ? undefined
       : file.kind === "html"
-        ? withDocumentCsp(data)
+        ? { srcDoc: withDocumentCsp(data), sandbox: "allow-scripts" }
         : file.kind === "md" || file.kind === "rmd" || file.kind === "ipynb"
-          ? docShell(renderMarkdown(data))
-          : docShell(`<pre class="sheet">${escapeHtml(data)}</pre>`);
+          ? { srcDoc: docShell(renderMarkdown(data)), sandbox: "allow-same-origin" }
+          : {
+              srcDoc: docShell(`<pre class="sheet">${escapeHtml(data)}</pre>`),
+              sandbox: "allow-same-origin",
+            };
+  const srcDoc = framed?.srcDoc;
 
   return (
     <div
@@ -203,19 +214,14 @@ export function FileViewer({
           <p className="py-16 text-center text-body text-destructive">
             Couldn't load the file: {String(error)}
           </p>
-        ) : isPending || srcDoc === undefined ? (
+        ) : isPending || framed === undefined ? (
           <p className="py-16 text-center text-body text-muted-foreground">
             Loading…
           </p>
         ) : (
-          // Class HTML notebooks need their own embedded scripts to unpack;
-          // allow-scripts without same-origin keeps them isolated from the app.
-          // A document the register rendered runs no script — the sandbox and
-          // its own CSP both refuse one — so same-origin costs nothing and lets
-          // the viewer scroll it to a flagged item's heading.
           <iframe
-            sandbox={file.kind === "html" ? "allow-scripts" : "allow-same-origin"}
-            srcDoc={srcDoc}
+            sandbox={framed.sandbox}
+            srcDoc={framed.srcDoc}
             title={file.name}
             onLoad={(e) => scrollToAnchor(e.currentTarget, file.anchor)}
             className="block h-full w-full border-0"
