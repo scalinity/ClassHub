@@ -101,6 +101,11 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // A move can be a lecture refiled into a different week, which moves
       // which division it feeds (SPEC §8.5).
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+      // A Canvas card's week alternative lands beside a file already at its
+      // destination (SPEC §10 step 8), so it is read off the disk as well as
+      // the rows; a file that arrived there since is what the queue must see
+      // before a click sends the unbumped path.
+      void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       break;
     case "index":
       // A scan asked for from the workspace changed the file index — a file
@@ -113,6 +118,8 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["units"] });
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      // The same disk the alternative reads (above, under `files`).
+      void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       break;
   }
 });
