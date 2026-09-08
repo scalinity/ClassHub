@@ -1585,6 +1585,9 @@ fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
         // in the audit log — is only true if both statements land together.
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        // A tracked assignment's card is declined, or the next sync would
+        // write the deadline back (SPEC §7.2).
+        crate::deadlines::decline_assignment(&tx, &row)?;
         // The full row rides the audit entry, so a deletion is recoverable.
         let audit_id = audit(&tx, "chat.delete_deadline", row)?;
         tx.commit()?;

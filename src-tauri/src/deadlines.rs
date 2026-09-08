@@ -301,12 +301,48 @@ pub fn delete_deadline(app: &AppHandle, id: i64) -> Result<()> {
         let title = row["title"].as_str().unwrap_or_default().to_string();
         let class_id = row["classId"].as_i64().unwrap_or_default();
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        decline_assignment(&tx, &row)?;
         let audit_id = audit(&tx, "ui.delete_deadline", row)?;
         tx.commit()?;
         Ok((audit_id, title, class_id))
     })?;
     emit_hub_change(app, "deadlines");
     notify(app, format!("Deleted {title}"), vec![audit_id], Some(class_id));
+    Ok(())
+}
+
+/// A deleted deadline that Canvas tracks is a decision the next sync has to
+/// see, or the direct write (§7.2) puts the assignment back: its card is
+/// recorded as declined — the row `insert_canvas_deadline` honours — in the
+/// delete's own transaction. `row` is the deadline as `deadline_row` reads
+/// it; a row Canvas does not track needs nothing.
+pub(crate) fn decline_assignment(conn: &Connection, row: &serde_json::Value) -> Result<()> {
+    let Some(canvas_id) = row["canvasAssignmentId"].as_str() else {
+        return Ok(());
+    };
+    let class_id = row["classId"].as_i64().context("the row names no class")?;
+    let declined = conn.execute(
+        "UPDATE deadline_proposals SET status = 'dismissed', resolved_at = ?1
+         WHERE class_id = ?2 AND canvas_assignment_id = ?3",
+        params![now(), class_id, canvas_id],
+    )?;
+    if declined == 0 {
+        conn.execute(
+            "INSERT INTO deadline_proposals
+             (class_id, title, kind, due_at, notes, status, source, canvas_assignment_id,
+              created_at, resolved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'dismissed', 'canvas', ?6, ?7, ?7)",
+            params![
+                class_id,
+                row["title"].as_str().unwrap_or(""),
+                row["kind"].as_str().unwrap_or("other"),
+                row["dueAt"].as_str().unwrap_or(""),
+                row["notes"].as_str(),
+                canvas_id,
+                now(),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -2868,5 +2904,44 @@ mod tracked_card_tests {
             .query_row("SELECT status FROM deadline_proposals WHERE id = 41", [], |r| r.get(0))
             .unwrap();
         assert_eq!(card, "approved", "the card has nothing left to ask");
+    }
+}
+
+#[cfg(test)]
+mod declined_delete_tests {
+    use super::*;
+
+    /// Deleting a deadline Canvas tracks records the decline, so the next
+    /// sync's direct write leaves the assignment off the list; a row Canvas
+    /// does not track writes no card.
+    #[test]
+    fn a_deleted_tracked_deadline_stays_off_the_list() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source, canvas_assignment_id)
+             VALUES (9, 3, 'Homework Assignment 1', 'assignment', '2026-09-14T23:59', 'open', 'canvas', '7317246')",
+            [],
+        )
+        .unwrap();
+        let row = deadline_row(&conn, 9).unwrap().unwrap();
+        conn.execute("DELETE FROM deadlines WHERE id = 9", []).unwrap();
+        decline_assignment(&conn, &row).expect("declined");
+        let assignment = CanvasAssignment {
+            id: "7317246",
+            title: "Homework Assignment 1",
+            due_at: Some("2026-09-14T23:59"),
+            submitted_at: None,
+        };
+        assert_eq!(
+            insert_canvas_deadline(&conn, 3, &assignment, "assignment", "From Canvas").unwrap(),
+            DirectWrite::DeclinedBefore
+        );
+        let deadlines: i64 = conn.query_row("SELECT COUNT(*) FROM deadlines", [], |r| r.get(0)).unwrap();
+        assert_eq!(deadlines, 0, "not written back");
+        let untracked = serde_json::json!({ "id": 10, "classId": 3, "title": "Quiz 1", "canvasAssignmentId": null });
+        decline_assignment(&conn, &untracked).expect("nothing to decline");
+        let cards: i64 =
+            conn.query_row("SELECT COUNT(*) FROM deadline_proposals", [], |r| r.get(0)).unwrap();
+        assert_eq!(cards, 1, "one declined card, none for the untracked row");
     }
 }
