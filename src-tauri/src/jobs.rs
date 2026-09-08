@@ -66,10 +66,15 @@ const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// `finished_at` in the table.
 const SELF_CHECK_INTERVAL: i64 = 24 * 60 * 60;
 
-/// The latest `rate_limit_event` any run streamed (SPEC §6): every one logged
-/// so far says `allowed`, and the shift reads this between jobs for the day
-/// one does not.
-static RATE_LIMIT: Mutex<Option<RateLimit>> = Mutex::new(None);
+/// The latest `rate_limit_event` any run streamed, per window (SPEC §6):
+/// every one logged so far says `allowed`, and the shift reads these between
+/// jobs for the day one does not. Keyed by `rateLimitType`, so a five-hour
+/// allowance cannot overwrite a seven-day refusal.
+static RATE_LIMIT: Mutex<Option<HashMap<String, RateLimit>>> = Mutex::new(None);
+
+/// How long a refusal that names no reset stands, so one the CLI reports
+/// without a time cannot latch for the life of the process.
+const UNSAID_RESET: i64 = 5 * 60 * 60;
 
 #[derive(Clone, Debug)]
 pub struct RateLimit {
@@ -79,6 +84,8 @@ pub struct RateLimit {
     pub window: Option<String>,
     /// When the window resets, unix seconds, where the event said.
     pub resets_at: Option<i64>,
+    /// When the event was streamed, unix seconds.
+    pub seen_at: i64,
 }
 
 impl RateLimit {
@@ -103,18 +110,33 @@ impl RateLimit {
 }
 
 /// Whether an event says the limit is reached: a status other than `allowed`
-/// whose reset, where it named one, is still ahead. Pure, since the wrong
-/// answer is silent either way — a shift that never stops, or one that never
-/// starts on an event that lifted hours ago.
+/// whose reset, where it named one, is still ahead — and where it named none,
+/// seen within `UNSAID_RESET`. Pure, since the wrong answer is silent either
+/// way — a shift that never stops, or one that never starts on an event that
+/// lifted hours ago.
 pub(crate) fn limit_reached(limit: &RateLimit, now: i64) -> bool {
-    limit.status != "allowed" && limit.resets_at.is_none_or(|at| at > now)
+    limit.status != "allowed"
+        && match limit.resets_at {
+            Some(at) => at > now,
+            None => now < limit.seen_at + UNSAID_RESET,
+        }
 }
 
-/// What the shift asks between jobs: a reason to stop, when the latest event
-/// says the limit is reached.
+/// What the shift asks between jobs: a reason to stop, when any window's
+/// latest event says its limit is reached.
 pub fn rate_limit_reached() -> Option<String> {
-    let latest = lock(&RATE_LIMIT).clone()?;
-    limit_reached(&latest, now()).then(|| latest.describe())
+    let windows = lock(&RATE_LIMIT).clone()?;
+    let now = now();
+    windows
+        .values()
+        .find(|limit| limit_reached(limit, now))
+        .map(RateLimit::describe)
+}
+
+/// Records a window's latest event.
+fn record_rate_limit(latest: RateLimit) {
+    let key = latest.window.clone().unwrap_or_else(|| "unknown".to_string());
+    lock(&RATE_LIMIT).get_or_insert_with(HashMap::new).insert(key, latest);
 }
 
 /// Whether the process that owns a row is gone, for a recovery that runs
@@ -1637,7 +1659,7 @@ fn run_job(
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        crate::shift::notify(
+        crate::notifications::notify(
             &app,
             crate::settings::NOTIFY_JOB_FAILED,
             "A job failed",
@@ -2206,6 +2228,7 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
                 status: info["status"].as_str().unwrap_or("unknown").to_string(),
                 window: stream.rate_limit_type.clone(),
                 resets_at: info["resetsAt"].as_i64(),
+                seen_at: now(),
             };
             if limit_reached(&latest, now()) {
                 push_event(
@@ -2215,7 +2238,7 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
                     format!("rate limit reached — {}", latest.describe()),
                 );
             }
-            *lock(&RATE_LIMIT) = Some(latest);
+            record_rate_limit(latest);
         }
         // Partial message chunks (master_guide only): the long silent stretch of
         // a 30-min job is the model streaming one huge Write input. Tracking its
@@ -2888,9 +2911,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The launch gate stands on the latest verdict, not the latest success: a
-    /// day-old success has lapsed, a fresh one stands, a row still in flight is
-    /// not a verdict, and a failure after a success is the verdict.
     /// The shift's stop rule (SPEC §6): every event logged so far says
     /// `allowed`, and only a status that is not — whose reset, where named,
     /// is still ahead — is a reason to stop. An event that lifted hours ago
@@ -2901,12 +2921,14 @@ mod tests {
             status: "allowed".into(),
             window: Some("five_hour".into()),
             resets_at: Some(2_000),
+            seen_at: 500,
         };
         assert!(!limit_reached(&allowed, 1_000));
         let reached = RateLimit {
             status: "rejected".into(),
             window: Some("five_hour".into()),
             resets_at: Some(2_000),
+            seen_at: 500,
         };
         assert!(limit_reached(&reached, 1_000));
         assert!(!limit_reached(&reached, 2_000), "lifted at its reset");
@@ -2914,10 +2936,40 @@ mod tests {
             status: "rejected".into(),
             window: None,
             resets_at: None,
+            seen_at: 1_000,
         };
-        assert!(limit_reached(&unsaid, 1_000), "no reset named: it stands");
+        assert!(limit_reached(&unsaid, 1_000), "no reset named: it stands for a while");
+        assert!(
+            !limit_reached(&unsaid, 1_000 + super::UNSAID_RESET),
+            "and lifts on its own, never for the life of the process"
+        );
+        // Windows are kept apart: a five-hour allowance does not clear a
+        // seven-day refusal.
+        super::record_rate_limit(RateLimit {
+            status: "rejected".into(),
+            window: Some("seven_day".into()),
+            resets_at: Some(now() + 3_600),
+            seen_at: now(),
+        });
+        super::record_rate_limit(RateLimit {
+            status: "allowed".into(),
+            window: Some("five_hour".into()),
+            resets_at: Some(now() + 3_600),
+            seen_at: now(),
+        });
+        assert!(super::rate_limit_reached().is_some_and(|why| why.contains("seven-day")));
+        super::record_rate_limit(RateLimit {
+            status: "allowed".into(),
+            window: Some("seven_day".into()),
+            resets_at: Some(now() + 3_600),
+            seen_at: now(),
+        });
+        assert!(super::rate_limit_reached().is_none());
     }
 
+    /// The launch gate stands on the latest verdict, not the latest success: a
+    /// day-old success has lapsed, a fresh one stands, a row still in flight is
+    /// not a verdict, and a failure after a success is the verdict.
     #[test]
     fn the_self_check_gate_stands_on_the_latest_verdict_only() {
         let conn = crate::db::memory_db();
