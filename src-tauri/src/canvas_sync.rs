@@ -1074,13 +1074,33 @@ fn sync_files(
     if skipped > 0 {
         outcome.notes.push(format!("{skipped} file(s) already in the class"));
     }
+    let (notes, sort) = landing_notes(by_name, loose, unproposed);
+    outcome.notes.extend(notes);
+    if staged > 0 {
+        emit_hub_change(app, "proposals");
+        if sort {
+            crate::sorter::enqueue_followup(app, class.id);
+        }
+    }
+    Ok(())
+}
+
+/// What the report says about the staged files that got no Canvas card, and
+/// whether the content-aware sorter runs after the sync. A by-name card is a
+/// card, so those alone enqueue nothing (SPEC §7.2); a loose file whose name
+/// read no week waits for the sorter, and so does one that downloaded but
+/// could not be proposed — the follow-up run covers every fresh inbox file,
+/// so an uncarded file of either kind is what it is for. Pure, so the tally is
+/// tested without a running app.
+fn landing_notes(by_name: usize, loose: usize, unproposed: usize) -> (Vec<String>, bool) {
+    let mut notes = Vec::new();
     if by_name > 0 {
-        outcome.notes.push(format!(
+        notes.push(format!(
             "{by_name} file(s) Canvas keeps loose, proposed by name — each name carries its week"
         ));
     }
     if loose > 0 {
-        outcome.notes.push(format!(
+        notes.push(format!(
             "{loose} file(s) waiting in the inbox — Canvas keeps them loose, so the sorter reads \
              them by content"
         ));
@@ -1088,20 +1108,11 @@ fn sync_files(
     // A different situation from the one above, with a different remedy: these
     // downloaded but could not be proposed.
     if unproposed > 0 {
-        outcome.notes.push(format!(
+        notes.push(format!(
             "{unproposed} file(s) downloaded but could not be proposed — see the lines above"
         ));
     }
-    if staged > 0 {
-        emit_hub_change(app, "proposals");
-        // The loose ones have no placement to inherit, so they wait for the
-        // content-aware sorter — which SPEC §7.2 promises and which nothing was
-        // actually asking for.
-        if loose > 0 {
-            crate::sorter::enqueue_followup(app, class.id);
-        }
-    }
-    Ok(())
+    (notes, loose > 0 || unproposed > 0)
 }
 
 /// Where a staged file's card came from, if one was written.
@@ -2403,5 +2414,26 @@ mod tests {
         assert!(launch_sync_due(Some(now - 3 * LAUNCH_SYNC_AFTER), now));
         assert!(!launch_sync_due(Some(now - LAUNCH_SYNC_AFTER + 1), now));
         assert!(!launch_sync_due(Some(now), now));
+    }
+
+    /// The sorter runs for the files no card covers — loose and unproposed —
+    /// and never for by-name cards alone; each kind gets its own line.
+    #[test]
+    fn the_sorter_runs_for_every_uncarded_file_and_for_by_name_cards_never() {
+        let (notes, sort) = landing_notes(0, 0, 0);
+        assert!(notes.is_empty() && !sort);
+        let (notes, sort) = landing_notes(2, 0, 0);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("2 file(s) Canvas keeps loose, proposed by name"));
+        assert!(!sort, "a by-name card is a card");
+        let (notes, sort) = landing_notes(0, 1, 0);
+        assert!(notes[0].starts_with("1 file(s) waiting in the inbox") && sort);
+        let (notes, sort) = landing_notes(3, 0, 1);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[1].starts_with("1 file(s) downloaded but could not be proposed"));
+        assert!(sort, "an unproposed file has no card either");
+        let (notes, sort) = landing_notes(1, 1, 1);
+        assert_eq!(notes.len(), 3);
+        assert!(sort);
     }
 }
