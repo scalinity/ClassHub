@@ -553,10 +553,15 @@ fn folder_filing(
 /// What the queue already holds against a filing (SPEC §10). A pending card
 /// for the source from another route — chat's, since a sort or Canvas card
 /// names an inbox file — is the reader's own earlier ask, which a click must
-/// not retarget without a word; and a pending card from any source already
-/// heading for the destination — two folders sharing a leaf name would each
-/// claim it — would fail only at the second approval. Both are refused by
-/// name. A by-name card of the click's own is refreshed, as before.
+/// not move the file from under without a word; and a pending card from any
+/// source already heading for the destination — two folders sharing a leaf
+/// name would each claim it — would fail only at the second approval. Both
+/// are refused by name. A pending by-name card is left out of the first
+/// check for the one writer that still makes one: the sync's card for a
+/// loose file whose name reads a module as a week (`propose_loose_by_name`),
+/// which a re-sync refreshes through `upsert_proposal` rather than refusing.
+/// A row's click writes no card at all — it is the move, with an approved
+/// row for the record — so nothing of its own is ever pending here.
 fn refuse_held(conn: &Connection, class_id: i64, source_rel: &str, dest_rel: &str) -> Result<()> {
     let other_route: Option<String> = conn
         .query_row(
@@ -1865,29 +1870,7 @@ fn approve_in_conn(
 /// move fails is left pending and named.
 pub fn approve_all(app: &AppHandle, class_id: i64) -> Result<crate::deadlines::BatchOutcome> {
     let batch = format!("approve-all-{}-{class_id}", now());
-    let (outcome, audit_ids) = with_conn(app, |conn| {
-        let ids: Vec<i64> = conn
-            .prepare(
-                "SELECT id FROM move_proposals
-                 WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
-            )?
-            .query_map([class_id], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut approved = Vec::new();
-        let mut skipped = Vec::new();
-        let mut audit_ids = Vec::new();
-        for id in ids {
-            match approve_in_conn(conn, id, true, None, Some(&batch)) {
-                Ok(Some(moved)) => {
-                    approved.push(id);
-                    audit_ids.push(moved.audit_id);
-                }
-                Ok(None) => {}
-                Err(e) => skipped.push(format!("{e:#}")),
-            }
-        }
-        Ok((crate::deadlines::BatchOutcome { approved, skipped }, audit_ids))
-    })?;
+    let (outcome, audit_ids) = with_conn(app, |conn| approve_all_in_conn(conn, class_id, &batch))?;
     emit_hub_change(app, "proposals");
     if !outcome.approved.is_empty() {
         emit_hub_change(app, "files");
@@ -1896,6 +1879,36 @@ pub fn approve_all(app: &AppHandle, class_id: i64) -> Result<crate::deadlines::B
         notify(app, text, audit_ids, Some(class_id));
     }
     Ok(outcome)
+}
+
+/// Approve all on the connection: every pending card of the class in id
+/// order, the outcome and the audit rows of the moves made.
+fn approve_all_in_conn(
+    conn: &Connection,
+    class_id: i64,
+    batch: &str,
+) -> Result<(crate::deadlines::BatchOutcome, Vec<i64>)> {
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM move_proposals
+             WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
+        )?
+        .query_map([class_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut approved = Vec::new();
+    let mut skipped = Vec::new();
+    let mut audit_ids = Vec::new();
+    for id in ids {
+        match approve_in_conn(conn, id, true, None, Some(batch)) {
+            Ok(Some(moved)) => {
+                approved.push(id);
+                audit_ids.push(moved.audit_id);
+            }
+            Ok(None) => {}
+            Err(e) => skipped.push(format!("{e:#}")),
+        }
+    }
+    Ok((crate::deadlines::BatchOutcome { approved, skipped }, audit_ids))
 }
 
 /// The `move_proposals` row a move writes, inside its own transaction, so a
@@ -3387,5 +3400,120 @@ mod auto_filing_tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod filing_now_tests {
+    use super::*;
+
+    fn class_on_disk(name: &str) -> (Connection, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("classhub-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 4 — Probability', 4, '2026-09-10', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        (conn, root, class_dir)
+    }
+
+    fn pending(conn: &Connection, source: &str, source_rel: &str, dest_rel: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO move_proposals (class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
+             VALUES (3, ?1, ?2, 'a card', ?3, 'pending', 0)",
+            params![source_rel, dest_rel, source],
+        )
+        .expect("card");
+        conn.last_insert_rowid()
+    }
+
+    fn status(conn: &Connection, id: i64) -> (String, String) {
+        conn.query_row(
+            "SELECT status, dest_rel_path FROM move_proposals WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("row")
+    }
+
+    /// The sync's placement: refused by name while a card from another
+    /// route holds the file or another card claims the destination, and its
+    /// own waiting card becomes the record of the move rather than a second
+    /// row, with the destination and the reason the rule read.
+    #[test]
+    fn a_placement_honours_the_queue_and_takes_over_its_own_card() {
+        let (conn, root, class_dir) = class_on_disk("file-now");
+        fs::write(class_dir.join("_Inbox/Quiz 1.pdf"), "%PDF").unwrap();
+        let chat = pending(&conn, "chat", "_Inbox/Quiz 1.pdf", "Decks/Quiz 1.pdf");
+        let err = file_now(&conn, 3, &class_dir, "_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf", "Canvas files it.", "b")
+            .expect_err("chat holds it");
+        assert!(format!("{err:#}").contains("from chat"), "{err:#}");
+        assert!(class_dir.join("_Inbox/Quiz 1.pdf").is_file(), "not moved");
+        conn.execute("DELETE FROM move_proposals WHERE id = ?1", [chat]).unwrap();
+
+        fs::write(class_dir.join("_Inbox/Week 4 reading.pdf"), "%PDF").unwrap();
+        pending(&conn, "by_name", "Readings/Week 4 reading.pdf", "Quizzes/Quiz 1.pdf");
+        let err = file_now(&conn, 3, &class_dir, "_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf", "Canvas files it.", "b")
+            .expect_err("destination claimed");
+        assert!(format!("{err:#}").contains("already proposed for"), "{err:#}");
+        conn.execute("DELETE FROM move_proposals", []).unwrap();
+
+        let waiting = pending(&conn, "canvas", "_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf");
+        let (dest, audit_id) =
+            file_now(&conn, 3, &class_dir, "_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf", "Canvas files it under \"Quizzes\".", "b")
+                .expect("filed");
+        assert_eq!(dest, "Quizzes/Quiz 1.pdf");
+        assert!(class_dir.join("Quizzes/Quiz 1.pdf").is_file());
+        assert_eq!(status(&conn, waiting), ("approved".to_string(), "Quizzes/Quiz 1.pdf".to_string()));
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM move_proposals", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "the waiting card is the record, not a second row");
+        let (action, batch): (String, String) = conn
+            .query_row(
+                "SELECT action, json_extract(payload, '$.batch') FROM audit_log WHERE id = ?1",
+                [audit_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((action.as_str(), batch.as_str()), ("canvas.filed", "b"));
+        // A destination a file already occupies lands beside it.
+        fs::write(class_dir.join("_Inbox/Quiz 1.pdf"), "%PDF v2").unwrap();
+        let (dest, _) = file_now(&conn, 3, &class_dir, "_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf", "Canvas files it.", "b")
+            .expect("filed beside");
+        assert_eq!(dest, "Quizzes/Quiz 1 (2).pdf");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Approve all: every pending card's ordinary move under one batch, a
+    /// card whose file is gone left pending and named.
+    #[test]
+    fn approve_all_moves_every_card_it_can_and_names_the_rest() {
+        let (conn, root, class_dir) = class_on_disk("approve-all");
+        fs::write(class_dir.join("_Inbox/one.csv"), "a\n").unwrap();
+        fs::write(class_dir.join("_Inbox/two.csv"), "b\n").unwrap();
+        let one = pending(&conn, "sort_job", "_Inbox/one.csv", "Data/one.csv");
+        let two = pending(&conn, "chat", "_Inbox/two.csv", "Data/two.csv");
+        let gone = pending(&conn, "sort_job", "_Inbox/gone.csv", "Data/gone.csv");
+        let (outcome, audit_ids) = approve_all_in_conn(&conn, 3, "batch-1").expect("approve all");
+        assert_eq!(outcome.approved, [one, two]);
+        assert_eq!(audit_ids.len(), 2);
+        assert_eq!(outcome.skipped.len(), 1, "{outcome:?}");
+        assert!(outcome.skipped[0].contains("no longer on disk"), "{outcome:?}");
+        assert!(class_dir.join("Data/one.csv").is_file() && class_dir.join("Data/two.csv").is_file());
+        assert_eq!(status(&conn, gone).0, "pending");
+        let batches: Vec<String> = conn
+            .prepare("SELECT json_extract(payload, '$.batch') FROM audit_log WHERE action = 'sort.move'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(batches, ["batch-1", "batch-1"]);
+        let _ = fs::remove_dir_all(&root);
     }
 }

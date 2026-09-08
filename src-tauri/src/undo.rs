@@ -701,3 +701,50 @@ mod edited_since_tests {
         assert_eq!(score, 9.0);
     }
 }
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    /// A batch reverses newest first, refuses a row without an inverse
+    /// while the rest go, names each reversal, and pushes the areas the
+    /// inverses touched.
+    #[test]
+    fn a_batch_reverses_what_it_can_newest_first() {
+        let conn = crate::db::memory_db();
+        for (id, title) in [(7, "Homework 1"), (8, "Homework 2")] {
+            conn.execute(
+                "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+                 VALUES (?1, 1, ?2, 'assignment', '2026-09-08', 'open', 'manual')",
+                rusqlite::params![id, title],
+            )
+            .unwrap();
+        }
+        let first = crate::db::audit(
+            &conn,
+            "ui.upsert_deadline",
+            json!({ "id": 7, "classId": 1, "title": "Homework 1", "created": true }),
+        )
+        .unwrap();
+        let no_inverse = crate::db::audit(&conn, "lecture.added", json!({ "classId": 1, "relPath": "x" })).unwrap();
+        let second = crate::db::audit(
+            &conn,
+            "ui.upsert_deadline",
+            json!({ "id": 8, "classId": 1, "title": "Homework 2", "created": true }),
+        )
+        .unwrap();
+        let batch = undo_in_conn(&conn, &[first, no_inverse, second, second]);
+        assert_eq!(batch.outcome.undone, [second, first], "newest first, each once");
+        assert_eq!(batch.outcome.refused.len(), 1, "{:?}", batch.outcome.refused);
+        assert!(batch.outcome.refused[0].contains("cannot be reversed"));
+        assert_eq!(batch.texts, ["Removed Homework 2", "Removed Homework 1"]);
+        assert_eq!(batch.class_id, Some(1));
+        assert!(batch.areas.contains("deadlines"));
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM deadlines", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+        // The same batch again: every row already reversed.
+        let again = undo_in_conn(&conn, &[first, second]);
+        assert!(again.outcome.undone.is_empty());
+        assert!(again.outcome.refused.iter().all(|r| r.contains("already undone")), "{:?}", again.outcome.refused);
+    }
+}

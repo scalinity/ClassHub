@@ -1180,41 +1180,42 @@ fn file_waiting_cards(
     class_dir: &Path,
     batch: &str,
 ) -> Result<Vec<i64>> {
-    with_conn(app, |conn| {
-        let cards: Vec<(String, String, String)> = conn
-            .prepare(
-                "SELECT source_rel_path, dest_rel_path, reasoning FROM move_proposals
-                 WHERE class_id = ?1 AND status = 'pending' AND source = 'canvas'
-                 ORDER BY id",
-            )?
-            .query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        if cards.is_empty() {
-            return Ok(Vec::new());
+    with_conn(app, |conn| file_waiting_in(conn, class_id, class_dir, batch))
+}
+
+fn file_waiting_in(conn: &Connection, class_id: i64, class_dir: &Path, batch: &str) -> Result<Vec<i64>> {
+    let cards: Vec<(String, String, String)> = conn
+        .prepare(
+            "SELECT source_rel_path, dest_rel_path, reasoning FROM move_proposals
+             WHERE class_id = ?1 AND status = 'pending' AND source = 'canvas'
+             ORDER BY id",
+        )?
+        .query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if cards.is_empty() {
+        return Ok(Vec::new());
+    }
+    let modules_are_weeks = units::modules_read_as_weeks(conn, class_id)?;
+    let slots = units::week_slots(conn, class_id)?;
+    let mut moved = Vec::new();
+    for (source_rel, dest_rel, reasoning) in cards {
+        if !class_dir.join(&source_rel).is_file() {
+            continue;
         }
-        let modules_are_weeks = units::modules_read_as_weeks(conn, class_id)?;
-        let slots = units::week_slots(conn, class_id)?;
-        let mut moved = Vec::new();
-        for (source_rel, dest_rel, reasoning) in cards {
-            if !class_dir.join(&source_rel).is_file() {
-                continue;
-            }
-            let name = source_rel.rsplit('/').next().unwrap_or(&source_rel);
-            // The card's own reason opens with Canvas's folder; the rule
-            // reads the destination it named.
-            let canvas_reason = reasoning.trim_end_matches('.');
-            match crate::sorter::auto_filing(&slots, modules_are_weeks, name, Some(&dest_rel), canvas_reason) {
-                crate::sorter::AutoFiling::Filed { dest_rel, reasoning } => {
-                    match crate::sorter::file_now(conn, class_id, class_dir, &source_rel, &dest_rel, &reasoning, batch) {
-                        Ok((_, audit_id)) => moved.push(audit_id),
-                        Err(e) => eprintln!("canvas: {source_rel} stays carded: {e:#}"),
-                    }
-                }
-                _ => {}
+        let name = source_rel.rsplit('/').next().unwrap_or(&source_rel);
+        // The card's own reason opens with Canvas's folder; the rule reads
+        // the destination it named.
+        let canvas_reason = reasoning.trim_end_matches('.');
+        if let crate::sorter::AutoFiling::Filed { dest_rel, reasoning } =
+            crate::sorter::auto_filing(&slots, modules_are_weeks, name, Some(&dest_rel), canvas_reason)
+        {
+            match crate::sorter::file_now(conn, class_id, class_dir, &source_rel, &dest_rel, &reasoning, batch) {
+                Ok((_, audit_id)) => moved.push(audit_id),
+                Err(e) => eprintln!("canvas: {source_rel} stays carded: {e:#}"),
             }
         }
-        Ok(moved)
-    })
+    }
+    Ok(moved)
 }
 
 /// What the report says about the staged files that got no Canvas card, and
@@ -2624,5 +2625,57 @@ mod tests {
         let (notes, sort) = landing_notes(1, 1, 1);
         assert_eq!(notes.len(), 3);
         assert!(sort);
+    }
+}
+
+#[cfg(test)]
+mod waiting_card_tests {
+    use super::*;
+
+    /// The cards an earlier sync left: one whose name carries a week the
+    /// course declares files into the week folder, one Canvas placed files
+    /// into its folder, a module reading keeps its card, and a card whose
+    /// file has left the inbox is left to the vanish check.
+    #[test]
+    fn waiting_cards_file_by_the_rule_and_a_module_reading_keeps_its_card() {
+        let root = std::env::temp_dir().join(format!("classhub-waiting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).unwrap();
+        let class_dir = crate::scanner::class_dir(&conn, 3).unwrap();
+        std::fs::create_dir_all(class_dir.join(INBOX_DIR)).unwrap();
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 4 — Probability', 4, '2026-09-10', 'syllabus')",
+            [],
+        )
+        .unwrap();
+        let mut card = |source_rel: &str, dest_rel: &str| {
+            conn.execute(
+                "INSERT INTO move_proposals (class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
+                 VALUES (3, ?1, ?2, 'Canvas files it under \"x\"', 'canvas', 'pending', 0)",
+                params![source_rel, dest_rel],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let reading = card("_Inbox/Week 4 Reinhold.pdf", "Reading Material/Week 4 Reinhold.pdf");
+        let quiz = card("_Inbox/Quiz 1.pdf", "Quizzes/Quiz 1.pdf");
+        let module = card("_Inbox/Biostatistics_Module4_Slides.pptx", "Slides/Biostatistics_Module4_Slides.pptx");
+        let vanished = card("_Inbox/gone.pdf", "Quizzes/gone.pdf");
+        for name in ["Week 4 Reinhold.pdf", "Quiz 1.pdf", "Biostatistics_Module4_Slides.pptx"] {
+            std::fs::write(class_dir.join(INBOX_DIR).join(name), "%PDF").unwrap();
+        }
+        let moved = file_waiting_in(&conn, 3, &class_dir, "sync-1").expect("filed");
+        assert_eq!(moved.len(), 2, "{moved:?}");
+        assert!(class_dir.join("Weeks/Week 04 — Probability/Week 4 Reinhold.pdf").is_file());
+        assert!(class_dir.join("Quizzes/Quiz 1.pdf").is_file());
+        assert!(class_dir.join("_Inbox/Biostatistics_Module4_Slides.pptx").is_file(), "the module reading keeps its card");
+        let status = |id: i64| -> String {
+            conn.query_row("SELECT status FROM move_proposals WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!((status(reading).as_str(), status(quiz).as_str()), ("approved", "approved"));
+        assert_eq!((status(module).as_str(), status(vanished).as_str()), ("pending", "pending"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
