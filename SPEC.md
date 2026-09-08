@@ -986,8 +986,11 @@ badge and the chat overview count what still asks.
 
 **A deadline already on the list is tracked by its assignment.** Two readings name one
 assignment when their titles reduce to one key — lowercased, `#` and punctuation dropped,
-`hw` and `assignment` read as `homework`, so the syllabus's `Homework 1`, Canvas's `Homework
-Assignment 1` and a `HW #1` are one — and their due dates fall within two days of each
+connectives (`and`, `the`, `of`…) dropped, `hw` and `assignment` read as `homework`, so the
+syllabus's `Homework 1`, Canvas's `Homework Assignment 1` and a `HW #1` are one — or to keys
+that share at least three words in five with every number in either found in both (the
+syllabus's `Problem Statement + AI Pitch` is Canvas's `Problem Statement and AI Sketch`;
+`Homework 1 Draft` is never `Homework 2`), and their due dates fall within two days of each
 other, the syllabus naming the week's Sunday and Canvas the Monday at 11:59 pm. A row the
 syllabus scan put there before Canvas could, carrying no id, an open row before a done one,
 takes the assignment's id on first contact by that rule, with an audit row of its own, and is
@@ -996,10 +999,13 @@ deadline follows Canvas's words and Canvas's due date — one audit row holding 
 the date it had — and is marked done the moment Canvas holds a submission for it, with an
 audit row naming the submission; an assignment Canvas has stopped dating still closes the
 deadline it is tracked by. Any other untracked row that names the assignment beside the
-tracked one — the syllabus's reading, left there by an earlier sync — is folded in on the
-next: its notes carried onto the row where they add anything, its own row removed under a
-`canvas.merge_deadline` audit row, the sync report and a notice saying so; not reversible,
-as no `canvas.*` row is, since the next sync would fold it again. A syllabus rescan that
+tracked one — the syllabus's reading, left there by an earlier sync or added by a later
+scan — is folded in: its notes carried onto the row where they add anything, its own row
+removed under a `canvas.merge_deadline` audit row, and a notice saying so. The fold runs
+inside every sync's settle and once at every launch over every tracked row the list holds,
+which needs no Canvas read since the tracked row carries Canvas's words and day — so a
+duplicate never outlives a relaunch, whether or not a session is stored. Not reversible, as
+no `canvas.*` row is, since the next fold would remove it again. A syllabus rescan that
 proposes what Canvas tracks under its own words is told the deadline exists rather than
 given a card. From then on the row's badge reads `from Canvas` whoever first put it on the
 list, the same words the grade item's tag uses, since the same thing is true of both: an

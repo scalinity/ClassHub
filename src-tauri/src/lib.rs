@@ -871,6 +871,9 @@ pub fn run() {
             // same thread, so its duplicate check reads a fresh index.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // What an earlier sync left beside Canvas's rows folds first
+                // (SPEC §7.2), so the lists open without a duplicate.
+                deadlines::fold_at_launch(&handle);
                 scan_and_extract_all(&handle);
                 canvas_sync::sync_on_launch(&handle);
             });

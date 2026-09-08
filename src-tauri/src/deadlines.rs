@@ -1490,6 +1490,9 @@ pub(crate) fn assignment_key(title: &str) -> String {
     {
         let word = match word {
             "hw" | "assignment" | "assignments" | "homeworks" => "homework",
+            // Connectives carry no name: `Problem Statement and AI Sketch`
+            // and `Problem Statement + AI Pitch` differ in one word, not two.
+            "and" | "the" | "a" | "an" | "of" | "for" | "to" | "in" | "on" | "with" => continue,
             other => other,
         };
         if words.last() != Some(&word) {
@@ -1504,7 +1507,8 @@ pub(crate) fn assignment_key(title: &str) -> String {
 /// silent either way — a row beside its own duplicate, or two homeworks
 /// folded into one.
 pub(crate) fn same_assignment(title_a: &str, due_a: &str, title_b: &str, due_b: &str) -> bool {
-    if assignment_key(title_a) != assignment_key(title_b) {
+    let (key_a, key_b) = (assignment_key(title_a), assignment_key(title_b));
+    if key_a != key_b && !similar_keys(&key_a, &key_b) {
         return false;
     }
     let day = |due: &str| chrono::NaiveDate::parse_from_str(due.get(..10).unwrap_or(""), "%Y-%m-%d").ok();
@@ -1512,6 +1516,39 @@ pub(crate) fn same_assignment(title_a: &str, due_a: &str, title_b: &str, due_b: 
         (Some(a), Some(b)) => (a - b).num_days().abs() <= SAME_ASSIGNMENT_DAYS,
         _ => false,
     }
+}
+
+/// How much of two keys' words must be shared for them to name one thing
+/// when the keys differ: the syllabus's `Problem Statement + AI Pitch` and
+/// Canvas's `Problem Statement and AI Sketch` share three words of five.
+const SIMILAR_KEY_SHARE: f64 = 0.6;
+
+/// Two keys that differ but name one assignment: every number in either is
+/// in both — `Homework 1 Draft` is never `Homework 2` — and the words they
+/// share are at least `SIMILAR_KEY_SHARE` of the words they use between them.
+fn similar_keys(key_a: &str, key_b: &str) -> bool {
+    let (a, b) = (key_words(key_a), key_words(key_b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if key_numbers(&a) != key_numbers(&b) {
+        return false;
+    }
+    let shared = a.intersection(&b).count() as f64;
+    let used = a.union(&b).count() as f64;
+    shared / used >= SIMILAR_KEY_SHARE
+}
+
+fn key_words(key: &str) -> std::collections::BTreeSet<&str> {
+    key.split(' ').filter(|w| !w.is_empty()).collect()
+}
+
+fn key_numbers<'a>(words: &std::collections::BTreeSet<&'a str>) -> Vec<&'a str> {
+    words
+        .iter()
+        .filter(|w| w.chars().all(|c| c.is_ascii_digit()))
+        .copied()
+        .collect()
 }
 
 /// canvas > syllabus, for a card both readers can propose.
@@ -1849,43 +1886,124 @@ pub(crate) fn settle_canvas_deadline(
         settled.completed = true;
     }
     // Any other untracked row that names this assignment — the syllabus's
-    // reading of it, left beside the tracked row — is folded in: its notes
-    // carried onto the row, its own row removed, and the fold audited. Not
-    // reversible, as no `canvas.*` row is: the next sync would fold it again.
+    // reading of it, left beside the tracked row — is folded in.
     let due_now = canvas_due.unwrap_or(due_at.as_str());
-    for dup in untracked(&tx)? {
-        if dup.0 == id || !same_assignment(&title, due_now, &dup.1, &dup.2) {
+    settled.merged = fold_into(&tx, class_id, id, &title, due_now, assignment.id)?;
+    tx.commit()?;
+    Ok(Some(settled))
+}
+
+/// Folds every untracked row of the class that names the tracked row's
+/// assignment into it (SPEC §7.2): their notes carried onto the row where
+/// they add anything, their own rows removed, each fold audited. Not
+/// reversible, as no `canvas.*` row is: the next sync would fold it again.
+/// Answers with the folded titles.
+fn fold_into(
+    tx: &Connection,
+    class_id: i64,
+    kept_id: i64,
+    kept_title: &str,
+    kept_due: &str,
+    canvas_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT id, title, due_at, status, kind, notes, source FROM deadlines
+         WHERE class_id = ?1 AND canvas_assignment_id IS NULL AND id != ?2
+         ORDER BY id",
+    )?;
+    type Dup = (i64, String, String, String, String, Option<String>, String);
+    let dups: Vec<Dup> = stmt
+        .query_map(params![class_id, kept_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut folded = Vec::new();
+    for (dup_id, dup_title, dup_due, dup_status, kind, notes, source) in dups {
+        if !same_assignment(kept_title, kept_due, &dup_title, &dup_due) {
             continue;
         }
-        let (kind, notes, source): (String, Option<String>, String) = tx.query_row(
-            "SELECT kind, notes, source FROM deadlines WHERE id = ?1",
-            [dup.0],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
         if let Some(theirs) = notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
             let mine: Option<String> =
-                tx.query_row("SELECT notes FROM deadlines WHERE id = ?1", [id], |r| r.get(0))?;
+                tx.query_row("SELECT notes FROM deadlines WHERE id = ?1", [kept_id], |r| r.get(0))?;
             let kept = match mine.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 Some(mine) if mine.contains(theirs) => None,
                 Some(mine) => Some(format!("{mine} · {theirs}")),
                 None => Some(theirs.to_string()),
             };
             if let Some(kept) = kept {
-                tx.execute("UPDATE deadlines SET notes = ?1 WHERE id = ?2", params![kept, id])?;
+                tx.execute("UPDATE deadlines SET notes = ?1 WHERE id = ?2", params![kept, kept_id])?;
             }
         }
-        tx.execute("DELETE FROM deadlines WHERE id = ?1", [dup.0])?;
+        tx.execute("DELETE FROM deadlines WHERE id = ?1", [dup_id])?;
         audit(
-            &tx,
+            tx,
             "canvas.merge_deadline",
-            json!({ "id": dup.0, "classId": class_id, "mergedInto": id,
-                    "canvasAssignmentId": assignment.id, "title": dup.1, "kind": kind,
-                    "dueAt": dup.2, "notes": notes, "status": dup.3, "source": source }),
+            json!({ "id": dup_id, "classId": class_id, "mergedInto": kept_id,
+                    "canvasAssignmentId": canvas_id, "title": dup_title, "kind": kind,
+                    "dueAt": dup_due, "notes": notes, "status": dup_status, "source": source }),
         )?;
-        settled.merged.push(dup.1);
+        folded.push(dup_title);
+    }
+    Ok(folded)
+}
+
+/// One fold a launch made: whose class, what was folded, into what.
+pub struct Fold {
+    pub class_id: i64,
+    pub theirs: String,
+    pub canvas_title: String,
+}
+
+/// Folds, for every tracked deadline the list holds, the untracked rows that
+/// name its assignment — what an earlier sync left beside Canvas's row, or a
+/// syllabus scan added after it (SPEC §7.2). Needs no Canvas read: the
+/// tracked row carries Canvas's words and day. One transaction for the lot.
+pub fn fold_duplicates(conn: &Connection) -> Result<Vec<Fold>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "SELECT id, class_id, title, due_at, canvas_assignment_id FROM deadlines
+         WHERE canvas_assignment_id IS NOT NULL ORDER BY class_id, id",
+    )?;
+    let tracked: Vec<(i64, i64, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    let mut folds = Vec::new();
+    for (id, class_id, title, due_at, canvas_id) in tracked {
+        for theirs in fold_into(&tx, class_id, id, &title, &due_at, &canvas_id)? {
+            folds.push(Fold { class_id, theirs, canvas_title: title.clone() });
+        }
     }
     tx.commit()?;
-    Ok(Some(settled))
+    Ok(folds)
+}
+
+/// The launch's fold (SPEC §7.2): what it folded is said per class on the
+/// window, with nothing to undo, and the lists refetch.
+pub fn fold_at_launch(app: &AppHandle) {
+    let folds = match with_conn(app, fold_duplicates) {
+        Ok(folds) => folds,
+        Err(e) => {
+            eprintln!("deadlines: the launch fold failed — {e:#}");
+            return;
+        }
+    };
+    if folds.is_empty() {
+        return;
+    }
+    let mut by_class: std::collections::BTreeMap<i64, Vec<&Fold>> = std::collections::BTreeMap::new();
+    for fold in &folds {
+        by_class.entry(fold.class_id).or_default().push(fold);
+    }
+    for (class_id, folds) in by_class {
+        let text = match folds.as_slice() {
+            [one] => format!("Merged {} into {} from Canvas", one.theirs, one.canvas_title),
+            many => format!("Merged {} syllabus deadlines into their Canvas rows", many.len()),
+        };
+        eprintln!("deadlines: {text} (class {class_id})");
+        notify(app, text, Vec::new(), Some(class_id));
+    }
+    emit_hub_change(app, "deadlines");
 }
 
 // ---------------------------------------------------------------------------
@@ -2222,6 +2340,43 @@ mod tests {
         assert!(!same_assignment("Homework 1", "soon", "Homework 1", "2026-09-14"));
         assert_eq!(assignment_key("Homework Assignment #1"), "homework 1");
         assert_eq!(assignment_key("Problem Set 2"), "problem set 2");
+        // Keys that differ but share most of their words on one day are one
+        // deliverable named twice; a different number never is.
+        assert!(same_assignment("Problem Statement and AI Sketch", "2026-09-09T23:59", "Problem Statement + AI Pitch", "2026-09-09"));
+        assert!(!same_assignment("Homework 1 Draft", "2026-09-14", "Homework 2", "2026-09-14"));
+        assert!(!same_assignment("AI Design Project Presentations", "2026-10-28", "AI Teaming Log", "2026-10-28"));
+    }
+
+    /// The launch's fold needs no Canvas read: every tracked row folds the
+    /// untracked rows that name its assignment, across classes, in one
+    /// transaction, and names each fold by class.
+    #[test]
+    fn the_launch_fold_covers_every_tracked_row_across_classes() {
+        let conn = db();
+        let hw = deadline(&conn, 3, "Homework Assignment 1", "2026-09-14T23:59", "canvas", None);
+        conn.execute("UPDATE deadlines SET canvas_assignment_id = '7317246' WHERE id = ?1", [hw]).unwrap();
+        deadline(&conn, 3, "Homework 1", "2026-09-13", "syllabus", None);
+        let sketch = deadline(&conn, 2, "Problem Statement and AI Sketch", "2026-09-09T23:59", "canvas", None);
+        conn.execute("UPDATE deadlines SET canvas_assignment_id = '7300444' WHERE id = ?1", [sketch]).unwrap();
+        deadline(&conn, 2, "Problem Statement + AI Pitch", "2026-09-09", "syllabus", None);
+        let stays = deadline(&conn, 2, "AI Solution Architecture", "2026-09-16", "syllabus", None);
+        let folds = fold_duplicates(&conn).unwrap();
+        let named: Vec<(i64, &str, &str)> = folds
+            .iter()
+            .map(|f| (f.class_id, f.theirs.as_str(), f.canvas_title.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (2, "Problem Statement + AI Pitch", "Problem Statement and AI Sketch"),
+                (3, "Homework 1", "Homework Assignment 1"),
+            ]
+        );
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM deadlines", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 3);
+        let kept: i64 = conn.query_row("SELECT COUNT(*) FROM deadlines WHERE id = ?1", [stays], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1);
+        assert!(fold_duplicates(&conn).unwrap().is_empty(), "a second launch folds nothing");
     }
 
     /// A syllabus row is the Canvas assignment's on first contact by that

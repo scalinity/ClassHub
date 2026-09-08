@@ -5759,7 +5759,15 @@ Nothing spent. Against a `.backup` copy of the live database taken at 13:43
   so the sync report and a notice say `Merged Homework 1 into Homework
   Assignment 1 from Canvas`; `record_proposal` tells a syllabus rescan the
   deadline exists rather than carding it again. Not reversible, as no
-  `canvas.*` row is: the next sync would fold it again.
+  `canvas.*` row is: the next fold would remove it again. Keys that differ
+  still name one assignment when they share three words in five with the
+  same numbers (`similar_keys`; connectives leave the key), which is what
+  folds `Problem Statement + AI Pitch` into `Problem Statement and AI
+  Sketch`; and `fold_duplicates` runs the same `fold_into` over every tracked
+  row at launch (`fold_at_launch`, first on the launch thread), needing no
+  Canvas read — which is how the three duplicates on the live list went
+  the moment the dev build relaunched, notified per class (Homework 1 and
+  the done Quiz 1 into their Canvas rows, the pitch into the sketch).
 
 ### Verified
 
