@@ -67,7 +67,11 @@ function update(key: number, patch: Partial<Notice>) {
   emit({ notices, toast });
 }
 
+/** Restarts the toast's fade, for the notice that owns it. One timer serves
+ *  the one toast; an undo of an older notice from the panel must not touch
+ *  it, or the toast on screen would lose its fade and stay. */
 function scheduleFade(key: number, ms: number) {
+  if (snapshot.toast?.key !== key) return;
   if (fade !== null) clearTimeout(fade);
   fade = setTimeout(() => {
     if (snapshot.toast?.key === key) emit({ toast: null });
