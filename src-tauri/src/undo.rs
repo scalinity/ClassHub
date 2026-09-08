@@ -31,45 +31,94 @@ pub fn undo(app: &AppHandle, audit_ids: &[i64]) -> Result<UndoOutcome> {
     if audit_ids.is_empty() {
         bail!("nothing to undo");
     }
+    let batch = with_conn(app, |conn| Ok(undo_in_conn(conn, audit_ids)))?;
+    for area in &batch.areas {
+        emit_hub_change(app, area);
+    }
+    if !batch.outcome.undone.is_empty() {
+        let text = match batch.texts.as_slice() {
+            [one] => one.clone(),
+            many => format!("Undone: {} actions", many.len()),
+        };
+        notify(app, text, Vec::new(), batch.class_id);
+    }
+    Ok(batch.outcome)
+}
+
+/// What a batch did on the connection: the outcome for the caller, the hub
+/// areas to push, each row's words and the class the notice belongs to.
+struct Batch {
+    outcome: UndoOutcome,
+    areas: std::collections::BTreeSet<&'static str>,
+    texts: Vec<String>,
+    class_id: Option<i64>,
+}
+
+/// The batch on the connection, newest row first, each row once: the rows
+/// already reversed are read once here, not once per row over the whole
+/// log, and a row this batch reverses joins them so a repeated id is
+/// refused the second time.
+fn undo_in_conn(conn: &Connection, audit_ids: &[i64]) -> Batch {
     let mut ids = audit_ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
     ids.reverse();
-    let (outcome, areas, texts, class_id) = with_conn(app, |conn| {
-        let mut outcome = UndoOutcome::default();
-        let mut areas = std::collections::BTreeSet::new();
-        let mut texts = Vec::new();
-        let mut class_id = None;
-        for id in ids {
-            match undo_one(conn, id) {
-                Ok((undone, touched)) => {
-                    outcome.undone.push(id);
-                    areas.extend(touched.iter().copied());
-                    texts.push(undone.what);
-                    class_id = class_id.or(undone.class_id);
-                }
-                Err(e) => outcome.refused.push(format!("#{id}: {e:#}")),
-            }
+    let mut batch = Batch {
+        outcome: UndoOutcome::default(),
+        areas: std::collections::BTreeSet::new(),
+        texts: Vec::new(),
+        class_id: None,
+    };
+    let mut undone = match already_undone(conn) {
+        Ok(undone) => undone,
+        Err(e) => {
+            batch.outcome.refused.push(format!("the audit log could not be read: {e:#}"));
+            return batch;
         }
-        Ok((outcome, areas, texts, class_id))
-    })?;
-    for area in areas {
-        emit_hub_change(app, area);
+    };
+    for id in ids {
+        match undo_with(conn, id, &undone) {
+            Ok((reversed, touched)) => {
+                undone.insert(id);
+                batch.outcome.undone.push(id);
+                batch.areas.extend(touched.iter().copied());
+                batch.texts.push(reversed.what);
+                batch.class_id = batch.class_id.or(reversed.class_id);
+            }
+            Err(e) => batch.outcome.refused.push(format!("#{id}: {e:#}")),
+        }
     }
-    if !outcome.undone.is_empty() {
-        let text = match texts.as_slice() {
-            [one] => one.clone(),
-            many => format!("Undone: {} actions", many.len()),
-        };
-        notify(app, text, Vec::new(), class_id);
-    }
-    Ok(outcome)
+    batch
+}
+
+/// Every audit row an `undo.*` row names, in one read of the log.
+fn already_undone(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT json_extract(payload, '$.auditId') FROM audit_log
+         WHERE action LIKE 'undo.%' AND json_valid(payload)",
+    )?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, Option<i64>>(0))?
+        .filter_map(|id| id.ok().flatten())
+        .collect();
+    Ok(ids)
 }
 
 /// The hub areas an action's inverse changes.
 type Areas = &'static [&'static str];
 
+/// One row, reading the reversed set itself — the tests' entry point.
+#[cfg(test)]
 fn undo_one(conn: &Connection, audit_id: i64) -> Result<(crate::deadlines::Undone, Areas)> {
+    let undone = already_undone(conn)?;
+    undo_with(conn, audit_id, &undone)
+}
+
+fn undo_with(
+    conn: &Connection,
+    audit_id: i64,
+    undone: &std::collections::HashSet<i64>,
+) -> Result<(crate::deadlines::Undone, Areas)> {
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT action, payload FROM audit_log WHERE id = ?1",
@@ -81,14 +130,7 @@ fn undo_one(conn: &Connection, audit_id: i64) -> Result<(crate::deadlines::Undon
         bail!("no such audit row");
     };
     let payload: Value = serde_json::from_str(&payload).context("the row's payload is not JSON")?;
-    let already: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM audit_log
-         WHERE action LIKE 'undo.%'
-           AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.auditId') END = ?1",
-        [audit_id],
-        |r| r.get(0),
-    )?;
-    if already > 0 {
+    if undone.contains(&audit_id) {
         bail!("{action} was already undone");
     }
     // A move writes its own transaction around the rename; every other
