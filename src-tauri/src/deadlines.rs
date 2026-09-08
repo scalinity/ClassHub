@@ -1660,6 +1660,9 @@ pub(crate) struct CanvasAssignment<'a> {
 pub(crate) struct Settled {
     pub due_moved: bool,
     pub completed: bool,
+    /// A card waiting for the assignment left the queue with the settle,
+    /// which the sync's `deadlineProposals` push has to follow.
+    pub card_resolved: bool,
 }
 
 /// Brings the deadline for a Canvas assignment up to date, if there is one.
@@ -1739,13 +1742,13 @@ pub(crate) fn settle_canvas_deadline(
     let (id, title, due_at, status, _) = row;
     // A card waiting for an assignment the list now tracks leaves the queue
     // with it: the deadline is on the list, so the card has nothing to ask.
-    tx.execute(
+    let cards = tx.execute(
         "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
          WHERE class_id = ?2 AND canvas_assignment_id = ?3 AND status = 'pending'",
         params![now(), class_id, assignment.id],
     )?;
 
-    let mut settled = Settled::default();
+    let mut settled = Settled { card_resolved: cards > 0, ..Settled::default() };
     if let Some(canvas_due) = canvas_due.filter(|d| *d != due_at) {
         tx.execute(
             "UPDATE deadlines SET due_at = ?1 WHERE id = ?2",
@@ -2479,7 +2482,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &unsubmitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: false })
+            Some(Settled { due_moved: true, completed: false, card_resolved: false })
         );
         assert_eq!(
             row(),
@@ -2505,7 +2508,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("submitted"),
-            Some(Settled { due_moved: false, completed: true })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false })
         );
         assert_eq!(row().2, "done");
         let named: i64 = conn
@@ -2607,7 +2610,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: true })
+            Some(Settled { due_moved: true, completed: true, card_resolved: false })
         );
         let (source, status): (String, String) = conn
             .query_row(
@@ -2640,7 +2643,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &tracked).expect("settle"),
-            Some(Settled { due_moved: false, completed: true })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false })
         );
         let (due_at, status): (String, String) = conn
             .query_row(
@@ -2893,7 +2896,7 @@ mod tracked_card_tests {
         )
         .expect("settle")
         .expect("the syllabus row is claimed");
-        assert!(settled.completed);
+        assert!(settled.completed && settled.card_resolved, "{settled:?}");
         let (linked, status): (Option<String>, String) = conn
             .query_row("SELECT canvas_assignment_id, status FROM deadlines WHERE id = 31", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))

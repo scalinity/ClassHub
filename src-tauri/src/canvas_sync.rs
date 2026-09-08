@@ -614,13 +614,14 @@ fn sync_assignments(
     assignments: &[Value],
     outcome: &mut ClassOutcome,
 ) -> Result<()> {
-    let (recorded, undated, known, completed, moved, declined) = with_conn(app, |conn| {
+    let (recorded, undated, known, completed, moved, declined, cards_resolved) = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut undated = 0usize;
         let mut known = 0usize;
         let mut completed = 0usize;
         let mut moved = 0usize;
         let mut declined = 0usize;
+        let mut cards_resolved = 0usize;
         for assignment in assignments {
             let Some(title) = assignment["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -649,6 +650,9 @@ fn sync_assignments(
                         }
                         if settled.due_moved {
                             moved += 1;
+                        }
+                        if settled.card_resolved {
+                            cards_resolved += 1;
                         }
                         continue;
                     }
@@ -712,7 +716,7 @@ fn sync_assignments(
                 Err(e) => eprintln!("canvas: skipping assignment '{title}': {e:#}"),
             }
         }
-        Ok((recorded, undated, known, completed, moved, declined))
+        Ok((recorded, undated, known, completed, moved, declined, cards_resolved))
     })?;
 
     outcome.deadlines_recorded = recorded;
@@ -738,9 +742,9 @@ fn sync_assignments(
              hand to track it"
         ));
     }
-    if recorded > 0 {
-        // The cards the direct write resolved leave the queue, and the badge
-        // counts what still asks.
+    if recorded > 0 || cards_resolved > 0 {
+        // The cards the direct write or a settle resolved leave the queue,
+        // and the badge counts what still asks.
         emit_hub_change(app, "deadlineProposals");
     }
     if recorded > 0 || completed > 0 || moved > 0 {
