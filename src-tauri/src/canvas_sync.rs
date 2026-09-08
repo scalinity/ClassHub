@@ -653,7 +653,13 @@ fn sync_assignments(
                         continue;
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("canvas: could not settle '{title}': {e:#}"),
+                    // A failed settle is not "nothing tracks it": the row it
+                    // found may still be there, and a direct write beside it
+                    // would put the assignment on the list twice.
+                    Err(e) => {
+                        eprintln!("canvas: could not settle '{title}': {e:#}");
+                        continue;
+                    }
                 }
             }
             // An assignment with no due date is real but not a deadline. It
