@@ -156,6 +156,16 @@ mod tests {
         conn.query_row(sql, [], |r| r.get(0)).expect("count")
     }
 
+    /// The proposal row a move wrote, read off its audit payload.
+    fn proposal_of(conn: &Connection, audit_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT json_extract(payload, '$.proposalId') FROM audit_log WHERE id = ?1",
+            [audit_id],
+            |r| r.get(0),
+        )
+        .expect("proposal id")
+    }
+
     /// A created deadline is removed, an edited one takes its earlier state
     /// back, a deleted one comes back under its id, and a status flip flips
     /// back — each writing its `undo.` row, and none twice.
@@ -397,16 +407,14 @@ mod tests {
             [],
         )
         .unwrap();
-        let proposal_id = crate::sorter::record_approved(&conn, 3, "by_name",
-            "Slides/Week3 deck.csv", "Weeks/Week 03 — Data/Week3 deck.csv", "test").unwrap();
         let audit_id = crate::sorter::move_file(
             &conn,
             3,
             &class_dir,
             "Slides/Week3 deck.csv",
             "Weeks/Week 03 — Data/Week3 deck.csv",
-            &crate::sorter::Recorded {
-                proposal_id,
+            crate::sorter::Recorded {
+                proposal: crate::sorter::ProposalRow::New { source: "by_name", reasoning: "test" },
                 proposed_by: "by_name",
                 confidence: None,
                 action: "sort.move",
@@ -414,6 +422,7 @@ mod tests {
             },
         )
         .expect("move");
+        let proposal_id = proposal_of(&conn, audit_id);
         assert!(class_dir.join("Weeks/Week 03 — Data/Week3 deck.csv").is_file());
 
         // The source taken since: refused by name, the file stays.
@@ -437,16 +446,14 @@ mod tests {
 
         // A Canvas placement returns to the inbox, unindexed, with its card pending.
         std::fs::write(class_dir.join("_Inbox/Quiz.csv"), "q\n").unwrap();
-        let proposal_id = crate::sorter::record_approved(&conn, 3, "canvas",
-            "_Inbox/Quiz.csv", "Quizzes/Quiz.csv", "test").unwrap();
         let audit_id = crate::sorter::move_file(
             &conn,
             3,
             &class_dir,
             "_Inbox/Quiz.csv",
             "Quizzes/Quiz.csv",
-            &crate::sorter::Recorded {
-                proposal_id,
+            crate::sorter::Recorded {
+                proposal: crate::sorter::ProposalRow::New { source: "canvas", reasoning: "test" },
                 proposed_by: "canvas",
                 confidence: None,
                 action: "canvas.filed",
@@ -454,6 +461,7 @@ mod tests {
             },
         )
         .expect("file");
+        let proposal_id = proposal_of(&conn, audit_id);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM files WHERE rel_path = 'Quizzes/Quiz.csv'"), 1);
         undo_one(&conn, audit_id).expect("undo the placement");
         assert!(class_dir.join("_Inbox/Quiz.csv").is_file());

@@ -415,17 +415,17 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     refuse_held(conn, class_id, &source_rel, &dest_rel)?;
     let reasoning = week_reason(&reading, &folder_rel, &slot.unit_name);
     // The click is the move (SPEC §10): the record of it is an approved
-    // by-name row, so the queue's history reads as it did when the click
-    // wrote a card, and the audit row is the same `sort.move`.
-    let proposal_id = record_approved(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning)?;
+    // by-name row, written in the move's own transaction, so the queue's
+    // history reads as it did when the click wrote a card, and the audit
+    // row is the same `sort.move`.
     let audit_id = move_file(
         conn,
         class_id,
         class_dir,
         &source_rel,
         &dest_rel,
-        &Recorded {
-            proposal_id,
+        Recorded {
+            proposal: ProposalRow::New { source: "by_name", reasoning: &reasoning },
             proposed_by: "by_name",
             confidence: None,
             action: "sort.move",
@@ -433,27 +433,6 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
         },
     )?;
     Ok(WeekFiling { dest_rel, moved: 1, audit_ids: vec![audit_id], name: name.to_string() })
-}
-
-/// An approved row for a move made without a card — a by-name click, or a
-/// file the sync placed — so `move_proposals` stays the record of every move
-/// the app made, and an undo has a row to put back to pending or dismissed.
-pub(crate) fn record_approved(
-    conn: &Connection,
-    class_id: i64,
-    source: &str,
-    source_rel: &str,
-    dest_rel: &str,
-    reasoning: &str,
-) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO move_proposals
-         (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
-          source, status, created_at, resolved_at)
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'approved', ?6, ?6)",
-        params![class_id, source_rel, dest_rel, reasoning, source, now()],
-    )?;
-    Ok(conn.last_insert_rowid())
 }
 
 /// A folder named for a week files what it holds: every file under it moves
@@ -512,15 +491,14 @@ fn folder_filing(
     let batch = format!("by-name-{}-{class_id}", now());
     let mut audit_ids = Vec::new();
     for (from, to) in &moves {
-        let proposal_id = record_approved(conn, class_id, "by_name", from, to, &reasoning)?;
         let audit_id = move_file(
             conn,
             class_id,
             class_dir,
             from,
             to,
-            &Recorded {
-                proposal_id,
+            Recorded {
+                proposal: ProposalRow::New { source: "by_name", reasoning: &reasoning },
                 proposed_by: "by_name",
                 confidence: None,
                 action: "sort.move",
@@ -852,7 +830,8 @@ pub(crate) fn file_now(
         bail!("'{dest_rel}' is already proposed for '{other}'");
     }
     // The card the sync itself wrote earlier, if one is waiting, becomes the
-    // record of this move rather than a second row.
+    // record of this move rather than a second row — written, like a fresh
+    // row, inside the move's own transaction.
     let waiting: Option<i64> = conn
         .query_row(
             "SELECT id FROM move_proposals
@@ -861,17 +840,9 @@ pub(crate) fn file_now(
             |row| row.get(0),
         )
         .optional()?;
-    let proposal_id = match waiting {
-        Some(id) => {
-            conn.execute(
-                "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, source = 'canvas',
-                        status = 'approved', resolved_at = ?3
-                 WHERE id = ?4",
-                params![dest_rel, reasoning, now(), id],
-            )?;
-            id
-        }
-        None => record_approved(conn, class_id, "canvas", source_rel, &dest_rel, reasoning)?,
+    let proposal = match waiting {
+        Some(id) => ProposalRow::Waiting { id, reasoning },
+        None => ProposalRow::New { source: "canvas", reasoning },
     };
     let audit_id = move_file(
         conn,
@@ -879,8 +850,8 @@ pub(crate) fn file_now(
         class_dir,
         source_rel,
         &dest_rel,
-        &Recorded {
-            proposal_id,
+        Recorded {
+            proposal,
             proposed_by: "canvas",
             confidence: None,
             action: "canvas.filed",
@@ -1838,8 +1809,8 @@ fn approve_in_conn(
         &class_dir,
         &source_rel,
         &dest_rel,
-        &Recorded {
-            proposal_id,
+        Recorded {
+            proposal: ProposalRow::Existing(proposal_id),
             proposed_by: &source,
             confidence: confidence.as_deref(),
             action: "sort.move",
@@ -1888,11 +1859,25 @@ pub fn approve_all(app: &AppHandle, class_id: i64) -> Result<crate::deadlines::B
     Ok(outcome)
 }
 
-/// What a move records beside its paths: the row it resolves, who proposed
+/// The `move_proposals` row a move writes, inside its own transaction, so a
+/// move that fails leaves no row saying it happened (SPEC §5).
+pub(crate) enum ProposalRow<'a> {
+    /// A card the reader approved: set approved with the destination.
+    Existing(i64),
+    /// A move made without a card — a by-name click, a file the sync placed
+    /// — gets an approved row for the record, so an undo has a row to put
+    /// back to pending or dismissed.
+    New { source: &'a str, reasoning: &'a str },
+    /// A card the sync itself wrote earlier, now the record of this move
+    /// rather than a second row.
+    Waiting { id: i64, reasoning: &'a str },
+}
+
+/// What a move records beside its paths: the row it writes, who proposed
 /// it, the audit action and anything else the payload carries — a reason,
 /// a batch id.
 pub(crate) struct Recorded<'a> {
-    pub proposal_id: i64,
+    pub proposal: ProposalRow<'a>,
     pub proposed_by: &'a str,
     pub confidence: Option<&'a str>,
     /// `sort.move` for an approval or a by-name click, `canvas.filed` for a
@@ -1913,7 +1898,7 @@ pub(crate) fn move_file(
     class_dir: &Path,
     source_rel: &str,
     dest_rel: &str,
-    recorded: &Recorded<'_>,
+    mut recorded: Recorded<'_>,
 ) -> Result<i64> {
     let src_abs = class_dir.join(source_rel);
     if !src_abs.is_file() {
@@ -1931,20 +1916,12 @@ pub(crate) fn move_file(
     fs::rename(&src_abs, &dest_abs)
         .with_context(|| format!("moving {source_rel} to {dest_rel}"))?;
 
-    let mut recorded_with_dirs = Recorded {
-        proposal_id: recorded.proposal_id,
-        proposed_by: recorded.proposed_by,
-        confidence: recorded.confidence,
-        action: recorded.action,
-        extra: recorded.extra.clone(),
-    };
     if !created.is_empty() {
-        if let Some(into) = recorded_with_dirs.extra.as_object_mut() {
+        if let Some(into) = recorded.extra.as_object_mut() {
             into.insert("createdDirs".to_string(), json!(created));
         }
     }
-    let recorded = &recorded_with_dirs;
-    match record_move(conn, class_id, class_dir, source_rel, dest_rel, recorded) {
+    match record_move(conn, class_id, class_dir, source_rel, dest_rel, &recorded) {
         Ok(audit_id) => Ok(audit_id),
         Err(e) => {
             undo_artifact_moves(class_dir, source_rel, dest_rel);
@@ -2004,8 +1981,40 @@ fn record_move(
     // left naming a path nothing is at.
     let effects =
         crate::lectures::refile_lecture(&tx, class_id, class_dir, source_rel, dest_rel)?;
+    // The row and the move commit together: a move that fails past here rolls
+    // its row back with the rest, and a retry finds no row claiming it moved.
+    let proposal_id = match recorded.proposal {
+        ProposalRow::Existing(id) => {
+            tx.execute(
+                "UPDATE move_proposals
+                 SET status = 'approved', dest_rel_path = ?1, resolved_at = ?2 WHERE id = ?3",
+                params![dest_rel, now(), id],
+            )?;
+            id
+        }
+        ProposalRow::New { source, reasoning } => {
+            tx.execute(
+                "INSERT INTO move_proposals
+                 (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
+                  source, status, created_at, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'approved', ?6, ?6)",
+                params![class_id, source_rel, dest_rel, reasoning, source, now()],
+            )?;
+            tx.last_insert_rowid()
+        }
+        ProposalRow::Waiting { id, reasoning } => {
+            tx.execute(
+                "UPDATE move_proposals
+                 SET dest_rel_path = ?1, reasoning = ?2, source = 'canvas',
+                     status = 'approved', resolved_at = ?3
+                 WHERE id = ?4",
+                params![dest_rel, reasoning, now(), id],
+            )?;
+            id
+        }
+    };
     let mut payload = json!({
-        "proposalId": recorded.proposal_id,
+        "proposalId": proposal_id,
         "classId": class_id,
         "from": source_rel,
         "to": dest_rel,
@@ -2020,11 +2029,6 @@ fn record_move(
         }
     }
     let audit_id = crate::db::audit(&tx, recorded.action, payload)?;
-    tx.execute(
-        "UPDATE move_proposals
-         SET status = 'approved', dest_rel_path = ?1, resolved_at = ?2 WHERE id = ?3",
-        params![dest_rel, now(), recorded.proposal_id],
-    )?;
     tx.commit()?;
     // Only now: the database can no longer roll back, so the corpus note moves
     // against a record that already says it moved. Before the commit it stays
