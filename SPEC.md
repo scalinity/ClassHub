@@ -1777,6 +1777,96 @@ Mark the checkbox when the acceptance criteria pass.
   Week NN`; and, where the recordings exist, each session is filed with a note and a session
   document and the guides are built with their costs in §1.
 
+- [ ] **M32 — Honest guides.** (`milestones/M32-honest-guides.md`)
+  A job's own stream log says what it read and wrote: the manifest records every file a guide
+  drew on, and the write guard stops failing a job for an edit that was the owner's. The digest
+  writes a hints sidecar — emphasis, exam hints, corrections, where the room got stuck, what the
+  session built on — into a `lecture_hints` table, shown as a `Flagged` section with anchors
+  into the transcript and handed to every guide, exam and the master, and a cards sidecar
+  nothing reads until M37. The master takes its roster from `units` and reads the corpus; a
+  rewrite says what changed on the row and marks it in the document; the syllabus scan reads
+  objectives; a practice exam gets a row, a focus field, the real weights and a results contract.
+  *Accepted when:* the four verification runs on Biostatistics — a redistill, the Week 3 guide,
+  the master and a focused exam — each show every change to their kind, the Week 3 manifest
+  names every file its log shows it read, an owner's edit during an extract leaves the job
+  succeeded, and the `Flagged` section's anchors open the transcript.
+
+- [ ] **M33 — One click, and undo.** (`milestones/M33-one-click-and-undo.md`)
+  One command reverses an audit row and a notice with `Undo` follows every reversible action.
+  On that: a file Canvas placed, or whose own name carries a week the course declares, is filed
+  without a card and undone in one; a by-name click is the move, a folder's one batch; `Approve
+  all` over a class's cards; a Canvas assignment becomes its deadline directly; a recurring
+  proposal is one series card; a date-only due date is the end of its day everywhere; a
+  duplicate file is marked and read once; every row action is visible without hover.
+  *Accepted when:* a week-named fixture files on one click and returns on `Undo`, a folder of
+  two moves and reverses as one batch, the live sync files the week's Canvas files with a notice
+  and leaves a module-named file its card, the twelve live-coding proposals read as one series,
+  a date-only deadline due today reads `due today` at noon, and the duplicate reading is named
+  and listed once among its division's sources.
+
+- [ ] **M34 — The idle shift.** (`milestones/M34-the-idle-shift.md`)
+  A scheduler thread runs a plan when the owner has stopped for the evening — sync, file,
+  extract, distill what has no note or no hints, rebuild stale guides whose meeting has passed —
+  under per-night caps, stopping at the first rate-limit event, holding the Mac awake with
+  `caffeinate`, catching up at launch when a window was missed, and never running a master.
+  A model and effort per job kind, a meter in counts and minutes, two notifications, a login
+  item and a tray, and a self-check that writes no row when the daily verdict stands.
+  *Accepted when:* on the dev build with the window set to now the shift runs its plan on
+  pending work within its caps, records the run, notifies, refuses a second run that night and
+  pauses between jobs; `caffeinate` lives and dies with the run; only one process runs shifts;
+  and a per-kind override reaches a job's init event.
+
+- [ ] **M35 — What Canvas knows.** (`milestones/M35-what-canvas-knows.md`)
+  A probe of the Zoom tool in Canvas's course navigation, recorded in §1; where its recordings
+  list is readable from the signed-in window, recordings are found and captured hidden after
+  each meeting and filed into its week — an undated course's by the one-meeting rule — and
+  where it is not, the form opens pre-filled and the app names the meeting with no transcript.
+  A light-tier scan reads each new announcement into deadline proposals, to-dos and changes, and
+  the sync keeps an assignment's description for M36's briefs.
+  *Accepted when:* §1 records the probe with timings for all four courses; a found recording is
+  captured with no window shown and filed with a note and a session document, or the fallback
+  form is pre-filled; the existing announcements yield the postponed office hour and the
+  milestone assignment as proposals with to-do lines under their notices; and the homework rows
+  carry Canvas's descriptions.
+
+- [ ] **M36 — Briefs and workbooks.** (`milestones/M36-briefs-and-workbooks.md`)
+  Four small document kinds for the three quarters of the grade that are not exams, each
+  written by the shift around the calendar and by a row action: a homework brief that maps an
+  assignment to where it was taught, with anchors and the professor's hints, and never solves
+  it; a project workbook per class from the guidelines, the milestones and the owner's own
+  `Project/` drafts, with a presentation kit from a paper's row; a pre-read before a lecture
+  whose deck posted early; and a note's `Against the room` section once its session is
+  distilled.
+  *Accepted when:* one brief for the next open homework maps every part to a source and works
+  no answer, the Design Studio workbook lists its sixteen items with the next one's needs, a
+  pre-read exists for the week that qualifies, a fixture note gains its section once and undoes,
+  and the shift's plan lists the four steps with their caps.
+
+- [ ] **M37 — Today.** (`milestones/M37-today.md`)
+  The app says what it knows: a `Today` block on the dashboard from the tables — meetings,
+  what is due, what the shift did with its `Undo`, announcements since the last open, and every
+  decision waiting — with two more notifications; a semester strip per class with Applied's
+  current week read from its filed lectures; the fetched fields rendered. A practice exam's
+  self-score lands in `practice_results` and becomes the next exam's default focus, with a quiz
+  written two days before a quiz; the cards sidecars are indexed, exported for Anki and served
+  ten a day on the dashboard; a grade projection once a score exists.
+  *Accepted when:* Today lists today's meetings, a fixture deadline and a waiting card, a
+  notification fires for a deadline due tomorrow, all four cards name the week Applied's from
+  its lectures, an exam's self-score reaches the table and the next exam's prompt, the cards
+  list and export, and a fixture grade item yields the projection.
+
+- [ ] **M38 — Chat that ranks.** (`milestones/M38-chat-that-ranks.md`)
+  An FTS5 index over everything the pipeline writes, filled at extract and on write, answering
+  `search_material` with BM25 ranking and snippets, ripgrep bounded behind it; a cache breakpoint
+  on the last message of each round, retries on a 429 or 529, compaction of old tool results,
+  the overview's deadline list trimmed; citations that open scripts and CSVs and `HH:MM` anchors
+  that open the transcript; and tools that approve, sort, scan, batch-approve, add a lecture,
+  run the shift, undo, and list what the professor flagged.
+  *Accepted when:* a phrase from a corpus note returns that note first with a snippet, a
+  five-round turn's cache reads exceed its writes from round two, a compacted session still
+  answers a follow-up about an earlier turn, chat approves a card and adds a lecture with their
+  audit rows, and an `HH:MM` in an answer opens the transcript.
+
 
 ## 15. Risks & trade-offs (accepted)
 
@@ -1819,7 +1909,6 @@ Mark the checkbox when the acceptance criteria pass.
 
 ## 16. Future ideas (explicitly out of v1)
 
-- Spaced-repetition export (Anki) from quiz sections
 - Cross-class semester dashboard analytics (study time, grade trends)
 - Auto-sync of the AIBHS folder from cloud storage
 
