@@ -1679,19 +1679,25 @@ pub(crate) fn record_proposal(
         return Ok(Recorded::AlreadyDeadline);
     }
     // A reader without an id — the syllabus scan — proposing what the list
-    // already holds under Canvas's words and Canvas's day (SPEC §7.2): the
-    // same assignment, not a card beside it.
+    // already holds under Canvas's words and Canvas's day, or what a card was
+    // declined for under its own earlier words (SPEC §7.2): the same
+    // assignment by the same reading the fold uses, not a card beside it.
     if canvas_id.is_none() {
-        let mut stmt = conn.prepare(
-            "SELECT title, due_at FROM deadlines WHERE class_id = ?1",
-        )?;
-        let named = stmt
-            .query_map([class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .any(|(t, d)| same_assignment(title, due_at, &t, &d));
-        if named {
+        let names = |sql: &str| -> Result<bool> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map([class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows.into_iter().any(|(t, d)| same_assignment(title, due_at, &t, &d)))
+        };
+        if names("SELECT title, due_at FROM deadlines WHERE class_id = ?1")? {
             return Ok(Recorded::AlreadyDeadline);
+        }
+        if names(
+            "SELECT title, due_at FROM deadline_proposals
+             WHERE class_id = ?1 AND status = 'dismissed'",
+        )? {
+            return Ok(Recorded::DismissedBefore);
         }
     }
     let dismissed_before: i64 = conn.query_row(
@@ -2509,6 +2515,16 @@ mod tests {
         assert!(matches!(recorded, Recorded::AlreadyDeadline));
         let recorded = record_proposal(&conn, 1, "Homework 2", "assignment", "2026-10-04", None, "syllabus", None).unwrap();
         assert!(matches!(recorded, Recorded::Proposed));
+        // A card declined as `Homework 2` covers the scan's next reading of
+        // it, `HW #2` a day later, by the same rule.
+        let card: i64 = conn.query_row("SELECT id FROM deadline_proposals", [], |r| r.get(0)).unwrap();
+        conn.execute(
+            "UPDATE deadline_proposals SET status = 'dismissed', resolved_at = 1 WHERE id = ?1",
+            [card],
+        )
+        .unwrap();
+        let recorded = record_proposal(&conn, 1, "HW #2", "assignment", "2026-10-05", None, "syllabus", None).unwrap();
+        assert!(matches!(recorded, Recorded::DismissedBefore));
     }
 
     fn propose(conn: &rusqlite::Connection, due_at: &str, source: &str) -> Recorded {
