@@ -175,7 +175,7 @@ pub(crate) fn undo_write(
     if content_hash(&current) != written {
         bail!("{rel_path} has been edited since — its current text is not this save's");
     }
-    let name = file_name.trim_end_matches(".md").to_string();
+    let name = note_title(rel_path).to_string();
     match payload["previousContent"].as_str() {
         Some(previous) => crate::db::write_atomic(&abs, previous)?,
         None => fs::remove_file(&abs).with_context(|| format!("removing {rel_path}"))?,
@@ -225,11 +225,10 @@ pub fn save_from_ui(
 
 /// A note's name as the listing shows it: the file name without `.md`.
 pub(crate) fn note_title(rel_path: &str) -> &str {
-    rel_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(rel_path)
-        .trim_end_matches(".md")
+    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    // One suffix, not every trailing one: a note titled `Week 3.md` is the
+    // file `Week 3.md.md`, and its name is `Week 3.md`.
+    name.strip_suffix(".md").unwrap_or(name)
 }
 
 pub fn list_notes(conn: &Connection, class_id: i64) -> Result<Vec<NoteFile>> {
