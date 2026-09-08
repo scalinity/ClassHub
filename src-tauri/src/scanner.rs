@@ -227,7 +227,7 @@ pub fn scan_class(
     // is marked with the first's path, and every reader of a scope's sources
     // leaves it out. Marked once the vanished rows are gone, so a copy whose
     // canonical left the tree is canonical from this scan on.
-    let (duplicates, remarked) = mark_duplicates(&tx, class_id)?;
+    let (duplicates, remarked) = mark_duplicates(&tx, class_id, &seen)?;
     changed |= remarked;
     let mut tree = tree;
     if !duplicates.is_empty() {
@@ -258,11 +258,15 @@ pub fn scan_class(
 }
 
 /// Marks every row whose hash another row of the class shares with the
-/// canonical copy's path, and clears the mark on the rest. Returns the marks
-/// and whether any row's mark changed.
+/// canonical copy's path, and clears the mark on the rest. Only rows the
+/// walk found on disk (`on_disk`) group: a row a refused settle kept for the
+/// next scan names a file that is not there, and it must neither be read as
+/// the canonical copy nor mark a live one. Returns the marks and whether
+/// any row's mark changed.
 fn mark_duplicates(
     conn: &Connection,
     class_id: i64,
+    on_disk: &HashSet<&str>,
 ) -> Result<(HashMap<String, String>, bool)> {
     let mut stmt = conn.prepare(
         "SELECT id, rel_path, sha256, duplicate_of FROM files
@@ -271,8 +275,10 @@ fn mark_duplicates(
     let rows: Vec<(i64, String, String, Option<String>)> = stmt
         .query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let present: Vec<&(i64, String, String, Option<String>)> =
+        rows.iter().filter(|row| on_disk.contains(row.1.as_str())).collect();
     let mut marks: HashMap<String, String> = HashMap::new();
-    for group in rows.chunk_by(|a, b| a.2 == b.2) {
+    for group in present.chunk_by(|a, b| a.2 == b.2) {
         if group.len() < 2 {
             continue;
         }
@@ -1429,7 +1435,11 @@ mod duplicate_tests {
         let master = crate::extract::current_manifest(&conn, 4, "master").unwrap();
         assert_eq!(master.len(), 1, "{master:?}");
         let folder = crate::extract::current_manifest(&conn, 4, "Module 1").unwrap();
-        assert!(folder.is_empty(), "{folder:?}");
+        assert_eq!(
+            folder.len(),
+            1,
+            "its canonical sits outside the folder, so this copy is the folder's only one: {folder:?}"
+        );
         drop(conn);
         std::fs::remove_file(dir.join("Readings/Role.csv")).unwrap();
         scan_class(&db, 4).expect("rescan");
@@ -1442,6 +1452,17 @@ mod duplicate_tests {
             )
             .unwrap();
         assert_eq!(mark, None, "canonical once the other copy left");
+        // A row the walk did not find — kept for a refused settle's next
+        // try — neither wins nor marks: the live copy stays canonical.
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (4, 'Weeks/Week 01/gone.csv', (SELECT sha256 FROM files WHERE rel_path = 'Module 1/Readings/Role.csv'), 8, 1, 'csv')",
+            [],
+        )
+        .unwrap();
+        let on_disk: HashSet<&str> = ["Module 1/Readings/Role.csv"].into();
+        let (marks, _) = mark_duplicates(&conn, 4, &on_disk).unwrap();
+        assert!(marks.is_empty(), "{marks:?}");
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
