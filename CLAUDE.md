@@ -72,13 +72,12 @@ session rather than from a prompt.
   reload (`touch index.html`), not after HMR. A render error while an edit is half-applied
   blanks the window and HMR does not bring it back; the same `touch` does.
 
-## The facelift branch (M30)
+## The facelift (M30)
 
-- The redesigned UI lives on the `facelift` branch; `main` holds the original at the
-  `pre-facelift` tag. Both build against the one database. `git switch main && npm run
-  install-app` restores the original look; `git switch main && git merge --ff-only facelift`
-  keeps the new one. Until that merge, main and the branch must not be edited in the same
-  session.
+- Merged into `main` on 2026-09-04 (1af2747, the installed build). The original look is the
+  `pre-facelift` tag (84454ad): `git switch --detach pre-facelift && npm run install-app`
+  shows it again, and `git switch main && npm run install-app` returns. The `facelift`
+  branch points at the same commit and can be deleted.
 
 ## Commit pipeline
 
