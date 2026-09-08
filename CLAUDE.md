@@ -19,7 +19,7 @@ once a milestone's acceptance criteria are verified.
 ## One database, two processes
 
 - Database: `~/Library/Application Support/com.danny.classhub/classhub.db`, WAL,
-  `user_version` 17; job logs under `logs/` beside it. Read it with `sqlite3 -readonly`.
+  `user_version` 18; job logs under `logs/` beside it. Read it with `sqlite3 -readonly`.
 - The installed app and a dev build share it. Check `lsof -nP -iTCP:1420` before
   `npm run tauri dev`; find the dev build with `pgrep -f target/debug/classhub` and stop it by
   pid, which ends `tauri dev` and frees the port.

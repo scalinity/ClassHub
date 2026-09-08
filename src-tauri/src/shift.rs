@@ -628,7 +628,7 @@ fn run_shift(app: &AppHandle, id: i64) {
         eprintln!("shift run {id}: could not be recorded as finished — {e:#}");
     }
     eprintln!("shift run {id}: {} ({})", end.summary, end.stopped_by);
-    notify(
+    crate::notifications::notify(
         app,
         crate::settings::NOTIFY_SHIFT_FINISHED,
         "Shift finished",
@@ -672,6 +672,25 @@ impl Progress<'_> {
         self.steps[index].state = "skipped".into();
         self.steps[index].outcome = Some(why.into());
         self.save();
+    }
+
+    /// The run ends before its last step: every step not yet reached reads
+    /// `skipped` with the reason, never `pending` on a finished run.
+    fn finish_early(&mut self, end: End) -> End {
+        let why = match end.stopped_by {
+            "paused" => "not reached — paused",
+            "rate_limit" => "not reached — the rate limit",
+            "window" => "not reached — the window closed",
+            _ => "not reached",
+        };
+        for step in &mut self.steps {
+            if step.state == "pending" {
+                step.state = "skipped".into();
+                step.outcome = Some(why.into());
+            }
+        }
+        self.save();
+        end
     }
 
     fn save(&self) {
@@ -870,7 +889,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
     }
     if let Some(end) = p.stop_reason() {
-        return Ok(end);
+        return Ok(p.finish_early(end));
     }
 
     // 3. Extract, class by class, waiting for each run.
@@ -884,7 +903,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     })?;
     let mut extract_notes = Vec::new();
     for class_id in &class_ids {
-        match crate::extract::run_pipeline_now(app, *class_id) {
+        match crate::extract::run_pipeline(app, *class_id) {
             Ok(Some(job_id)) => {
                 p.extracts += 1;
                 let status = p.wait(job_id);
@@ -893,7 +912,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
                 }
                 if let Some(end) = p.stop_reason() {
                     p.done(EXTRACT, format!("stopped after job {job_id}"));
-                    return Ok(end);
+                    return Ok(p.finish_early(end));
                 }
             }
             Ok(None) => {}
@@ -916,7 +935,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
 
     // 4. Distill, oldest session first, under the cap.
     p.begin(DISTILL);
-    let candidates = with_conn(app, |conn| digest_candidates(conn))?;
+    let candidates = with_conn(app, |conn| digest_candidates(conn, now()))?;
     let (todo, left) = capped(candidates, s.digests_per_night);
     p.left += left;
     let mut digest_notes = Vec::new();
@@ -934,14 +953,14 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
         if let Some(end) = p.stop_reason() {
             p.done(DISTILL, format!("stopped after {}", c.date));
-            return Ok(end);
+            return Ok(p.finish_early(end));
         }
     }
     p.done(DISTILL, step_outcome(p.distilled, todo.len(), left, "session", "sessions", &digest_notes));
 
     // 5. Rebuild the division guides whose meeting has passed, oldest first.
     p.begin(REBUILD);
-    let candidates = with_conn(app, |conn| guide_candidates(conn, Local::now().naive_local()))?;
+    let candidates = with_conn(app, |conn| guide_candidates(conn, Local::now().naive_local(), now()))?;
     let (todo, left) = capped(candidates, s.guides_per_night);
     p.left += left;
     let mut guide_notes = Vec::new();
@@ -960,7 +979,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
         if let Some(end) = p.stop_reason() {
             p.done(REBUILD, format!("stopped after {}", c.unit_name));
-            return Ok(end);
+            return Ok(p.finish_early(end));
         }
     }
     p.done(REBUILD, step_outcome(p.rebuilt, todo.len(), left, "guide", "guides", &guide_notes));
@@ -987,12 +1006,13 @@ fn step_outcome(
     many: &str,
     notes: &[String],
 ) -> String {
-    let mut outcome = if tried == 0 {
-        format!("no {many} waiting")
-    } else {
-        format!("{succeeded} of {tried} {}", if tried == 1 { one } else { many })
+    let mut outcome = match (tried, left) {
+        (0, 0) => format!("no {many} waiting"),
+        // A cap of zero: the work waits, and the cap is why.
+        (0, left) => format!("{left} {} waiting, the cap is 0", if left == 1 { one } else { many }),
+        (tried, _) => format!("{succeeded} of {tried} {}", if tried == 1 { one } else { many }),
     };
-    if left > 0 {
+    if tried > 0 && left > 0 {
         outcome.push_str(&format!(" · {left} past the cap"));
     }
     if !notes.is_empty() {
@@ -1023,9 +1043,32 @@ pub(crate) struct DigestCandidate {
     pub reason: &'static str,
 }
 
+/// How long a candidate whose last job failed is left alone (SPEC §6), so a
+/// lecture or a division that fails for a stable reason cannot hold a cap
+/// night after night.
+const FAILED_REST: i64 = 3 * 24 * 60 * 60;
+
+/// Whether the newest job of this kind and scope failed within `FAILED_REST`
+/// of `now`.
+fn recently_failed(conn: &Connection, kind: &str, class_id: i64, scope: &str, now: i64) -> Result<bool> {
+    let latest: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT status, finished_at FROM jobs
+             WHERE kind = ?1 AND class_id = ?2 AND scope = ?3
+             ORDER BY id DESC LIMIT 1",
+            params![kind, class_id, scope],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(latest.is_some_and(|(status, finished_at)| {
+        status == "failed" && finished_at.is_some_and(|at| at > now - FAILED_REST)
+    }))
+}
+
 /// Every applied contribution without a note, then every one whose ledger
-/// was never read, each group oldest session first.
-pub(crate) fn digest_candidates(conn: &Connection) -> Result<Vec<DigestCandidate>> {
+/// was never read, each group oldest session first; one whose last digest
+/// failed within `FAILED_REST` waits.
+pub(crate) fn digest_candidates(conn: &Connection, now: i64) -> Result<Vec<DigestCandidate>> {
     let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
     let class_ids: Vec<i64> = stmt
         .query_map([], |row| row.get(0))?
@@ -1034,6 +1077,9 @@ pub(crate) fn digest_candidates(conn: &Connection) -> Result<Vec<DigestCandidate
     let mut unread = Vec::new();
     for class_id in class_ids {
         for c in crate::lectures::list_contributions(conn, class_id)? {
+            if recently_failed(conn, "lecture_digest", class_id, &c.rel_path, now)? {
+                continue;
+            }
             let date = crate::lectures::session_date(&c.rel_path);
             let candidate = |reason| DigestCandidate {
                 class_id,
@@ -1110,7 +1156,11 @@ pub(crate) fn meeting_end(
 /// Every division with sources whose guide is stale or absent and whose
 /// meeting has passed, oldest meeting first. Never the master, never a folder
 /// guide: neither has a meeting.
-pub(crate) fn guide_candidates(conn: &Connection, now: NaiveDateTime) -> Result<Vec<GuideCandidate>> {
+pub(crate) fn guide_candidates(
+    conn: &Connection,
+    now: NaiveDateTime,
+    now_secs: i64,
+) -> Result<Vec<GuideCandidate>> {
     let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
     let class_ids: Vec<i64> = stmt
         .query_map([], |row| row.get(0))?
@@ -1126,6 +1176,9 @@ pub(crate) fn guide_candidates(conn: &Connection, now: NaiveDateTime) -> Result<
                 continue;
             }
             let scope = crate::db::unit_scope(unit.id);
+            if recently_failed(conn, "module_guide", class_id, &scope, now_secs)? {
+                continue;
+            }
             let stale = match guides.iter().find(|g| g.scope == scope) {
                 Some(guide) if !guide.stale => continue,
                 Some(_) => true,
@@ -1251,7 +1304,9 @@ pub struct TraySummary {
     pub next_meeting: String,
     pub shift: String,
     pub paused: bool,
-    pub running: bool,
+    /// Whether `Run the shift now` can start one: not while one runs, and
+    /// not once the night has had its run.
+    pub can_run: bool,
     /// Beside the icon while a run is under way: `2/5`.
     pub title: Option<String>,
 }
@@ -1298,7 +1353,7 @@ pub fn tray_summary(app: &AppHandle) -> TraySummary {
             next_meeting: next_meeting(conn, now.naive_local())?,
             shift,
             paused,
-            running,
+            can_run: !running && !ran_on(conn, &night)?,
             title: step.map(|(i, of)| format!("{i}/{of}")),
         })
     })
@@ -1306,7 +1361,7 @@ pub fn tray_summary(app: &AppHandle) -> TraySummary {
         next_meeting: format!("ClassHub — {e:#}"),
         shift: "Shift".to_string(),
         paused: false,
-        running,
+        can_run: false,
         title: None,
     })
 }
@@ -1351,27 +1406,158 @@ fn next_meeting(conn: &Connection, now: NaiveDateTime) -> Result<String> {
     })
 }
 
-/// One of the two notifications (SPEC §12), when its setting is on.
-pub fn notify(app: &AppHandle, key: &str, title: &str, body: &str) {
-    let on = with_conn(app, |conn| Ok(flag(conn, key, true))).unwrap_or(true);
-    if !on {
-        return;
-    }
-    use tauri_plugin_notification::NotificationExt;
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("notification not shown ({title}): {e}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        capped, digest_candidates, guide_candidates, in_window, insert_run, last_closed_night,
-        meeting_end, night_key, parse_idle, should_start, Conditions,
+        capped, digest_candidates, finish_run, guide_candidates, in_window, insert_run,
+        last_closed_night, meeting_end, meter, next_meeting, night_key, parse_idle,
+        should_start, startup_recovery, step_outcome, Conditions,
     };
     use crate::db::{memory_db, set_setting};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use rusqlite::{params, Connection};
+
+    /// A scratch tree that removes itself, the sync tests' shape.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("classhub-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The week's meter counts succeeded synthesis by kind, in minutes, from
+    /// `since` on; a failed run and an older one do not count.
+    #[test]
+    fn the_meter_counts_the_weeks_synthesis_in_minutes() {
+        let conn = memory_db();
+        let since = 1_000_000;
+        for (kind, status, started, finished) in [
+            ("lecture_digest", "succeeded", since + 10, since + 10 + 13 * 60),
+            ("module_guide", "succeeded", since + 20, since + 20 + 23 * 60),
+            ("master_guide", "succeeded", since + 30, since + 30 + 32 * 60),
+            ("practice", "succeeded", since + 40, since + 40 + 10 * 60),
+            ("extract", "succeeded", since + 50, since + 50 + 2 * 60),
+            ("module_guide", "failed", since + 60, since + 60 + 5 * 60),
+            ("lecture_digest", "succeeded", since - 100, since - 100 + 12 * 60),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (kind, class_id, status, created_at, started_at, finished_at)
+                 VALUES (?1, 1, ?2, ?3, ?3, ?4)",
+                params![kind, status, started, finished],
+            )
+            .unwrap();
+        }
+        let m = meter(&conn, since).unwrap();
+        assert_eq!((m.digests, m.guides, m.exams, m.extracts, m.minutes), (1, 2, 1, 1, 80));
+    }
+
+    /// A step's line, cap and failures included.
+    #[test]
+    fn a_steps_outcome_names_the_count_the_cap_and_the_failures() {
+        assert_eq!(step_outcome(0, 0, 0, "session", "sessions", &[]), "no sessions waiting");
+        assert_eq!(step_outcome(0, 0, 2, "session", "sessions", &[]), "2 sessions waiting, the cap is 0");
+        assert_eq!(step_outcome(0, 0, 1, "guide", "guides", &[]), "1 guide waiting, the cap is 0");
+        assert_eq!(step_outcome(1, 1, 0, "session", "sessions", &[]), "1 of 1 session");
+        assert_eq!(
+            step_outcome(1, 2, 3, "guide", "guides", &["Week 3 failed".to_string()]),
+            "1 of 2 guides · 3 past the cap · Week 3 failed"
+        );
+    }
+
+    /// The tray's next meeting across the seeded classes: from a Tuesday at
+    /// noon it is Applied's 11:45 next Tuesday no longer — Fundamentals meets
+    /// at 4:05 pm the same day — and from a Friday it is Tuesday's Applied.
+    #[test]
+    fn the_next_meeting_is_the_soonest_across_the_classes() {
+        let conn = memory_db();
+        assert_eq!(
+            next_meeting(&conn, at("2026-09-08 12:00")).unwrap(),
+            "Next class · Tue 4:05 pm · Fundamentals of AI in Medicine I"
+        );
+        assert_eq!(
+            next_meeting(&conn, at("2026-09-11 09:00")).unwrap(),
+            "Next class · Tue 11:45 am · Applied Generative AI in Medicine"
+        );
+        conn.execute("DELETE FROM meetings", []).unwrap();
+        assert_eq!(next_meeting(&conn, at("2026-09-11 09:00")).unwrap(), "No classes scheduled");
+    }
+
+    /// A run finishes once; a run whose process is gone is settled at launch
+    /// as interrupted, and one this process owns is left alone.
+    #[test]
+    fn a_run_finishes_once_and_an_orphan_is_settled_at_launch() {
+        let conn = memory_db();
+        let mine = insert_run(&conn, "2026-09-08", "idle").unwrap().unwrap();
+        finish_run(&conn, mine, "done", "1 session distilled").unwrap();
+        finish_run(&conn, mine, "error", "again").unwrap();
+        let (stopped, summary): (String, String) = conn
+            .query_row("SELECT stopped_by, summary FROM shift_runs WHERE id = ?1", [mine], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((stopped.as_str(), summary.as_str()), ("done", "1 session distilled"));
+        let orphan = insert_run(&conn, "2026-09-07", "idle").unwrap().unwrap();
+        conn.execute("UPDATE shift_runs SET owner_pid = 999999999 WHERE id = ?1", [orphan]).unwrap();
+        let live = insert_run(&conn, "2026-09-06", "manual").unwrap().unwrap();
+        // launchd: alive, and not this process, whose own rows a launch
+        // cannot have.
+        conn.execute("UPDATE shift_runs SET owner_pid = 1 WHERE id = ?1", [live]).unwrap();
+        startup_recovery(&conn).unwrap();
+        let settled: Option<String> = conn
+            .query_row("SELECT stopped_by FROM shift_runs WHERE id = ?1", [orphan], |r| r.get(0))
+            .unwrap();
+        assert_eq!(settled.as_deref(), Some("error"));
+        let untouched: Option<String> = conn
+            .query_row("SELECT stopped_by FROM shift_runs WHERE id = ?1", [live], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched, None, "a live process's run is left alone");
+    }
+
+    /// A lecture whose last digest failed within three days waits; one whose
+    /// failure is older, or whose last run succeeded, is listed.
+    #[test]
+    fn a_candidate_that_failed_lately_waits() {
+        let conn = memory_db();
+        set_setting(&conn, "aibhs_root", "/nonexistent/classhub-shift-rest").unwrap();
+        let unit = week_unit(&conn, 1, 2, "Week 2 — Ethics", Some("2026-09-01"));
+        for (rel, failed_at) in [
+            ("Weeks/Week 02 — Ethics/2026-09-01 — Lecture.md", Some(1_000_000 - 3_600)),
+            ("Weeks/Week 02 — Ethics/2026-09-02 — Lecture.md", Some(1_000_000 - 4 * 24 * 3_600)),
+            ("Weeks/Week 02 — Ethics/2026-09-03 — Lecture.md", None),
+        ] {
+            conn.execute(
+                "INSERT INTO lecture_contributions (class_id, unit_id, rel_path, start_ms, end_ms,
+                    start_line, end_line, corpus_rel_path, summary, confidence, status, created_at)
+                 VALUES (1, ?1, ?2, 0, 1, 1, 2, ?3, '', 'high', 'applied', 1)",
+                params![unit, rel, format!(".classhub/corpus/Week 2 — Ethics/{}", rel.rsplit('/').next().unwrap())],
+            )
+            .unwrap();
+            if let Some(at) = failed_at {
+                conn.execute(
+                    "INSERT INTO jobs (kind, class_id, scope, status, created_at, started_at, finished_at)
+                     VALUES ('lecture_digest', 1, ?1, 'failed', ?2, ?2, ?2)",
+                    params![rel, at],
+                )
+                .unwrap();
+            }
+        }
+        let listed: Vec<String> = digest_candidates(&conn, 1_000_000)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.date)
+            .collect();
+        assert_eq!(listed, vec!["2026-09-02".to_string(), "2026-09-03".to_string()]);
+    }
 
     fn t(s: &str) -> NaiveTime {
         NaiveTime::parse_from_str(s, "%H:%M").unwrap()
@@ -1486,8 +1672,8 @@ mod tests {
     #[test]
     fn the_distill_list_is_the_notes_missing_then_the_ledgers_unread() {
         let conn = memory_db();
-        let root = std::env::temp_dir().join(format!("classhub-shift-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = Scratch::new("shift");
+        let root = scratch.0.clone();
         set_setting(&conn, "aibhs_root", &root.to_string_lossy()).unwrap();
         let unit = week_unit(&conn, 1, 2, "Week 2 — Ethics", Some("2026-09-01"));
         let folder = root.join("Fundamentals of Artificial Intelligence in Medicine I");
@@ -1512,7 +1698,7 @@ mod tests {
         std::fs::write(note_dir.join("2026-09-01 — Lecture.md"), "note").unwrap();
         std::fs::write(note_dir.join("2026-08-25 — Lecture.md"), "note").unwrap();
         std::fs::write(note_dir.join("2026-09-02 — Lecture.md"), "note").unwrap();
-        let listed: Vec<(String, &str)> = digest_candidates(&conn)
+        let listed: Vec<(String, &str)> = digest_candidates(&conn, 1_000_000)
             .unwrap()
             .into_iter()
             .map(|c| (c.date, c.reason))
@@ -1525,7 +1711,6 @@ mod tests {
                 ("2026-09-01".to_string(), "not read for what was flagged"),
             ]
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A division's meeting (SPEC §6): the class's first meeting on or after
@@ -1589,7 +1774,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let listed: Vec<(i64, bool)> = guide_candidates(&conn, at("2026-09-08 21:00"))
+        let listed: Vec<(i64, bool)> = guide_candidates(&conn, at("2026-09-08 21:00"), 1_000_000)
             .unwrap()
             .into_iter()
             .map(|c| (c.unit_id, c.stale))
@@ -1601,7 +1786,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let listed: Vec<(i64, bool)> = guide_candidates(&conn, at("2026-09-08 21:00"))
+        let listed: Vec<(i64, bool)> = guide_candidates(&conn, at("2026-09-08 21:00"), 1_000_000)
             .unwrap()
             .into_iter()
             .map(|c| (c.unit_id, c.stale))

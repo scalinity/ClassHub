@@ -15,6 +15,7 @@ mod guides;
 mod jobs;
 mod lectures;
 mod notebook;
+mod notifications;
 mod notes;
 mod scanner;
 mod settings;
@@ -708,10 +709,12 @@ fn set_login_item(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     // The plist names this process's own executable, and a dev build's is
     // `target/debug/classhub`: registering it would open the wrong binary
-    // at login, so only the installed app registers itself.
-    if on && cfg!(debug_assertions) {
+    // at login, so only the installed app registers itself. Removal stays
+    // open to every build, which is how a stale plist gets cleared.
+    let exe = std::env::current_exe().map_err(|e| format!("{e}"))?;
+    if on && (cfg!(debug_assertions) || !exe.starts_with("/Applications/")) {
         return Err(
-            "a dev build cannot be the login item — switch this on in the installed app".into(),
+            "only the installed app can be the login item — switch this on there".into(),
         );
     }
     let launcher = app.autolaunch();
@@ -721,7 +724,7 @@ fn set_login_item(app: tauri::AppHandle, on: bool) -> Result<(), String> {
         db::audit(
             conn,
             "ui.set_login_item",
-            serde_json::json!({ "after": on, "executable": std::env::current_exe().ok() }),
+            serde_json::json!({ "after": on, "executable": exe }),
         )?;
         Ok(())
     })

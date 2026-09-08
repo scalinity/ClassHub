@@ -121,14 +121,10 @@ pub fn spawn_pipeline(app: &AppHandle, class_id: i64) {
 /// past it, soffice is wedged rather than slow.
 const CONVERT_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// The shift's extract step (SPEC §6): the pipeline run to its end on the calling
-/// thread, answering with the extract job it enqueued, if any, so the caller can
-/// wait for it.
-pub(crate) fn run_pipeline_now(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
-    run_pipeline(app, class_id)
-}
-
-fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
+/// The pipeline run to its end on the calling thread, answering with the extract
+/// job it enqueued, if any — what the scan spawns on a thread and the shift
+/// waits on (SPEC §6).
+pub(crate) fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     let _serial = lock(&PIPELINE_LOCK);
 
     let (class_dir, stale) = {

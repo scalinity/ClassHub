@@ -48,6 +48,10 @@ pub fn refresh(app: &AppHandle) {
     });
 }
 
+/// What the menu last showed, so a minute that changed nothing rebuilds
+/// nothing: the scheduler asks every tick, and most ticks are alike.
+static LAST_MENU: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
 fn rebuild(app: &AppHandle) -> tauri::Result<()> {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
@@ -58,6 +62,17 @@ fn rebuild(app: &AppHandle) -> tauri::Result<()> {
     } else {
         ("pause", "Pause tonight")
     };
+    let shown = format!(
+        "{}\n{}\n{}\n{}\n{:?}",
+        summary.next_meeting, summary.shift, pause_id, summary.can_run, summary.title
+    );
+    {
+        let mut last = crate::db::lock(&LAST_MENU);
+        if *last == shown {
+            return Ok(());
+        }
+        *last = shown;
+    }
     let menu = Menu::with_items(
         app,
         &[
@@ -65,7 +80,7 @@ fn rebuild(app: &AppHandle) -> tauri::Result<()> {
             &MenuItem::with_id(app, "shift", &summary.shift, false, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "open", "Open ClassHub", true, None::<&str>)?,
-            &MenuItem::with_id(app, "run", "Run the shift now", !summary.running, None::<&str>)?,
+            &MenuItem::with_id(app, "run", "Run the shift now", summary.can_run, None::<&str>)?,
             &MenuItem::with_id(app, pause_id, pause_label, true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit ClassHub", true, None::<&str>)?,
