@@ -97,14 +97,14 @@ function filesUnder(node: TreeNode): string[] {
 function FilingAction({
   filing,
   proposed,
-  filing_,
+  moving,
   title,
   onFile,
 }: {
   filing: WeekSlot;
   proposed: boolean;
   /** The move is in flight. */
-  filing_: boolean;
+  moving: boolean;
   title: string;
   onFile: () => void;
 }) {
@@ -120,13 +120,13 @@ function FilingAction({
       type="button"
       title={title}
       onClick={onFile}
-      disabled={filing_}
+      disabled={moving}
       className={buttonText}
     >
       {/* The inbox card's second approval carries this label word for word
           (InboxQueue.tsx, ProposalCard): the card offers the row's own action,
           and the two must read the same. */}
-      {filing_
+      {moving
         ? "Filing…"
         : `File under Week ${String(filing.week).padStart(2, "0")}`}
     </button>
@@ -299,7 +299,7 @@ function DirNode({
             <FilingAction
               filing={filing}
               proposed={proposed}
-              filing_={moving}
+              moving={moving}
               title={`Move its files into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them — Undo puts them back`}
               onFile={file}
             />
@@ -490,7 +490,7 @@ function FileRow({
             <FilingAction
               filing={filing}
               proposed={proposed}
-              filing_={moving}
+              moving={moving}
               title={`Move it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it — Undo puts it back`}
               onFile={file}
             />
