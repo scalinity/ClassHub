@@ -40,6 +40,8 @@ export interface ManifestDiff {
   added: string[];
   changed: string[];
   removed: string[];
+  /** The stored manifest could not be read: stale whatever the lists hold. */
+  unreadable: boolean;
 }
 
 /**

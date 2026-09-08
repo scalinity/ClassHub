@@ -948,13 +948,16 @@ pub struct ManifestDiff {
     pub added: Vec<String>,
     pub changed: Vec<String>,
     pub removed: Vec<String>,
+    /// The stored manifest could not be read: stale whatever the lists hold,
+    /// since a scope whose current set is empty would otherwise read fresh.
+    pub unreadable: bool,
 }
 
 impl ManifestDiff {
     pub fn is_stale(&self) -> bool {
-        !(self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty())
+        self.unreadable
+            || !(self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty())
     }
-
 }
 
 /// The diff between a stored manifest and the scope's current set. A stored
@@ -968,14 +971,17 @@ pub fn manifest_diff(
     current: &[ManifestEntry],
     resolve: impl Fn(&str) -> Option<String>,
 ) -> ManifestDiff {
-    let stored = serde_json::from_str::<Vec<ManifestEntry>>(stored_manifest_json).unwrap_or_default();
+    let (stored, unreadable) = match serde_json::from_str::<Vec<ManifestEntry>>(stored_manifest_json) {
+        Ok(stored) => (stored, false),
+        Err(_) => (Vec::new(), true),
+    };
     let current_by_path: std::collections::HashMap<&str, &str> = current
         .iter()
         .map(|e| (e.rel_path.as_str(), e.sha256.as_str()))
         .collect();
     let stored_paths: std::collections::HashSet<&str> =
         stored.iter().map(|e| e.rel_path.as_str()).collect();
-    let mut diff = ManifestDiff::default();
+    let mut diff = ManifestDiff { unreadable, ..ManifestDiff::default() };
     for entry in current {
         if !stored_paths.contains(entry.rel_path.as_str()) {
             diff.added.push(entry.rel_path.clone());
@@ -1611,7 +1617,11 @@ mod tests {
         assert!(!same.is_stale(), "{same:?}");
         let unread = manifest_diff("not json", &current, |_| None);
         assert_eq!(unread.added.len(), 3);
-        assert!(unread.is_stale());
+        assert!(unread.unreadable && unread.is_stale());
+        // A scope with no set of its own — an exam's — still reads stale over
+        // a manifest it cannot read.
+        assert!(manifest_diff("not json", &[], |_| None).is_stale());
+        assert!(!manifest_diff("[]", &[], |_| None).is_stale());
     }
 
     /// The union a finished job records (SPEC §7 step 5): a read outside the
