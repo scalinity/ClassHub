@@ -5205,3 +5205,87 @@ job logs under the data directory read with `jq`, and the code at 760cc1c:
   over a folder.
 - `grep -ci CONTINUE` counts JavaScript's `continue`; the marker is
   `<!-- CONTINUE -->`.
+
+## Post-M32 — Review fixes (2026-09-08)
+
+A two-agent review of the M32 changeset since 760cc1c (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, ten warnings and five suggestions once the two reports were merged,
+two of them raised by both reviewers. Each fix was its own commit through
+`scripts/gate.sh`, sixteen in all with the backfill. What future sessions
+should know:
+
+- **The guard's exclusion needs a whole log** (both reviewers). A log a
+  write had failed into still opened at finalize, so a change made after
+  the failure had no logged write and was cleared. `execute_job` returns
+  whether every line reached the log; an incomplete log clears nothing and
+  widens nothing. `relativize` reads a leading `./` as the bare path the
+  fingerprint names, any tool the reader does not know by name counts as a
+  write when it names a file, and the cleared paths are named on stderr.
+- **An empty ledger is not a session never read** (both). The Lectures
+  row inferred "not yet read" from the row count, so a session the
+  professor flagged nothing in would have offered a paid redistill
+  forever. Migration 0015 adds `lecture_contributions.hints_read_at`,
+  stamped when a sidecar parses, carried across a refile with the rows,
+  and backfilled from the rows a contribution already holds; the listing
+  exposes `hintsRead` and the row reads it.
+- **The master keeps an undistilled transcript listed.** Every applied
+  contribution was listed apart while only the distilled had a note to
+  stand in; only distilled transcripts are listed apart now, in the master
+  and the semester exam alike. SPEC §8.2 says so.
+- **The focus form survives the button's mousedown.** WebKit does not
+  focus a button on click, so the field's blur closed the form before the
+  click landed and only Enter submitted; the button keeps focus in the
+  field on mousedown. Not reproducible through the AX driver, which
+  presses without a mouse — the fix stands on the reviewer's trace.
+- **An unreadable manifest is stale whatever the scope holds.** The diff
+  swallowed a parse failure as an empty manifest, so an exam's row, whose
+  scope has no current set, read fresh over one it could not read;
+  `ManifestDiff.unreadable` makes it stale on its own.
+- **A missing cards file demotes the job with the row already right.**
+  The cards check ran before the row upsert, leaving the earlier run's row
+  under the new file; the row is written first, then the check fails the
+  job.
+- **A rename carries the guide's cards file** through the same effects as
+  the guide's move; a name already taken under the new stem is left alone.
+- **A listing computes only the diffs its caller keeps.** `guides_where`
+  serves `list_guides`, `stale_guide_count` (guides only) and
+  `list_practice` (exams only), and a widened entry is hashed once per
+  listing.
+- **One mislabelled hint no longer discards the run.** A sidecar that is
+  not a JSON array still fails the digest; an item that is not `{kind,
+  text}` with a known kind is skipped and counted on stderr. SPEC §8.4.
+- **Only a guide's prompt pays for its changes block**: the context takes
+  whether the prompt has a place for it, since an exam scoped to a
+  division would otherwise have been told about the division guide's row.
+- **An unreadable transcript at finalize is named** on stderr with its
+  path; the items still record, untimed.
+- **The viewer chooses a document and its sandbox together**, in one
+  expression with the reason each pairing holds beside it.
+- **`refuse_held_note` drops the flagged items** of the row it clears, as
+  every other delete site does.
+- **The exam's results contract names how its listener will trust it**:
+  `event.source` against the frame it framed, never `event.origin`, which
+  a sandboxed frame reports as `null`; the payload is model output.
+- **Tests**: 264 pass, three new — the three templates rendered with a
+  fixture context and refused any `{word}` left unfilled (the master and
+  exam renderers became pure functions for it), the changes block's three
+  answers, and the exam listing's merge of files with rows; the refile test
+  now writes real sidecars and asserts they follow the note and go with it.
+  `npx tsc --noEmit` clean. Nothing was pushed.
+- **Left as it is.** The two sidecar shapes keep their two derivations —
+  `lectures::note_sidecar` beside a note, `guides::cards_rel_path` under
+  `.classhub/cards/` — each with its owner, as the brief drew them; the
+  rename is the one place that reads both and now does.
+
+### Gotchas
+
+- A background agent's report reaches the orchestrator at the next turn
+  boundary, not mid-turn: `ListAgents` showed both reviewers idle for
+  minutes while nothing arrived, and ending the turn delivered everything
+  queued. Ask for the remainder three findings at a time, as the kickoff
+  said; the first reply is cut near 4,000 characters.
+- Two `Bash` heredocs cannot append a test to a module whose file ends in
+  a blank line: `sed '$ d'` removes the blank line, not the brace. Check
+  the tail with `od -c` first, or use the Edit tool on the last test's
+  closing lines.
