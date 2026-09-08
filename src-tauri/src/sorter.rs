@@ -606,8 +606,12 @@ fn beside_existing(class_dir: &Path, mut alt: WeekAlternative) -> WeekAlternativ
     if landed == name {
         return alt;
     }
+    // The cost is said with the landing: a division counts every file under
+    // its week folder (SPEC §8.5), so its guide reads both copies until the
+    // reader removes one — the app never deletes source material.
     alt.reasoning.push_str(&format!(
-        " {folder_rel} already holds {name}, which stays; this one lands beside it as {landed}."
+        " {folder_rel} already holds {name}, which stays; this one lands beside it as {landed}, \
+         and the week's guide reads both until one is removed."
     ));
     alt.dest_rel_path = format!("{folder_rel}/{landed}");
     alt
@@ -2572,16 +2576,39 @@ mod tests {
         assert!(
             alt.reasoning.ends_with(
                 "Weeks/Week 03 — Data Quality/Week 3 Coding Material already holds Intro.html, \
-                 which stays; this one lands beside it as Intro (2).html."
+                 which stays; this one lands beside it as Intro (2).html, and the week's guide \
+                 reads both until one is removed."
             ),
             "{}",
             alt.reasoning
         );
         validate_dest(&class_dir, &source, &alt.dest_rel_path).expect("approval would take it");
 
+        // The landing runs before the claim filter, so the name that would be
+        // taken is the suffixed one: a pending card already heading there
+        // withholds the alternative altogether.
+        fs::create_dir_all(class_dir.join("Coding Material")).expect("tree folder");
+        fs::write(class_dir.join("Coding Material/Intro.html"), "z").expect("tree twin");
+        upsert_proposal(
+            &conn,
+            3,
+            "by_name",
+            "Coding Material/Intro.html",
+            "Weeks/Week 03 — Data Quality/Week 3 Coding Material/Intro (2).html",
+            "because",
+            None,
+        )
+        .expect("claimant");
+        let state = sort_state(&conn, 3).expect("state");
+        let canvas = state
+            .proposals
+            .iter()
+            .find(|p| p.source_rel_path == source)
+            .expect("the canvas card");
+        assert!(canvas.alternative.is_none(), "a claimed suffixed destination is not offered");
+
         // The same name from a Materials row: refused, since two copies in the
         // tree are the reader's to reconcile.
-        fs::create_dir_all(class_dir.join("Coding Material")).expect("tree folder");
         fs::write(class_dir.join("Coding Material/Week 3 Intro.html"), "x").expect("tree twin");
         fs::write(class_dir.join("Weeks/Week 03 — Data Quality/Week 3 Intro.html"), "y").expect("held name");
         let refused = match week_filing(&conn, 3, &class_dir, "Coding Material/Week 3 Intro.html") {

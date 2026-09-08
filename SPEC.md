@@ -1245,8 +1245,10 @@ its meetings.
    another pending card already claims, which only the second approval could refuse. A
    destination a file of that name already occupies — a re-upload, as Biostatistics' Week 3
    coding notebook was on 2026-09-08 — lands beside it at the next free name, ` (2)`, the
-   way a download lands in the inbox, and the reason says the earlier file stays; nothing is
-   overwritten (§4), and the click is not spent on a refusal. A row's own filing of a file
+   way a download lands in the inbox, and the reason says the earlier file stays and that the
+   week's guide reads both copies until one is removed — the duplicate is the reader's to
+   settle in Finder, since the app never deletes source material (§4); nothing is
+   overwritten, and the click is not spent on a refusal. A row's own filing of a file
    already in the tree onto a taken name stays refused: two copies in the tree are the
    reader's to reconcile, while a re-upload is new material. The
    card shows both routes, each with its reason — Canvas's, then the by-name card's own —
