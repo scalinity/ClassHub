@@ -1451,7 +1451,7 @@ fn run_job(
             (job.class_id, job.payload.as_deref(), error.as_deref())
         {
             if crate::extract::refused_by_filter(reason) {
-                match crate::extract::record_refusal(&app, class_id, payload) {
+                match crate::extract::record_refusal(&app, class_id, payload, read_paths) {
                     Ok(refused) if !refused.is_empty() => {
                         error = Some(truncate(
                             &format!(

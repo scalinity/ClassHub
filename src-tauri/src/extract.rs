@@ -11,6 +11,7 @@
 //! (SPEC §6, the single gateway to the subscription). Extract paths mirror the
 //! source rel path with `.md` appended under `.classhub/extracts/` (SPEC §4).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,20 @@ struct BatchItem {
     sha256: String,
     input_rel_path: String,
     extract_rel_path: String,
+}
+
+#[cfg(test)]
+impl BatchItem {
+    /// A PDF item as the pipeline would batch it: read as itself, written to
+    /// its mirrored extract path.
+    fn test_item(rel_path: &str, sha256: &str) -> Self {
+        BatchItem {
+            rel_path: rel_path.to_string(),
+            sha256: sha256.to_string(),
+            input_rel_path: rel_path.to_string(),
+            extract_rel_path: format!("{EXTRACTS_DIR}/{rel_path}.md"),
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -199,25 +214,43 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
 /// Called by the job runner before it marks the row succeeded, so a scan that
 /// sees no active job also sees up-to-date extract columns.
 pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()> {
-    let items: Vec<BatchItem> =
-        serde_json::from_str(payload).context("parsing extract batch payload")?;
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
-    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    reconcile(&conn, class_id, payload, |_, item| {
+        eprintln!(
+            "extract job wrote no output for {} — stays stale for the next scan",
+            item.rel_path
+        );
+        Ok(false)
+    })?;
+    Ok(())
+}
+
+/// The record keeping every extract run ends with: an extract the run wrote
+/// — a non-empty file at the contracted path — is recorded as the source's,
+/// and each item it wrote nothing for is handed to `unwritten`, which says
+/// whether it counts as refused. Returns the paths it counted.
+fn reconcile(
+    conn: &Connection,
+    class_id: i64,
+    payload: &str,
+    mut unwritten: impl FnMut(&Connection, &BatchItem) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let items: Vec<BatchItem> =
+        serde_json::from_str(payload).context("parsing extract batch payload")?;
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let mut counted = Vec::new();
     for item in items {
         let written = fs::metadata(class_dir.join(&item.extract_rel_path))
             .map(|m| m.is_file() && m.len() > 0)
             .unwrap_or(false);
         if written {
-            record(&conn, &class_dir, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
-        } else {
-            eprintln!(
-                "extract job wrote no output for {} — stays stale for the next scan",
-                item.rel_path
-            );
+            record(conn, &class_dir, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
+        } else if unwritten(conn, &item)? {
+            counted.push(item.rel_path);
         }
     }
-    Ok(())
+    Ok(counted)
 }
 
 /// Whether a failed run's error is the model refusing the material outright —
@@ -227,36 +260,52 @@ pub fn refused_by_filter(error: &str) -> bool {
 }
 
 /// Record keeping after a run the model refused (`refused_by_filter`): an
-/// extract the run did write is recorded as any extract is, and a file it
-/// wrote none for is marked attempted at its current hash with no extract, so
-/// the pipeline does not enqueue the same refusal on every scan — Biostatistics'
-/// Week 4 reading cost a run per launch on 2026-09-08 until it did. A changed
-/// file is tried again, since its hash moves. Returns the paths left without
-/// an extract, for the job's error line.
-pub fn record_refusal(app: &AppHandle, class_id: i64, payload: &str) -> Result<Vec<String>> {
-    let items: Vec<BatchItem> =
-        serde_json::from_str(payload).context("parsing extract batch payload")?;
+/// extract the run did write is recorded as any extract is; a file the run
+/// read and wrote nothing for was the one refused, and is marked attempted at
+/// its current hash with no extract, so the pipeline does not enqueue the
+/// same refusal on every scan — Biostatistics' Week 4 reading cost a run per
+/// launch on 2026-09-08 until it did; a file the run never reached stays
+/// stale for the next run, since the refusal was not its. `read` is the run's
+/// own log (`jobs::log_paths`); when the log could not be read the batch is
+/// marked only if it held one file, which the refusal can only have been.
+/// A changed file is tried again, since its hash moves. Returns the paths
+/// left without an extract, for the job's error line.
+pub fn record_refusal(
+    app: &AppHandle,
+    class_id: i64,
+    payload: &str,
+    read: &BTreeSet<String>,
+) -> Result<Vec<String>> {
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
-    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
-    let mut refused = Vec::new();
-    for item in items {
-        let written = fs::metadata(class_dir.join(&item.extract_rel_path))
-            .map(|m| m.is_file() && m.len() > 0)
-            .unwrap_or(false);
-        if written {
-            record(&conn, &class_dir, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
-        } else {
-            mark_attempted(&conn, class_id, &item.rel_path, &item.sha256)?;
+    refusal_in(&conn, class_id, payload, read)
+}
+
+fn refusal_in(
+    conn: &Connection,
+    class_id: i64,
+    payload: &str,
+    read: &BTreeSet<String>,
+) -> Result<Vec<String>> {
+    let alone = serde_json::from_str::<Vec<BatchItem>>(payload).map(|b| b.len() == 1).unwrap_or(false);
+    reconcile(conn, class_id, payload, |conn, item| {
+        let reached = read.contains(&item.input_rel_path) || (read.is_empty() && alone);
+        if !reached {
             eprintln!(
-                "extract of {} was refused by the model's content filter — left without an \
-                 extract until the file changes",
+                "extract of {} was not reached before the run was refused — stays stale for \
+                 the next run",
                 item.rel_path
             );
-            refused.push(item.rel_path);
+            return Ok(false);
         }
-    }
-    Ok(refused)
+        mark_attempted(conn, class_id, &item.rel_path, &item.sha256)?;
+        eprintln!(
+            "extract of {} was refused by the model's content filter — left without an \
+             extract until the file changes",
+            item.rel_path
+        );
+        Ok(true)
+    })
 }
 
 /// A row tried at this hash and left without an extract: `stale_files` skips
@@ -1777,5 +1826,47 @@ mod refusal_tests {
         assert_eq!(stale_files(&conn, 3).unwrap().len(), 1, "a changed file is tried again");
         assert!(refused_by_filter("API Error: 400 Output blocked by content filtering policy"));
         assert!(!refused_by_filter("API Error: 529 overloaded"));
+    }
+
+    /// A refusal marks only the file the run read and wrote nothing for: a
+    /// file the run never reached stays stale, an extract it did write is
+    /// recorded, and with no log a batch of one is the refusal itself.
+    #[test]
+    fn a_refusal_marks_only_the_file_the_run_reached() {
+        let conn = crate::db::memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-refusal-{}", std::process::id()));
+        let class_dir = root.join("Biostatistics for AI");
+        std::fs::create_dir_all(class_dir.join(".classhub/extracts/Readings")).unwrap();
+        crate::db::set_setting(&conn, "aibhs_root", root.to_str().unwrap()).unwrap();
+        for (path, hash) in [("Quizzes/Quiz 1.pdf", "h1"), ("Readings/Week 4.pdf", "h2"), ("Readings/Week 5.pdf", "h3")] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+                 VALUES (3, ?1, ?2, 4, 1, 'pdf')",
+                rusqlite::params![path, hash],
+            )
+            .unwrap();
+        }
+        std::fs::write(class_dir.join(".classhub/extracts/Readings/Week 5.pdf.md"), "# read\n").unwrap();
+        let payload = serde_json::to_string(&[
+            BatchItem::test_item("Quizzes/Quiz 1.pdf", "h1"),
+            BatchItem::test_item("Readings/Week 4.pdf", "h2"),
+            BatchItem::test_item("Readings/Week 5.pdf", "h3"),
+        ])
+        .unwrap();
+        let read: BTreeSet<String> = ["Readings/Week 4.pdf".to_string(), "Readings/Week 5.pdf".to_string()].into();
+        let refused = refusal_in(&conn, 3, &payload, &read).expect("reconcile");
+        assert_eq!(refused, ["Readings/Week 4.pdf"], "the one read and unwritten");
+        let stale: Vec<String> = stale_files(&conn, 3).unwrap().into_iter().map(|f| f.rel_path).collect();
+        assert_eq!(stale, ["Quizzes/Quiz 1.pdf"], "never reached, so tried next run");
+        let recorded: Option<String> = conn
+            .query_row("SELECT extract_rel_path FROM files WHERE rel_path = 'Readings/Week 5.pdf'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded.as_deref(), Some(".classhub/extracts/Readings/Week 5.pdf.md"), "written, so recorded");
+        // No log and a batch of one: the refusal can only have been that file.
+        let alone = serde_json::to_string(&[BatchItem::test_item("Quizzes/Quiz 1.pdf", "h1")]).unwrap();
+        let refused = refusal_in(&conn, 3, &alone, &BTreeSet::new()).expect("reconcile");
+        assert_eq!(refused, ["Quizzes/Quiz 1.pdf"]);
+        assert!(stale_files(&conn, 3).unwrap().is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
