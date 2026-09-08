@@ -529,7 +529,19 @@ pub(crate) fn log_paths(lines: impl Iterator<Item = String>, class_dir: &Path) -
                                 );
                             }
                         }
-                        _ => {}
+                        // Glob is a listing. Any other tool naming a file is
+                        // taken for a write — the CLI's write tools are the
+                        // four above today, and a new one must not clear a
+                        // change by being unnamed here.
+                        "Glob" => {}
+                        _ => {
+                            let named = input["file_path"]
+                                .as_str()
+                                .or_else(|| input["notebook_path"].as_str());
+                            if let Some(rel) = relativize(named, class_dir) {
+                                out.written.insert(rel);
+                            }
+                        }
                     }
                 }
             }
@@ -555,7 +567,10 @@ pub(crate) fn log_paths(lines: impl Iterator<Item = String>, class_dir: &Path) -
 }
 
 /// A tool's path, class-relative, or `None` when it falls outside the class
-/// folder — absolute and elsewhere, or reaching out through `..`.
+/// folder — absolute and elsewhere, or reaching out through `..`. A leading
+/// `./` is the same path spelled longer, and is read as such: the fingerprint
+/// names the path bare, and a write the log spells `./Notes/x.md` must meet
+/// it.
 fn relativize(path: Option<&str>, class_dir: &Path) -> Option<String> {
     let path = path?.trim();
     if path.is_empty() {
@@ -567,13 +582,15 @@ fn relativize(path: Option<&str>, class_dir: &Path) -> Option<String> {
     } else {
         given
     };
-    if rel
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return None;
+    let mut plain = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(part) => plain.push(part),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
     }
-    let rel = rel.to_string_lossy().into_owned();
+    let rel = plain.to_string_lossy().into_owned();
     (!rel.is_empty()).then_some(rel)
 }
 
@@ -1310,13 +1327,24 @@ fn run_job(
         .as_deref()
         .map(crate::scanner::fingerprint_sources);
 
-    let outcome = execute_job(&app, &job, &child_slot, &cancelled);
+    let (outcome, log_complete) = match execute_job(&app, &job, &child_slot, &cancelled) {
+        Ok((outcome, log_complete)) => (Ok(outcome), log_complete),
+        Err(e) => (Err(e), false),
+    };
     // The run's own account of what it saw and touched (SPEC §6, §7 step 5),
     // read back off the log it streamed: every Read and Grep hit widens the
-    // manifest, every Write and Edit is what the guard may pin on it.
-    let log = guarded_dir
-        .as_deref()
-        .and_then(|dir| job_log_paths(&app, job.id, dir));
+    // manifest, every Write and Edit is what the guard may pin on it. A log
+    // a write failed into is no account at all — the guard stays strict and
+    // the manifest stays what was listed — since the permissive direction
+    // needs the stronger evidence.
+    let log = if log_complete {
+        guarded_dir
+            .as_deref()
+            .and_then(|dir| job_log_paths(&app, job.id, dir))
+    } else {
+        eprintln!("job {}: its log is incomplete, so it clears nothing and widens nothing", job.id);
+        None
+    };
     let empty_reads = BTreeSet::new();
     let read_paths = log.as_ref().map_or(&empty_reads, |l| &l.read);
 
@@ -1377,14 +1405,17 @@ fn run_job(
         // A change the log shows no write to was not the run's. An unreadable
         // log leaves the guard strict rather than clearing everything.
         if let (false, Some(log)) = (touched.is_empty(), &log) {
-            let seen = touched.len();
+            let seen = touched.clone();
             touched = excluding_unlogged(touched, &log.written);
-            if touched.len() < seen {
+            let cleared: Vec<&String> = seen.iter().filter(|p| !touched.contains(p)).collect();
+            if !cleared.is_empty() {
+                // Named, so a clear that should not have happened is at least
+                // visible in the process's stderr.
                 eprintln!(
                     "job {}: {} change(s) in the class folder have no Write or Edit in the \
-                     run's log and were not the run's",
+                     run's log and were not the run's: {cleared:?}",
                     job.id,
-                    seen - touched.len()
+                    cleared.len()
                 );
             }
         }
@@ -1729,12 +1760,15 @@ fn subscription_token() -> Option<&'static str> {
         .as_deref()
 }
 
+/// Runs the spawn and returns its outcome with whether every stream line
+/// reached the log — the guard and the finalizers read the log only when it
+/// is the whole account.
 fn execute_job(
     app: &AppHandle,
     job: &QueuedJob,
     child_slot: &Arc<Mutex<Option<Child>>>,
     cancelled: &Arc<AtomicBool>,
-) -> Result<Outcome> {
+) -> Result<(Outcome, bool)> {
     let class_dir: Option<PathBuf> = match job.class_id {
         Some(class_id) => Some(with_conn(app, |c| crate::scanner::class_dir(c, class_id))?),
         None => None,
@@ -1917,37 +1951,42 @@ fn execute_job(
     let exit = child.wait().context("waiting for child")?;
     let _ = stderr_thread.join();
     let _ = watchdog.join();
+    let log_complete = !log_broken;
     if stalled.load(Ordering::SeqCst) {
-        return Ok(Outcome::Failed {
-            error: format!(
-                "no output for {} minutes — the run was stopped as wedged",
-                STALL_LIMIT.as_secs() / 60
-            ),
-        });
+        return Ok((
+            Outcome::Failed {
+                error: format!(
+                    "no output for {} minutes — the run was stopped as wedged",
+                    STALL_LIMIT.as_secs() / 60
+                ),
+            },
+            log_complete,
+        ));
     }
     read_result?;
 
     if job.kind == "self_check" {
-        return Ok(resolve_self_check(app, &stream, &lock(&stderr_tail)));
+        return Ok((resolve_self_check(app, &stream, &lock(&stderr_tail)), log_complete));
     }
 
     let stderr_text = lock(&stderr_tail).trim().to_string();
-    match (stream.result_is_error, stream.result_text) {
-        (Some(false), text) => Ok(Outcome::Succeeded {
+    let outcome = match (stream.result_is_error, stream.result_text) {
+        (Some(false), text) => Outcome::Succeeded {
             summary: truncate(text.as_deref().unwrap_or("done"), 4000),
             result_text: text,
-        }),
-        (Some(true), text) => Ok(Outcome::Failed {
+        },
+        (Some(true), text) => Outcome::Failed {
             error: truncate(text.as_deref().unwrap_or("claude reported an error"), 2000),
-        }),
-        (None, _) => Ok(Outcome::Failed {
+        },
+        (None, _) => Outcome::Failed {
             error: if stderr_text.is_empty() {
                 format!("claude exited ({exit}) without a result event")
             } else {
                 truncate(&stderr_text, 2000)
             },
-        }),
-    }
+        },
+    };
+    Ok((outcome, log_complete))
 }
 
 /// SPEC §6: verdict for the startup subscription-auth self-check.
@@ -2832,6 +2871,10 @@ mod tests {
             call("w1", "Write", serde_json::json!({"file_path": abs("Study Guides/g.html"), "content": "x"})),
             call("e1", "Edit", serde_json::json!({"file_path": abs("Study Guides/g.html")})),
             call("w2", "Write", serde_json::json!({"file_path": abs("Slides/deck.pptx")})),
+            // The same path spelled longer, and a write tool this reader
+            // does not know by name: both are writes.
+            call("w3", "Write", serde_json::json!({"file_path": "./Notes/b.md"})),
+            call("w4", "FancyWrite", serde_json::json!({"file_path": abs("Notes/c.md")})),
             "not json at all".to_string(),
         ];
         let paths = log_paths(lines.into_iter(), &dir);
@@ -2840,7 +2883,10 @@ mod tests {
             paths.read,
             set(&["Notes/a.md", ".classhub/corpus/Week 3/note.md", "Slides/deck.pptx"])
         );
-        assert_eq!(paths.written, set(&["Study Guides/g.html", "Slides/deck.pptx"]));
+        assert_eq!(
+            paths.written,
+            set(&["Study Guides/g.html", "Slides/deck.pptx", "Notes/b.md", "Notes/c.md"])
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
