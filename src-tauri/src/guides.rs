@@ -129,6 +129,11 @@ fn synthesis_context(
     // once. A division's contributing lectures, or every lecture for the
     // master; none for a folder.
     listed_apart: BTreeSet<String>,
+    // Whether the prompt has a `{changes}` to fill: a guide's does, and the
+    // block costs a row lookup and a full diff; an exam's does not, and an
+    // exam scoped to a division would be told about the division guide's row
+    // rather than its own.
+    with_changes: bool,
     empty_message: &str,
 ) -> Result<SynthesisContext> {
     let (class_name, color): (String, String) = conn.query_row(
@@ -154,7 +159,11 @@ fn synthesis_context(
         accent_light,
         accent_dark,
         files_block: files_block(conn, class_id, &manifest, &listed_apart)?,
-        changes_block: changes_block(conn, class_id, scope, &class_dir, &manifest)?,
+        changes_block: if with_changes {
+            changes_block(conn, class_id, scope, &class_dir, &manifest)?
+        } else {
+            String::new()
+        },
         manifest,
         manifest_block,
         class_dir,
@@ -194,6 +203,7 @@ pub fn synthesize_module(
             class_id,
             module_rel,
             BTreeSet::new(),
+            true,
             &format!("no indexed files in {module_rel} — rescan the class first"),
         )?;
         let cards_rel = cards_rel_path(&output_rel);
@@ -261,7 +271,7 @@ pub fn synthesize_unit(
             bail!("a synthesis for {unit_name} is already queued or running");
         }
 
-        let (ctx, corpus) = unit_context(&conn, class_id, unit_id, &unit_name, &scope)?;
+        let (ctx, corpus) = unit_context(&conn, class_id, unit_id, &unit_name, &scope, true)?;
         let output_rel = unit_guide_rel_path(&unit_name);
         let cards_rel = cards_rel_path(&output_rel);
         let hints = hints_for(&conn, class_id, Some(&[unit_id]))?;
@@ -307,6 +317,7 @@ fn unit_context(
     unit_id: i64,
     unit_name: &str,
     scope: &str,
+    with_changes: bool,
 ) -> Result<(SynthesisContext, String)> {
     let nothing = format!(
         "nothing to build {unit_name} from yet — nothing is filed under its weeks, it has \
@@ -315,7 +326,7 @@ fn unit_context(
     );
     let notes = crate::lectures::corpus_notes(conn, class_id, unit_id)?;
     let listed_apart = crate::lectures::contributing_paths(conn, class_id, unit_id)?;
-    let ctx = synthesis_context(conn, class_id, scope, listed_apart, &nothing)?;
+    let ctx = synthesis_context(conn, class_id, scope, listed_apart, with_changes, &nothing)?;
     if notes.is_empty() && ctx.files_block.is_empty() {
         bail!("{nothing}");
     }
@@ -562,6 +573,7 @@ pub fn synthesize_master(
             class_id,
             MASTER_SCOPE,
             listed_apart,
+            true,
             "no indexed files in this class — rescan first",
         )?;
         let units = crate::units::list_units(&conn, class_id)?;
@@ -642,7 +654,7 @@ pub fn generate_practice(
                     )
                     .optional()?
                     .context("that division is no longer in this course's structure")?;
-                let sources = unit_context(&conn, class_id, unit_id, &unit_name, scope)?;
+                let sources = unit_context(&conn, class_id, unit_id, &unit_name, scope, false)?;
                 let hints = hints_for(&conn, class_id, Some(&[unit_id]))?;
                 (unit_name, sources, hints)
             }
@@ -692,6 +704,7 @@ pub fn generate_practice(
                     class_id,
                     scope,
                     listed_apart,
+                    false,
                     "no indexed files in that scope — rescan the class first",
                 )?;
                 (label, (ctx, corpus), hints)
@@ -1285,7 +1298,7 @@ mod tests {
             .query_row("SELECT id FROM units WHERE class_id = 3", [], |row| row.get(0))
             .expect("id");
         let scope = unit_scope(unit_id);
-        let refused = |conn: &Connection| match unit_context(conn, 3, unit_id, name, &scope) {
+        let refused = |conn: &Connection| match unit_context(conn, 3, unit_id, name, &scope, true) {
             Err(e) => format!("{e:#}"),
             Ok(_) => panic!("built a division from nothing"),
         };
@@ -1322,7 +1335,7 @@ mod tests {
             [deck],
         )
         .expect("deck");
-        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope).expect("builds from the deck");
+        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope, true).expect("builds from the deck");
         assert!(ctx.files_block.contains(&format!("- source: {deck}")), "{}", ctx.files_block);
         assert!(!ctx.files_block.contains(transcript), "{}", ctx.files_block);
         assert!(corpus.starts_with("(none"), "{corpus}");
@@ -1334,7 +1347,7 @@ mod tests {
         let note = class_dir.join(note_rel);
         fs::create_dir_all(note.parent().expect("parent")).expect("corpus dir");
         fs::write(&note, "# distilled").expect("note");
-        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope).expect("builds from the note");
+        let (ctx, corpus) = unit_context(&conn, 3, unit_id, name, &scope, true).expect("builds from the note");
         assert!(ctx.files_block.is_empty(), "{}", ctx.files_block);
         assert!(
             corpus.contains(&format!("- {note_rel}\n  transcript: {transcript}")),
@@ -1358,7 +1371,7 @@ mod tests {
         let module_id: i64 = conn
             .query_row("SELECT id FROM units WHERE name = 'Module 1'", [], |row| row.get(0))
             .expect("id");
-        let (ctx, corpus) = unit_context(&conn, 3, module_id, "Module 1", &unit_scope(module_id))
+        let (ctx, corpus) = unit_context(&conn, 3, module_id, "Module 1", &unit_scope(module_id), true)
             .expect("builds from the folder");
         assert!(ctx.files_block.contains("- source: Module 1/Slides/deck.pptx"), "{}", ctx.files_block);
         assert!(corpus.starts_with("(none"), "{corpus}");
