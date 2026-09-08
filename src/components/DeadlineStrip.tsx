@@ -30,7 +30,25 @@ export function DeadlineStrip() {
   const [completedHere, setCompletedHere] = useState<ReadonlySet<number>>(
     () => new Set(),
   );
-  const [error, setError] = useState<string | null>(null);
+  // One failure per chip, kept until that chip is clicked again: a second
+  // chip's click must not clear a message the reader has not seen.
+  const [errors, setErrors] = useState<ReadonlyMap<number, string>>(
+    () => new Map(),
+  );
+  const keep = (id: number, kept: boolean) =>
+    setCompletedHere((prev) => {
+      const next = new Set(prev);
+      if (kept) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  const report = (id: number, message: string | null) =>
+    setErrors((prev) => {
+      const next = new Map(prev);
+      if (message === null) next.delete(id);
+      else next.set(id, message);
+      return next;
+    });
   if (data === undefined) return null;
 
   const shown = data.filter(
@@ -45,7 +63,11 @@ export function DeadlineStrip() {
         title="Due in the next 7 days"
         count={due === 0 ? undefined : due === 1 ? "1 due" : `${due} due`}
       >
-        {error && <p className={errorLine}>{error}</p>}
+        {[...errors].map(([id, message]) => (
+          <p key={id} className={errorLine}>
+            {data.find((d) => d.id === id)?.title ?? "A deadline"}: {message}
+          </p>
+        ))}
       </SectionHeading>
       {shown.length === 0 ? (
         <p className={`mt-3 ${readingText} text-muted-foreground`}>
@@ -57,10 +79,8 @@ export function DeadlineStrip() {
             <DeadlineChip
               key={deadline.id}
               deadline={deadline}
-              onCompleted={(id) =>
-                setCompletedHere((prev) => new Set(prev).add(id))
-              }
-              onError={setError}
+              onKeep={keep}
+              onError={report}
             />
           ))}
         </div>
@@ -71,12 +91,13 @@ export function DeadlineStrip() {
 
 function DeadlineChip({
   deadline,
-  onCompleted,
+  onKeep,
   onError,
 }: {
   deadline: Deadline;
-  onCompleted: (id: number) => void;
-  onError: (message: string | null) => void;
+  /** Whether the strip keeps this chip once its deadline is done. */
+  onKeep: (id: number, kept: boolean) => void;
+  onError: (id: number, message: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const done = deadline.status === "done";
@@ -87,10 +108,10 @@ function DeadlineChip({
 
   const toggle = () => {
     setBusy(true);
-    onError(null);
+    onError(deadline.id, null);
     // Kept before the write lands, so the refetch that follows it cannot
     // drop the chip between the click and its answer.
-    if (!done) onCompleted(deadline.id);
+    if (!done) onKeep(deadline.id, true);
     setDeadlineStatus(deadline.id, !done)
       // Held until the strip has re-read the deadlines: the push that follows
       // the write invalidates the same query, but a chip reading open a beat
@@ -98,7 +119,10 @@ function DeadlineChip({
       .then(() => queryClient.invalidateQueries({ queryKey: ["deadlines"] }))
       .then(() => setBusy(false))
       .catch((e) => {
-        onError(String(e));
+        // The write did not land, so the strip must not keep the chip: a
+        // completion from the tab later would bring it back as done.
+        if (!done) onKeep(deadline.id, false);
+        onError(deadline.id, String(e));
         setBusy(false);
       });
   };
