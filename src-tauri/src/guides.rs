@@ -546,11 +546,16 @@ pub fn synthesize_master(
         if has_active_job(&conn, class_id, "master_guide", MASTER_SCOPE)? {
             bail!("a master synthesis for this class is already queued or running");
         }
-        // Every lecture is listed through its note (SPEC §8.5), the way a
-        // division's are, so the file listing leaves the transcripts out.
+        // Every distilled lecture is listed through its note (SPEC §8.5), the
+        // way a division's are, so the file listing leaves those transcripts
+        // out; one not yet distilled has no note to stand in for it and stays
+        // listed as the source material it is.
         let contributions = crate::lectures::list_contributions(&conn, class_id)?;
-        let listed_apart: BTreeSet<String> =
-            contributions.iter().map(|c| c.rel_path.clone()).collect();
+        let listed_apart: BTreeSet<String> = contributions
+            .iter()
+            .filter(|c| c.distilled)
+            .map(|c| c.rel_path.clone())
+            .collect();
         // Scope 'master' = every indexed file in the class (SPEC §7 step 5).
         let ctx = synthesis_context(
             &conn,
@@ -662,7 +667,11 @@ pub fn generate_practice(
                         .map(|c| (c.corpus_rel_path.clone(), c.rel_path.clone()))
                         .collect();
                     (
-                        contributions.iter().map(|c| c.rel_path.clone()).collect(),
+                        contributions
+                            .iter()
+                            .filter(|c| c.distilled)
+                            .map(|c| c.rel_path.clone())
+                            .collect(),
                         crate::lectures::corpus_block(&notes),
                         hints_for(&conn, class_id, None)?,
                     )

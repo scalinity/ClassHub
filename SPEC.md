@@ -1041,8 +1041,9 @@ every extract, every corpus note, and the transcripts through their notes, opene
 a note is not enough. The prompt's roster comes from `units` — the course's own divisions in
 its own order, each with its start date and, for a Part, its week range — never from the
 folders the material sits in, and Key concepts groups by those divisions; a `{corpus}` block
-lists every applied contribution's note with its transcript path, the way a division guide's
-does, so the file listing leaves the transcripts out; `{hints}` carries every flagged item of
+lists every distilled contribution's note with its transcript path, the way a division guide's
+does, so the file listing leaves those transcripts out while one not yet distilled stays listed
+as the source material it is; `{hints}` carries every flagged item of
 the class (§8.4), and the cross-division threads start from its *Builds on* items;
 `{objectives}` carries each division's stated objectives under its name (§11); `{changes}`
 and the `New since` chip work as in §8.1. Output `Study Guides/Semester Master.html` with the
