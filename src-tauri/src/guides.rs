@@ -890,11 +890,11 @@ pub struct PracticeInfo {
 /// what exists, and the guides table for what each was built from.
 pub fn list_practice(conn: &Connection, class_id: i64) -> Result<Vec<PracticeInfo>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
-    let rows: std::collections::HashMap<String, GuideInfo> = list_guides(conn, class_id)?
-        .into_iter()
-        .filter(|g| g.practice)
-        .map(|g| (g.rel_path.clone(), g))
-        .collect();
+    let rows: std::collections::HashMap<String, GuideInfo> =
+        guides_where(conn, class_id, crate::db::is_practice_scope)?
+            .into_iter()
+            .map(|g| (g.rel_path.clone(), g))
+            .collect();
     Ok(crate::notes::list_dir_files(&class_dir.join(PRACTICE_DIR), PRACTICE_DIR)
         .into_iter()
         .filter(|f| f.name.to_lowercase().ends_with(".html"))
@@ -1127,6 +1127,18 @@ fn upsert_guide(
 // Reads (staleness computed on demand, SPEC §7 step 5)
 
 pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
+    guides_where(conn, class_id, |_| true)
+}
+
+/// The rows `keep` admits by scope, each with its diff. The diff is the
+/// expensive part — a scope's current set, then a probe or a disk hash per
+/// widened entry — so a caller that wants only the guides, or only the exams,
+/// says so before it is computed rather than discarding it after.
+fn guides_where(
+    conn: &Connection,
+    class_id: i64,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Vec<GuideInfo>> {
     // The division's name rides along for the label: a unit scope is its id.
     let mut stmt = conn.prepare(
         "SELECT g.scope, g.rel_path, g.generated_at, g.source_manifest, u.name
@@ -1148,17 +1160,28 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
     // Resolved once for the resolver below; a root that cannot be resolved
     // leaves every widened entry unresolved, which reads as gone.
     let class_dir = crate::scanner::class_dir(conn, class_id).ok();
+    // One note read by three guides is hashed once per listing, not thrice.
+    let hashes: std::cell::RefCell<std::collections::HashMap<String, Option<String>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 
     let mut guides = Vec::with_capacity(rows.len());
     for (scope, rel_path, generated_at, manifest_json, unit_name) in rows {
+        if !keep(&scope) {
+            continue;
+        }
         let current = current_manifest(conn, class_id, &scope)?;
         // An entry outside the scope's own set — a note, a page mirror, a
         // file the job found through --add-dir — is resolved to what it is
         // now, so a widened manifest reads honestly rather than stale forever.
         let diff = manifest_diff(&manifest_json, &current, |path| {
-            class_dir
+            if let Some(known) = hashes.borrow().get(path) {
+                return known.clone();
+            }
+            let hash = class_dir
                 .as_deref()
-                .and_then(|dir| current_hash(conn, class_id, dir, path).ok().flatten())
+                .and_then(|dir| current_hash(conn, class_id, dir, path).ok().flatten());
+            hashes.borrow_mut().insert(path.to_string(), hash.clone());
+            hash
         });
         guides.push(GuideInfo {
             stale: diff.is_stale(),
@@ -1181,10 +1204,12 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
 /// listing carries its own affordance for a stale session; an exam is not
 /// regenerated either.
 pub fn stale_guide_count(conn: &Connection, class_id: i64) -> Result<i64> {
-    Ok(list_guides(conn, class_id)?
-        .iter()
-        .filter(|g| g.stale && !g.session && !g.practice)
-        .count() as i64)
+    Ok(guides_where(conn, class_id, |scope| {
+        !crate::db::is_session_scope(scope) && !crate::db::is_practice_scope(scope)
+    })?
+    .iter()
+    .filter(|g| g.stale)
+    .count() as i64)
 }
 
 /// Guide HTML for the in-app sandboxed viewer.
