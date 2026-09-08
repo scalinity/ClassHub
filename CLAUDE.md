@@ -54,20 +54,25 @@ session rather than from a prompt.
 - `scripts/ax-driver/ax <pid> raise | dump | press <name> | focus <name> | setvalue <name>
   <value> | text` — a Swift accessibility driver, arm64; its source was never committed and
   these binaries are the only copy. `AX_NTH=n` picks the nth element of a name. `dump` lists
-  controls; `text` includes static text. `scripts/ax-driver/winid` prints window ids for
-  `screencapture -l`. Raise, then dump twice; reopen the workspace before each dump, since the
-  owner may be using the window. A modal (the Add lecture form) hides the rest of the page
+  controls; `text` includes static text. `scripts/ax-driver/winid <pid>` prints the window id
+  for `screencapture -l` (with no pid it prints nothing or dies). Raise, then dump twice;
+  reopen the workspace before each dump, since the owner may be using the window. A modal
+  (the Add lecture form) hides the rest of the page
   from AX, and the Week popup's menu is not in the tree — `press '<full item title>'` still
   picks an item.
-- Add lecture form: `setvalue 'Recording link or file' <path>` first, then each date segment
-  with `focus month|day|year` and a System Events keystroke (expect a second pass); the digest
+- Every date input — the Add lecture form's, the deadline form's — takes keystrokes, never
+  `setvalue`, which writes the DOM and React never sees: activate the build by pid so it is
+  frontmost, then `focus month|day|year` and a System Events keystroke per segment (expect a
+  second pass). Add lecture form: `setvalue 'Recording link or file' <path>` first; the digest
   checkbox is on by default once a week is picked — uncheck it before Add lecture on a fixture
   (the dialog's own button is the second of that name).
 - Fixtures: a `.md` under `Weeks/` reads as a lecture; use a `.csv`, which extracts locally
   for nothing. Never edit source material to test staleness — add a file beside it.
 - A workspace dump opens with the section links (Notices … Notes, those present) before any
   section's controls, so a folder row of the same name — `Notes` — is the second of that name
-  (`AX_NTH=2`). A card is `Open <display_name>`.
+  (`AX_NTH=2`). A card is `Open <display_name>`. A deadline's control is `Mark <title> done`
+  or `Reopen <title>` on the dashboard strip and on the tab alike; the tab's done rows sit
+  behind an `N done` toggle.
 - Vite HMR of `query.ts` creates a second `QueryClient`; verify cache changes after a full
   reload (`touch index.html`), not after HMR. A render error while an edit is half-applied
   blanks the window and HMR does not bring it back; the same `touch` does.

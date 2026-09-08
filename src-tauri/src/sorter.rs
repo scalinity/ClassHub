@@ -581,6 +581,69 @@ fn week_alternative(
     })
 }
 
+/// An alternative whose week-folder destination a file of that name already
+/// occupies lands at the next free name — Biostatistics re-uploaded its Week 3
+/// coding notebook on 2026-09-08, and the earlier one already sat under the
+/// week folder — the way a download lands in the inbox (`free_slot`), with the
+/// reason saying the earlier file stays. Nothing is overwritten (SPEC §4), and
+/// the click is not spent on `validate_dest`'s refusal. A row's own filing of a
+/// file already in the tree onto a taken name stays refused: two copies in
+/// the tree are the reader's to reconcile, while a re-upload is new material.
+fn beside_existing(class_dir: &Path, mut alt: WeekAlternative) -> WeekAlternative {
+    let Some((folder_rel, name)) = alt.dest_rel_path.rsplit_once('/') else {
+        return alt;
+    };
+    let landed = free_slot(&class_dir.join(folder_rel), name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if landed == name {
+        return alt;
+    }
+    alt.reasoning.push_str(&format!(
+        " {folder_rel} already holds {name}, which stays; this one lands beside it as {landed}."
+    ));
+    alt.dest_rel_path = format!("{folder_rel}/{landed}");
+    alt
+}
+
+/// A file Canvas keeps in no folder, proposed by its name where the name reads
+/// a week the course declares (SPEC §7.2): the by-name card its row would
+/// offer, written at staging time in the sort job's place, since the reading
+/// is the row's own and costs nothing — Applied's Week 2 notebook came loose
+/// on 2026-09-03 and spent a sort job to reach the folder its name said.
+/// Canvas placed nothing, so no placement is overridden and no Canvas card is
+/// replaced. `Ok(false)` where the name reads no week, the course lacks it, or
+/// the destination is taken or held: the file stays loose for the sorter.
+pub(crate) fn propose_loose_by_name(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    name: &str,
+) -> Result<bool> {
+    let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
+    let Some((week, reading)) = crate::units::named_week_reading(name, modules_are_weeks) else {
+        return Ok(false);
+    };
+    let Some(slot) = crate::units::slot_for_week(conn, class_id, week)? else {
+        return Ok(false);
+    };
+    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+    let dest_rel = format!("{folder_rel}/{name}");
+    if validate_dest(class_dir, source_rel, &dest_rel).is_err()
+        || refuse_held(conn, class_id, source_rel, &dest_rel).is_err()
+    {
+        return Ok(false);
+    }
+    let reasoning = week_reason(
+        &format!("Canvas keeps it in no folder. {}", reading_words(week, reading)),
+        &folder_rel,
+        &slot.unit_name,
+    );
+    upsert_proposal(conn, class_id, "by_name", source_rel, &dest_rel, &reasoning, None)
+}
+
 /// The words a by-name card gives the reading that found its week (SPEC §10).
 fn reading_words(week: i64, reading: WeekReading) -> String {
     match reading {
@@ -1019,6 +1082,7 @@ pub fn sort_state(conn: &Connection, class_id: i64) -> Result<SortState> {
             proposals.iter().map(|p| p.dest_rel_path.clone()).collect();
         for card in proposals.iter_mut().filter(|p| p.source == "canvas") {
             card.alternative = week_alternative(&slots, modules_are_weeks, &card.dest_rel_path)
+                .map(|alt| beside_existing(&class_dir, alt))
                 .filter(|alt| taken.insert(alt.dest_rel_path.clone()));
         }
     }
@@ -2434,6 +2498,143 @@ mod tests {
             .expect("the reading's card");
         assert!(reading.alternative.is_none(), "a destination another card claims is not offered");
         assert_eq!(state.proposals.len(), 4);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A Canvas alternative onto a name the week folder already holds — a
+    /// re-upload, the Sept 8 shape — lands beside the earlier file at the next
+    /// free name, said on the card, and approval would take it; the by-name
+    /// row's filing of a tree file onto that name stays refused.
+    #[test]
+    fn a_canvas_alternative_lands_beside_an_earlier_file_of_its_name() {
+        let root = std::env::temp_dir().join(format!("classhub-beside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 3 — Data Quality', 3, '2026-09-03', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        let class_dir = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        let week_dir = class_dir.join("Weeks/Week 03 — Data Quality/Week 3 Coding Material");
+        fs::create_dir_all(&week_dir).expect("week folder");
+        fs::write(week_dir.join("Intro.html"), "<html>earlier</html>").expect("earlier");
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        fs::write(class_dir.join(INBOX_DIR).join("Intro.html"), "<html>later</html>").expect("later");
+        let source = format!("{INBOX_DIR}/Intro.html");
+        upsert_proposal(
+            &conn,
+            3,
+            "canvas",
+            &source,
+            "Coding Material/Week 3 Coding Material/Intro.html",
+            "because",
+            None,
+        )
+        .expect("canvas card");
+
+        let state = sort_state(&conn, 3).expect("state");
+        let alt = state.proposals[0].alternative.as_ref().expect("an alternative");
+        assert_eq!(
+            alt.dest_rel_path,
+            "Weeks/Week 03 — Data Quality/Week 3 Coding Material/Intro (2).html"
+        );
+        assert!(
+            alt.reasoning.ends_with(
+                "Weeks/Week 03 — Data Quality/Week 3 Coding Material already holds Intro.html, \
+                 which stays; this one lands beside it as Intro (2).html."
+            ),
+            "{}",
+            alt.reasoning
+        );
+        validate_dest(&class_dir, &source, &alt.dest_rel_path).expect("approval would take it");
+
+        // The same name from a Materials row: refused, since two copies in the
+        // tree are the reader's to reconcile.
+        fs::create_dir_all(class_dir.join("Coding Material")).expect("tree folder");
+        fs::write(class_dir.join("Coding Material/Week 3 Intro.html"), "x").expect("tree twin");
+        fs::write(class_dir.join("Weeks/Week 03 — Data Quality/Week 3 Intro.html"), "y").expect("held name");
+        let refused = match week_filing(&conn, 3, &class_dir, "Coding Material/Week 3 Intro.html") {
+            Ok(_) => panic!("a taken name on a row's filing"),
+            Err(e) => e,
+        };
+        assert!(format!("{refused:#}").contains("already exists"), "{refused:#}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A file Canvas keeps loose gets the by-name card its row would offer
+    /// when its name reads a week the course declares — the week word, or a
+    /// module where the course reads modules as weeks — and stays loose for
+    /// the sorter otherwise: a name reading none, a week the course lacks, a
+    /// module on a Part course, or a destination already on disk.
+    #[test]
+    fn a_loose_canvas_file_named_for_its_week_is_proposed_by_name() {
+        let root = std::env::temp_dir().join(format!("classhub-loose-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (4, 1, 'part', 'Part I: Deep Learning', 1, 1, 8, 'syllabus')",
+            [],
+        )
+        .expect("part");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 4 — Probability', 4, '2026-09-10', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        let propose = |class: i64, name: &str| {
+            let class_dir = crate::scanner::class_dir(&conn, class).expect("class dir");
+            fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+            fs::write(class_dir.join(INBOX_DIR).join(name), "x").expect("landed");
+            let source = format!("{INBOX_DIR}/{name}");
+            let written = propose_loose_by_name(&conn, class, &class_dir, &source, name).expect("proposed");
+            let card: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT dest_rel_path, reasoning, source FROM move_proposals
+                     WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
+                    params![class, source],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .expect("query");
+            (written, card)
+        };
+
+        let (written, card) = propose(4, "CAI6734_Week3_Colab.ipynb");
+        let (dest, reasoning, source) = card.expect("a by-name card");
+        assert!(written);
+        assert_eq!((dest.as_str(), source.as_str()), ("Weeks/Week 03/CAI6734_Week3_Colab.ipynb", "by_name"));
+        assert_eq!(
+            reasoning,
+            "Canvas keeps it in no folder. Its name carries Week 3. Under Weeks/Week 03, it counts \
+             among the sources of Part I: Deep Learning."
+        );
+        let (written, card) = propose(3, "Biostatistics_Module4_Slides_class.pptx");
+        assert!(written);
+        let (dest, reasoning, _) = card.expect("the module reading's card");
+        assert_eq!(dest, "Weeks/Week 04 — Probability/Biostatistics_Module4_Slides_class.pptx");
+        assert!(reasoning.starts_with("Canvas keeps it in no folder. Its name carries Module 4,"), "{reasoning}");
+
+        for (class, name) in [
+            (4, "Loose notes.pdf"),
+            (4, "CAI6734_Week9_Beyond.pdf"),
+            (4, "Module2_Colab.ipynb"),
+            (3, "Weekly plan.pdf"),
+        ] {
+            let (written, card) = propose(class, name);
+            assert!(!written && card.is_none(), "{name} stays loose for the sorter");
+        }
+        // A name the week folder already holds stays loose too.
+        let class_dir = crate::scanner::class_dir(&conn, 4).expect("class dir");
+        fs::create_dir_all(class_dir.join("Weeks/Week 03")).expect("week folder");
+        fs::write(class_dir.join("Weeks/Week 03/CAI6734_Week3_Deck.pdf"), "x").expect("earlier");
+        let (written, card) = propose(4, "CAI6734_Week3_Deck.pdf");
+        assert!(!written && card.is_none(), "a taken name stays loose");
         let _ = fs::remove_dir_all(&root);
     }
 }

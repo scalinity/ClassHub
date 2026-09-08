@@ -4635,3 +4635,197 @@ through `scripts/gate.sh`. What future sessions should know:
   index.html` does.
 - `pgrep -f target/debug/classhub` also matches the `tauri dev` shell; the app
   is the pid whose `ps -o comm=` is the binary.
+
+## M31 — Done from the dashboard (2026-09-08)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database (`user_version` 13,
+37 file rows, 4 contributions, 9 guides, jobs at 313, audit at 174, no active
+job, every `canvas_synced_at` 2026-09-03 02:15, the copy taken at 00:04) through
+two ignored probe tests in `guides.rs` and `sorter.rs`, under the code at
+ddd156c:
+
+- **The Structure rows.** `unit_context` refused for units 25, 42 and 9 —
+  nothing filed, no folder, nothing distilled — so those rows offer nothing.
+  Unit 40: a one-entry manifest, `Introduction.pdf` under its Week 1 folder, in
+  the files block with its extract, no note; the row offers a guide, and one
+  built from an introduction deck with no lecture behind it is not worth the
+  budget, which is the four guides with lectures. Unit 37: five entries (two
+  transcripts, both decks, the notebook), two notes; row 7 stale. Unit 8: seven
+  entries, one note; row 9 stale. Stale from before: Biostatistics' `Module 1`
+  guide and its Semester Master.
+- **The queue**, from the backup's rows: Design Studio's two project cards, 25
+  and 27; nothing else pending. The inbox listing beside them — read from the
+  live disk, not the backup — already held files the backup did not know: the
+  owner had signed in while the probe ran (below).
+- **The readings.** Cards 25 and 27 derive nothing (`AI Design Project/` carries
+  no week). The shapes the week may bring: `Week 3 - HiPerGator and NaviGator
+  II/<name>` on Design Studio → week 3, under the folder's own name inside
+  `Weeks/Week 03 — HiPerGator and NaviGator II/`; `Module 2/<name>` there →
+  none; a `Module 2 …` file name there → week 2 by the module reading, which
+  Design Studio takes by the rule; `Slides/Biostatistics_Module4_Slides_class.
+  pptx`, and the same under `Lecture Slides/` → week 4 by the module reading;
+  `Reading Material/Week 4 ….pdf` → week 4; Applied's `Slides/CAI6734_Week3_….
+  pdf` and a placed `…Week3….ipynb` → week 3 into `Weeks/Week 03/`, Part I
+  named; a loose `CAI6734_Week3_….ipynb` → no card at all — a sort job, whose
+  card carries no alternative — though `named_week_reading` reads `(3, Week)`.
+  Applied's Week 2 notebook took exactly that route on Sept 3: audit 132
+  (`dest: null`), sort job 294, proposal 38 → `Weeks/Week 02/` at `high`.
+- **The slots.** Fundamentals 15, all dated, Sept 8 → week 3 (unit 25); Design
+  Studio 15 dated, Sept 9 → week 3 (unit 42); Biostatistics 17 dated, Sept 10
+  → week 4 (unit 9); Applied 16 undated, weeks 1–8 feeding Part I.
+  `modules_read_as_weeks`: true, true, true, false.
+- **The strip's seven days on Sept 8**: four open deadlines — Biostatistics'
+  Quiz 1 (Sept 3), Fundamentals' Homework 1 (Sept 7 23:59), Design Studio's
+  Problem Statement + AI Pitch (Sept 9), Biostatistics' Homework 1 (Sept 13) —
+  every one `syllabus`, none carrying a Canvas assignment id; the Canvas
+  proposals for `Homework #1` (Sept 7) and `Problem Statement and AI Sketch`
+  (Sept 9) wait unapproved under titles of their own.
+- **`set_deadline_status`**, read: one `UPDATE deadlines SET status`, one
+  `ui.set_deadline_status` audit row `{id, status}` in the same transaction,
+  one `deadlines` hub push, which `query.ts` turns into a refetch of
+  `["deadlines"]` and `["classes"]`. Nothing else.
+- **The date**: 23:59 on Sept 7 at the start, Sept 8 by the probe; no Sept 8–10
+  recording could exist, and the four links were not asked for.
+- **The installed app's launch** (23:45, ddd156c) ran its scan and started no
+  sync: its Settings screen carried no launch report at all, the path
+  `sync_on_launch` takes when the Keychain holds no session. The copy stored on
+  Sept 3 had lapsed.
+
+### What the sync delivered
+
+`Sync all classes` pressed on the installed app at 00:03; the sign-in window
+opened (`Waiting for you to sign in to Canvas…`), the owner signed in, and
+every class stamped 2026-09-08 00:05. Per course, off the report, the queue and
+audit rows 175–179:
+
+- **Fundamentals**: nothing new; 2 assignments already accounted for. It has
+  still never staged a Canvas file.
+- **Design Studio**: 1 page mirrored; `RC_Class_Orientation.pdf` (5.4 MB)
+  staged under Canvas's `2 HiPerGator` — the module page's number with no
+  word — so card 50 offers nothing; 4 files already in the class. Its Week 3
+  material is not in a week-named folder on Canvas, so the folder reading has
+  nothing to read.
+- **Biostatistics**: 3 deadline proposals (Homework Assignment 1, Sept 14;
+  Programming Quiz 1, Sept 5, and Conceptual Quiz 1, Sept 6, both past), 1
+  grade recorded (Programming Quiz 1, audit 176), 1 notice, 3 pages mirrored,
+  3 files staged: `Introduction_to_Data_condensed_combined.html` (1,167,710 B —
+  a re-export of the 1,366,681 B file M28 filed under the Week 3 folder; the
+  sync matches on name and size, so it is new material) under `Coding
+  Material/Week 3 Coding Material/` (card 51), `Programming _Quiz 1_R.pdf`
+  under `Quizzes/` (card 52), `Week 4 2012 Reinhold Introduction to probability
+  theory and sampling distributions.pdf` under `Reading Material/` (card 53);
+  16 already in the class. The Module 4 deck has not been posted.
+- **Applied**: nothing new; 6 already in the class. The Week 3 deck and
+  notebook have not been posted (its lecture is Sept 8 at 11:45).
+- **Which cards offer the week**: 53, `File under Week 04` from the week word;
+  51, `File under Week 03` from the folder segment `Week 3 Coding Material` —
+  toward a path the earlier version already occupied, which `validate_dest`
+  refuses ("destination already exists"), so the offer was a dead click. That
+  is the first gap; the second is the loose notebook's, on record from Sept 3.
+  Cards 50 and 52 offer nothing, rightly.
+
+### What was built
+
+- **An alternative lands beside an earlier file of its name.**
+  `sorter::beside_existing` takes the derived alternative and, when its
+  destination exists on disk, moves it to `free_slot`'s next free name — ` (2)`,
+  the inbox's own landing rule — and appends to the reason "`<folder>` already
+  holds `<name>`, which stays; this one lands beside it as `<name> (2).ext`."
+  `sort_state` applies it before the pending-claim filter, so a suffixed path
+  another card claims is still withheld. A row's own filing (`week_filing`,
+  `folder_filing`) onto a taken name stays refused: two copies in the tree are
+  the reader's to reconcile, a re-upload is new material.
+- **A loose Canvas file named for its week is proposed by name.**
+  `sorter::propose_loose_by_name` reads the name through `named_week_reading`
+  with the course's module rule, finds the slot, validates the destination and
+  the queue's claims, and upserts a `by_name` card whose reason opens "Canvas
+  keeps it in no folder." before the reading's sentence and the division's;
+  any refusal returns `false` and the file stays loose. `canvas_sync::
+  record_landed` returns `Landing::{Placed, ByName, Loose}`; the report gains
+  "N file(s) Canvas keeps loose, proposed by name — each name carries its
+  week", and the sorter is enqueued for the loose remainder alone.
+- **The chip.** `DeadlineStrip.tsx`: each chip is a button carrying the tab's
+  control at chip scale — a 14px ring at its edge, the class ink's at 40%, the
+  accent on hover — with the tab's own accessible name (`Mark <title> done`,
+  `Reopen <title>`) and a tooltip naming the class and `from Canvas` on a
+  tracked row. The click calls `setDeadlineStatus`, adds the id to the strip's
+  `completedHere` set first, and holds the chip busy until
+  `invalidateQueries(["deadlines"])` has refetched; the strip shows a deadline
+  that is open or one it completed, so the chip reads done — the ring filled
+  with a check, the title struck and muted, `· done` — and stays until the
+  dashboard is next opened, while `N due` counts the open ones. A second
+  click reopens it. Errors land under the heading in `errorLine`. Nothing under
+  `src-tauri/` changed for it.
+- SPEC §7.2, §10 steps 7 and 8, §11, §12, §13 and §14 state the design.
+
+### Verified
+
+- `cargo test`: 246 pass, two new — the alternative beside an earlier file with
+  the reason's close, approval's `validate_dest` taking the suffixed path, and
+  the row's filing refused on a taken name; the loose by-name card on a Part
+  course by the week word and on a week course by the module reading, and
+  none for a name reading nothing, a week the course lacks, a module on a Part
+  course, or a name the week folder already holds. `npx tsc --noEmit` clean.
+- Live on the dev build (pid 91606) beside the installed app ddd156c; the
+  launch scan found nothing stale. **Card 51** read `_Inbox → Coding Material /
+  Week 3 Coding Material /`, then `or → Weeks / Week 03 — Data Exploration,
+  Processing, and Quality / Week 3 Coding Material /
+  Introduction_to_Data_condensed_combined (2).html`, Canvas's reason, the
+  folder reading's with its close, and `File under Week 03` beside Approve;
+  card 53 `File under Week 04`; card 52 nothing. Pressed: proposal 51 approved
+  at the suffixed path, audit row 180 (`sort.move`, `proposedBy: canvas`),
+  files row 39 with its local extract beside row 29's, jobs still at 313 — an
+  `.html` extracts locally — and the inbox down to two files.
+- **The chip**, on a fixture: `M31 fixture` added on the Fundamentals tab (row
+  41, audit 181, Sept 8). The dashboard showed five chips, `5 due`, the fixture
+  `· today`. `Mark M31 fixture done`: audit 182 (`done`); the ring filled with
+  a check, the title struck, `· done`, `4 due`, the button now `Reopen M31
+  fixture`. Pressed: audit 183 (`open`), the chip open again. Marked done once
+  more (audit 184) and the workspace opened: the tab's open rows lacked it and
+  its `3 done` list held `Reopen M31 fixture` — agreement with no refresh. Back
+  on the dashboard the chip was gone. Deleted from the tab: audit 185
+  (`ui.delete_deadline`), row gone. Captured in dark and light; no real
+  deadline was touched.
+- The loose by-name card is pinned by `cargo test` alone: no loose file arrived
+  this sync, and the next real one is Applied's Week 3 notebook, which the
+  Sept 9 launch brings through the installed build.
+- Not run: any chat turn, any digest, any guide, any sort job. Session cost:
+  nothing on the subscription, nothing on credits.
+
+### Left as it is
+
+- **The lectures.** None of the four recordings could exist at 00:20 on Sept 8;
+  Fundamentals' Week 3, Applied's Week 3 (row 7 stale), Design Studio's Week 3
+  and Biostatistics' Week 4 wait for their recordings, and every form resolves
+  its day. §1 gains no cost this milestone.
+- Card 50 (`2 HiPerGator`): Canvas names the folder by the module page's
+  number alone, no reading applies, and a module reading would name week 2
+  for material that may be Week 3's — the reader's `Move to…`. Card 52
+  (`Quizzes/`) and card 53 (`File under Week 04`; any approval of a PDF spawns
+  its $0.65 extract) wait for the reader, as do cards 25 and 27.
+- The earlier Week 3 notebook stays beside the re-export under the week folder,
+  and the Week 3 guide (row 9, stale over eight entries now) reads both until
+  one is removed in Finder.
+- The three Biostatistics deadline proposals and the recorded grade are the
+  reader's; `Homework Assignment 1` (Sept 14, Canvas) and the syllabus's
+  `Homework 1` (Sept 13) differ in title and day, so neither claims the other.
+- Unit 40's guide is a button away and not built. Rows 1 and 2 stay stale.
+- A done chip's linger is per mount: the dashboard reopened shows only what is
+  open, which is the strip's job.
+
+### Gotchas
+
+- `ax setvalue` on a date input writes the DOM and React never sees it, so the
+  deadline form's Save stayed inert; `focus month|day|year` and a System
+  Events keystroke per segment, with the dev build frontmost, is what works —
+  the Add lecture form's rule holds for every date input.
+- `winid` takes the pid as its argument; with none it printed nothing once and
+  died with signal 133 once.
+- `sort_state` lists the inbox from the live disk even on a backup copy, so a
+  probe's queue can show files the backup's rows do not know — which is how
+  the sign-in was noticed.
+- A `cd` into `src-tauri` persisted into the next call and `ax` failed on its
+  relative path; `git -C` and `--manifest-path` from the repo root avoid it.
+- `echo ====` is a command lookup in zsh; quote the separator.

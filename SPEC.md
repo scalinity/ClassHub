@@ -906,7 +906,12 @@ syllabus scan's picker offers the mirrored syllabus page as a source when it exi
 
 Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
 from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
-invented and the file waits for the content-aware sorter, which the sync enqueues. **A sort job
+invented: a name that reads a week the course declares — the reading a Materials row takes
+(§10 step 7) — gets the by-name card its row would offer, toward `Weeks/<week folder>/<name>`,
+written at staging time in a sort job's place, since the reading is the row's own and costs
+nothing (Applied's Week 2 notebook came loose on 2026-09-03 and spent a sort job to reach the
+folder its name said); a name that reads none waits for the content-aware sorter, which the
+sync enqueues for those alone. **A sort job
 never replaces a Canvas destination on its own.** Where Canvas filed a file is an observation —
 the professor put it there — and a sort job's destination is an inference from a filename and a
 tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
@@ -1220,8 +1225,10 @@ its meetings.
    nothing is re-extracted. Explicit by design: Canvas may have placed the file where it
    is (§7.2), an automatic sort never overrides that, and the module reading is not
    universal — Design Studio's `Module 2` page spans its weeks 2 and 3 — so a wrong
-   reading costs a dismissal, never a move. Its source is a file or a folder in the tree,
-   never one in `_Inbox/`, so a by-name row never replaces a Canvas card; a source another
+   reading costs a dismissal, never a move. A row's click takes a file or a folder in the
+   tree, never one in `_Inbox/`, so it never replaces a Canvas card; the one by-name card
+   with an inbox source is the sync's own, for a file Canvas keeps loose (§7.2), which has
+   no Canvas card to replace. A source another
    route's card already holds — chat's — is refused by name rather than retargeted, and so
    is a destination another pending card claims. A source already under its week folder,
    at any depth, is refused, as are `Weeks/` and a week folder, which are where filing
@@ -1235,7 +1242,13 @@ its meetings.
    its contents. The first of those readings that names a week the course declares decides,
    so a name reading a week the course lacks yields to its folder; none when no reading
    does, none for a destination already under its week folder, and none for a destination
-   another pending card already claims, which only the second approval could refuse. The
+   another pending card already claims, which only the second approval could refuse. A
+   destination a file of that name already occupies — a re-upload, as Biostatistics' Week 3
+   coding notebook was on 2026-09-08 — lands beside it at the next free name, ` (2)`, the
+   way a download lands in the inbox, and the reason says the earlier file stays; nothing is
+   overwritten (§4), and the click is not spent on a refusal. A row's own filing of a file
+   already in the tree onto a taken name stays refused: two copies in the tree are the
+   reader's to reconcile, while a re-upload is new material. The
    card shows both routes, each with its reason — Canvas's, then the by-name card's own —
    and offers `File under Week NN` beside Approve; the click is the ordinary
    approval with the week folder as its destination, the folder picker's path, so the move
@@ -1249,7 +1262,12 @@ its meetings.
 - **Schedule**: weekly grid (Mon–Fri) built from `meetings`; today highlighted; "next class"
   chip on the dashboard; exam countdown chips (days until each `final_exam_start`).
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
-  chat tools. **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
+  chat tools. A strip chip is the tab's checkbox at chip scale: its click marks the deadline
+  done through the same command, with the same audit row, and the chip stays in the strip as
+  done — a second click reopens it, the way back in place of a confirm — until the dashboard
+  is next opened; the strip and the tab read one query, which the write's push refetches, so
+  they agree the moment either changes. A deadline done anywhere else leaves the strip.
+  **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
   class folder) once and returns three things as one JSON object: deadlines → confirm cards →
   insert with `source='syllabus'`; the course's own divisions, recorded directly (§7.2); and
   the grade breakdown, recorded directly as category weights (Grades below). Each part
@@ -1337,8 +1355,9 @@ and apply it. Non-negotiable per project owner.
   with the semester and the Canvas sync's age as meta beside the settings icon: `Canvas
   synced yesterday`, `synced 6 days ago`, `never synced`, `syncing…`, in the destructive
   colour from seven days and opening Settings where the sync lives; the This week schedule
-  grid with the next class beside its heading; Due in the next 7 days as class-washed chips;
-  the four class cards)
+  grid with the next class beside its heading; Due in the next 7 days as class-washed chips,
+  each a button with a ring at its edge that fills with a check when clicked, the title struck
+  and `done` in place of the due day, clickable back to open (§11); the four class cards)
   · Class Workspace (a full-width band in the class wash holding the back link, the class
   name in the display role, the current division in the headline role and one meta row —
   meeting, room, credits, instructors — then a sticky row of section links in the page's own
@@ -1451,8 +1470,11 @@ and apply it. Non-negotiable per project owner.
   proposed into the wrong week is silent until a guide reads it), a Canvas card's week
   alternative — the file's reading before its folder's, none for a destination already under
   its week folder, and on a Canvas card alone (§10 — a file approved into the wrong week
-  folder is silent until a guide reads it) — and a claimed week named once by the scan that
-  wrote it (§8.5). UI and job plumbing are exercised by running the app.
+  folder is silent until a guide reads it), an alternative landing beside an earlier file of
+  its name while a row's filing onto that name is refused (§10 — a click spent on a refusal
+  is silent until it is pressed), a loose Canvas file's by-name card and its refusals (§7.2 —
+  a sort job spent on a name that already said its week is silent), and a claimed week named
+  once by the scan that wrote it (§8.5). UI and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -1737,6 +1759,20 @@ Mark the checkbox when the acceptance criteria pass.
   `/Applications/ClassHub.app` runs the facelift commit, and `git switch main && npm run
   install-app` restores the original.
 
+- [x] **M31 — Done from the dashboard.** (`milestones/M31-done-from-the-dashboard.md`)
+  A chip on the dashboard's `Due in the next 7 days` strip marks its deadline done through
+  the tab's own command, stays in the strip as done until the dashboard is next opened, and
+  reopens on a second click; the strip and the tab read one query. The week's Canvas files
+  go through M29's card live for all four courses, and the gap the real files show is
+  closed. The Sept 8–10 lectures go through the form, the digest and the guide where they
+  exist.
+  *Accepted when:* a fixture deadline's chip marks it done with the tab's audit row, reads
+  done and reopens on a second click with the tab's row agreeing both times; the week's
+  Canvas cards are measured for all four courses and the gap they showed offers `File under
+  Week NN`; and, where the recordings exist, each session is filed with a note and a session
+  document and the guides are built with their costs in §1.
+
+
 ## 15. Risks & trade-offs (accepted)
 
 - **Master re-synthesis cost/time**: full raw re-synthesis on every run is token-heavy and
@@ -1781,3 +1817,4 @@ Mark the checkbox when the acceptance criteria pass.
 - Spaced-repetition export (Anki) from quiz sections
 - Cross-class semester dashboard analytics (study time, grade trends)
 - Auto-sync of the AIBHS folder from cloud storage
+

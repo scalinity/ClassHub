@@ -989,6 +989,7 @@ fn sync_files(
     let mut staged = 0usize;
     let mut skipped = 0usize;
     let mut loose = 0usize;
+    let mut by_name = 0usize;
     let mut unproposed = 0usize;
     for file in &files {
         let Some(name) = canvas_file_name(file) else {
@@ -1063,14 +1064,20 @@ fn sync_files(
                 outcome.notes.push(format!("{landed}: {e:#}"));
                 unproposed += 1;
             }
-            Ok(false) => loose += 1,
-            Ok(true) => {}
+            Ok(Landing::Loose) => loose += 1,
+            Ok(Landing::ByName) => by_name += 1,
+            Ok(Landing::Placed) => {}
         }
     }
 
     outcome.files_staged = staged;
     if skipped > 0 {
         outcome.notes.push(format!("{skipped} file(s) already in the class"));
+    }
+    if by_name > 0 {
+        outcome.notes.push(format!(
+            "{by_name} file(s) Canvas keeps loose, proposed by name — each name carries its week"
+        ));
     }
     if loose > 0 {
         outcome.notes.push(format!(
@@ -1097,13 +1104,25 @@ fn sync_files(
     Ok(())
 }
 
-/// Logs a downloaded file and proposes where it goes, returning whether Canvas
-/// had a destination for it.
+/// Where a staged file's card came from, if one was written.
+enum Landing {
+    /// A Canvas card toward the folder Canvas keeps it in.
+    Placed,
+    /// Canvas keeps it loose and its name reads a week the course declares: a
+    /// by-name card toward the week folder (`sorter::propose_loose_by_name`).
+    ByName,
+    /// Canvas keeps it loose and its name reads no week: the sorter's.
+    Loose,
+}
+
+/// Logs a downloaded file and proposes where it goes, saying which card it
+/// got, if any.
 ///
 /// Where Canvas filed something is a proposal, never a placement — approval is
 /// what moves a file (SPEC §10). Canvas keeping it loose in the course root is
-/// no signal at all, so those stay in the inbox for the content-aware sorter to
-/// read rather than being given an invented home.
+/// no signal at all, so nothing invents it a home: a name that reads a week
+/// gets the by-name card its row would offer, and the rest stay in the inbox
+/// for the content-aware sorter to read.
 #[allow(clippy::too_many_arguments)]
 fn record_landed(
     app: &AppHandle,
@@ -1114,7 +1133,7 @@ fn record_landed(
     vocabulary: &[(String, usize)],
     source_rel: &str,
     landed: &str,
-) -> Result<bool> {
+) -> Result<Landing> {
     let folder = canvas_folder_path(file, folders, vocabulary);
     let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
     with_conn(app, |conn| {
@@ -1127,7 +1146,9 @@ fn record_landed(
             json!({ "classId": class_id, "source": source_rel, "dest": dest_rel }),
         )?;
         let (Some(folder), Some(dest_rel)) = (&folder, &dest_rel) else {
-            return Ok(false);
+            let by_name =
+                crate::sorter::propose_loose_by_name(conn, class_id, class_dir, source_rel, landed)?;
+            return Ok(if by_name { Landing::ByName } else { Landing::Loose });
         };
         // Says both names when they differ, so a retargeted destination is
         // legible rather than looking like a misread of Canvas.
@@ -1139,7 +1160,7 @@ fn record_landed(
             _ => format!("Canvas files it under \"{folder}\""),
         };
         propose_move(conn, class_id, class_dir, source_rel, dest_rel, &reasoning)?;
-        Ok(true)
+        Ok(Landing::Placed)
     })
 }
 
