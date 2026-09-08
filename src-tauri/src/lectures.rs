@@ -1096,26 +1096,30 @@ fn sidecar_path(note: &Path, kind: &str) -> PathBuf {
     note.with_extension(format!("{kind}.json"))
 }
 
-/// Parses a hints sidecar. An empty array is valid; anything that is not an
-/// array of `{kind, text, anchor}` with a known kind and a non-empty text
-/// fails the digest the way a missing markdown twin does, because the file
-/// is the point. An anchor is resolved to the transcript's own `## HH:MM`
-/// heading at or before it — the one a link can open — and dropped where the
-/// transcript has none there, so a stored anchor is always one that resolves.
-pub(crate) fn parse_hints(json: &str, anchors: &[i64]) -> Result<Vec<Hint>> {
+/// Parses a hints sidecar into its items and the count it skipped. A file
+/// that is not a JSON array fails the digest the way a missing markdown twin
+/// does, because the file is the point; an item that is not `{kind, text,
+/// anchor}` with a known kind and a non-empty text is skipped and counted,
+/// since one mislabelled item is no reason to discard a run whose documents
+/// are sound. An empty array is valid. An anchor is resolved to the
+/// transcript's own `## HH:MM` heading at or before it — the one a link can
+/// open — and dropped where the transcript has none there, so a stored anchor
+/// is always one that resolves.
+pub(crate) fn parse_hints(json: &str, anchors: &[i64]) -> Result<(Vec<Hint>, usize)> {
     let items: Vec<serde_json::Value> =
         serde_json::from_str(json).context("the hints sidecar is not a JSON array")?;
     let mut hints = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let raw: RawHint = serde_json::from_value(item.clone())
-            .with_context(|| format!("hint {} is not {{kind, text, anchor}}", index + 1))?;
+    let mut skipped = 0;
+    for item in &items {
+        let Ok(raw) = serde_json::from_value::<RawHint>(item.clone()) else {
+            skipped += 1;
+            continue;
+        };
         let kind = raw.kind.trim().to_lowercase();
-        if !HINT_KINDS.contains(&kind.as_str()) {
-            bail!("hint {} has an unknown kind '{}'", index + 1, raw.kind);
-        }
         let text = raw.text.trim();
-        if text.is_empty() {
-            bail!("hint {} has no text", index + 1);
+        if !HINT_KINDS.contains(&kind.as_str()) || text.is_empty() {
+            skipped += 1;
+            continue;
         }
         hints.push(Hint {
             kind,
@@ -1123,7 +1127,7 @@ pub(crate) fn parse_hints(json: &str, anchors: &[i64]) -> Result<Vec<Hint>> {
             anchor: raw.anchor.as_deref().and_then(|cited| resolve_anchor(cited, anchors)),
         });
     }
-    Ok(hints)
+    Ok((hints, skipped))
 }
 
 /// `HH:MM` as minutes.
@@ -1785,8 +1789,14 @@ fn record_session(
             let anchors = transcript_anchors(
                 &fs::read_to_string(class_dir.join(&payload.transcript_rel_path)).unwrap_or_default(),
             );
-            let hints = parse_hints(&json, &anchors)
+            let (hints, skipped) = parse_hints(&json, &anchors)
                 .with_context(|| format!("the hints sidecar at {hints_rel} is malformed"))?;
+            if skipped > 0 {
+                eprintln!(
+                    "digest: {skipped} item(s) of {hints_rel} were not {{kind, text}} with a \
+                     known kind and were skipped"
+                );
+            }
             let cards_rel = note_sidecar(corpus_rel, "cards");
             let cards = fs::read_to_string(class_dir.join(&cards_rel))
                 .with_context(|| format!("no cards sidecar written at {cards_rel}"))?;
@@ -2723,11 +2733,14 @@ mod tests {
     fn the_hints_sidecar_parses_resolves_anchors_and_refuses_malformed_files() {
         let anchors = transcript_anchors("# L\n\n## 00:08\n\ntext\n\n## 00:17\n\nmore\n\n## 01:20\n\nend\n");
         assert_eq!(anchors, vec![8, 17, 80]);
-        assert!(parse_hints("[]", &anchors).unwrap().is_empty());
-        let hints = parse_hints(
+        assert_eq!(parse_hints("[]", &anchors).unwrap(), (vec![], 0));
+        let (hints, skipped) = parse_hints(
             r#"[{"kind":"exam_hint","text":" Quiz covers today ","anchor":"01:23"},
                 {"kind":"Thread","text":"builds on week 2","anchor":null},
-                {"kind":"confusion","text":"MAR","anchor":"00:05"}]"#,
+                {"kind":"confusion","text":"MAR","anchor":"00:05"},
+                {"kind":"guess","text":"an unknown kind"},
+                {"kind":"emphasis","text":"  "},
+                {"text":"no kind"}]"#,
             &anchors,
         )
         .unwrap();
@@ -2737,13 +2750,9 @@ mod tests {
         );
         assert_eq!((hints[1].kind.as_str(), hints[1].anchor.as_deref()), ("thread", None));
         assert_eq!(hints[2].anchor, None, "before the first heading");
-        for bad in [
-            r#"{"kind":"x"}"#,
-            r#"[{"kind":"guess","text":"x"}]"#,
-            r#"[{"kind":"emphasis","text":"  "}]"#,
-            r#"[{"text":"no kind"}]"#,
-            "not json",
-        ] {
+        // One mislabelled item costs that item, never the run.
+        assert_eq!((hints.len(), skipped), (3, 3));
+        for bad in [r#"{"kind":"x"}"#, "not json", "42"] {
             assert!(parse_hints(bad, &anchors).is_err(), "{bad}");
         }
         assert_eq!(

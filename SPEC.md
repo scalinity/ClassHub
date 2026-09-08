@@ -1126,8 +1126,11 @@ stuck (`confusion`), one per thing assigned or dated (`action`), and three to fi
 items naming what the session built on from the class's earlier sessions, whose summaries
 the prompt carries under *Earlier sessions* — and `<note minus .md>.cards.json`,
 `[{front, back, source, topic}]`, one card per term introduced and per key point that stands
-alone as a question. An empty array is a valid answer; a missing or malformed file fails the
-run the way a missing markdown twin does, because the file is the point. `record_session`
+alone as a question. An empty array is a valid answer; a missing file, or one that is not a
+JSON array, fails the run the way a missing markdown twin does, because the file is the
+point, while an item that is not `{kind, text}` with a known kind is skipped and counted on
+stderr — one mislabelled item is no reason to discard documents that are sound.
+`record_session`
 parses the hints, resolves each anchor to the transcript's own `## HH:MM` heading at or
 before it — dropping one the transcript has no heading for — and replaces the
 contribution's `lecture_hints` rows (§5) in one transaction with the session row, stamping
