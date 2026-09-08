@@ -616,11 +616,14 @@ claude -p <prompt>
   answered in seconds — can run Sonnet at `medium` while every synthesis kind inherits the
   global pair; Settings shows one row per kind, `Default · Opus` until picked, and every
   setter audits its before and after.
-- **The latest `rate_limit_event` is kept**, not just its window: the CLI streams one near
-  the top of every run and again after a turn crosses a window boundary, each carrying
-  `status`, `rateLimitType` and `resetsAt` (every one logged so far says `allowed`). A
-  status other than `allowed` whose reset is still ahead is what the shift reads between
-  jobs, and what the run's own progress names as `rate limit reached`.
+- **The latest `rate_limit_event` is kept per window**, not just its type: the CLI streams
+  one near the top of every run and again after a turn crosses a window boundary, each
+  carrying `status`, `rateLimitType` and `resetsAt` (every one logged so far says
+  `allowed`), and the five-hour and seven-day windows are kept apart so an allowance on one
+  cannot clear a refusal on the other. A status other than `allowed` whose reset is still
+  ahead — or, where the event named no reset, seen within the last five hours — is what
+  the shift reads between jobs, and what the run's own progress names as `rate limit
+  reached`.
 - **The idle shift** (`shift.rs`) is the one thing that runs synthesis without a click. A
   thread checks once a minute and starts the night's run when the shift is on and not
   paused, the clock is inside the window (21:00–06:00 by default, filed under the date it
@@ -640,15 +643,22 @@ claude -p <prompt>
   guide is stale or absent and whose meeting has passed — the class's first meeting on or
   after a dated division's start, this calendar week's for an undated Part — oldest
   meeting first, up to `shift_guides_per_night`; never the master, never a folder guide.
-  Each job goes through the ordinary enqueue and its guards, and the run waits for it to
-  settle before the next, so the caps are real and the concurrency setting stays in
-  charge; between jobs it stops for the pause (`Pause tonight`, the night's key on a
-  setting the next night leaves behind) or the rate limit, leaving the rest for tomorrow.
-  While it runs the app holds `/usr/bin/caffeinate -i -w <pid>` as a child and ends it
-  with the run; the machine asleep at the window runs nothing, and at launch a window
-  that closed since the last run with no run row is caught up at once — with no run on
-  record, nothing was missed. A run whose process is gone is settled at launch as a
-  job's is, and quitting mid-run settles it on the way out. The meter beside it counts
+  A lecture or a division whose last job failed within three days waits, so one that
+  fails for a stable reason cannot hold a cap night after night. Each job goes through
+  the ordinary enqueue and its guards, and the run waits for it to settle before the
+  next — three hours at most, after which the job is left to the runner's own watchdog
+  and counted as failed — so the caps are real and the concurrency setting stays in
+  charge; between jobs it stops for the pause (`Pause tonight`, keyed on the night of the
+  run under way, else the coming night, on a setting the next night leaves behind), the
+  rate limit, or — for a run the idle check started — the window's close, since the
+  owner is back by then, leaving the rest for tomorrow; every step it never reached reads
+  `skipped` with the reason. While it runs the app holds `/usr/bin/caffeinate -i -w
+  <pid>` as a child and ends it with the run; the machine asleep at the window runs
+  nothing, and at launch a window that closed since the last run with no run row is
+  caught up at once — with no run on record nothing was missed, and inside an open
+  window the coming run covers the same backlog. One run a night is a unique index on the
+  night as well as the insert's check. A run whose process is gone is settled at launch
+  as a job's is, and quitting mid-run settles it on the way out. The meter beside it counts
   this week's digests, guides and exams and their minutes from the `jobs` table, never
   dollars. Two notifications, each a setting: `Shift finished` with the summary, and `A
   job failed` naming the kind and scope of any failed job.
@@ -991,10 +1001,13 @@ syllabus's `Homework 1`, Canvas's `Homework Assignment 1` and a `HW #1` are one 
 that share at least three words in five with every number in either found in both (the
 syllabus's `Problem Statement + AI Pitch` is Canvas's `Problem Statement and AI Sketch`;
 `Homework 1 Draft` is never `Homework 2`), and their due dates fall within two days of each
-other, the syllabus naming the week's Sunday and Canvas the Monday at 11:59 pm. A row the
-syllabus scan put there before Canvas could, carrying no id, an open row before a done one,
-takes the assignment's id on first contact by that rule, with an audit row of its own, and is
-found by it after; a card waiting for that assignment leaves the queue with it. A tracked
+other, the syllabus naming the week's Sunday and Canvas the Monday at 11:59 pm. That looser
+reading is the syllabus's alone, its rows being a model's reading of prose: a row the owner
+typed or asked chat for is the assignment only on the same key and the same calendar day, so
+a marker of their own two days before an assignment is never linked, renamed or folded. A
+row the syllabus scan put there before Canvas could, carrying no id, an open row before a
+done one, takes the assignment's id on first contact by that rule, with an audit row of its
+own, and is found by it after; a card waiting for that assignment leaves the queue with it. A tracked
 deadline follows Canvas's words and Canvas's due date — one audit row holding the title and
 the date it had — and is marked done the moment Canvas holds a submission for it, with an
 audit row naming the submission; an assignment Canvas has stopped dating still closes the
@@ -1678,9 +1691,11 @@ and apply it. Non-negotiable per project owner.
   open on the right, and its menu reads the next meeting across the classes (`Next class ·
   Thu 11:45 am · Biostatistics for AI`) and the shift's state (`Shift tonight at 9:00 pm`,
   `Shift running · step 2 of 5`, `Shift ran tonight · …`, `Shift paused tonight`, `Shift
-  off`, `Shift runs in the installed app`), then `Open ClassHub`, `Run the shift now`,
+  off`, `Shift runs in the installed app`), then `Open ClassHub`, `Run the shift now` —
+  enabled only while a run could start, and answering a refusal with a notification —
   `Pause tonight` or `Resume tonight`, and `Quit ClassHub`; `2/5` sits beside the glyph
-  while a run is under way.
+  while a run is under way. The menu is rebuilt on every change of the shift's state and
+  on the hour, off the main thread's reads, and only when its text changed.
 - **A drop-down is the app's own** (`Picker`): a control that reads its value, and on click
   a list on `--surface` with the chosen row checked, in place of the system popup no
   stylesheet reaches. Arrows move, Enter picks, Escape closes, a click anywhere else closes.
@@ -1771,9 +1786,10 @@ and apply it. Non-negotiable per project owner.
   request before and after the run, saw nothing from LibreOffice.
 - **Two plugins and the tray feature**: `tauri-plugin-notification` for the two
   notifications, `tauri-plugin-autostart` with its LaunchAgent launcher for the login item
-  (a plist under `~/Library/LaunchAgents/` naming the build's own executable, so a dev
-  build registers itself and the installed app itself), and `tauri`'s `tray-icon`. Each is
-  called from Rust alone; no capability entry widens the window's reach.
+  (a plist under `~/Library/LaunchAgents/` naming the registering executable, so only the
+  installed app under `/Applications/` may register and a dev build's switch is refused,
+  while any build may remove the plist), and `tauri`'s `tray-icon`. Each is called from
+  Rust alone; no capability entry widens the window's reach.
 - **One database for every build.** The data directory is Tauri's own `app_data_dir()`
   (`~/Library/Application Support/com.danny.classhub`), resolved by `lib.rs::data_dir` for
   every caller — the database, job logs, the LibreOffice profile, Zoom downloads and the

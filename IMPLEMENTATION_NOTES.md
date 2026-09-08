@@ -5848,3 +5848,87 @@ Nothing spent. Against a `.backup` copy of the live database taken at 13:43
   (`menu bar 2` of the process), never a screenshot.
 - Each Rust edit relaunched the dev build (three times this session); the
   Job Center and the shift block were checked before each.
+
+## Post-M34 — Review fixes (2026-09-08)
+
+A two-agent review of the M34 changeset since 8f1a363 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced two critical
+issues, fourteen warnings and fourteen suggestions once the two reports
+were merged, seven of them raised by both reviewers. Each fix went through
+`scripts/gate.sh`, eight commits in all, grouped by concern. What future
+sessions should know:
+
+- **The fold reaches only the syllabus's rows** (both reviewers, the one
+  critical on the deadlines). The looser reading — one key, or three words
+  in five, within two days — was matching any untracked row, so a marker
+  the owner typed two days before an assignment would have been renamed,
+  moved or removed with no undo. `names_assignment` applies the looser
+  reading to `syllabus` rows alone; a `manual` or chat row links only on
+  the same key and the same calendar day, the rule it had, and is never
+  folded. The `assignment` → `homework` synonym stays for the syllabus's
+  readings, which is what it was written for.
+- **Only the installed app registers the login item** (the other critical).
+  The plist names the registering executable, so a dev build switched on
+  `target/debug/classhub` under the app's plist and the installed app then
+  reported it registered. The switch is refused to any executable outside
+  `/Applications/` and to a debug build, the audit row names the executable
+  checked, removal stays open to every build, and Settings says so in a dev
+  build.
+- **The shift's controls at the night's edges** (the debugger's cluster).
+  `Pause tonight` keys on the run under way's night, so a press after 06:00
+  stops the run still working rather than pausing the coming night; a run
+  the idle check started ends between jobs once its window closed
+  (`stopped_by = window`); `wait_for_job` gives up after three hours and
+  counts the job as failed, so a child that never stops talking cannot hold
+  the run, `caffeinate` and the running flag until a relaunch; a launch
+  inside an open window starts no catch-up, since two runs in one evening
+  would spend two nights' caps; every step a run never reached reads
+  `skipped` with the reason (`finish_early`).
+- **Rate-limit events are kept per window** (both reviewers): one slot let
+  a five-hour allowance overwrite a seven-day refusal, and a refusal that
+  named no reset latched for the life of the process. `RATE_LIMIT` is a map
+  by `rateLimitType`, `rate_limit_reached` answers on any window, and an
+  unsaid reset lifts five hours after it was seen.
+- **A failing candidate rests three days** (both): a lecture or a division
+  whose last job failed within `FAILED_REST` is left off the list, so four
+  stable failures cannot hold the whole cap night after night.
+- **One run a night is a unique index** (both) — migration 0018,
+  `user_version` 18 — as well as the insert's check.
+- **The tray**: `Run the shift now` is enabled only while a run could start
+  and a refusal notifies; the summary's reads run off the main thread, the
+  tick refreshes on the hour rather than every minute, and the menu is
+  rebuilt only when its text changed.
+- **A refused Settings value goes back**: `apply` answers whether the change
+  took and `ValueField` restores the standing value, so a blur no longer
+  resends the rejected text. The picker scrolls its active row into view,
+  returns focus to its control on close, and its control only opens.
+- **The leftover line reads `3 more for tomorrow`**, both reviewers having
+  read `plural`'s verb agreement as a swap; a cap of zero says `2 sessions
+  waiting, the cap is 0`.
+- **Smaller**: the notification helper lives in `notifications.rs`, shared
+  by the runner and the shift (its error branch catches a builder error
+  only — the plugin hands the show to the system and drops the result);
+  `run_pipeline` is called directly, its alias gone; one `tonight` reader of
+  the night key; the launch-gate doc comment sits over its own test again;
+  the distill-list test uses a scratch guard that removes itself.
+- **Left as it is**: the SQL `SAME_TITLE_AND_DAY` rule still decides the
+  proposal queue's exact matches beside the Rust rule for deadlines — two
+  notions in one module, named by the auditor; unifying them is a rewrite
+  of the queue's five queries for no behaviour the app needs today.
+  `sorter::week_filing` stays a test-only function at the baseline.
+- **Tests**: 309 pass, eleven new — the rate limit per window and the
+  unsaid reset; a hand-typed row linking only on the same key and day and
+  never folded; the launch fold across classes; the meter; a step's
+  outcome line; the next meeting; a run finishing once and an orphan
+  settled at launch; a candidate that failed lately waiting. `npx tsc
+  --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- A `-p` perl with `\n` in the pattern deletes the matched line outright
+  (`s/^    notify\(\n//` removed the call's first line); the Edit tool for
+  multi-line changes, or `-0`.
+- `is_orphan` treats a row owned by the current pid as orphaned — a fresh
+  launch cannot own rows — so a test for a live owner uses pid 1.
+- The reviewers' reports arrive three findings at a time on request;
+  asking for every remaining batch in one message keeps them flowing.
