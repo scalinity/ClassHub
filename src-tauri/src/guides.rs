@@ -408,6 +408,59 @@ fn render_guide_prompt(ctx: &SynthesisContext, blocks: &GuideBlocks<'_>) -> Stri
         .replace("{manifest}", &ctx.manifest_block)
 }
 
+/// The blocks the master prompt takes beside its context (SPEC §8.2).
+struct MasterBlocks<'a> {
+    generated_at_label: &'a str,
+    roster: &'a str,
+    corpus: &'a str,
+    hints: &'a str,
+    objectives: &'a str,
+    cards_rel: &'a str,
+}
+
+fn render_master_prompt(ctx: &SynthesisContext, blocks: &MasterBlocks<'_>) -> String {
+    MASTER_TEMPLATE
+        .replace("{class}", &ctx.class_name)
+        .replace("{output}", MASTER_OUTPUT)
+        .replace("{cards}", blocks.cards_rel)
+        .replace("{modules}", blocks.roster)
+        .replace("{accent_light}", ctx.accent_light)
+        .replace("{accent_dark}", ctx.accent_dark)
+        .replace("{generated_at}", blocks.generated_at_label)
+        .replace("{files}", &ctx.files_block)
+        .replace("{corpus}", blocks.corpus)
+        .replace("{hints}", blocks.hints)
+        .replace("{objectives}", blocks.objectives)
+        .replace("{changes}", &ctx.changes_block)
+        .replace("{manifest}", &ctx.manifest_block)
+}
+
+/// The blocks the exam prompt takes beside its context (SPEC §8.3).
+struct PracticeBlocks<'a> {
+    scope_label: &'a str,
+    focus: &'a str,
+    output_rel: &'a str,
+    generated_at_label: &'a str,
+    corpus: &'a str,
+    hints: &'a str,
+    assessment: &'a str,
+}
+
+fn render_practice_prompt(ctx: &SynthesisContext, blocks: &PracticeBlocks<'_>) -> String {
+    PRACTICE_TEMPLATE
+        .replace("{class}", &ctx.class_name)
+        .replace("{scope_label}", blocks.scope_label)
+        .replace("{focus}", blocks.focus)
+        .replace("{output}", blocks.output_rel)
+        .replace("{accent_light}", ctx.accent_light)
+        .replace("{accent_dark}", ctx.accent_dark)
+        .replace("{generated_at}", blocks.generated_at_label)
+        .replace("{files}", &ctx.files_block)
+        .replace("{corpus}", blocks.corpus)
+        .replace("{hints}", blocks.hints)
+        .replace("{assessment}", blocks.assessment)
+}
+
 /// The `{hints}` block for a scope (SPEC §8.1): a division's rows, or every
 /// row of the class for the master and the semester exam.
 fn hints_for(conn: &Connection, class_id: i64, units: Option<&[i64]>) -> Result<String> {
@@ -583,20 +636,17 @@ pub fn synthesize_master(
             .map(|c| (c.corpus_rel_path.clone(), c.rel_path.clone()))
             .collect();
         let cards_rel = cards_rel_path(MASTER_OUTPUT);
-        let prompt = MASTER_TEMPLATE
-            .replace("{class}", &ctx.class_name)
-            .replace("{output}", MASTER_OUTPUT)
-            .replace("{cards}", &cards_rel)
-            .replace("{modules}", &roster_block(&units))
-            .replace("{accent_light}", ctx.accent_light)
-            .replace("{accent_dark}", ctx.accent_dark)
-            .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &ctx.files_block)
-            .replace("{corpus}", &crate::lectures::corpus_block(&notes))
-            .replace("{hints}", &hints_for(&conn, class_id, None)?)
-            .replace("{objectives}", &master_objectives_block(&conn, &units)?)
-            .replace("{changes}", &ctx.changes_block)
-            .replace("{manifest}", &ctx.manifest_block);
+        let prompt = render_master_prompt(
+            &ctx,
+            &MasterBlocks {
+                generated_at_label,
+                roster: &roster_block(&units),
+                corpus: &crate::lectures::corpus_block(&notes),
+                hints: &hints_for(&conn, class_id, None)?,
+                objectives: &master_objectives_block(&conn, &units)?,
+                cards_rel: &cards_rel,
+            },
+        );
         let payload = serde_json::to_string(&GuidePayload {
             scope: MASTER_SCOPE.to_string(),
             rel_path: MASTER_OUTPUT.to_string(),
@@ -721,23 +771,20 @@ pub fn generate_practice(
         );
         let output_rel = practice_output_rel(&class_dir, &base, &claimed_practice_paths(&conn, class_id)?);
 
-        let prompt = PRACTICE_TEMPLATE
-            .replace("{class}", &ctx.class_name)
-            .replace("{scope_label}", &scope_label)
-            .replace(
-                "{focus}",
-                focus.map(str::trim).filter(|f| !f.is_empty()).unwrap_or(
+        let prompt = render_practice_prompt(
+            &ctx,
+            &PracticeBlocks {
+                scope_label: &scope_label,
+                focus: focus.map(str::trim).filter(|f| !f.is_empty()).unwrap_or(
                     "none — cover the whole scope evenly, weighted toward what an exam would test",
                 ),
-            )
-            .replace("{output}", &output_rel)
-            .replace("{accent_light}", ctx.accent_light)
-            .replace("{accent_dark}", ctx.accent_dark)
-            .replace("{generated_at}", generated_at_label)
-            .replace("{files}", &ctx.files_block)
-            .replace("{corpus}", &corpus)
-            .replace("{hints}", &hints)
-            .replace("{assessment}", &assessment_block(&conn, class_id, date_label)?);
+                output_rel: &output_rel,
+                generated_at_label,
+                corpus: &corpus,
+                hints: &hints,
+                assessment: &assessment_block(&conn, class_id, date_label)?,
+            },
+        );
         let payload = serde_json::to_string(&PracticePayload {
             rel_path: output_rel.clone(),
             source_manifest: Some(serde_json::to_string(&ctx.manifest)?),
@@ -888,7 +935,7 @@ pub fn finalize_practice(
 
 /// One practice exam as the workspace lists it: the file, and its row's
 /// freshness where one exists — exams written before rows carry none.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PracticeInfo {
     pub name: String,
@@ -1483,5 +1530,159 @@ mod tests {
              - Next assessment on the calendar: Quiz 2 (quiz) on 2026-09-24\n\
              - Kinds of assessment the calendar holds: assignment, quiz"
         );
+    }
+
+    /// A `{word}` a renderer never fills reaches the model as a literal brace
+    /// in a paid run; the JSON shapes the templates show carry quotes or
+    /// commas inside their braces and are not placeholders.
+    fn leftover_placeholder(text: &str) -> Option<String> {
+        let mut from = 0;
+        while let Some(open) = text[from..].find('{') {
+            let start = from + open + 1;
+            let Some(close) = text[start..].find('}') else {
+                return None;
+            };
+            let inner = &text[start..start + close];
+            if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                return Some(inner.to_string());
+            }
+            from = start;
+        }
+        None
+    }
+
+    /// Every placeholder of the three guide templates is filled by its
+    /// renderer, so a `{block}` added to a template without a `.replace` fails
+    /// here rather than in a twenty-minute run.
+    #[test]
+    fn the_guide_templates_leave_no_placeholder_unfilled() {
+        let ctx = SynthesisContext {
+            class_name: "Biostatistics for AI".into(),
+            accent_light: "oklch(0.578 0.135 158)",
+            accent_dark: "oklch(0.732 0.13 158)",
+            manifest: Vec::new(),
+            manifest_block: "- Weeks/Week 03/deck.pdf".into(),
+            files_block: "- source: Weeks/Week 03/deck.pdf".into(),
+            changes_block: "This is the first guide for this scope.".into(),
+            class_dir: PathBuf::new(),
+        };
+        let guide = render_guide_prompt(
+            &ctx,
+            &GuideBlocks {
+                name: "Week 3 — Data Exploration",
+                output_rel: "Study Guides/Week 3 — Data Exploration.html",
+                generated_at_label: "SEPTEMBER 8, 2026",
+                corpus: "(none)",
+                hints: "(none)",
+                objectives: "- Missing data mechanisms",
+                cards_rel: ".classhub/cards/Week 3 — Data Exploration.json",
+            },
+        );
+        assert_eq!(leftover_placeholder(&guide), None, "module_guide.md");
+        let master = render_master_prompt(
+            &ctx,
+            &MasterBlocks {
+                generated_at_label: "SEPTEMBER 8, 2026",
+                roster: "- Week 1 — Introduction (from 2026-08-20)",
+                corpus: "(none)",
+                hints: "(none)",
+                objectives: "(none)",
+                cards_rel: ".classhub/cards/Semester Master.json",
+            },
+        );
+        assert_eq!(leftover_placeholder(&master), None, "master_guide.md");
+        let exam = render_practice_prompt(
+            &ctx,
+            &PracticeBlocks {
+                scope_label: "Week 3 — Data Exploration",
+                focus: "missing data",
+                output_rel: "Study Guides/Practice/Week 3 — 2026-09-08.html",
+                generated_at_label: "SEPTEMBER 8, 2026",
+                corpus: "(none)",
+                hints: "(none)",
+                assessment: "- Grade weights: Quizzes 20%",
+            },
+        );
+        assert_eq!(leftover_placeholder(&exam), None, "practice.md");
+        assert_eq!(leftover_placeholder("a {b_c} d"), Some("b_c".into()));
+        assert_eq!(leftover_placeholder(r#"{"front": 1} {a, b} {}"#), None);
+    }
+
+    /// The `{changes}` block (SPEC §8.1): a first write says no chip applies;
+    /// a rewrite over an unchanged manifest says so; one over a changed
+    /// manifest names the guide's date and every entry added, changed or
+    /// removed, and disowns the earlier guide as an input.
+    #[test]
+    fn the_changes_block_names_what_a_rewrite_draws_on() {
+        let conn = crate::db::memory_db();
+        let entry = |p: &str, h: &str| ManifestEntry { rel_path: p.into(), sha256: h.into() };
+        let current = [entry("a.pdf", "1"), entry("b.Rmd", "2x"), entry("d.pptx", "4")];
+        let dir = PathBuf::new();
+        let first = changes_block(&conn, 3, "unit:8", &dir, &current).unwrap();
+        assert!(first.contains("first guide"), "{first}");
+
+        let stored = serde_json::to_string(&[entry("a.pdf", "1"), entry("b.Rmd", "2"), entry("c.pdf", "3")]).unwrap();
+        conn.execute(
+            "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+             VALUES (3, 'unit:8', 'Study Guides/Week 3.html', 1788476046, ?1)",
+            [stored],
+        )
+        .unwrap();
+        let rewrite = changes_block(&conn, 3, "unit:8", &dir, &current).unwrap();
+        let date = short_date(1788476046);
+        assert!(rewrite.contains(&format!("rewrite of the guide written on {date}")), "{rewrite}");
+        assert!(rewrite.contains(&format!("`New since {date}` chip")), "{rewrite}");
+        for line in ["- d.pptx (added)", "- b.Rmd (changed)", "- c.pdf (removed — no longer a source)"] {
+            assert!(rewrite.contains(line), "{rewrite}");
+        }
+        assert!(rewrite.contains("do not read it"), "{rewrite}");
+
+        let same = [entry("a.pdf", "1"), entry("b.Rmd", "2"), entry("c.pdf", "3")];
+        let unchanged = changes_block(&conn, 3, "unit:8", &dir, &same).unwrap();
+        assert!(unchanged.contains("have not changed"), "{unchanged}");
+        assert!(!unchanged.contains("(added)"), "{unchanged}");
+    }
+
+    /// The exam listing (SPEC §8.3) merges the files on disk with their rows:
+    /// an exam with a row carries its scope and its freshness off its own
+    /// manifest; one written before rows existed carries none.
+    #[test]
+    fn the_exam_listing_merges_the_files_with_their_rows() {
+        let conn = crate::db::memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-practice-rows-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = root.join("Biostatistics for AI");
+        fs::create_dir_all(class_dir.join(PRACTICE_DIR)).unwrap();
+        for name in ["Week 3 — 2026-09-08.html", "Module 1 — 2026-08-22.html", "notes.txt"] {
+            fs::write(class_dir.join(PRACTICE_DIR).join(name), "<html></html>").unwrap();
+        }
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (3, 'Weeks/Week 03/deck.pdf', 'd1', 1, 1, 'pdf')",
+            [],
+        )
+        .unwrap();
+        let rel = format!("{PRACTICE_DIR}/Week 3 — 2026-09-08.html");
+        let fresh = serde_json::to_string(&[ManifestEntry { rel_path: "Weeks/Week 03/deck.pdf".into(), sha256: "d1".into() }]).unwrap();
+        upsert_guide(&conn, 3, &format!("{PRACTICE_SCOPE_PREFIX}{rel}"), &rel, &fresh).unwrap();
+
+        let listed = list_practice(&conn, 3).unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        let week3 = listed.iter().find(|e| e.rel_path == rel).expect("the rowed exam");
+        assert_eq!(week3.scope.as_deref(), Some(format!("{PRACTICE_SCOPE_PREFIX}{rel}").as_str()));
+        assert_eq!(week3.stale, Some(false));
+        let module1 = listed.iter().find(|e| e.name.starts_with("Module 1")).expect("the rowless exam");
+        assert_eq!((module1.scope.as_deref(), module1.stale, module1.diff.is_none()), (None, None, true));
+
+        // Its source moves on: the row reads stale over the named change,
+        // and the guides' stale count still leaves exams out.
+        conn.execute("UPDATE files SET sha256 = 'd2' WHERE rel_path = 'Weeks/Week 03/deck.pdf'", []).unwrap();
+        let week3 = list_practice(&conn, 3).unwrap().into_iter().find(|e| e.rel_path == rel).unwrap();
+        assert_eq!(week3.stale, Some(true));
+        assert_eq!(week3.diff.as_ref().map(|d| d.changed.clone()), Some(vec!["Weeks/Week 03/deck.pdf".to_string()]));
+        assert_eq!(stale_guide_count(&conn, 3).unwrap(), 0);
+        assert!(list_guides(&conn, 3).unwrap().iter().all(|g| g.practice));
+        let _ = fs::remove_dir_all(&root);
     }
 }

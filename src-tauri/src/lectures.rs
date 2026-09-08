@@ -2804,7 +2804,12 @@ mod tests {
         }
         fs::write(dir.join(&from), markdown).unwrap();
         let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
-        record_contribution(&conn, 1, &dir, &slot, &from, markdown).expect("record");
+        let corpus = record_contribution(&conn, 1, &dir, &slot, &from, markdown).expect("record");
+        // The note and both sidecars on disk, so the move has something to carry.
+        fs::create_dir_all(dir.join(&corpus).parent().unwrap()).unwrap();
+        fs::write(dir.join(&corpus), "# note").unwrap();
+        fs::write(dir.join(note_sidecar(&corpus, "hints")), "[]").unwrap();
+        fs::write(dir.join(note_sidecar(&corpus, "cards")), "[]").unwrap();
         let id = contribution_id(&conn, 1, &from).unwrap().unwrap();
         replace_hints(
             &conn,
@@ -2832,9 +2837,19 @@ mod tests {
         let block = hints_block(&carried, Some(&[carried[0].unit_id]));
         assert!(block.contains("[Exam hint · 00:00] covers today"), "{block}");
         assert!(hints_block(&carried, Some(&[-1])).starts_with("(none"));
+        // The sidecars followed the note into the new division's folder.
+        let moved = corpus_rel_path("Week 3 — Data Exploration", &to);
+        assert!(dir.join(&moved).is_file(), "the note did not move");
+        for kind in SIDECAR_KINDS {
+            assert!(dir.join(note_sidecar(&moved, kind)).is_file(), "{kind} sidecar left behind");
+            assert!(!dir.join(note_sidecar(&corpus, kind)).exists(), "{kind} sidecar still at the old path");
+        }
 
         lecture_left(&conn, 1, &dir, &to, None).expect("settled").expect("keyed").apply();
         assert!(list_hints(&conn, 1).unwrap().is_empty());
+        for kind in SIDECAR_KINDS {
+            assert!(!dir.join(note_sidecar(&moved, kind)).exists(), "{kind} sidecar outlived the note");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }
