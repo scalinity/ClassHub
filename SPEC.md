@@ -599,7 +599,11 @@ claude -p <prompt>
   refused when the note no longer holds what the save wrote, which the row records as a
   hash, or when the row predates it); and the grade writes (a created row removed, an edit
   restored, a deleted category reinserted with its scores — a created category holding
-  scores is refused). `canvas.*` deadline and grade rows are not reversible: a sync would
+  scores is refused). Two checks hold across them: a row named by id is refused when it is
+  no longer the row the audit wrote — a plain rowid is reissued once the highest is deleted,
+  so the payload's title or name and its class settle it — and an edit's `before` goes back
+  only while the row still holds the change's `after`, a later edit being its own row's to
+  undo. `canvas.*` deadline and grade rows are not reversible: a sync would
   redo them, and nothing reopens what Canvas closed (§7.2). The write guard reads an undo's
   move and note rows the way it reads the app's own (`undo.sort.move`, `undo.canvas.filed`
   carry the paths of their own move; `undo.*.write_note` the note's path). Every
@@ -646,12 +650,15 @@ agent and synthesis prompts can search text instead of re-reading binaries.
    finds its new path as new material) or parked under an app-managed folder; a transcript
    is settled first (§8.5), and a row a refused settle keeps keeps its extract. Two rows with
    one content are one reading: the scan marks the second with the canonical copy's path
-   (`duplicate_of`) — the copy under `Weeks/`, where a division counts it, then the shallower
-   path, then the older row — and a marked row is left out of every scope's sources (a
-   folder's, a division's, the master's), out of the pipeline while it is marked, and out of
-   `search_material`'s results, while the tree still lists it as `Duplicate of <path>` with
-   Show in Finder. A copy whose canonical leaves the tree is canonical from the next scan,
-   and its extract follows.
+   (`duplicate_of`) — among the rows the walk found, the copy under `Weeks/`, where a
+   division counts it, then the shallower path, then the older row — and a marked row is
+   read once per scope: left out of a folder's or a division's set where its canonical copy
+   is in the same set, kept where it is that scope's only copy (a paper posted for two
+   weeks reaches both weeks' guides), left out of the master's set, which holds every copy,
+   out of the pipeline while it is marked, and out of `search_material`'s results, its own
+   hits and its extract's, while the tree still lists it as `Duplicate of <path>` with Show
+   in Finder. A copy whose canonical leaves the tree is canonical from the next scan, and
+   its extract follows.
 2. **Convert**: for `.pptx` files, run
    `soffice --headless --convert-to pdf --outdir <extracts mirror dir> <file>`
    producing `<name>.pptx.pdf`; for `.docx` files the same subprocess with
@@ -673,9 +680,12 @@ agent and synthesis prompts can search text instead of re-reading binaries.
      tables, formulas, code; **describe every figure/diagram/chart in brackets**
      (e.g. `[Figure: scatterplot of X vs Y showing positive correlation]`); write to the
      mirrored extract path. A run the model refuses outright — its content filter on a
-     PDF, which a retry cannot pass — records the extracts it did write and marks the rest
-     attempted at their hash with no extract, so the same refusal is not enqueued on every
-     scan; the job's error names them, and a changed file is tried again.
+     PDF, which a retry cannot pass — records the extracts it did write and marks the file
+     it read and wrote nothing for attempted at its hash with no extract, so the same
+     refusal is not enqueued on every scan; a file the run never reached stays stale for
+     the next run, the job's error names the one refused, and a changed file is tried
+     again. The run's own log says which was reached; without it a batch of one is the
+     refusal itself.
 4. **Record**: update `extract_rel_path`, `extracted_at`, `extracted_sha256`.
 5. **Staleness**: a guide's `source_manifest` is what the job was told about, at the hashes
    captured when it was enqueued, widened at finalize by what the job's own stream log
@@ -923,9 +933,12 @@ assignment id, its UTC due date converted through the machine's real timezone (�
 `canvas.insert_deadline` as its audit row and done at once where Canvas holds a submission —
 and no card: a Canvas card waiting from before is resolved as approved by the sync that writes
 the deadline, and one declined earlier keeps the assignment off the list, which the report
-says, adding it by hand being the way back. An undated assignment is a line in the report. The
-proposal queue keeps the readings that are a model's, the syllabus scan's, and the badge and
-the chat overview count what still asks.
+says, adding it by hand being the way back. Deleting a tracked deadline, from the tab or from
+chat, declines its card in the same transaction, so the next sync leaves it off rather than
+writing it back. An undated assignment is a line in the report, and an assignment whose
+settle failed is left for the next sync rather than written beside the row it may still
+track. The proposal queue keeps the readings that are a model's, the syllabus scan's, and the
+badge and the chat overview count what still asks.
 
 **A deadline already on the list is tracked by its assignment.** A row the syllabus scan put
 there before Canvas could — the same title on the same calendar day, titles compared with `#`

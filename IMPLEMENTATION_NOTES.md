@@ -5542,3 +5542,80 @@ cc026f7:
 - `press 'Undo'` under the AX driver hits the Edit menu's `AXMenuItem`
   before the toast's `AXButton`; `AX_NTH` after a dump, or the Job Center's
   `Recent actions` list once the panel is open.
+
+## Post-M33 — Review fixes (2026-09-08)
+
+A two-agent review of the M33 changeset since cc026f7 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced two critical
+issues, twelve warnings and ten suggestions once the two reports were
+merged, two of them raised by both reviewers. Each fix was its own commit
+through `scripts/gate.sh`, twenty in all (the `refuse_held` doc rode the
+tests' commit). What future sessions should know:
+
+- **A refusal marks only the file the run reached** (both reviewers). One
+  refused PDF marked every unwritten item of its batch attempted, so files
+  the run never read were left without an extract until they changed.
+  `record_refusal` takes the run's read set off the job log, marks only an
+  item the run read and wrote nothing for, and with no log marks a batch
+  of one; `finalize_job` and it share one `reconcile`.
+- **An undo checks the row is still the one it names.** `deadlines.id` and
+  the grade ids are plain rowids SQLite reissues, and the delete-shaped
+  inverses trusted a bare id; each compares the payload's title or name
+  and its class or category against the current row and refuses by name.
+- **An edit's inverse restores only over the state it wrote**: the row is
+  compared against the change's `after`, and a status undo against the
+  status it set, refused as "edited since" — the note undo's rule.
+- **Deleting a tracked deadline declines its Canvas card**
+  (`decline_assignment`, in the delete's transaction, from the UI and
+  chat), or the direct write put the assignment back on the next sync.
+- **A failed settle does not fall through** to a direct write, and a settle
+  that resolves a waiting card says so (`Settled.card_resolved`) so the
+  sync pushes the queue's refetch.
+- **A move writes its proposal row inside its own transaction**:
+  `Recorded.proposal` is `ProposalRow::Existing`, `New` or `Waiting`, and
+  `record_move` writes it beside the audit row; `move_file` takes
+  `Recorded` by value; `record_approved` is gone.
+- **A folder filing that stops part-way announces what moved** with its
+  Undo before the error is raised (`filing_with` collects the rows).
+- **A series' Skip dismisses what it can** and names the rest in the batch
+  outcome; the card shows the refusals.
+- **The sync report counts this run's downloads**, the waiting cards filed
+  being a note line, so the inbox remainder cannot go negative.
+- **Only rows the walk found group as duplicates**, so a row a refused
+  settle kept for the next scan neither wins nor marks.
+- **A duplicate is read once per scope**: a folder's and a division's set
+  drop a marked row only where its canonical copy is in the same set, so a
+  paper posted for two weeks stays in the second week's guide; the master
+  reads each content once. `filed_under_weeks` carries the canonical paths
+  and `once_per_scope` settles each set.
+- **The fade timer serves the toast on screen alone**; an undo of an older
+  notice from the panel no longer pins the visible toast.
+- **The undo's paths take `clean_rel`**, the forward move's last gate.
+- **The reversed rows are read once per batch** (`undo_in_conn`,
+  `already_undone`), not once per row over the whole log.
+- **Search drops a duplicate's own hits** as well as its extract's.
+- **`note_title` strips one `.md`**, and the note undo names the note
+  through it; `series_of` groups in one pass over a map; the filing
+  action's busy flag is `moving`.
+- **Tests**: 287 pass, ten new — the refusal marking only the reached
+  file; the reissued-id refusals; the edited-since refusals; a deleted
+  tracked deadline staying off the list; a settled assignment resolving
+  its card; a skip naming what it could not dismiss; the walk's rows
+  alone grouping; a duplicate read once per scope; the sync's placement
+  with its refusals and its waiting card, Approve all, the waiting cards
+  and a module reading keeping its card; an undo batch newest first with a
+  refusal. `npx tsc --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- A perl `s|…|…|` with `\|` inside the pattern makes the escaped pipes
+  alternation once perl strips the delimiter's backslash, so the pattern
+  matched a single `r` at the top of `undo.rs` and spliced a test helper
+  into the module comment; the file was restored from the last commit and
+  the edits redone with the Edit tool. Any pipe, any braces: the Edit tool.
+- A pattern that guesses a character (`{folder:#}` for `{folder:?}`)
+  matches nothing and the gate fails on the unchanged assertion four times
+  in a row; read the line first.
+- The shell's working directory carried a `cd src-tauri` into the next
+  call, so `git add src-tauri/src/…` looked for `src-tauri/src-tauri/`;
+  absolute paths, or `cd` to the repo root in the same command.
