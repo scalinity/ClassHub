@@ -587,7 +587,7 @@ function ProposalChip({ proposal }: { proposal: MoveProposal }) {
   if (proposal.source === "by_name") {
     return (
       <span
-        title="Its name carries the week — proposed from its row in Materials"
+        title="Its name carries the week — proposed into the week folder it names"
         className={chipAccent}
       >
         by name
