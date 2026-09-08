@@ -617,7 +617,10 @@ pub struct DeadlineSeries {
 /// The series among a queue's cards. Pure over the rows, so the grouping is
 /// tested without a database.
 pub fn series_of(proposals: &[DeadlineProposal]) -> Vec<DeadlineSeries> {
-    let mut groups: Vec<((String, String, String, String), Vec<&DeadlineProposal>)> = Vec::new();
+    // Keyed in a map, so the grouping is one pass and the series come out in
+    // one order — by stem, then kind, source and weekday.
+    let mut groups: std::collections::BTreeMap<(String, String, String, String), Vec<&DeadlineProposal>> =
+        std::collections::BTreeMap::new();
     for proposal in proposals {
         let Some(weekday) = weekday_of(&proposal.due_at) else {
             continue;
@@ -628,10 +631,7 @@ pub fn series_of(proposals: &[DeadlineProposal]) -> Vec<DeadlineSeries> {
             proposal.source.clone(),
             weekday,
         );
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, members)) => members.push(proposal),
-            None => groups.push((key, vec![proposal])),
-        }
+        groups.entry(key).or_default().push(proposal);
     }
     groups
         .into_iter()
