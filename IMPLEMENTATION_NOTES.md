@@ -4829,3 +4829,77 @@ audit rows 175–179:
 - A `cd` into `src-tauri` persisted into the next call and `ax` failed on its
   relative path; `git -C` and `--manifest-path` from the repo root avoid it.
 - `echo ====` is a command lookup in zsh; quote the separator.
+
+## Post-M31 — Review fixes (2026-09-08)
+
+A two-agent review of the M31 changeset since ddd156c (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced no critical
+issue, seven warnings and thirteen suggestions once the two reports were
+merged, three of them raised by both reviewers. Each fix was its own commit
+through `scripts/gate.sh`, nine in all. What future sessions should know:
+
+- **The sorter runs for every uncarded file** (both reviewers). The
+  follow-up sort was enqueued on `loose > 0` alone, and once week-named
+  loose files get by-name cards a sync whose only uncarded file downloaded
+  but could not be proposed left it with neither a card nor a job.
+  `canvas_sync::landing_notes` takes the three counts and returns the report
+  lines and whether the sorter runs — for a loose or an unproposed file,
+  never for by-name cards alone — and is tested on its own, since
+  `sync_files` needs a running app.
+- **A database failure under a filing guard is not a refusal** (both).
+  `propose_loose_by_name` collapsed every error into "stays loose", so a
+  busy timeout under `refuse_held` read as a name carrying no week;
+  `refused_or_failed` propagates a rusqlite error and keeps a refusal a
+  refusal. The route now resolves its folder through `week_target`, the one
+  home of the week-folder rule, and returns the card's destination.
+- **The audit row names the landing.** `canvas.staged_file` is written after
+  the decision with `landing` (`canvas`, `by_name`, `loose`) and the card's
+  destination, so a carded loose file no longer logs `dest: null` like an
+  uncarded one — the reading Phase 0 used on audit 132.
+- **A failed chip write leaves the strip's set** (both). The id joined
+  `completedHere` before the write and stayed on failure, so a later
+  completion from the tab would have brought the chip back as done, against
+  SPEC §11; the failure path drops it. Each chip keeps its own error line
+  under the heading, named for its deadline, until that chip is clicked
+  again.
+- **The queue refetches on the `files` and `index` pushes.** The alternative
+  now reads the disk as well as the rows, and only the `units` push
+  refetched the queue; a file that reached the destination through a scan
+  or a job left the card offering the unbumped path.
+- **A sort job leaves a by-name-carded inbox file to its card.**
+  `recorded_placements` (formerly `canvas_placed`) keeps a pending Canvas
+  or by-name source out of every sort run, `upsert_proposal` refuses a sort
+  entry over a by-name card as over a Canvas one, and a declined by-name
+  card still leaves its file to a manual Sort the inbox, which reads it by
+  content — SPEC §7.2 states it. Tested before and after a decline.
+- **The beside landing says its cost.** The reason ends "and the week's
+  guide reads both until one is removed", SPEC §10 step 8 states the trade,
+  and the beside test pins the order of the landing and the pending-claim
+  filter: a card heading for the suffixed name withholds the alternative.
+- **`refuse_held` is tested on the new path**: a pending Canvas card holding
+  the source survives untouched, and a destination another card claims
+  stays loose.
+- **One check circle.** `checkCircle` and `checkCircleDone` in `styles.ts`
+  serve the tab's row and the strip's chip; each appends the idle border its
+  ground calls for.
+- Comments: `upsert_proposal` names both by-name writers and the guard that
+  keeps the sync's off a Canvas card; `free_slot` names its week-folder
+  caller; `beside_existing` leaves a tail that is no file name alone; the
+  by-name chip's tooltip reads true for the sync's own cards.
+- **Left as it is.** `beside_existing` stays in `sort_state`'s read rather
+  than in the pure `week_alternative`, since it is the one step that touches
+  the disk. `sort_state`'s per-card `exists()` costs one stat per Canvas
+  card on a queue read; `pending_count` does not call it, so the class-card
+  badge path is untouched. The strip imports `queryClient` as `App.tsx`
+  does.
+- **Tests**: 249 pass; `npx tsc --noEmit` clean. Nothing was pushed.
+
+### Gotchas
+
+- `expect_err` needs `Debug` on the `Ok` type; a `match` with a `panic!`
+  arm reads the error out of a `Result<WeekFiling>` without deriving it.
+- `sort_state` runs `reconcile_vanished` first, which dismisses a pending
+  card whose source is not on disk — a claimant written for a test has to
+  have its file written too.
+- Editing `src-tauri/` relaunches the dev build under a new pid each time;
+  find it again with `pgrep -f target/debug/classhub` and `ps -o comm=`.
