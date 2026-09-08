@@ -503,6 +503,9 @@ fn refuse_held_note(
         return Ok(());
     };
     if !class_dir.join(&holder).is_file() {
+        // Its flagged items go with it, stated as at every other delete of a
+        // row (`drop_hints`), rather than left to the schema's cascade.
+        drop_hints(conn, class_id, &holder)?;
         conn.execute("DELETE FROM lecture_contributions WHERE id = ?1", [id])?;
         eprintln!("lectures: cleared the contribution of {holder}, whose transcript is gone");
         return Ok(());
