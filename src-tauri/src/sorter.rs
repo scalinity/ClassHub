@@ -335,10 +335,31 @@ pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
 /// for a module files under that week where the course reads its modules as
 /// weeks (`units::modules_read_as_weeks`), and the card says so.
 pub fn file_under_week(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<WeekFiling> {
+    // The moves land one by one, so a folder's batch that stops part-way
+    // has still moved what came before: those are announced with their
+    // Undo before the error is raised, or the way back would die with it.
+    let mut moved = Vec::new();
     let filed = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
-        week_filing(conn, class_id, &class_dir, rel_path)
-    })?;
+        filing_with(conn, class_id, &class_dir, rel_path, &mut moved)
+    });
+    let filed = match filed {
+        Ok(filed) => filed,
+        Err(e) => {
+            if !moved.is_empty() {
+                emit_hub_change(app, "proposals");
+                emit_hub_change(app, "files");
+                let count = moved.len();
+                notify(
+                    app,
+                    format!("Filed {count} of the folder's files before it stopped — the rest stayed"),
+                    moved,
+                    Some(class_id),
+                );
+            }
+            return Err(e);
+        }
+    };
     emit_hub_change(app, "proposals");
     emit_hub_change(app, "files");
     let text = match filed.moved {
@@ -369,6 +390,18 @@ pub(crate) fn folder_of(rel_path: &str) -> &str {
 }
 
 fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &str) -> Result<WeekFiling> {
+    filing_with(conn, class_id, class_dir, rel_path, &mut Vec::new())
+}
+
+/// `week_filing` with the audit rows of the moves it made so far collected
+/// into `moved` as each lands, so a caller sees them when a later move fails.
+fn filing_with(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    rel_path: &str,
+    moved: &mut Vec<i64>,
+) -> Result<WeekFiling> {
     let source_rel = clean_rel(rel_path)?;
     // An inbox file is the sorter's, and Canvas may have placed it: the row
     // never offers one, and a caller that asked would be replacing a Canvas
@@ -388,7 +421,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
         bail!("'{source_rel}' is a symlink — the tree shows none, and filing follows none");
     }
     if source_abs.is_dir() {
-        return folder_filing(conn, class_id, class_dir, &source_rel, name);
+        return folder_filing(conn, class_id, class_dir, &source_rel, name, moved);
     }
     if !source_abs.is_file() {
         bail!("'{source_rel}' is not on disk — rescan the class");
@@ -432,6 +465,7 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
             extra: json!({ "reasoning": reasoning }),
         },
     )?;
+    moved.push(audit_id);
     Ok(WeekFiling { dest_rel, moved: 1, audit_ids: vec![audit_id], name: name.to_string() })
 }
 
@@ -449,6 +483,7 @@ fn folder_filing(
     class_dir: &Path,
     source_rel: &str,
     name: &str,
+    moved: &mut Vec<i64>,
 ) -> Result<WeekFiling> {
     if source_rel == WEEKS_DIR {
         bail!("'{WEEKS_DIR}' is where lectures are filed, not something to file");
@@ -489,7 +524,6 @@ fn folder_filing(
     // the notice's `Undo` reverses. The validation above is what keeps a
     // collision from being that failure.
     let batch = format!("by-name-{}-{class_id}", now());
-    let mut audit_ids = Vec::new();
     for (from, to) in &moves {
         let audit_id = move_file(
             conn,
@@ -506,9 +540,14 @@ fn folder_filing(
             },
         )
         .with_context(|| format!("'{from}' — the files before it moved"))?;
-        audit_ids.push(audit_id);
+        moved.push(audit_id);
     }
-    Ok(WeekFiling { dest_rel: dest_folder, moved: moves.len(), audit_ids, name: name.to_string() })
+    Ok(WeekFiling {
+        dest_rel: dest_folder,
+        moved: moves.len(),
+        audit_ids: moved.clone(),
+        name: name.to_string(),
+    })
 }
 
 /// What the queue already holds against a filing (SPEC §10). A pending card
