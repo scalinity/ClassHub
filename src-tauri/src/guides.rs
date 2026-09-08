@@ -1080,14 +1080,9 @@ pub fn finalize_job(
     if !written {
         bail!("no guide file written at {}", payload.rel_path);
     }
-    // The cards sidecar is required on the same terms as the guide (SPEC
-    // §8.1): the file is the contract, and a run that skipped it did not
-    // finish.
-    if let Some(cards_rel) = &payload.cards_rel_path {
-        let json = fs::read_to_string(class_dir.join(cards_rel))
-            .with_context(|| format!("no cards file written at {cards_rel}"))?;
-        parse_cards(&json).with_context(|| format!("the cards file at {cards_rel} is malformed"))?;
-    }
+    // The guide on disk is this run's whatever the cards did, so the row is
+    // written first: left unwritten, it would describe the earlier run under
+    // a file the new one replaced.
     let listed = serde_json::from_str::<Vec<ManifestEntry>>(&payload.source_manifest)
         .unwrap_or_default();
     let manifest = union_manifest(&conn, class_id, &class_dir, listed, read)?;
@@ -1097,7 +1092,16 @@ pub fn finalize_job(
         &payload.scope,
         &payload.rel_path,
         &serde_json::to_string(&manifest)?,
-    )
+    )?;
+    // The cards sidecar is required on the same terms as the guide (SPEC
+    // §8.1): the file is the contract, and a run that skipped it did not
+    // finish — the job is demoted, with the row already telling the truth.
+    if let Some(cards_rel) = &payload.cards_rel_path {
+        let json = fs::read_to_string(class_dir.join(cards_rel))
+            .with_context(|| format!("no cards file written at {cards_rel}"))?;
+        parse_cards(&json).with_context(|| format!("the cards file at {cards_rel} is malformed"))?;
+    }
+    Ok(())
 }
 
 fn upsert_guide(
