@@ -365,6 +365,10 @@ pub struct Contribution {
     /// Whether the corpus note has actually been written yet — the distillation
     /// is a separate, token-spending pass, so the map exists before the note.
     pub distilled: bool,
+    /// Whether a digest has read the session for what was flagged (SPEC
+    /// §8.4): false for one distilled before the ledger existed, whatever an
+    /// empty sidecar found since.
+    pub hints_read: bool,
     pub summary: String,
 }
 
@@ -596,6 +600,14 @@ pub fn refile_lecture(
     // The flagged items are the lecture's, like its note (SPEC §8.4): read
     // off the row about to go, written back under the row that replaces it.
     let carried = held_hints(conn, class_id, source_rel)?;
+    let read_at: Option<i64> = conn
+        .query_row(
+            "SELECT hints_read_at FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
     drop_hints(conn, class_id, source_rel)?;
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
@@ -605,6 +617,10 @@ pub fn refile_lecture(
     if let Some((unit_id, ..)) = &moved {
         if let Some(id) = contribution_id(conn, class_id, dest_rel)? {
             replace_hints(conn, class_id, *unit_id, id, &carried)?;
+            conn.execute(
+                "UPDATE lecture_contributions SET hints_read_at = ?1 WHERE id = ?2",
+                rusqlite::params![read_at, id],
+            )?;
         }
     }
     let (old_corpus, old_summary) = match old_row {
@@ -907,7 +923,8 @@ pub fn keyed_by(conn: &Connection, class_id: i64, rel_path: &str) -> Result<bool
 pub fn list_contributions(conn: &Connection, class_id: i64) -> Result<Vec<Contribution>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let mut stmt = conn.prepare(
-        "SELECT lc.rel_path, lc.unit_id, u.name, lc.corpus_rel_path, lc.summary
+        "SELECT lc.rel_path, lc.unit_id, u.name, lc.corpus_rel_path, lc.summary,
+                lc.hints_read_at IS NOT NULL
          FROM lecture_contributions lc JOIN units u ON u.id = lc.unit_id
          WHERE lc.class_id = ?1 AND lc.status = 'applied'
          ORDER BY lc.rel_path",
@@ -922,6 +939,7 @@ pub fn list_contributions(conn: &Connection, class_id: i64) -> Result<Vec<Contri
                 distilled: class_dir.join(&corpus_rel_path).is_file(),
                 corpus_rel_path,
                 summary: row.get(4)?,
+                hints_read: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1815,6 +1833,11 @@ fn record_session(
             .optional()?;
         if let Some((id, unit_id)) = row {
             replace_hints(&tx, class_id, unit_id, id, hints)?;
+            // The stamp is what tells an empty ledger from one never read.
+            tx.execute(
+                "UPDATE lecture_contributions SET hints_read_at = ?1 WHERE id = ?2",
+                rusqlite::params![now(), id],
+            )?;
         }
     }
 
@@ -2771,12 +2794,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list_hints(&conn, 1).unwrap().len(), 1);
+        conn.execute("UPDATE lecture_contributions SET hints_read_at = 7 WHERE id = ?1", [id])
+            .unwrap();
+        assert!(list_contributions(&conn, 1).unwrap()[0].hints_read);
 
         fs::rename(dir.join(&from), dir.join(&to)).unwrap();
         refile_lecture(&conn, 1, &dir, &from, &to).expect("refile").apply();
         let carried = list_hints(&conn, 1).unwrap();
         assert_eq!(carried.len(), 1, "{carried:?}");
         assert_eq!(carried[0].rel_path, to);
+        // The read stamp travels too, so a refiled session is not offered a
+        // redistill it does not need.
+        assert!(list_contributions(&conn, 1).unwrap()[0].hints_read, "the stamp was left behind");
         assert_eq!(carried[0].unit_name, "Week 3 — Data Exploration");
         assert_eq!(carried[0].date, "2026-08-27");
         let block = hints_block(&carried, Some(&[carried[0].unit_id]));

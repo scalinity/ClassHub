@@ -184,6 +184,7 @@ const MIGRATIONS: &[&str] = &[
     UNIT_LABELS_MIGRATION,
     CONTRIBUTION_NOTES_MIGRATION,
     include_str!("../migrations/0014_lecture_hints.sql"),
+    include_str!("../migrations/0015_hints_read_at.sql"),
 ];
 
 /// The migration that makes one note per transcript name in a division

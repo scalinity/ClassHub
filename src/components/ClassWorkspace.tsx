@@ -225,11 +225,14 @@ export function ClassWorkspace({
       setMaterialsError(`The practice exam didn't start: ${String(e)}`),
     );
   };
-  // What the professor flagged (SPEC §8.4): the section, its nav link, and
-  // which sessions have been read for it — a session document with no items
-  // was distilled before the ledger existed, and says so on its row.
+  // What the professor flagged (SPEC §8.4): the section and its nav link.
+  // Which sessions have been read for it is the contribution row's stamp,
+  // never the row count — a session the professor flagged nothing in has an
+  // empty ledger, and only one distilled before the ledger existed says so.
   const { data: hints } = useQuery(hintsQuery(info.id));
-  const hintedPaths = new Set((hints ?? []).map((h) => h.relPath));
+  const hintsReadFor = new Map(
+    (contributions ?? []).map((c) => [c.relPath, c.hintsRead]),
+  );
   const openTranscriptAt = (relPath: string, anchor: string) =>
     setViewFile({
       relPath,
@@ -536,11 +539,10 @@ export function ClassWorkspace({
             ))}
             {sessions.map((session) => {
               const transcript = session.scope.slice(SESSION_SCOPE_PREFIX.length);
-              // A session read before the ledger existed has a document and
-              // no flagged items; only a lecture mapped to a division carries
-              // any, so an unmapped one is not asked to.
-              const unread =
-                unitFor.has(transcript) && !hintedPaths.has(transcript);
+              // A session read before the ledger existed carries no read
+              // stamp; only a lecture mapped to a division is read for one,
+              // so an unmapped one is not asked to.
+              const unread = hintsReadFor.get(transcript) === false;
               return (
                 <ManagedRow
                   key={session.scope}

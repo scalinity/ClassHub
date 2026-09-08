@@ -184,6 +184,9 @@ export interface Contribution {
   corpusRelPath: string;
   /** Whether the distilled note behind the map has actually been written. */
   distilled: boolean;
+  /** Whether a digest has read the session for what was flagged (SPEC §8.4)
+   *  — false for one distilled before the ledger existed, whatever it found. */
+  hintsRead: boolean;
   summary: string;
 }
 

@@ -417,6 +417,7 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
                       confidence TEXT,        -- high|medium|low
                       status TEXT,            -- applied|pending|dismissed
                       created_at INTEGER,
+                      hints_read_at INTEGER NULL,  -- when a digest last read it for what was flagged (§8.4)
                       UNIQUE(class_id, rel_path, unit_id, start_ms),
                       UNIQUE(class_id, corpus_rel_path));  -- one note per name in a division (§8.5)
 
@@ -1125,10 +1126,13 @@ alone as a question. An empty array is a valid answer; a missing or malformed fi
 run the way a missing markdown twin does, because the file is the point. `record_session`
 parses the hints, resolves each anchor to the transcript's own `## HH:MM` heading at or
 before it — dropping one the transcript has no heading for — and replaces the
-contribution's `lecture_hints` rows (§5) in one transaction with the session row. The
-sidecars are the note's: a refile carries them with it and the rows onto the new
-contribution, a rename of the division moves the folder they sit in, and a lecture that
-leaves the tree takes them along.
+contribution's `lecture_hints` rows (§5) in one transaction with the session row, stamping
+the contribution's `hints_read_at`: an empty ledger is a session the professor flagged
+nothing in, and only a session distilled before the ledger existed carries no stamp, which
+is what its row's `Not yet read for what was flagged` reads. The sidecars are the note's: a
+refile carries them with it, the rows and the stamp onto the new contribution, a rename of
+the division moves the folder they sit in, and a lecture that leaves the tree takes them
+along.
 
 The workspace shows the ledger as a `Flagged` section between `Lectures` and `Practice
 exams`, present while the class has a row: the items newest session first, grouped under
