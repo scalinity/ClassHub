@@ -3,6 +3,8 @@ import { X } from "lucide-react";
 
 import { withDocumentCsp } from "@/lib/document";
 import {
+  deltaLabel,
+  deltaTitle,
   formatGeneratedAt,
   readGuide,
   type GuideInfo,
@@ -55,11 +57,8 @@ export function GuideViewer({
           {guide.label}
         </p>
         {guide.stale && (
-          <span
-            title="Sources changed since this guide was written"
-            className={chipAmber}
-          >
-            stale
+          <span title={deltaTitle(guide.diff)} className={chipAmber}>
+            stale · {deltaLabel(guide.diff)}
           </span>
         )}
         <span className={`ml-auto shrink-0 ${meta}`}>

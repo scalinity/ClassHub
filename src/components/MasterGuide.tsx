@@ -3,6 +3,8 @@ import { RefreshCw } from "lucide-react";
 
 import { PracticeAction } from "@/components/PracticeAction";
 import {
+  deltaLabel,
+  deltaTitle,
   formatGeneratedAt,
   generatePractice,
   resumeMasterGuide,
@@ -109,9 +111,9 @@ export function MasterGuideStrip({
       setError(`Not started: ${String(e)}`),
     );
   };
-  const practice = () => {
+  const practice = (focus: string | null) => {
     setError(null);
-    generatePractice(classId, "master").catch((e) =>
+    generatePractice(classId, "master", focus).catch((e) =>
       setError(`The practice exam didn't start: ${String(e)}`),
     );
   };
@@ -161,11 +163,11 @@ export function MasterGuideStrip({
                 guide.stale ? (
                   <button
                     type="button"
-                    title="Sources changed since this master was written"
+                    title={deltaTitle(guide.diff)}
                     onClick={start}
                     className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
                   >
-                    Rewrite · sources changed
+                    Rewrite · {deltaLabel(guide.diff)}
                   </button>
                 ) : (
                   <button

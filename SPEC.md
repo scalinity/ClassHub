@@ -72,7 +72,18 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   no file listed — nothing but the transcript sits under its week folder — ran 20.9 min over 46
   turns for $7.86, 117k output tokens, 201 KB through one `Write` and nineteen `Edit`s; told
   the note alone, it found the Week 3 readings, the Week 3 coding material and the Module 3
-  deck through `--add-dir` and read them, none of which its manifest names.
+  deck through `--add-dir` and read them, none of which its manifest names. Measured
+  2026-09-08 on the same course with the prompts as §8 now states them, Opus at `xhigh`: the
+  Sept 3 session distilled again with its two sidecars ran 18.5 min over 11 turns for $4.82
+  (101k output tokens — 39 flagged items and 91 cards beside the note); the Week 3 guide
+  rewritten with the flagged items, the objectives and the changes since Sept 3, and its
+  cards file, ran 23.3 min over 53 turns for $10.60 (129k, 205 KB, 32 `New since` chips);
+  the semester master, from 27 extracts and the one note with its roster off `units`, ran
+  32.0 min over 74 turns for $18.38 (178k, 300 KB, 155 cards, no transcript opened); and a
+  Week 3 practice exam focused on missing data, with the weights and Quiz 2's date in its
+  rubric, ran 10.3 min over 18 turns for $3.64 (55k, 19 questions each carrying its
+  `data-topic`). The manifests widened by what each log showed was read: the corpus note
+  in all three guides' and the exam's, the deck and the notebook in the session's.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
@@ -202,8 +213,8 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   header read from the `_csrf_token` cookie. REST GETs need no CSRF and the rate limit is 700
   requests / 10 minutes — far above a full sync — so REST is the default and GraphQL is an
   optimization only if request counts ever justify the extra moving part.
-- Toolchain verified installed: Rust 1.96.1, Node v26.3.1, Homebrew. LibreOffice is NOT yet
-  installed (Milestone 4 installs it via `brew install --cask libreoffice`).
+- Toolchain verified installed: Rust 1.96.1, Node v26.3.1, Homebrew, and LibreOffice
+  (`brew install --cask libreoffice`), which §7 step 2 runs headless.
 
 ## 2. Prerequisites
 
@@ -388,6 +399,7 @@ units(id INTEGER PK, class_id INTEGER FK, ordinal INTEGER,
       rel_path TEXT NULL,    -- its folder, when it has one; units need not be folders
       starts_on TEXT NULL, ends_on TEXT NULL,
       first_week INTEGER NULL, last_week INTEGER NULL,  -- the weeks it spans, where it groups them
+      objectives TEXT NULL,  -- JSON array of strings: what it set out to teach, as the syllabus states (§11)
       source TEXT,           -- canvas|syllabus — which reader declared it, canvas winning
       UNIQUE(class_id, name),
       UNIQUE(class_id, source, kind, number) WHERE number IS NOT NULL);
@@ -415,10 +427,23 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
 -- A division's guide is scoped `unit:<id>` — the row's id, never its name, so a
 -- rescan that renames the division (§7.2) leaves its guide keyed; the guide file
 -- and the corpus folder, both named for the division, follow the name instead.
-guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>'
+-- A practice exam's row is scoped by its file, `practice:<rel path>` (§8.3), so
+-- several exams of one scope each keep a row. The manifest is what the job was
+-- told about, widened by what its own log shows it read (§7 step 5).
+guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>' | 'practice:<path>'
        rel_path TEXT, generated_at INTEGER,
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
+
+-- The ledger of what the professor flagged (§8.4): one row per item of a
+-- digest's hints sidecar, keyed by the contribution it was distilled with, so
+-- a redistill replaces them, a refile carries them, and a lecture that leaves
+-- the tree takes them along. `anchor` is an `HH:MM` the transcript's own
+-- headings resolve, so the Flagged section can open the transcript there.
+lecture_hints(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
+              contribution_id INTEGER FK,   -- lecture_contributions(id), cascading
+              kind TEXT,                    -- emphasis|exam_hint|correction|confusion|action|thread
+              text TEXT, anchor TEXT NULL, created_at INTEGER);
 
 -- `canvas_assignment_id` is the join between a deadline, a score and the thing
 -- on Canvas (§7.2): set by approval of a Canvas card, or on first contact for a
@@ -543,6 +568,14 @@ claude -p <prompt>
   carries the size and mtime it had where it came from, so a job that rewrote it after the
   move is still caught. The corollary is that every app write into source material must be
   audited, because the audit log is what tells the guard "that was us".
+
+  The job's own stream log is the third thing the compare reads. `Bash` is denied to every
+  kind, so the log at `logs/job-<id>.jsonl` is a complete account of what the run touched:
+  a changed path the log shows no `Write` or `Edit` to was not the run's — the owner's own
+  edit beside a running extract, a file re-rendered by hand — and is dropped from the
+  touched list, while a logged write outside `Study Guides/` and `.classhub/` still fails
+  the job. The deny list stays the boundary; the log only says which of the changes inside
+  it were the run's. A log that cannot be read leaves the guard strict.
 - **Models**: one global model/effort pair, set in Settings and read at spawn time so a
   change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
@@ -605,9 +638,22 @@ agent and synthesis prompts can search text instead of re-reading binaries.
      (e.g. `[Figure: scatterplot of X vs Y showing positive correlation]`); write to the
      mirrored extract path.
 4. **Record**: update `extract_rel_path`, `extracted_at`, `extracted_sha256`.
-5. **Staleness**: a guide is stale when its `source_manifest` differs from the current set of
-   `{rel_path, sha256}` in its scope. Computed on demand and refetched after a scan that
-   changed the index; surfaced as badges.
+5. **Staleness**: a guide's `source_manifest` is what the job was told about, at the hashes
+   captured when it was enqueued, widened at finalize by what the job's own stream log
+   shows it read — every `Read` path and every file a `Grep` result names, a `Glob` being
+   a listing and not a read. An extract or converted twin it opened counts as the source
+   file it mirrors, with the index's hash; a corpus note, a Canvas page mirror or one of
+   the reader's notes counts as itself, hashed from disk; its own output and anything
+   under `_Inbox/` never count. A listed source the job never opened stays — it was told
+   about it, and a change to it is still a reason to rebuild — so the union only widens,
+   and a file the job found through `--add-dir` counts as honestly as one it was listed.
+   A guide is stale when the diff between its manifest and its sources is not empty: an
+   entry of the scope's current set the manifest never named (added), a named entry whose
+   hash moved (changed) — an entry outside the scope's own set resolved through the index
+   or the disk — or a named entry that is gone (removed). The three lists are what the
+   row says (`Rewrite · 2 files added, 1 changed`) and what a rewrite's prompt is told.
+   Computed on demand and refetched after a scan that changed the index; surfaced as
+   badges.
 
 Extraction is triggered automatically after a scan finds changes (extraction is cheap:
 sonnet + mostly local), but **guide synthesis is never automatic**.
@@ -954,11 +1000,27 @@ shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
   re-inspecting; Daniel's classwork files marked as "learner work" for the worked-examples
   section; and the unit's corpus notes, which are how lecture content reaches a guide when the
   lecture itself lives under `Weeks/` (§8.5) — the transcripts are listed only through them.
+  Three blocks beside them: `{hints}`, what the professor flagged across the division's
+  distilled sessions (§8.4) — each item with its kind, its session date and its anchor,
+  under one rule: these are the professor's own words about what matters, the ★ rail, the
+  self-test and the weighting lean toward them, and an entry that draws on one cites its
+  anchor; `{objectives}`, what the division set out to teach as the syllabus states it
+  (§11), which the guide opens with under *What this week set out to teach*, the ★ entries
+  aligned to them where they exist; and `{changes}`, which for a rewrite over an existing
+  row names the date of the guide on record and every source added, changed or removed
+  since (§7 step 5), and for a first write says so. The earlier guide is never an input.
 - Output: **one self-contained HTML file** at `Study Guides/<Unit name>.html`. No external
   requests (no CDN fonts/JS/CSS). Inline CSS, inline SVG, and inline vanilla JS powering
   interactive teaching devices (owner decision 2026-08-22: interactivity is load-bearing).
   Fully readable with scripts disabled and in print. Print-friendly stylesheet.
   Class accent color as the theme hue. Footer with generated-at timestamp and source manifest.
+  A rewrite marks each entry that draws on a changed source with a small mono
+  `New since <date>` chip in the yield rail, defined once in the design contract, in muted
+  ink beside the `★ EXAM` tag — new is information, not emphasis; a first write carries
+  none. And a required second output, the cards file at `.classhub/cards/<guide file
+  stem>.json`: `[{front, back, source, topic}]`, one card per self-test question and per
+  glossary term, `source` the citation the entry carries. Nothing reads the cards until
+  M37; the finalizer requires the file and checks it parses, so the shape holds.
 - Required sections (the "guide anatomy"):
   1. **Key concepts** — dense high-yield summaries, exam-oriented
   2. **Diagrams** — inline SVG concept maps / flowcharts / comparison tables
@@ -973,11 +1035,19 @@ shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
 ### 8.2 Semester master file (`master_guide` job)
 
 Manual trigger per class ("Generate Semester Master"). **Full re-synthesis from all raw
-material every time** (deliberate quality-first decision — not map-reduce over module guides).
-Prompt contract: read every extract (and originals as needed) across all modules, synthesize
-cross-module connections, output `Study Guides/Semester Master.html` with the same anatomy
-plus a "Cross-module threads" section. This is a long-running exclusive job (potentially
-30+ min); UI must show phased streaming progress and support resume (§6).
+material every time** (deliberate quality-first decision — not map-reduce over module guides):
+every extract, every corpus note, and the transcripts through their notes, opened only where
+a note is not enough. The prompt's roster comes from `units` — the course's own divisions in
+its own order, each with its start date and, for a Part, its week range — never from the
+folders the material sits in, and Key concepts groups by those divisions; a `{corpus}` block
+lists every applied contribution's note with its transcript path, the way a division guide's
+does, so the file listing leaves the transcripts out; `{hints}` carries every flagged item of
+the class (§8.4), and the cross-division threads start from its *Builds on* items;
+`{objectives}` carries each division's stated objectives under its name (§11); `{changes}`
+and the `New since` chip work as in §8.1. Output `Study Guides/Semester Master.html` with the
+same anatomy plus a "Cross-division threads" section, and the cards file beside it as §8.1
+requires. This is a long-running exclusive job (potentially 30+ min); UI must show phased
+streaming progress and support resume (§6).
 
 ### 8.3 Practice exams (`practice` job)
 
@@ -995,9 +1065,21 @@ semester) + optional focus topics from chat. A division's exam draws on the same
 its guide (§8.5) — its folder, if it has one, and its distilled lectures — so the action is
 offered on a division's row exactly when a guide could be built, and a division with neither
 is refused by name. One exam per scope at a time, the same duplicate-active guard as guides.
+The `Practice exam` action opens in place into a short form — an optional `Focus on…` field
+and the button that writes — carrying the same `focus` the chat tool passes. The prompt
+receives the scope's `{hints}` (§8.4) and an `{assessment}` block: the class's categories
+with their weights (§11), the next open deadline of kind `quiz` or `exam` with its date, and
+the kinds of assessment the calendar holds — and its rubric matches them, its cover naming
+the assessment it rehearses for, rather than a volume guessed from the material. Two lines
+settled for M37: every question block carries a `data-topic` naming the concept it tests,
+and the self-scoring panel, once totalled, posts `{exam, results: [{question, topic,
+correct}]}` to `window.parent`, which a sandboxed frame may; nothing receives it yet.
 Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style questions with hidden
 answers + scoring rubric; the row shows `Writing the exam…` while it is written, and the
-exam appears in the workspace's Practice exams listing when the job succeeds.
+exam appears in the workspace's Practice exams listing when the job succeeds, with a
+`guides` row scoped `practice:<rel path>` whose manifest is §7 step 5's, so it reads stale
+like everything else once its sources change; the listing merges the rows with the files
+that predate them, which carry no freshness.
 
 ### 8.4 Session documents (`lecture_digest` job)
 
@@ -1024,6 +1106,37 @@ action items and dates as a record, never as created deadlines · open threads.
 
 The prompt is bound to the transcript: no outside knowledge, no invented speaker or time, and
 a session that covered something partially is reported with the gap named as a gap.
+
+The Add lecture form's digest checkbox is on by default once a week is picked, so a filed
+lecture is distilled unless the reader says otherwise; the Lectures listing offers `Distill`
+on a transcript with no session document and `Distill again` on one whose transcript
+changed or that was read before the ledger existed.
+
+**The ledger.** Where the session belongs to one of the course's divisions, the digest
+writes two sidecars beside the corpus note, at paths derived the way the note's is and
+both required outputs: `<note minus .md>.hints.json`, a JSON array of `{kind, text,
+anchor}` — one item per point the session document puts under *Said out loud, not on the
+slides* (`emphasis`, `exam_hint` or `correction`), one per question where the room got
+stuck (`confusion`), one per thing assigned or dated (`action`), and three to five `thread`
+items naming what the session built on from the class's earlier sessions, whose summaries
+the prompt carries under *Earlier sessions* — and `<note minus .md>.cards.json`,
+`[{front, back, source, topic}]`, one card per term introduced and per key point that stands
+alone as a question. An empty array is a valid answer; a missing or malformed file fails the
+run the way a missing markdown twin does, because the file is the point. `record_session`
+parses the hints, resolves each anchor to the transcript's own `## HH:MM` heading at or
+before it — dropping one the transcript has no heading for — and replaces the
+contribution's `lecture_hints` rows (§5) in one transaction with the session row. The
+sidecars are the note's: a refile carries them with it and the rows onto the new
+contribution, a rename of the division moves the folder they sit in, and a lecture that
+leaves the tree takes them along.
+
+The workspace shows the ledger as a `Flagged` section between `Lectures` and `Practice
+exams`, present while the class has a row: the items newest session first, grouped under
+the session's title and date, each with its kind as a chip and its anchor as a link that
+opens the transcript in the material viewer scrolled to that heading — the document
+register gives `## HH:MM` headings ids for it — while an untimed item says so. Every guide,
+exam and the master receive the same rows as a `{hints}` block (§8.1–§8.3), and the chat
+overview counts them (§9).
 
 ### 8.5 Unit corpus — what a guide is actually built from
 
@@ -1160,9 +1273,11 @@ its meetings.
     the compact form, each body in the detailed form, capped — the lectures filed under those
     divisions and which are distilled or have a session document, material by folder — a
     folder is named as a folder, never as a module — every guide scope with its staleness,
-    and the proposals of both kinds waiting for approval. The compact form rides every turn
-    as cached system context and stays one line per topic; the detailed form, behind
-    `get_overview`, is where the lists and the proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
+    what the professor flagged (`Flagged: N items since <date>` in the compact form, the
+    items newest first and capped in the detailed one, §8.4), and the proposals of both
+    kinds waiting for approval. The compact form rides every turn as cached system context
+    and stays one line per topic; the detailed form, behind `get_overview`, is where the
+    lists and the proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
     6.4 KB of text (6.0 KB before M19), and the whole system block — template and overview —
     cached at about 5,000 tokens beside about 3,600 for the tool schemas.
 - **Read tools** (Milestone 7):
@@ -1280,7 +1395,12 @@ its meetings.
   deadlines — while a part that is present and not a list fails the scan, and a bare array
   is still read as the deadline list alone. The divisions and the weights are recorded
   before the deadlines, and a scan demoted for an unusable deadline list still reports
-  what those two parts wrote.
+  what those two parts wrote. Each division's entry may carry `objectives` — what it set out
+  to teach as the syllabus states it, the bullet list under a week's topic or a module's
+  stated outcomes, topics and skills only — recorded on the unit row as a JSON array of
+  strings with the divisions, before the deadlines, as the weights are. A rescan that states
+  them replaces them; one that states none leaves the column. A division guide opens with
+  them, and the master carries each division's under its name (§8.1, §8.2).
   The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `Canvas syllabus page`
   when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
   so a scan of it finds no dates and says so.
@@ -1366,13 +1486,16 @@ and apply it. Non-negotiable per project owner.
   · Class Workspace (a full-width band in the class wash holding the back link, the class
   name in the display role, the current division in the headline role and one meta row —
   meeting, room, credits, instructors — then a sticky row of section links in the page's own
-  order, Inbox · Notices · Structure · Deadlines · Grades · Materials · Lectures · Practice
-  exams · Notes, each present only while its section is; the sections follow in that order,
-  each a headline with its count in meta and its text actions on the right, rows separated
-  by hairlines because they are a list, and decisions — proposals, forms — as cards on
-  `--surface`; the `Notices` section lists the professor's Canvas announcements newest
-  first, each a title and posting time with the text clamped beneath it until opened, absent
-  while there are none)
+  order, Inbox · Notices · Structure · Deadlines · Grades · Materials · Lectures · Flagged ·
+  Practice exams · Notes, each present only while its section is; the sections follow in
+  that order, each a headline with its count in meta and its text actions on the right, rows
+  separated by hairlines because they are a list, and decisions — proposals, forms — as
+  cards on `--surface`; the `Notices` section lists the professor's Canvas announcements
+  newest first, each a title and posting time with the text clamped beneath it until opened,
+  absent while there are none; the `Flagged` section lists what the professor flagged
+  (§8.4) newest session first under the session's title and date, each item its kind as a
+  chip, its text, and its `HH:MM` as a mono link that opens the transcript at that heading,
+  absent until a session has been distilled for it)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in browser / Show in Finder)
   · Material viewer (the same reading room for a class file: markdown, R and Python
   scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
@@ -1397,6 +1520,15 @@ and apply it. Non-negotiable per project owner.
   under Week NN` beside Approve, which stays the filled default (§10 step 8).
   The Add lecture form says when a course declares no weeks and keeps Add lecture off,
   naming the syllabus scan (§7.1).
+- A stale guide's row says what changed rather than that something did: `Rewrite · 2 files
+  added, 1 changed` from the manifest diff (§7 step 5), the noun once on the first count,
+  the file names behind it in the tooltip; the guide viewer's chip and a stale exam's read
+  the same diff. The `Practice exam` action opens in place into a `Focus on…` field and
+  `Write the exam` (§8.3), closing on Escape or a blur that leaves the form. A session row
+  distilled before the ledger existed reads `Not yet read for what was flagged` with
+  `Distill again` beside it (§8.4). The material viewer opens a transcript at an `HH:MM`
+  heading when asked to — the frame that renders the document register runs no script, so
+  it may be same-origin and scrolled.
 - Motion answers an action and nothing else: 150–200ms on a notice opening, a panel or the
   sidebar appearing, a room fading in; every transition stops under reduced motion.
 
@@ -1478,8 +1610,20 @@ and apply it. Non-negotiable per project owner.
   folder is silent until a guide reads it), an alternative landing beside an earlier file of
   its name while a row's filing onto that name is refused (§10 — a click spent on a refusal
   is silent until it is pressed), a loose Canvas file's by-name card and its refusals (§7.2 —
-  a sort job spent on a name that already said its week is silent), and a claimed week named
-  once by the scan that wrote it (§8.5). UI and job plumbing are exercised by running the app.
+  a sort job spent on a name that already said its week is silent), a claimed week named
+  once by the scan that wrote it (§8.5), the job log reader (§6 — a `Read`, a `Grep` hit
+  over a file and over a folder, an ignored `Glob`, a path outside the class folder and a
+  `Grep` with no hits, since a manifest that misses a read is silent), the manifest union
+  and diff (§7 step 5 — a read outside the listed sources joining as its source row, a
+  listed source never read staying, and the counts and names behind `Rewrite · …`), the
+  guard's third exclusion (§6 — a changed path with no logged write dropped, one with a
+  logged write outside the contract still failing), the hints sidecar's parse and anchor
+  resolution and the ledger's carry across a refile and a removal (§8.4 — a malformed
+  sidecar passing, or an anchor no heading answers, is silent until the section opens it),
+  the cards file's shape, the scan's objectives and their keep-or-replace on the row (§11),
+  the master's roster off `units` (§8.2 — a roster of folder names is silent until the
+  master's map is read), and the exam's assessment block (§8.3). UI and job plumbing are
+  exercised by running the app.
 
 ## 14. Milestones
 
@@ -1777,7 +1921,7 @@ Mark the checkbox when the acceptance criteria pass.
   Week NN`; and, where the recordings exist, each session is filed with a note and a session
   document and the guides are built with their costs in §1.
 
-- [ ] **M32 — Honest guides.** (`milestones/M32-honest-guides.md`)
+- [x] **M32 — Honest guides.** (`milestones/M32-honest-guides.md`)
   A job's own stream log says what it read and wrote: the manifest records every file a guide
   drew on, and the write guard stops failing a job for an edit that was the owner's. The digest
   writes a hints sidecar — emphasis, exam hints, corrections, where the room got stuck, what the

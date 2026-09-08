@@ -32,10 +32,35 @@ stretch the anchor points at rather than the whole file.
 
 {corpus}
 
+#### What the professor flagged
+
+The distilled sessions of this division carry a ledger of what was flagged in the room:
+emphasis, exam hints, corrections to the slides, where the room got stuck, what was
+assigned, and what each session built on. These are the professor's own words about
+what matters. The ★ rail, the self-test and the weighting of the whole guide lean toward
+them, and an entry that draws on one cites its anchor (`00:45`) in its citation chip.
+
+{hints}
+
+### What this division set out to teach
+
+The syllabus states these objectives for it, where it states any. The guide opens with
+them (anatomy below), and the ★ entries align to them where they exist.
+
+{objectives}
+
+### What changed since the last guide
+
+{changes}
+
 ## Required content — the guide anatomy
 
 Write ONE complete, self-contained HTML document to {output} containing exactly these
 six sections, in this order:
+
+Before section 01, directly under the header: **What this week set out to teach** — the
+objectives above as a short list in the course's own words, each followed in muted text
+by where the guide covers it; omitted entirely when the syllabus states none.
 
 1. **Key concepts** — dense, high-yield summaries of everything the module taught,
    organized by topic in teaching order. Exam-oriented: definitions stated precisely,
@@ -122,6 +147,13 @@ rule with left padding. Standard entries: hairline gray. High-yield entries: the
 turns accent and the entry gains a small mono `★ EXAM` tag in accent. This is the one
 place the design is loud; keep everything else quiet.
 
+The `New since` chip: a rewrite is told, under *What changed since the last guide*, the
+date of the guide on record and the sources that changed since. Every entry that draws
+on one of those sources carries a small mono `NEW SINCE <date>` tag in the yield rail,
+beside the `★ EXAM` tag where both apply, in muted ink rather than accent — new is
+information, not emphasis. A first write, or a rewrite told nothing changed, carries
+none.
+
 Visual mandate: sections 01–05 each carry at least one visual device placed inline
 with the content it explains — a hand-drawn SVG mini-diagram, a styled comparison
 table, or an annotated formula anatomy. Section 02 houses the big pieces (the
@@ -202,6 +234,14 @@ be discarded, and waste the work. Build the file incrementally:
 4. Verify with Grep that no `<!-- CONTINUE -->` remains and the file ends with
    `</html>`.
 
+## The cards file (required second output)
+
+After the guide, write `{cards}`: a JSON array of `{"front": …, "back": …, "source": …,
+"topic": …}` — one card per self-test question (front the question, back the complete
+answer) and one per glossary term (front the term, back its definition), `source` the
+citation the entry carries and `topic` the concept in two or three words. Nothing reads
+the cards yet; the app checks the file exists and parses, and fails the run otherwise.
+
 ## Hard constraints
 
 - ONE file, entirely self-contained: a single `<style>` block in `<head>`, inline
@@ -218,7 +258,8 @@ be discarded, and waste the work. Build the file incrementally:
 ## What NOT to do
 
 - Never modify, move, or delete source files.
-- Write only {output}; create no other files.
+- Write only {output} and {cards}; create no other files, and never read an earlier
+  guide under `Study Guides/` — a rewrite is built from the sources alone.
 - No external requests of any kind, in the document or during synthesis.
 
 When finished, reply with exactly one line:

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 
 import { PracticeAction } from "@/components/PracticeAction";
-import type { GuideInfo } from "@/lib/guides";
+import { deltaLabel, deltaTitle, type GuideInfo } from "@/lib/guides";
 import { WEEKS_DIR, type WeekSlot } from "@/lib/lectures";
 import {
   countFiles,
@@ -139,7 +139,8 @@ export interface ModuleGuideControls {
   /** Scopes with a queued/running practice job (SPEC §8.3). */
   activePracticeScopes: ReadonlySet<string>;
   onSynthesize: (scope: string) => void;
-  onPractice: (scope: string) => void;
+  /** Write an exam for the scope, focused on the typed topics when any. */
+  onPractice: (scope: string, focus: string | null) => void;
   onView: (scope: string) => void;
 }
 
@@ -359,7 +360,7 @@ function GuideCluster({
   const practice = (
     <PracticeAction
       active={controls.activePracticeScopes.has(scope)}
-      onSelect={() => controls.onPractice(scope)}
+      onSelect={(focus) => controls.onPractice(scope, focus)}
     />
   );
 
@@ -395,11 +396,11 @@ function GuideCluster({
       {guide.stale ? (
         <button
           type="button"
-          title="Sources changed since this guide was written"
+          title={deltaTitle(guide.diff)}
           onClick={() => controls.onSynthesize(scope)}
           className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
         >
-          Rewrite · sources changed
+          Rewrite · {deltaLabel(guide.diff)}
         </button>
       ) : (
         <button

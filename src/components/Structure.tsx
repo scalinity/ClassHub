@@ -11,7 +11,7 @@ import {
 } from "@/lib/canvas";
 import { PracticeAction } from "@/components/PracticeAction";
 import { SectionHeading } from "@/components/SectionHeading";
-import { unitScope, type GuideInfo } from "@/lib/guides";
+import { deltaLabel, deltaTitle, unitScope, type GuideInfo } from "@/lib/guides";
 import { listLectureContributions } from "@/lib/lectures";
 import {
   buttonChip,
@@ -35,7 +35,8 @@ export interface UnitGuideControls {
   /** Scopes with a queued/running practice job (SPEC §8.3). */
   activePracticeScopes: ReadonlySet<string>;
   onSynthesize: (unitId: number) => Promise<unknown>;
-  onPractice: (scope: string) => Promise<unknown>;
+  /** Write an exam for the scope, focused on the typed topics when any. */
+  onPractice: (scope: string, focus: string | null) => Promise<unknown>;
   onView: (scope: string) => void;
 }
 
@@ -94,10 +95,10 @@ export function StructureSection({
       .onSynthesize(unitId)
       .catch((e) => setJobError(`No guide: ${String(e)}`));
   };
-  const practice = (scope: string) => {
+  const practice = (scope: string, focus: string | null) => {
     setJobError(null);
     controls
-      .onPractice(scope)
+      .onPractice(scope, focus)
       .catch((e) => setJobError(`No practice exam: ${String(e)}`));
   };
   const outcome = progress?.done
@@ -222,7 +223,7 @@ function UnitRow({
   distilled: number;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
-  onPractice: (scope: string) => void;
+  onPractice: (scope: string, focus: string | null) => void;
 }) {
   const scope = unitScope(unit.id);
   const guide = controls.guides.get(scope);
@@ -311,7 +312,7 @@ function UnitGuideCluster({
   canBuild: boolean;
   controls: UnitGuideControls;
   onSynthesize: (unitId: number) => void;
-  onPractice: (scope: string) => void;
+  onPractice: (scope: string, focus: string | null) => void;
 }) {
   // The button needs sources to start from; the pulse only needs the job.
   // An exam already being written for a division that has since lost its
@@ -321,7 +322,7 @@ function UnitGuideCluster({
     practiceActive || canBuild ? (
       <PracticeAction
         active={practiceActive}
-        onSelect={() => onPractice(scope)}
+        onSelect={(focus) => onPractice(scope, focus)}
       />
     ) : null;
 
@@ -365,11 +366,11 @@ function UnitGuideCluster({
       ) : guide.stale ? (
         <button
           type="button"
-          title="Sources changed since this guide was written"
+          title={deltaTitle(guide.diff)}
           onClick={() => onSynthesize(unitId)}
           className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
         >
-          Rewrite · sources changed
+          Rewrite · {deltaLabel(guide.diff)}
         </button>
       ) : !canBuild ? null : (
         <button

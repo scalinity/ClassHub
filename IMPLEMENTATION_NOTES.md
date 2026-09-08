@@ -4903,3 +4903,305 @@ through `scripts/gate.sh`, nine in all. What future sessions should know:
   have its file written too.
 - Editing `src-tauri/` relaunches the dev build under a new pid each time;
   find it again with `pgrep -f target/debug/classhub` and `ps -o comm=`.
+
+## M32 — Honest guides (2026-09-08)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database taken at 01:09
+(`user_version` 13, 38 file rows, 4 contributions, 9 guides, jobs at 313, audit
+at 185, no active job, no dev build running, the installed app 75e30aa), the
+job logs under the data directory read with `jq`, and the code at 760cc1c:
+
+- **What the guide jobs read.** Job 311 (Week 3, row 9) made 9 `Read`s, 13
+  `Grep`s and 3 `Glob`s. Its reads, class-relative: the Week 3 corpus note;
+  the extracts of the Week 3 notebook (`.Rmd`, `.html`), the sketchpad `.R`,
+  the Module 3 deck and both Week 3 readings (the Feder paper through a
+  heading `Grep` and an offset `Read`); then its own output, for the
+  verification greps. Row 9's manifest names one entry, the transcript — so
+  the note and six files it read were in no manifest, and every one of the
+  six has since moved under the Week 3 folder through M28's cards, where
+  the current scope set now holds them: the row is stale over seven added
+  entries today, and a rewrite's manifest would name them by scope alone.
+  Job 306 (Part I, row 7) read both corpus notes, the Week 1 deck in five
+  paged `Read`s, and the Week 2 notebook through three `Grep`s after a whole
+  `Read` was refused as too large; row 7's manifest names the two
+  transcripts only — the brief expected the deck and the notebook there, but
+  M25 widened the manifest after that row was written and the row was never
+  rebuilt, so it is stale today over three added entries (both decks and the
+  notebook). Every `Glob` returned a listing and nothing else. The masters'
+  logs (jobs 45 and 70) and jobs 24, 102, 286–293's are gone — the fourteen-day
+  prune — so "each master read every extract" cannot be measured; job 306 and
+  311 are the two guide logs that remain.
+- **Job 307**, the extract demoted on Sept 3: its log holds six `Read`s and one
+  `Write`, to `.classhub/extracts/Slides/Biostatistics_Module2_Slides_class.
+  pptx.md`. The path the guard flagged (audit 160: `Coding Material/Week 3
+  Coding Material/Introduction_to_Data_condensed_combined.html`) is in no
+  `Write` or `Edit` of the log — the change was the owner's, and the log
+  would have cleared it.
+- **The ledger's backfill.** Items under *Said out loud, not on the slides* and
+  *Questions asked* in the four markdown twins: Applied Aug 25 36 and 5;
+  Applied Sept 1 16 and 4; Biostatistics Sept 3 19 and 8; Fundamentals
+  Sept 1 16 and 28 — 71 and 45 in all, counted as list items and so
+  including a few sub-bullets. Every line is prose: a bold lead, the point,
+  an anchor in backticks at the end (`… "garbage in, garbage out" \`00:20\``);
+  nothing is in a structured shape.
+- **The master's roster.** `guides.rs` derives `{modules}` from the depth-0
+  folders holding indexed files: for Biostatistics today `Coding Material,
+  Module 1, Module 2, Reading Material, Slides, Syllabus, Weeks` (seven,
+  Coding Material having arrived in M28), beside 17 `units` rows: Weeks 1–15
+  dated Aug 20 through Nov 26, then `Reading Days — No Class` (Dec 3) and
+  `Final Exam week — Project presentations` (Dec 7), the last two unnumbered.
+- **The practice exams.** Three files on disk — Biostatistics `Module 1 —
+  2026-08-22.html` and `Module 1 — 2026-09-02.html`, Fundamentals `Week 2 —
+  Responsible AI, Ethics, and Governance — 2026-09-02.html` — and no `guides`
+  row for any; `list_practice` returns each as name, path and mtime, nothing
+  else, so none can read stale.
+- **Objectives in the syllabus extracts.** Every course's syllabus carries a
+  course-level *Course Goals and Objectives* and *Student Learning Outcomes*
+  section. Per division: Biostatistics' schedule table gives each week a
+  bullet list under its topic (Week 3: types of data in medical research,
+  exploratory analysis and visualization, missing data mechanisms, imputation
+  methods and assumptions, preprocessing, data quality, hands-on exercises),
+  and Fundamentals' week table does the same; Fundamentals also states an
+  *Objective* per homework. Applied's Parts carry topic lists; Design
+  Studio's weeks carry none beyond the topic. The per-week bullets are the
+  objectives the scan reads.
+- **The delta each stale row would show today** (current scope set against
+  the stored manifest): row 1 `Module 1` — 3 added (the Posit docx, the
+  reading under `Week 1/`, the corrected deck), 2 changed (the intro `.Rmd`,
+  the edited `.R`), 1 removed (the reading's old path); row 2 master — 17
+  added, 2 changed, 1 removed; row 7 Part I — 3 added; row 9 Week 3 — 7
+  added; rows 3–6 and 8 (three sessions, Fundamentals' Week 2 guide) —
+  nothing, fresh.
+- **The digest's write scope.** `jobs.rs::allowed_tools` grants
+  `Edit(**/Sessions/**),Edit(**/corpus/**),Edit(.classhub/corpus/**)`: the
+  pattern is the folder, so `<note>.hints.json` and `<note>.cards.json`
+  beside the note are already inside it. The fingerprint walk skips
+  `.classhub/` at depth 0, so a new `.classhub/cards/` folder needs nothing
+  from the guard either.
+- **The installed app** is 75e30aa (binary Sep 8 00:44, commit 00:43). Five
+  Canvas cards wait (Design Studio 25, 27, 50; Biostatistics 52, 53), nineteen
+  deadline proposals, no Sept 8–10 recording filed; the last digest is job
+  310, the Sept 3 session.
+
+### What was built
+
+- **The job's own log** (`jobs.rs`). `log_paths` reads a finished run's
+  stream log back off disk: every `Read` path, the file each `Grep` result
+  names — the one it was given, or the path each line of a folder result
+  opens with, found by trying the text before each `:` or `-` against the
+  disk, with a found path matched by text alone after — every `Write`,
+  `Edit`, `MultiEdit` and `NotebookEdit`, all made class-relative and
+  dropped outside the folder; a `Glob` is a listing and a `Grep` with no hits
+  or an error names nothing. `run_job` reads it once after the run and hands
+  the read set to the four finalizers and the written set to the guard, which
+  drops every changed path the log shows no write to (`excluding_unlogged`)
+  after the audit-row exclusion and stays strict when the log cannot be read.
+- **The honest manifest** (`extract.rs`). `union_manifest` widens what a job
+  was told about by what it read: an extract or converted twin maps to the
+  source row it mirrors (`source_of`, by `extract_rel_path` or the mirror
+  suffix), a corpus note, a Canvas page mirror or a note is hashed from disk
+  (`hashed_from_disk`), and its own output, an inbox file or anything else
+  never joins; a listed entry keeps its enqueue hash. Staleness is now
+  `manifest_diff`: the scope's current entries the manifest never named
+  (added), named entries whose hash moved — an entry outside the scope's own
+  set resolved through `current_hash`, the index then the disk (changed) —
+  and named entries that are gone (removed). `ManifestDiff` rides `GuideInfo`
+  as `diff`; `list_guides` resolves through the class folder once. A
+  `practice:` scope has no set of its own, so its diff is its entries alone.
+- **The ledger** (migration 0014, `lectures.rs`). `lecture_hints` keyed by
+  the contribution, `units.objectives`. `parse_hints` takes the sidecar —
+  an array of `{kind, text, anchor}` with a known kind and non-empty text,
+  empty allowed, anything else a failure — and `resolve_anchor` snaps each
+  cited time to the transcript's own `## HH:MM` heading at or before it,
+  none where the transcript has none there. `record_session` requires the
+  hints and the cards sidecars beside the note when the lecture maps to a
+  division, and writes the session row, the summary and the rows in one
+  transaction; the sidecars follow the note through `NoteMove`, the rows
+  through `refile_lecture` (`held_hints` → `replace_hints` under the new row
+  and unit) and out with `lecture_left` and `record_contribution`
+  (`drop_hints`, stated rather than left to the schema's cascade, since a
+  test connection has foreign keys off). `list_hints` orders newest session
+  first by the transcript's date; `hints_block` renders the `{hints}` block
+  per session, filtered to a scope's divisions; `previous_sessions_block`
+  renders the digest's `{previous}`.
+- **The section** (`Flagged.tsx`, `ClassWorkspace.tsx`, `FileViewer.tsx`,
+  `document.ts`, `hints.ts`). Between Lectures and Practice exams, present
+  while the class has a row, with its nav link; items grouped under the
+  session's title, date and division, each its kind as a chip — accent for
+  an exam hint or a correction, muted otherwise — its text, and its anchor
+  as a mono link. The link opens the material viewer on the transcript with
+  `anchor`; the register gives `## HH:MM` headings ids (`t-00-45`), the
+  frame that renders it is `allow-same-origin` — it runs no script, by the
+  sandbox and its own CSP alike — and `onLoad` scrolls to the heading. A
+  session row with a document, a division and no rows reads `Not yet read
+  for what was flagged` with `Distill again`. The `hints` query follows the
+  contributions' invalidations.
+- **What the prompts know** (`guides.rs`, the templates). `synthesis_context`
+  takes the transcripts to list apart and renders `{changes}` from the row
+  on record (`changes_block`: the guide's date, the diff by name, and the
+  rule that the earlier guide is no input); `render_guide_prompt` fills
+  `{hints}`, `{objectives}` (`unit_objectives` off the row), `{changes}` and
+  `{cards}`. The master's `{modules}` is `roster_block` over `units` — name,
+  date, week range — its `{corpus}` every distilled note with the
+  transcripts listed apart, `{objectives}` per division; the prompt's
+  sections group by division and the threads section is `Cross-division
+  threads`, told to start from the *Builds on* items. The practice prompt
+  gains `{hints}` and `{assessment}` (`assessment_block`: the weights, the
+  next open quiz or exam from the exam's date, the calendar's kinds), the
+  `data-topic` rule and the `postMessage` contract; `generate_practice` takes
+  `focus` from the command too, records a `practice:<path>` row at finalize
+  with the union manifest, and `list_practice` merges the rows with the files
+  (`PracticeInfo`). Every guide and the master require the cards file
+  (`parse_cards`, `cards_rel_path` under `.classhub/cards/`), and the digest
+  requires both sidecars. `syllabus.md` asks for `objectives` per division;
+  `RawUnit`, `stated_objectives` and `NewUnit::objectives` carry them onto
+  the row, `None` keeping the column.
+- **The rows** (`Structure.tsx`, `FileTree.tsx`, `MasterGuide.tsx`,
+  `GuideViewer.tsx`, `guides.ts`). `deltaLabel` composes `Rewrite · 2 files
+  added, 1 changed, 1 removed` from the diff, `deltaTitle` lists the names
+  in the tooltip; the viewer's chip and a stale exam's read the same. The
+  `Practice exam` action (`PracticeAction.tsx`) opens in place into a
+  `Focus on…` field and `Write the exam`, closing on Escape or a blur that
+  leaves the form. The chat overview gains `Flagged: N items since <date>`
+  and the detailed list; `guides_line` keeps exam rows out. `list_hints` is
+  a command; `generate_practice` takes `focus`.
+- SPEC §1, §5, §6, §7 step 5, §8.1–§8.4, §9, §11, §12, §13 and §14 state the
+  design.
+
+### Verified
+
+- `cargo test`: 261 pass, twelve new — the log reader over fixture lines (a
+  `Read`, a `Grep` over one file and over a folder with `:` and `-` lines, an
+  ignored `Glob`, a `Grep` with no hits and one that errored, a `Read` of
+  `/etc/hosts` and of `../elsewhere`, a `Write`, an `Edit`); the guard's
+  third exclusion; the manifest diff's counts and names, equal sets fresh,
+  an unreadable manifest stale over everything; the union (an extract as
+  its source row, a note hashed from disk, a listed source kept at its
+  listed hash, the output and the inbox left out) and `current_hash`; the
+  sidecar parser with anchor resolution and five malformed shapes, the
+  sidecar path and the session date; a refile carrying the ledger rows onto
+  the new row and unit and a removal dropping them; the digest finalizer
+  refusing a missing, a malformed and a cards-less sidecar set and
+  recording the rows with resolved anchors; the scan's objectives and the
+  row's keep-or-replace; the master's roster off `units`; the cards file's
+  shape, the cards path and the exam scope's label; the assessment block;
+  and the overview's Flagged line in both forms. `npx tsc --noEmit` clean.
+- **Live on the dev build**, beside the installed app 75e30aa, migration
+  0014 applied at launch (`user_version` 14). Before any run the Biostatistics
+  workspace read the rows' deltas — the master strip `Rewrite · 17 files
+  added, 2 changed, 1 removed`, the Week 3 row `Rewrite · 7 files added`,
+  the Module 1 folder row `Rewrite · 3 files added, 2 changed, 1 removed` —
+  no `Flagged` link, and the Sept 3 session row `Not yet read for what was
+  flagged` beside `Distill again`. Unit 8's `objectives` were seeded by hand
+  from the syllabus's own Week 3 bullet list (Phase 0), since a syllabus scan
+  is outside the budget; the scan's reading is pinned by the test.
+- **Run 1, the redistill** (job 314, `Distill again`): the prompt carried the
+  sidecar contract with both exact paths and `{previous}` as "(none — this
+  is the first session of the course to be distilled)". While it ran a
+  fixture `m32-guard-fixture.csv` was added beside the coding material and
+  removed after: stderr said `job 314: 1 change(s) in the class folder have
+  no Write or Edit in the run's log and were not the run's`, no
+  `job.out_of_contract` row was written (audit still at 185), and the job
+  succeeded. On disk: the note, `…Lecture.hints.json` (39 items: 17
+  emphasis, 4 exam hints, 4 corrections, 3 confusions, 11 actions, no
+  threads — there is no earlier session) and `…Lecture.cards.json` (91
+  cards); 39 `lecture_hints` rows, every anchor resolved to a heading; the
+  session pair rewritten under the same name; row 8's manifest widened to
+  the deck and the notebook `.Rmd` the digest opened. The `Flagged` section
+  appeared with its nav link, `39 items from 1 session`, grouped under
+  `Outliers, Missingness, and EDA in R · Sep 3 · Week 3 — …`; pressing
+  `00:20` opened the material viewer on the transcript scrolled to its
+  `00:20` heading (captured). $4.82.
+- **Run 2, the Week 3 rewrite** (job 316; job 315 was the same run,
+  orphaned — Gotchas): the prompt, read off the `claude` process's
+  arguments, carried the flagged items under `Session 2026-09-03 —
+  Outliers, Missingness, and EDA in R`, the seven objectives, `This is a
+  rewrite of the guide written on Sep 3` with the seven added files, the
+  `NEW SINCE` chip rule and the cards path. The document (205 KB) opens with
+  *What this week set out to teach* — the seven objectives, each naming
+  where the guide covers it (captured) — carries 32 `NEW SINCE` chips, 21 ★
+  tags, a flagged phrase (`garbage in`), anchors, no marker, no `<link>`, no
+  `fetch(`; `.classhub/cards/Week 3 — ….json` holds 90 cards. Its log shows
+  13 `Read`s and 19 `Grep`s: the note, the Module 3 deck's extract and
+  converted twin, the sketchpad's extract, and its own output; row 9's
+  manifest names the note beside the eight scope files — every source the
+  log shows it read. The row read `Read guide` with no chip after. $10.60.
+- **Run 3, the master** (job 317, exclusive, 32.0 min): the prompt's roster
+  was the seventeen `units` rows in order with their dates, its `{corpus}`
+  the one note with its transcript, `{hints}` the 39 items, `{objectives}`
+  Week 3's under its name, `{changes}` the rewrite since Aug 22 with the 17
+  added, 2 changed and 1 removed. Its log shows 32 `Read`s: all 27 extracts
+  (decks through their converted twins where figures mattered), the note,
+  and its own output — no transcript opened. The document (300 KB) names
+  the weeks by the course's names (`WEEK 3 — …` 57 times, no `MODULE`
+  eyebrow beyond the source folders' names), opens each group with the
+  division's objectives where stated, carries `Cross-division threads` with
+  eight threads and 56 `NEW SINCE` chips, no marker; the cards file holds
+  155. Row 2's manifest: the 27 files and the note. $18.38.
+- **Run 4, the exam** (job 318): `Practice exam` on the Week 3 row opened
+  the field; `missing data` typed by keystroke; `Write the exam`. The
+  prompt: `Focus topics: missing data`, `Grade weights: Assignments 50% ·
+  Project 30% · Quizzes 20% · Survey (no weight stated)`, `Next assessment on
+  the calendar: Quiz 2 (quiz) on 2026-09-24`, the calendar's kinds, the
+  flagged items. The document: 19 questions each with a `data-topic` (six of
+  them missing-data topics), the cover `Rehearses Quiz 2 (quiz) · due 24
+  September 2026 · quizzes carry 20% of the course grade`, a `postMessage`
+  in the script, no marker; row 10 scoped `practice:Study Guides/Practice/
+  Week 3 — … — 2026-09-08.html` with the note and the eight scope files; the
+  listing read `3 exams` with no stale chip on it. $3.64.
+- The viewer's chip on the Module 1 folder guide read `stale · 3 files
+  added, 2 changed, 1 removed`. Design Studio has no lecture and no
+  `Flagged` section; the other three courses' sessions read `Not yet read
+  for what was flagged` until distilled again.
+- Session cost: $37.44 on the subscription across the four runs, plus the
+  orphaned job 315's twelve turns; nothing on credits, no chat turn.
+
+### Left as it is
+
+- The other three courses' sessions (Fundamentals Sept 1, Applied Aug 25 and
+  Sept 1) keep their documents and no ledger rows; `Distill again` on each
+  row is the way, or the shift (M34). No syllabus was rescanned, so only
+  unit 8 carries objectives; a rescan of any course fills the rest.
+- Rows 1 (Module 1) and 7 (Part I) stay stale over their diffs, now named
+  on the row. Job 315's log stays under `logs/` until the prune.
+- A resumed master's log holds only the resumed session's reads; the
+  listed sources cover the manifest, and a note read only in the failed
+  session's stretch is not widened in. A guide file renamed with its
+  division leaves its cards file under the old stem; nothing reads the
+  cards until M37.
+- The digest's `{previous}` lists sessions by their filed date and excludes
+  the transcript's own date and later; Biostatistics had none, so no
+  `thread` item was written this milestone — the shape is pinned by the
+  parser test, and the next course's redistill will carry threads.
+- `list_guides` hashes a widened manifest's extras from disk on every
+  listing — a note or two per class today; worth a cache if the dashboard
+  ever drags.
+- The `Focus on…` form closes on a blur that leaves it, so a click on
+  `Write the exam` keeps focus inside the form and submits; a mouse-up
+  elsewhere cancels, as intended.
+
+### Gotchas
+
+- `tauri dev` relaunches on any write under `src-tauri/`, a test appended
+  while a guide ran included: job 315 was failed as orphaned by the new
+  process's startup recovery, and its `claude` child kept running unowned
+  until killed by pid. Nothing under `src-tauri/` while a job runs — a
+  `perl -pi` that matches nothing still rewrites the file's mtime.
+- A perl `s|…|…|` with `\|` inside the pattern spliced a replacement into
+  the wrong line of `lectures.rs`; the file was restored from git and the
+  edits redone with the Edit tool. `~` as the delimiter, or the Edit tool
+  for anything with a pipe, a `$` or braces.
+- `AX_NTH` is zero-based: `AX_NTH=1 press 'Read guide'` opened the second
+  guide. `winid` prints a tooltip's window while one is up; the ClassHub
+  row of its listing is the one to capture.
+- `ax setvalue` on a text input is the date input's story again — React
+  never sees it; a System Events keystroke with the build frontmost fills
+  the `Focus on…` field.
+- Grep's `count` mode prints `path:N`, its `content` mode over one file
+  prints bare `N:text` lines, and `-A/-B` context prints `path-N-text`;
+  the reader takes the given path when it is a file and parses lines only
+  over a folder.
+- `grep -ci CONTINUE` counts JavaScript's `continue`; the marker is
+  `<!-- CONTINUE -->`.

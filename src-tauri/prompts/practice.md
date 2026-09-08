@@ -31,6 +31,25 @@ whole file. Solution citations may name the note or the transcript with its anch
 
 {corpus}
 
+#### What the professor flagged
+
+The distilled sessions of this scope carry a ledger of what was flagged in the room:
+emphasis, exam hints, corrections, where the room got stuck, what was assigned, and
+what each session built on. These are the professor's own words about what matters,
+and an exam that ignores them tests the wrong things: weight questions toward them,
+and let a solution's citation name the anchor (`00:45`).
+
+{hints}
+
+## The assessment this exam stands in for
+
+{assessment}
+
+The rubric below matches this — the sections, their points and the suggested time
+follow the kind of assessment the course actually gives and its share of the grade,
+and the cover names the assessment it rehearses for — rather than a volume guessed
+from the material.
+
 ## Required content — the exam anatomy
 
 Write ONE complete, self-contained HTML document to {output}:
@@ -41,7 +60,8 @@ Write ONE complete, self-contained HTML document to {output}:
 2. **Instructions box** — a short bordered cover-sheet note: closed-book, suggested
    time, how scoring works, where the solutions are.
 3. **Rubric table** — one row per section: section name, question count, points,
-   suggested minutes. Totals row. This is the scoring rubric the SPEC requires.
+   suggested minutes. Totals row. Matched to the assessment named above: its kind, its
+   weight, and the date it falls on, stated in the cover's meta line.
 4. **Sections** — group questions by format, exam-style (e.g. A: multiple choice,
    B: short answer, C: worked problems / interpretation). 14–20 questions total,
    spanning the whole scope; honor the focus topics with roughly double weight when
@@ -84,6 +104,9 @@ Same ClassHub document family as the study guides — paper, ink, hairline, one 
   line pairs a mono accent question number (`Q01`) with the prompt, and carries a
   right-aligned mono point tag (`4 PTS`) on the same line. The rubric table up
   top and the point tags down the paper are the same system; totals must agree.
+- Every question block carries a `data-topic` attribute naming the concept it
+  tests, in two or three words (`data-topic="missing data mechanisms"`); the
+  self-scoring panel reads them when it reports.
 - Questions never break internally in print (`break-inside: avoid`); solutions
   print with the paper (details cannot open on paper — that is fine, the printed
   artifact is the sit-down exam).
@@ -99,6 +122,11 @@ at least three):
 - Self-scored free response: after opening a solution, a small stepper or input
   to record earned points; a running total strip (position: sticky, quiet, mono)
   keeps the live score and finishes as the grade on the self-scoring panel.
+- The self-scoring panel, once every section is totalled, posts its results to the
+  frame's parent: `window.parent.postMessage({exam: <the output file name>, results:
+  [{question: "Q01", topic: <its data-topic>, correct: true or false}]}, "*")` —
+  every question once, a free-response question counted correct at full marks. The
+  app listens for nothing yet; the message is the contract.
 - An exam timer: a start control and a mm:ss readout counting down the suggested
   time — display only, nothing stored, no alarm beyond the readout reaching zero.
 

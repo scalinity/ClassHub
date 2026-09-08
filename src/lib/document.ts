@@ -56,7 +56,18 @@ export function renderMarkdown(src: string): string {
       body = src.slice(end + 5);
     }
   }
-  return front + (marked.parse(body, { async: false }) as string);
+  const html = marked.parse(body, { async: false }) as string;
+  // A transcript's `## HH:MM` headings get ids (`t-00-45`), so a flagged item's
+  // anchor can open the viewer scrolled to the stretch it was said in (SPEC
+  // §8.4). marked gives headings no id of its own.
+  return (
+    front +
+    html.replace(
+      /<h2>(\d{1,2}):(\d{2})<\/h2>/g,
+      (_, h: string, m: string) =>
+        `<h2 id="t-${h.padStart(2, "0")}-${m}">${h}:${m}</h2>`,
+    )
+  );
 }
 
 /**

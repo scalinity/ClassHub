@@ -249,6 +249,7 @@ async function refreshJobs() {
       // is what turns "mapped" into "feeding a guide" on both listings.
       if (job.kind === "lecture_digest") {
         void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+        void queryClient.invalidateQueries({ queryKey: ["hints"] });
       }
     } else if (job.kind === "practice") {
       void queryClient.invalidateQueries({ queryKey: ["practice"] });

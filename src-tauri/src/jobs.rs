@@ -4,10 +4,10 @@
 //! auth env vars stripped (SPEC §1), raw stream-json persisted to a log file, and
 //! condensed progress forwarded to the frontend via `job://{id}/progress` events.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -442,6 +442,210 @@ fn excluding_app_writes(
             None => false,
         },
     });
+    touched
+}
+
+// ---------------------------------------------------------------------------
+// The job's own log (SPEC §6, §7 step 5)
+
+/// What a finished job's stream log says it saw and touched, class-relative:
+/// the paths of every `Read` and the files a `Grep` result names, and the
+/// paths of every `Write` and `Edit`. A `Glob` is a listing, not a read, and
+/// a path outside the class folder is dropped — a log is the model's own
+/// account, and only what sits inside the folder is a source.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct LogPaths {
+    pub read: BTreeSet<String>,
+    pub written: BTreeSet<String>,
+}
+
+/// Where a job's stream log lives: `logs/job-<id>.jsonl` beside the database.
+fn log_path_for(app: &AppHandle, job_id: i64) -> Result<PathBuf> {
+    Ok(crate::data_dir(app)?.join("logs").join(format!("job-{job_id}.jsonl")))
+}
+
+/// Reads a job's log back off disk. `None` when the file could not be read,
+/// which the guard treats as strict and the finalizers as an empty read set.
+fn job_log_paths(app: &AppHandle, job_id: i64, class_dir: &Path) -> Option<LogPaths> {
+    let path = match log_path_for(app, job_id) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("job {job_id}: no log path: {e:#}");
+            return None;
+        }
+    };
+    match fs::File::open(&path) {
+        Ok(file) => Some(log_paths(
+            BufReader::new(file).lines().map_while(Result::ok),
+            class_dir,
+        )),
+        Err(e) => {
+            eprintln!("job {job_id}: could not read its log {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Every `Read`, `Grep` hit, `Write` and `Edit` in a stream log's lines.
+pub(crate) fn log_paths(lines: impl Iterator<Item = String>, class_dir: &Path) -> LogPaths {
+    let mut out = LogPaths::default();
+    // Greps awaiting their result, by tool_use id: the path each was given.
+    let mut greps: HashMap<String, Option<String>> = HashMap::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let blocks = value["message"]["content"].as_array();
+        match value["type"].as_str() {
+            Some("assistant") => {
+                for block in blocks.into_iter().flatten() {
+                    if block["type"].as_str() != Some("tool_use") {
+                        continue;
+                    }
+                    let input = &block["input"];
+                    match block["name"].as_str().unwrap_or("") {
+                        "Read" => {
+                            if let Some(rel) = relativize(input["file_path"].as_str(), class_dir) {
+                                out.read.insert(rel);
+                            }
+                        }
+                        "Write" | "Edit" | "MultiEdit" => {
+                            if let Some(rel) = relativize(input["file_path"].as_str(), class_dir) {
+                                out.written.insert(rel);
+                            }
+                        }
+                        "NotebookEdit" => {
+                            if let Some(rel) =
+                                relativize(input["notebook_path"].as_str(), class_dir)
+                            {
+                                out.written.insert(rel);
+                            }
+                        }
+                        "Grep" => {
+                            if let Some(id) = block["id"].as_str() {
+                                greps.insert(
+                                    id.to_string(),
+                                    input["path"].as_str().map(str::to_string),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                for block in blocks.into_iter().flatten() {
+                    if block["type"].as_str() != Some("tool_result") {
+                        continue;
+                    }
+                    let Some(given) = block["tool_use_id"].as_str().and_then(|id| greps.remove(id))
+                    else {
+                        continue;
+                    };
+                    if block["is_error"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    grep_hits(&tool_result_text(block), given.as_deref(), class_dir, &mut out.read);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A tool's path, class-relative, or `None` when it falls outside the class
+/// folder — absolute and elsewhere, or reaching out through `..`.
+fn relativize(path: Option<&str>, class_dir: &Path) -> Option<String> {
+    let path = path?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let given = Path::new(path);
+    let rel = if given.is_absolute() {
+        given.strip_prefix(class_dir).ok()?
+    } else {
+        given
+    };
+    if rel
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let rel = rel.to_string_lossy().into_owned();
+    (!rel.is_empty()).then_some(rel)
+}
+
+/// The files a `Grep` result names. Over one file the result names that file
+/// — the CLI prints its lines bare — and a result with no hits names none.
+/// Over a folder each line opens with a path: bare in a files listing, before
+/// the `:` of a content or count line, before the `-` of a context line.
+fn grep_hits(text: &str, given: Option<&str>, class_dir: &Path, read: &mut BTreeSet<String>) {
+    let text = text.trim();
+    if text.is_empty() || text.starts_with("No matches found") || text.starts_with("No files found")
+    {
+        return;
+    }
+    if let Some(rel) = relativize(given, class_dir) {
+        if class_dir.join(&rel).is_file() {
+            read.insert(rel);
+            return;
+        }
+    }
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() || line.starts_with("Found ") {
+            continue;
+        }
+        if let Some(rel) = path_prefix(line, class_dir, read) {
+            read.insert(rel);
+        }
+    }
+}
+
+/// The longest prefix of a result line that is a file under the class folder:
+/// the whole line, else the text before the rightmost `:` or `-` that leaves
+/// one. A path already found is matched by its text alone, so a long content
+/// result costs one comparison per line rather than a stat per separator.
+fn path_prefix(line: &str, class_dir: &Path, known: &BTreeSet<String>) -> Option<String> {
+    let is_file = |candidate: &str| {
+        relativize(Some(candidate), class_dir).filter(|rel| class_dir.join(rel).is_file())
+    };
+    if let Some(rel) = known.iter().find(|rel| {
+        line.strip_prefix(rel.as_str())
+            .or_else(|| {
+                class_dir
+                    .join(rel.as_str())
+                    .to_str()
+                    .and_then(|abs| line.strip_prefix(abs))
+            })
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('-'))
+    }) {
+        return Some(rel.clone());
+    }
+    if let Some(rel) = is_file(line) {
+        return Some(rel);
+    }
+    let boundaries: Vec<usize> = line
+        .char_indices()
+        .filter(|(_, c)| *c == ':' || *c == '-')
+        .map(|(i, _)| i)
+        .collect();
+    for at in boundaries.into_iter().rev() {
+        if let Some(rel) = is_file(&line[..at]) {
+            return Some(rel);
+        }
+    }
+    None
+}
+
+/// The touched list with every path the run's log shows no `Write` or `Edit`
+/// to taken out: a change nothing in the log made was not the run's — the
+/// owner's own edit beside a running extract — while a logged write outside
+/// the contract still fails the job (SPEC §6).
+fn excluding_unlogged(mut touched: Vec<String>, written: &BTreeSet<String>) -> Vec<String> {
+    touched.retain(|path| written.contains(path));
     touched
 }
 
@@ -1107,6 +1311,14 @@ fn run_job(
         .map(crate::scanner::fingerprint_sources);
 
     let outcome = execute_job(&app, &job, &child_slot, &cancelled);
+    // The run's own account of what it saw and touched (SPEC §6, §7 step 5),
+    // read back off the log it streamed: every Read and Grep hit widens the
+    // manifest, every Write and Edit is what the guard may pin on it.
+    let log = guarded_dir
+        .as_deref()
+        .and_then(|dir| job_log_paths(&app, job.id, dir));
+    let empty_reads = BTreeSet::new();
+    let read_paths = log.as_ref().map_or(&empty_reads, |l| &l.read);
 
     let (mut status, mut error, mut summary, result_text) =
         if cancelled.load(Ordering::SeqCst) {
@@ -1162,6 +1374,20 @@ fn run_job(
                 Err(e) => eprintln!("job {} could not read the audit log: {e:#}", job.id),
             }
         }
+        // A change the log shows no write to was not the run's. An unreadable
+        // log leaves the guard strict rather than clearing everything.
+        if let (false, Some(log)) = (touched.is_empty(), &log) {
+            let seen = touched.len();
+            touched = excluding_unlogged(touched, &log.written);
+            if touched.len() < seen {
+                eprintln!(
+                    "job {}: {} change(s) in the class folder have no Write or Edit in the \
+                     run's log and were not the run's",
+                    job.id,
+                    seen - touched.len()
+                );
+            }
+        }
         if !touched.is_empty() {
             record_contract_breach(&app, &job, &touched);
             if status == "succeeded" {
@@ -1202,14 +1428,14 @@ fn run_job(
             }
             "module_guide" | "master_guide" => {
                 if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
-                    if let Err(e) = crate::guides::finalize_job(&app, class_id, payload) {
+                    if let Err(e) = crate::guides::finalize_job(&app, class_id, payload, read_paths) {
                         demote("synthesis finished but no guide was recorded", e);
                     }
                 }
             }
             "practice" => {
                 if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
-                    if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload) {
+                    if let Err(e) = crate::guides::finalize_practice(&app, class_id, payload, read_paths) {
                         demote("practice job finished but no exam was written", e);
                     }
                 }
@@ -1221,6 +1447,7 @@ fn run_job(
                         class_id,
                         payload,
                         result_text.as_deref().unwrap_or(""),
+                        read_paths,
                     ) {
                         Ok(recorded) => summary = Some(recorded),
                         Err(e) => demote("digest finished but wrote no session document", e),
@@ -1519,9 +1746,10 @@ fn execute_job(
     }
 
     let data_dir = crate::data_dir(app)?;
-    let log_dir = data_dir.join("logs");
-    fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join(format!("job-{}.jsonl", job.id));
+    let log_path = log_path_for(app, job.id)?;
+    if let Some(log_dir) = log_path.parent() {
+        fs::create_dir_all(log_dir)?;
+    }
     let mut log = fs::File::create(&log_path)
         .with_context(|| format!("creating log {}", log_path.display()))?;
     let mut log_broken = false;
@@ -2556,5 +2784,76 @@ mod tests {
         assert_eq!(label("master"), "Semester Master");
         assert_eq!(label("Module 1"), "Module 1");
         assert_eq!(label("session:Weeks/Week 02/2026-09-01 — Lecture.md"), "2026-09-01 — Lecture");
+    }
+    /// The log reader (SPEC §6, §7 step 5): a Read counts, a Grep names the
+    /// file it hit — the one it was given, or each line's path over a folder
+    /// — a Glob is a listing, a Grep with no hits names nothing, a path
+    /// outside the class folder is dropped, and a Write or Edit is a write.
+    #[test]
+    fn the_log_reader_names_reads_grep_hits_and_writes() {
+        use super::log_paths;
+        use serde_json::Value;
+        use std::collections::BTreeSet;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("classhub-log-reader-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for rel in ["Notes/a.md", ".classhub/corpus/Week 3/note.md", "Slides/deck.pptx"] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, rel).unwrap();
+        }
+        let abs = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
+        let call = |id: &str, name: &str, input: Value| {
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": id, "name": name, "input": input}]}})
+            .to_string()
+        };
+        let result = |id: &str, text: &str| {
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": id, "content": text}]}})
+            .to_string()
+        };
+        let lines = vec![
+            call("r1", "Read", serde_json::json!({"file_path": abs("Notes/a.md")})),
+            call("g1", "Glob", serde_json::json!({"pattern": "**/*"})),
+            result("g1", "Notes/a.md\nSlides/deck.pptx"),
+            call("gr1", "Grep", serde_json::json!({"pattern": "^#", "path": abs(".classhub/corpus/Week 3/note.md")})),
+            result("gr1", "3:## Domains"),
+            call("gr2", "Grep", serde_json::json!({"pattern": "x", "output_mode": "content"})),
+            result("gr2", "Slides/deck.pptx:12:text\nNotes/a.md-3-context\n\nFound 2 total occurrences across 2 files."),
+            call("gr3", "Grep", serde_json::json!({"pattern": "y", "path": abs("Notes")})),
+            result("gr3", "No matches found"),
+            call("gr4", "Grep", serde_json::json!({"pattern": "z", "path": abs("Slides/deck.pptx")})),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "gr4", "is_error": true, "content": "denied"}]}})
+            .to_string(),
+            call("r2", "Read", serde_json::json!({"file_path": "/etc/hosts"})),
+            call("r3", "Read", serde_json::json!({"file_path": abs("../elsewhere/x.md")})),
+            call("w1", "Write", serde_json::json!({"file_path": abs("Study Guides/g.html"), "content": "x"})),
+            call("e1", "Edit", serde_json::json!({"file_path": abs("Study Guides/g.html")})),
+            call("w2", "Write", serde_json::json!({"file_path": abs("Slides/deck.pptx")})),
+            "not json at all".to_string(),
+        ];
+        let paths = log_paths(lines.into_iter(), &dir);
+        let set = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths.read,
+            set(&["Notes/a.md", ".classhub/corpus/Week 3/note.md", "Slides/deck.pptx"])
+        );
+        assert_eq!(paths.written, set(&["Study Guides/g.html", "Slides/deck.pptx"]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The guard's third exclusion (SPEC §6): a changed path the log shows no
+    /// write to was not the run's; one it does show a write to stays, and an
+    /// empty log clears everything the run never wrote.
+    #[test]
+    fn the_guard_drops_a_change_the_log_shows_no_write_to() {
+        use super::excluding_unlogged;
+        use std::collections::BTreeSet;
+        let touched = vec!["Module 1/notes.md".to_string(), "Slides/deck.pptx".to_string()];
+        let written: BTreeSet<String> = ["Slides/deck.pptx".to_string()].into_iter().collect();
+        assert_eq!(excluding_unlogged(touched.clone(), &written), vec!["Slides/deck.pptx"]);
+        assert!(excluding_unlogged(touched, &BTreeSet::new()).is_empty());
     }
 }

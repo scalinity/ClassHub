@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 
 import { escapeHtml } from "@/lib/answer";
 import { docShell, renderMarkdown, withDocumentCsp } from "@/lib/document";
+import { anchorId } from "@/lib/hints";
 import { derivePhase, useJobs } from "@/lib/jobs";
 import { openInDefaultApp, readClassFile, revealInFinder } from "@/lib/materials";
 import { dragWindow } from "@/lib/window";
@@ -24,6 +25,20 @@ export interface ViewedFile {
   pdfPath?: string;
   /** Class-relative path read in place of `relPath`: a notebook's extract. */
   source?: string;
+  /**
+   * An `HH:MM` heading of a transcript to open at (SPEC §8.4): the document
+   * register gives those headings ids, and the frame scrolls there once it
+   * has loaded. A heading the transcript lacks opens it at the top.
+   */
+  anchor?: string;
+}
+
+/** Scrolls a loaded markdown frame to the anchor's heading, when it has one. */
+function scrollToAnchor(el: HTMLIFrameElement, anchor: string | undefined) {
+  if (anchor === undefined) return;
+  const doc = el.contentDocument;
+  const heading = doc?.getElementById(anchorId(anchor));
+  heading?.scrollIntoView({ block: "start" });
 }
 
 /**
@@ -195,10 +210,14 @@ export function FileViewer({
         ) : (
           // Class HTML notebooks need their own embedded scripts to unpack;
           // allow-scripts without same-origin keeps them isolated from the app.
+          // A document the register rendered runs no script — the sandbox and
+          // its own CSP both refuse one — so same-origin costs nothing and lets
+          // the viewer scroll it to a flagged item's heading.
           <iframe
-            sandbox={file.kind === "html" ? "allow-scripts" : ""}
+            sandbox={file.kind === "html" ? "allow-scripts" : "allow-same-origin"}
             srcDoc={srcDoc}
             title={file.name}
+            onLoad={(e) => scrollToAnchor(e.currentTarget, file.anchor)}
             className="block h-full w-full border-0"
           />
         )}

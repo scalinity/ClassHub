@@ -502,6 +502,7 @@ fn sync_units(
                 starts_on: iso_date(module["unlock_at"].as_str()),
                 ends_on: None,
                 weeks: units::declared_weeks(kind, name, None),
+                objectives: None,
                 source: "canvas",
             };
             match units::upsert(conn, class.id, &unit, &mut batch) {

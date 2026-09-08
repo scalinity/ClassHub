@@ -35,6 +35,13 @@ Material filed alongside this session, for tying spoken content to what it was a
 
 {context}
 
+## Earlier sessions
+
+What the class's earlier sessions were about, newest first, for the threads this one
+built on (the corpus note's hints sidecar names them):
+
+{previous}
+
 ## What to write
 
 TWO documents, same content, same base name, differing only in format:
@@ -43,7 +50,8 @@ TWO documents, same content, same base name, differing only in format:
 2. `{sessions_dir}/<basename>.md` — the same substance in markdown, for search
 
 …and, where this session belongs to one of the course's own divisions, a third file
-serving a different purpose entirely — see **The corpus note** below.
+serving a different purpose entirely, with two sidecars beside it — see **The corpus
+note** below.
 
 You choose `<basename>`, and it is the naming decision that matters most here:
 `{date} — <topic>`, where `<topic>` is what this session was actually about, in three
@@ -96,7 +104,8 @@ copy chat retrieves, so it must stand alone. Plain markdown, no HTML embedded in
 - Do not smooth over disagreement or confusion in the room; where the class got stuck is
   study-relevant.
 - Do not edit, move, or delete anything. Write only the files named above: the two under
-  `{sessions_dir}/`, and the corpus note at exactly the path given for it, if one was.
+  `{sessions_dir}/`, and the corpus note with its two sidecars at exactly the paths given
+  for them, if they were.
 
 ## Output contract
 

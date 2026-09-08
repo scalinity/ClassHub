@@ -1,11 +1,14 @@
-//! SPEC §8.1/§8.2 — study-guide synthesis (module and semester master): prompt
-//! assembly, the guides-table upsert on job success, and on-demand staleness.
+//! SPEC §8.1/§8.2/§8.3 — study-guide synthesis (division, folder, semester
+//! master and practice exam): prompt assembly, the guides-table upsert on job
+//! success, and on-demand staleness with the diff behind it.
 //!
 //! Synthesis flows through the job runner (SPEC §6, the single gateway to the
 //! subscription) and is only ever triggered manually (SPEC §7). The guides-row
 //! upsert data rides `QueuedJob.payload`, and `finalize_job` runs before the
 //! job row leaves `running` — the same ordering the extract pipeline uses — so
-//! the UI can never observe a succeeded job without its guide row.
+//! the UI can never observe a succeeded job without its guide row. The row's
+//! manifest is what the job was told about, widened by what its own log shows
+//! it read (SPEC §7 step 5).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -17,14 +20,19 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::db::{
-    GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, UNIT_SCOPE_PREFIX, lock, now, unit_scope, unit_scope_id,
+    GUIDES_DIR, MASTER_SCOPE, PRACTICE_DIR, PRACTICE_SCOPE_PREFIX, UNIT_SCOPE_PREFIX, lock, now,
+    unit_scope, unit_scope_id,
 };
-use crate::extract::{current_manifest, manifest_is_stale, ManifestEntry};
+use crate::extract::{
+    current_hash, current_manifest, manifest_diff, union_manifest, ManifestDiff, ManifestEntry,
+};
 
-/// SPEC §8.3: practice exams are dated files, several per scope — no staleness,
-/// no `guides` row, the directory listing is the record.
 /// SPEC §5/§8.2: the guides/jobs scope value for the semester master.
 const MASTER_OUTPUT: &str = "Study Guides/Semester Master.html";
+/// SPEC §8.1: where a guide's cards sidecar goes — `<guide file stem>.json`
+/// under here, one card per self-test question and glossary term. Nothing
+/// reads them until M37; the finalizer requires the file so the shape holds.
+pub const CARDS_DIR: &str = ".classhub/cards";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/module_guide.md");
 const MASTER_TEMPLATE: &str = include_str!("../prompts/master_guide.md");
 const PRACTICE_TEMPLATE: &str = include_str!("../prompts/practice.md");
@@ -35,7 +43,8 @@ const RESUME_PROMPT: &str = "This session was interrupted before the task comple
 Resume exactly where you left off and finish the original task: check what has \
 already been written to the contracted output file, complete anything missing, and \
 honor every requirement of the original instructions (content anatomy, design \
-contract, hard constraints, output path). Write the file incrementally — NEVER in \
+contract, hard constraints, output path, and the cards file the instructions name \
+under `.classhub/cards/`). Write the file incrementally — NEVER in \
 one large Write call, which hits the per-response output limit and is discarded. \
 First Write the head plus the first section ending with the literal line \
 `<!-- CONTINUE -->` before `</body></html>`, then extend via Edit calls that each \
@@ -60,8 +69,13 @@ pub(crate) fn accent_values(color: &str) -> (&'static str, &'static str) {
 struct GuidePayload {
     scope: String,
     rel_path: String,
-    /// JSON `[{relPath, sha256}]` — stored verbatim as guides.source_manifest.
+    /// JSON `[{relPath, sha256}]` captured at enqueue — the listed sources,
+    /// widened at finalize by what the log shows the job read.
     source_manifest: String,
+    /// The cards sidecar the job was told to write; a payload from before
+    /// the sidecar existed carries none and is finalized without it.
+    #[serde(default)]
+    cards_rel_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -74,26 +88,34 @@ pub struct GuideInfo {
     pub rel_path: String,
     pub generated_at: i64,
     pub stale: bool,
+    /// What changed since the guide was written (SPEC §7 step 5): the names
+    /// behind `stale`, for the row's `Rewrite · 2 files added, 1 changed`.
+    pub diff: ManifestDiff,
     /// Session digests share this table to inherit the viewer and staleness,
     /// but they are per-lecture rather than per-module, so the Study Guides tab
     /// lists them separately instead of interleaving them with the guides.
     pub session: bool,
+    /// A practice exam's row (SPEC §8.3): listed with the exams, never among
+    /// the guides, and never counted as one worth regenerating.
+    pub practice: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Synthesis trigger (manual only, SPEC §7)
 
-/// The steps all three synthesis triggers share: the class name and its accent
-/// pair, the manifest captured at enqueue time, and the prompt blocks derived
-/// from it. Each caller then owns only its own output path, template and
-/// payload shape — which is the part that actually differs between them.
+/// The steps every synthesis trigger shares: the class name and its accent
+/// pair, the manifest captured at enqueue time, the prompt blocks derived
+/// from it, and what changed since the guide on record. Each caller then owns
+/// only its own output path, template and payload shape — which is the part
+/// that actually differs between them.
 struct SynthesisContext {
     class_name: String,
     accent_light: &'static str,
     accent_dark: &'static str,
-    manifest: Vec<crate::extract::ManifestEntry>,
+    manifest: Vec<ManifestEntry>,
     manifest_block: String,
     files_block: String,
+    changes_block: String,
     class_dir: PathBuf,
 }
 
@@ -101,11 +123,12 @@ fn synthesis_context(
     conn: &Connection,
     class_id: i64,
     scope: &str,
-    // Set for a unit scope: its contributing lectures are listed with their
-    // corpus notes instead, so naming them again under the file listing would
-    // invite the job to read every transcript in full — the read the corpus
-    // note exists to have paid for once.
-    unit_id: Option<i64>,
+    // The transcripts listed with their corpus notes instead: naming them
+    // again under the file listing would invite the job to read every
+    // transcript in full — the read the corpus note exists to have paid for
+    // once. A division's contributing lectures, or every lecture for the
+    // master; none for a folder.
+    listed_apart: BTreeSet<String>,
     empty_message: &str,
 ) -> Result<SynthesisContext> {
     let (class_name, color): (String, String) = conn.query_row(
@@ -125,18 +148,16 @@ fn synthesis_context(
         .collect::<Vec<_>>()
         .join("\n");
     let (accent_light, accent_dark) = accent_values(&color);
-    let listed_apart = match unit_id {
-        Some(unit_id) => crate::lectures::contributing_paths(conn, class_id, unit_id)?,
-        None => BTreeSet::new(),
-    };
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
     Ok(SynthesisContext {
         class_name,
         accent_light,
         accent_dark,
         files_block: files_block(conn, class_id, &manifest, &listed_apart)?,
+        changes_block: changes_block(conn, class_id, scope, &class_dir, &manifest)?,
         manifest,
         manifest_block,
-        class_dir: crate::scanner::class_dir(conn, class_id)?,
+        class_dir,
     })
 }
 
@@ -172,28 +193,38 @@ pub fn synthesize_module(
             &conn,
             class_id,
             module_rel,
-            None,
+            BTreeSet::new(),
             &format!("no indexed files in {module_rel} — rescan the class first"),
         )?;
+        let cards_rel = cards_rel_path(&output_rel);
         let prompt = render_guide_prompt(
             &ctx,
-            &module_name,
-            &output_rel,
-            generated_at_label,
-            // A folder is not one of the course's divisions, so nothing is
-            // mapped to it — a lecture reaches a guide through its unit.
-            "(none — this guide is scoped to a folder rather than to one of the \
-             course's divisions, so no lecture is mapped to it)",
+            &GuideBlocks {
+                name: &module_name,
+                output_rel: &output_rel,
+                generated_at_label,
+                // A folder is not one of the course's divisions, so nothing is
+                // mapped to it — a lecture reaches a guide through its unit.
+                corpus: "(none — this guide is scoped to a folder rather than to one of the \
+                         course's divisions, so no lecture is mapped to it)",
+                hints: "(none — a folder is not one of the course's divisions, and what the \
+                        professor flagged is kept per division)",
+                objectives: "(none — a folder is not one of the course's divisions, and the \
+                             syllabus states objectives per division)",
+                cards_rel: &cards_rel,
+            },
         );
         let payload = serde_json::to_string(&GuidePayload {
             scope: module_rel.to_string(),
             rel_path: output_rel.clone(),
             source_manifest: serde_json::to_string(&ctx.manifest)?,
+            cards_rel_path: Some(cards_rel),
         })?;
         (ctx.class_dir, prompt, payload)
     };
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
+    fs::create_dir_all(class_dir.join(CARDS_DIR))?;
     crate::jobs::enqueue_module_guide(app, class_id, module_rel, &prompt, payload)
 }
 
@@ -232,17 +263,32 @@ pub fn synthesize_unit(
 
         let (ctx, corpus) = unit_context(&conn, class_id, unit_id, &unit_name, &scope)?;
         let output_rel = unit_guide_rel_path(&unit_name);
-        let prompt =
-            render_guide_prompt(&ctx, &unit_name, &output_rel, generated_at_label, &corpus);
+        let cards_rel = cards_rel_path(&output_rel);
+        let hints = hints_for(&conn, class_id, Some(&[unit_id]))?;
+        let objectives = objectives_block(&unit_objectives(&conn, unit_id)?);
+        let prompt = render_guide_prompt(
+            &ctx,
+            &GuideBlocks {
+                name: &unit_name,
+                output_rel: &output_rel,
+                generated_at_label,
+                corpus: &corpus,
+                hints: &hints,
+                objectives: &objectives,
+                cards_rel: &cards_rel,
+            },
+        );
         let payload = serde_json::to_string(&GuidePayload {
             scope: scope.clone(),
             rel_path: output_rel,
             source_manifest: serde_json::to_string(&ctx.manifest)?,
+            cards_rel_path: Some(cards_rel),
         })?;
         (ctx.class_dir, prompt, payload, scope)
     };
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
+    fs::create_dir_all(class_dir.join(CARDS_DIR))?;
     crate::jobs::enqueue_module_guide(app, class_id, &scope, &prompt, payload)
 }
 
@@ -268,7 +314,8 @@ fn unit_context(
          lecture or a file for one of its weeks, or distil a lecture already filed."
     );
     let notes = crate::lectures::corpus_notes(conn, class_id, unit_id)?;
-    let ctx = synthesis_context(conn, class_id, scope, Some(unit_id), &nothing)?;
+    let listed_apart = crate::lectures::contributing_paths(conn, class_id, unit_id)?;
+    let ctx = synthesis_context(conn, class_id, scope, listed_apart, &nothing)?;
     if notes.is_empty() && ctx.files_block.is_empty() {
         bail!("{nothing}");
     }
@@ -281,13 +328,24 @@ pub(crate) fn unit_guide_rel_path(unit_name: &str) -> String {
     format!("{GUIDES_DIR}/{}.html", crate::units::folder_segment(unit_name))
 }
 
+/// Where a guide's cards sidecar is written: named for the guide file, under
+/// `.classhub/cards/` (SPEC §8.1).
+pub(crate) fn cards_rel_path(output_rel: &str) -> String {
+    let stem = Path::new(output_rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| output_rel.to_string());
+    format!("{CARDS_DIR}/{}.json", stem.strip_suffix(".html").unwrap_or(&stem))
+}
+
 /// What a scope is called when it is shown or told to someone.
 ///
-/// A scope is a storage key, and two of its four shapes read as machinery: a
+/// A scope is a storage key, and three of its shapes read as machinery: a
 /// unit scope is a row id, and the app never shows the word "unit" (SPEC §5);
-/// a session names a file path rather than a session. The division's name is
-/// the caller's to look up, since the key no longer carries it; a unit scope
-/// from before ids, which no row answers to, shows what it carries.
+/// a session names a file path rather than a session; an exam names its
+/// file. The division's name is the caller's to look up, since the key no
+/// longer carries it; a unit scope from before ids, which no row answers to,
+/// shows what it carries.
 pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
     if scope == MASTER_SCOPE {
         return "Semester Master".into();
@@ -295,38 +353,187 @@ pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
     if let Some(rest) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
         return unit_name.map(str::to_string).unwrap_or_else(|| rest.to_string());
     }
-    match scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
-        Some(path) => path
-            .rsplit('/')
+    let file_stem = |path: &str, ext: &str| {
+        path.rsplit('/')
             .next()
             .unwrap_or(path)
-            .trim_end_matches(".md")
-            .to_string(),
+            .trim_end_matches(ext)
+            .to_string()
+    };
+    if let Some(path) = scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
+        return file_stem(path, ".md");
+    }
+    match scope.strip_prefix(PRACTICE_SCOPE_PREFIX) {
+        Some(path) => file_stem(path, ".html"),
         None => scope.to_string(),
     }
 }
 
-fn render_guide_prompt(
-    ctx: &SynthesisContext,
-    unit_name: &str,
-    output_rel: &str,
-    generated_at_label: &str,
-    corpus_block: &str,
-) -> String {
+/// The blocks a guide prompt takes beside its context.
+struct GuideBlocks<'a> {
+    name: &'a str,
+    output_rel: &'a str,
+    generated_at_label: &'a str,
+    corpus: &'a str,
+    hints: &'a str,
+    objectives: &'a str,
+    cards_rel: &'a str,
+}
+
+fn render_guide_prompt(ctx: &SynthesisContext, blocks: &GuideBlocks<'_>) -> String {
     PROMPT_TEMPLATE
         .replace("{class}", &ctx.class_name)
-        .replace("{module}", unit_name)
-        .replace("{output}", output_rel)
+        .replace("{module}", blocks.name)
+        .replace("{output}", blocks.output_rel)
+        .replace("{cards}", blocks.cards_rel)
         .replace("{accent_light}", ctx.accent_light)
         .replace("{accent_dark}", ctx.accent_dark)
-        .replace("{generated_at}", generated_at_label)
+        .replace("{generated_at}", blocks.generated_at_label)
         .replace("{files}", &ctx.files_block)
-        .replace("{corpus}", corpus_block)
+        .replace("{corpus}", blocks.corpus)
+        .replace("{hints}", blocks.hints)
+        .replace("{objectives}", blocks.objectives)
+        .replace("{changes}", &ctx.changes_block)
         .replace("{manifest}", &ctx.manifest_block)
 }
 
-/// SPEC §8.2: semester master synthesis — full raw re-synthesis from every
-/// module's extracts, never from module guides. Runs exclusively (jobs.rs).
+/// The `{hints}` block for a scope (SPEC §8.1): a division's rows, or every
+/// row of the class for the master and the semester exam.
+fn hints_for(conn: &Connection, class_id: i64, units: Option<&[i64]>) -> Result<String> {
+    Ok(crate::lectures::hints_block(&crate::lectures::list_hints(conn, class_id)?, units))
+}
+
+/// A division's stated objectives, off its row (SPEC §11).
+fn unit_objectives(conn: &Connection, unit_id: i64) -> Result<Vec<String>> {
+    let stored: Option<String> = conn
+        .query_row("SELECT objectives FROM units WHERE id = ?1", [unit_id], |row| row.get(0))
+        .optional()?
+        .flatten();
+    Ok(crate::units::objectives_of(stored.as_deref()))
+}
+
+/// The `{objectives}` block for one division: the syllabus's list, or the
+/// line saying it states none.
+fn objectives_block(objectives: &[String]) -> String {
+    if objectives.is_empty() {
+        return "(the syllabus states none for this division)".to_string();
+    }
+    objectives
+        .iter()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The master's `{modules}` roster (SPEC §8.2): the course's own divisions in
+/// its own order, each with its start date and, for a Part, its week range —
+/// never the folders the material happens to sit in.
+pub(crate) fn roster_block(units: &[crate::units::UnitInfo]) -> String {
+    if units.is_empty() {
+        return "(the course declares no divisions yet — group the material by the folders it \
+                sits in, and say so)"
+            .to_string();
+    }
+    units
+        .iter()
+        .map(|unit| {
+            let mut line = format!("- {}", unit.name);
+            match (unit.first_week, unit.last_week) {
+                (Some(first), Some(last)) => line.push_str(&format!(" (Weeks {first}–{last})")),
+                _ => {}
+            }
+            if let Some(starts) = &unit.starts_on {
+                line.push_str(&format!(" (from {starts})"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The master's `{objectives}`: each division's stated objectives under its
+/// name, only for the divisions that state any.
+fn master_objectives_block(conn: &Connection, units: &[crate::units::UnitInfo]) -> Result<String> {
+    let mut out = String::new();
+    for unit in units {
+        let objectives = unit_objectives(conn, unit.id)?;
+        if objectives.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{}:\n{}\n", unit.name, objectives_block(&objectives)));
+    }
+    if out.is_empty() {
+        return Ok("(the syllabus states none per division)".to_string());
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// The `{changes}` block (SPEC §8.1): for a rewrite, the date of the guide on
+/// record and every source added, changed or removed since, which the prompt
+/// marks with the `New since` chip; for a first write, the line saying no
+/// chip applies. The earlier guide itself is never an input.
+fn changes_block(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    class_dir: &Path,
+    current: &[ManifestEntry],
+) -> Result<String> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT generated_at, source_manifest FROM guides WHERE class_id = ?1 AND scope = ?2",
+            params![class_id, scope],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((generated_at, stored)) = row else {
+        return Ok("This is the first guide for this scope: no earlier guide exists, so no \
+                   entry is new and the `New since` chip is not used anywhere."
+            .to_string());
+    };
+    let date = short_date(generated_at);
+    let diff = manifest_diff(&stored, current, |path| {
+        current_hash(conn, class_id, class_dir, path).ok().flatten()
+    });
+    if !diff.is_stale() {
+        return Ok(format!(
+            "This is a rewrite of the guide written on {date}. Its sources have not changed \
+             since, so no entry is new: use no `New since` chip. The earlier guide is not an \
+             input — do not read it; rebuild every entry from the sources."
+        ));
+    }
+    let mut out = format!(
+        "This is a rewrite of the guide written on {date}, and these sources changed since. \
+         Mark every entry that draws on them with the `New since {date}` chip (design \
+         contract), and cite nothing under a removed path:\n"
+    );
+    for (list, note) in [
+        (&diff.added, "added"),
+        (&diff.changed, "changed"),
+        (&diff.removed, "removed — no longer a source"),
+    ] {
+        for path in list {
+            out.push_str(&format!("- {path} ({note})\n"));
+        }
+    }
+    out.push_str(
+        "\nThe earlier guide is not an input: do not read it, and rebuild every entry from the \
+         sources rather than carrying anything forward.",
+    );
+    Ok(out)
+}
+
+/// `Sep 3` for a unix stamp, in the machine's zone — the words the chip and
+/// the row use.
+pub(crate) fn short_date(unix_secs: i64) -> String {
+    chrono::DateTime::from_timestamp(unix_secs, 0)
+        .map(|t| t.with_timezone(&chrono::Local).format("%b %-d").to_string())
+        .unwrap_or_default()
+}
+
+/// SPEC §8.2: semester master synthesis — full re-synthesis from every extract
+/// and every corpus note, transcripts read through their notes, never from
+/// module guides. Runs exclusively (jobs.rs).
 pub fn synthesize_master(
     app: &AppHandle,
     class_id: i64,
@@ -339,63 +546,72 @@ pub fn synthesize_master(
         if has_active_job(&conn, class_id, "master_guide", MASTER_SCOPE)? {
             bail!("a master synthesis for this class is already queued or running");
         }
+        // Every lecture is listed through its note (SPEC §8.5), the way a
+        // division's are, so the file listing leaves the transcripts out.
+        let contributions = crate::lectures::list_contributions(&conn, class_id)?;
+        let listed_apart: BTreeSet<String> =
+            contributions.iter().map(|c| c.rel_path.clone()).collect();
         // Scope 'master' = every indexed file in the class (SPEC §7 step 5).
         let ctx = synthesis_context(
             &conn,
             class_id,
             MASTER_SCOPE,
-            None,
+            listed_apart,
             "no indexed files in this class — rescan first",
         )?;
-        // Module roster = distinct depth-0 folders holding indexed files.
-        let modules: BTreeSet<String> = ctx
-            .manifest
+        let units = crate::units::list_units(&conn, class_id)?;
+        let notes: Vec<(String, String)> = contributions
             .iter()
-            .filter_map(|e| {
-                let (first, rest) = e.rel_path.split_once('/')?;
-                (!rest.is_empty()).then(|| first.to_string())
-            })
+            .filter(|c| c.distilled)
+            .map(|c| (c.corpus_rel_path.clone(), c.rel_path.clone()))
             .collect();
-        let modules_block = modules
-            .iter()
-            .map(|m| format!("- {m}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let cards_rel = cards_rel_path(MASTER_OUTPUT);
         let prompt = MASTER_TEMPLATE
             .replace("{class}", &ctx.class_name)
             .replace("{output}", MASTER_OUTPUT)
-            .replace("{modules}", &modules_block)
+            .replace("{cards}", &cards_rel)
+            .replace("{modules}", &roster_block(&units))
             .replace("{accent_light}", ctx.accent_light)
             .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
             .replace("{files}", &ctx.files_block)
+            .replace("{corpus}", &crate::lectures::corpus_block(&notes))
+            .replace("{hints}", &hints_for(&conn, class_id, None)?)
+            .replace("{objectives}", &master_objectives_block(&conn, &units)?)
+            .replace("{changes}", &ctx.changes_block)
             .replace("{manifest}", &ctx.manifest_block);
         let payload = serde_json::to_string(&GuidePayload {
             scope: MASTER_SCOPE.to_string(),
             rel_path: MASTER_OUTPUT.to_string(),
             source_manifest: serde_json::to_string(&ctx.manifest)?,
+            cards_rel_path: Some(cards_rel),
         })?;
         (ctx.class_dir, prompt, payload)
     };
 
     fs::create_dir_all(class_dir.join(GUIDES_DIR))?;
+    fs::create_dir_all(class_dir.join(CARDS_DIR))?;
     crate::jobs::enqueue_master_guide(app, class_id, &prompt, payload, None)
 }
 
-/// Rides `QueuedJob.payload` for practice jobs: finalize only has to verify
-/// the contracted file actually landed.
+/// Rides `QueuedJob.payload` for practice jobs: what finalize verifies and
+/// records. A payload from before exams had rows carries the path alone, and
+/// is finalized as it always was — the file checked, no row.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PracticePayload {
     rel_path: String,
+    #[serde(default)]
+    source_manifest: Option<String>,
 }
 
 /// SPEC §8.3: practice exam synthesis, from chat (M8) or the workspace's
-/// PRACTICE EXAM action (M19). Scope is a folder rel path, `unit:<id>` for
+/// Practice exam action (M19). Scope is a folder rel path, `unit:<id>` for
 /// one of the course's own divisions — drawing on the same sources as that
 /// division's guide (SPEC §8.5) — or `master` (the whole semester); `focus`
 /// narrows topics. `date_label` names the file (`<scope> — <date>.html`), so
-/// it must be filename-safe (YYYY-MM-DD).
+/// it must be filename-safe (YYYY-MM-DD), and it is the day the rubric's next
+/// assessment is measured from.
 pub fn generate_practice(
     app: &AppHandle,
     class_id: i64,
@@ -411,7 +627,7 @@ pub fn generate_practice(
         if has_active_job(&conn, class_id, "practice", scope)? {
             bail!("a practice exam for this scope is already queued or running");
         }
-        let (scope_label, (ctx, corpus)) = match unit_scope_id(scope) {
+        let (scope_label, (ctx, corpus), hints) = match unit_scope_id(scope) {
             Some(unit_id) => {
                 let unit_name: String = conn
                     .query_row(
@@ -422,7 +638,8 @@ pub fn generate_practice(
                     .optional()?
                     .context("that division is no longer in this course's structure")?;
                 let sources = unit_context(&conn, class_id, unit_id, &unit_name, scope)?;
-                (unit_name, sources)
+                let hints = hints_for(&conn, class_id, Some(&[unit_id]))?;
+                (unit_name, sources, hints)
             }
             None => {
                 let label = if scope == MASTER_SCOPE {
@@ -434,20 +651,41 @@ pub fn generate_practice(
                         .to_string_lossy()
                         .into_owned()
                 };
+                // The semester scope lists its transcripts through their
+                // notes, as the master does; a folder is not one of the
+                // course's divisions, so no lecture is mapped to it.
+                let (listed_apart, corpus, hints) = if scope == MASTER_SCOPE {
+                    let contributions = crate::lectures::list_contributions(&conn, class_id)?;
+                    let notes: Vec<(String, String)> = contributions
+                        .iter()
+                        .filter(|c| c.distilled)
+                        .map(|c| (c.corpus_rel_path.clone(), c.rel_path.clone()))
+                        .collect();
+                    (
+                        contributions.iter().map(|c| c.rel_path.clone()).collect(),
+                        crate::lectures::corpus_block(&notes),
+                        hints_for(&conn, class_id, None)?,
+                    )
+                } else {
+                    (
+                        BTreeSet::new(),
+                        "(none — only an exam scoped to one of the course's divisions or to the \
+                         semester draws on distilled lectures; the files above are the whole of \
+                         this scope)"
+                            .to_string(),
+                        "(none — a folder is not one of the course's divisions, and what the \
+                         professor flagged is kept per division)"
+                            .to_string(),
+                    )
+                };
                 let ctx = synthesis_context(
                     &conn,
                     class_id,
                     scope,
-                    None,
+                    listed_apart,
                     "no indexed files in that scope — rescan the class first",
                 )?;
-                // A folder is not one of the course's divisions, so no lecture
-                // is mapped to it; the semester scope lists its transcripts
-                // among the files above, since they are source material.
-                let corpus = "(none — only an exam scoped to one of the course's divisions draws on \
-                              distilled lectures; the files above are the whole of this scope)"
-                    .to_string();
-                (label, (ctx, corpus))
+                (label, (ctx, corpus), hints)
             }
         };
 
@@ -466,7 +704,7 @@ pub fn generate_practice(
             .replace("{scope_label}", &scope_label)
             .replace(
                 "{focus}",
-                focus.filter(|f| !f.trim().is_empty()).unwrap_or(
+                focus.map(str::trim).filter(|f| !f.is_empty()).unwrap_or(
                     "none — cover the whole scope evenly, weighted toward what an exam would test",
                 ),
             )
@@ -475,9 +713,12 @@ pub fn generate_practice(
             .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
             .replace("{files}", &ctx.files_block)
-            .replace("{corpus}", &corpus);
+            .replace("{corpus}", &corpus)
+            .replace("{hints}", &hints)
+            .replace("{assessment}", &assessment_block(&conn, class_id, date_label)?);
         let payload = serde_json::to_string(&PracticePayload {
             rel_path: output_rel.clone(),
+            source_manifest: Some(serde_json::to_string(&ctx.manifest)?),
         })?;
         (class_dir, output_rel, prompt, payload)
     };
@@ -485,6 +726,74 @@ pub fn generate_practice(
     fs::create_dir_all(class_dir.join(PRACTICE_DIR))?;
     let job_id = crate::jobs::enqueue_practice(app, class_id, scope, &prompt, payload)?;
     Ok((job_id, output_rel))
+}
+
+/// The `{assessment}` block of the exam prompt (SPEC §8.3): the class's
+/// categories with their weights, the next open quiz or exam on the calendar
+/// from `today`, and the kinds of assessment the calendar holds — what the
+/// rubric is matched to instead of a guess at the volume.
+pub(crate) fn assessment_block(conn: &Connection, class_id: i64, today: &str) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT name, weight FROM grade_categories WHERE class_id = ?1
+         ORDER BY weight DESC, name",
+    )?;
+    let weights = stmt
+        .query_map([class_id], |row| {
+            let name: String = row.get(0)?;
+            let weight: f64 = row.get(1)?;
+            Ok(if weight > 0.0 {
+                format!("{name} {}%", trim_percent(weight))
+            } else {
+                format!("{name} (no weight stated)")
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let next: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT title, kind, due_at FROM deadlines
+             WHERE class_id = ?1 AND status = 'open' AND kind IN ('quiz', 'exam')
+               AND substr(due_at, 1, 10) >= ?2
+             ORDER BY due_at LIMIT 1",
+            params![class_id, today],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let mut kinds_stmt = conn.prepare(
+        "SELECT DISTINCT kind FROM deadlines WHERE class_id = ?1 ORDER BY kind",
+    )?;
+    let kinds = kinds_stmt
+        .query_map([class_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut lines = Vec::new();
+    if !weights.is_empty() {
+        lines.push(format!("- Grade weights: {}", weights.join(" · ")));
+    }
+    match next {
+        Some((title, kind, due)) => lines.push(format!(
+            "- Next assessment on the calendar: {title} ({kind}) on {}",
+            due.chars().take(10).collect::<String>()
+        )),
+        None => lines.push("- No quiz or exam is dated on the calendar yet".to_string()),
+    }
+    if !kinds.is_empty() {
+        lines.push(format!("- Kinds of assessment the calendar holds: {}", kinds.join(", ")));
+    }
+    if weights.is_empty() && kinds.is_empty() {
+        return Ok("(no weights or dated assessments are recorded for this class — weight the \
+                   rubric toward what the material itself emphasizes, and say so in the cover)"
+            .to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+/// `50` for 50.0, `12.5` for 12.5.
+fn trim_percent(weight: f64) -> String {
+    if (weight - weight.round()).abs() < f64::EPSILON {
+        format!("{}", weight.round() as i64)
+    } else {
+        format!("{weight}")
+    }
 }
 
 /// The first free name under `base`: not on disk, and not claimed by an exam
@@ -519,29 +828,78 @@ fn claimed_practice_paths(conn: &Connection, class_id: i64) -> Result<BTreeSet<S
     Ok(paths)
 }
 
-/// Practice completion check (job runner, before the row leaves `running`):
-/// a "succeeded" job with no exam on disk is a failure.
-pub fn finalize_practice(app: &AppHandle, class_id: i64, payload: &str) -> Result<()> {
+/// Practice completion (job runner, before the row leaves `running`): a
+/// "succeeded" job with no exam on disk is a failure, and an exam that landed
+/// gets its row — scoped by its file, its manifest the listed sources widened
+/// by what the log shows the run read (SPEC §8.3).
+pub fn finalize_practice(
+    app: &AppHandle,
+    class_id: i64,
+    payload: &str,
+    read: &BTreeSet<String>,
+) -> Result<()> {
     let payload: PracticePayload =
         serde_json::from_str(payload).context("parsing practice payload")?;
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
-    let abs = crate::scanner::class_dir(&conn, class_id)?.join(&payload.rel_path);
+    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    let abs = class_dir.join(&payload.rel_path);
     let written = fs::metadata(&abs)
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false);
     if !written {
         bail!("no exam file written at {}", payload.rel_path);
     }
-    Ok(())
+    let Some(listed) = payload.source_manifest else {
+        return Ok(());
+    };
+    let listed = serde_json::from_str::<Vec<ManifestEntry>>(&listed).unwrap_or_default();
+    let manifest = union_manifest(&conn, class_id, &class_dir, listed, read)?;
+    upsert_guide(
+        &conn,
+        class_id,
+        &format!("{PRACTICE_SCOPE_PREFIX}{}", payload.rel_path),
+        &payload.rel_path,
+        &serde_json::to_string(&manifest)?,
+    )
 }
 
-/// Practice exams for the workspace listing — the directory is the truth.
-pub fn list_practice(conn: &Connection, class_id: i64) -> Result<Vec<crate::notes::NoteFile>> {
-    let dir = crate::scanner::class_dir(conn, class_id)?.join(PRACTICE_DIR);
-    Ok(crate::notes::list_dir_files(&dir, PRACTICE_DIR)
+/// One practice exam as the workspace lists it: the file, and its row's
+/// freshness where one exists — exams written before rows carry none.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeInfo {
+    pub name: String,
+    pub rel_path: String,
+    pub modified_at: i64,
+    pub scope: Option<String>,
+    pub stale: Option<bool>,
+    pub diff: Option<ManifestDiff>,
+}
+
+/// Practice exams for the workspace listing — the directory is the truth for
+/// what exists, and the guides table for what each was built from.
+pub fn list_practice(conn: &Connection, class_id: i64) -> Result<Vec<PracticeInfo>> {
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let rows: std::collections::HashMap<String, GuideInfo> = list_guides(conn, class_id)?
+        .into_iter()
+        .filter(|g| g.practice)
+        .map(|g| (g.rel_path.clone(), g))
+        .collect();
+    Ok(crate::notes::list_dir_files(&class_dir.join(PRACTICE_DIR), PRACTICE_DIR)
         .into_iter()
         .filter(|f| f.name.to_lowercase().ends_with(".html"))
+        .map(|f| {
+            let row = rows.get(&f.rel_path);
+            PracticeInfo {
+                scope: row.map(|g| g.scope.clone()),
+                stale: row.map(|g| g.stale),
+                diff: row.map(|g| g.diff.clone()),
+                name: f.name,
+                rel_path: f.rel_path,
+                modified_at: f.modified_at,
+            }
+        })
         .collect())
 }
 
@@ -667,18 +1025,79 @@ pub(crate) fn has_active_job(conn: &Connection, class_id: i64, kind: &str, scope
 // ---------------------------------------------------------------------------
 // Completion (called by the job runner before the row leaves 'running')
 
-pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()> {
+/// One card of a cards sidecar, as a digest or a guide writes it.
+#[derive(Deserialize)]
+struct RawCard {
+    front: String,
+    back: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+/// Checks a cards file's shape — an array of `{front, back, source, topic}`,
+/// both sides non-empty; an empty array is valid — and returns the count.
+/// Nothing reads the cards until M37, so the check is the whole contract.
+pub(crate) fn parse_cards(json: &str) -> Result<usize> {
+    let items: Vec<serde_json::Value> =
+        serde_json::from_str(json).context("the cards file is not a JSON array")?;
+    for (index, item) in items.iter().enumerate() {
+        let card: RawCard = serde_json::from_value(item.clone())
+            .with_context(|| format!("card {} is not {{front, back, source, topic}}", index + 1))?;
+        if card.front.trim().is_empty() || card.back.trim().is_empty() {
+            bail!("card {} has an empty side", index + 1);
+        }
+        let _ = (card.source, card.topic);
+    }
+    Ok(items.len())
+}
+
+pub fn finalize_job(
+    app: &AppHandle,
+    class_id: i64,
+    payload: &str,
+    read: &BTreeSet<String>,
+) -> Result<()> {
     let payload: GuidePayload =
         serde_json::from_str(payload).context("parsing guide payload")?;
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
-    let abs = crate::scanner::class_dir(&conn, class_id)?.join(&payload.rel_path);
+    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    let abs = class_dir.join(&payload.rel_path);
     let written = fs::metadata(&abs)
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false);
     if !written {
         bail!("no guide file written at {}", payload.rel_path);
     }
+    // The cards sidecar is required on the same terms as the guide (SPEC
+    // §8.1): the file is the contract, and a run that skipped it did not
+    // finish.
+    if let Some(cards_rel) = &payload.cards_rel_path {
+        let json = fs::read_to_string(class_dir.join(cards_rel))
+            .with_context(|| format!("no cards file written at {cards_rel}"))?;
+        parse_cards(&json).with_context(|| format!("the cards file at {cards_rel} is malformed"))?;
+    }
+    let listed = serde_json::from_str::<Vec<ManifestEntry>>(&payload.source_manifest)
+        .unwrap_or_default();
+    let manifest = union_manifest(&conn, class_id, &class_dir, listed, read)?;
+    upsert_guide(
+        &conn,
+        class_id,
+        &payload.scope,
+        &payload.rel_path,
+        &serde_json::to_string(&manifest)?,
+    )
+}
+
+fn upsert_guide(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    rel_path: &str,
+    manifest_json: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -686,7 +1105,7 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()>
            rel_path = excluded.rel_path,
            generated_at = excluded.generated_at,
            source_manifest = excluded.source_manifest",
-        params![class_id, payload.scope, payload.rel_path, now(), payload.source_manifest],
+        params![class_id, scope, rel_path, now(), manifest_json],
     )?;
     Ok(())
 }
@@ -713,13 +1132,26 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Resolved once for the resolver below; a root that cannot be resolved
+    // leaves every widened entry unresolved, which reads as gone.
+    let class_dir = crate::scanner::class_dir(conn, class_id).ok();
 
     let mut guides = Vec::with_capacity(rows.len());
     for (scope, rel_path, generated_at, manifest_json, unit_name) in rows {
         let current = current_manifest(conn, class_id, &scope)?;
+        // An entry outside the scope's own set — a note, a page mirror, a
+        // file the job found through --add-dir — is resolved to what it is
+        // now, so a widened manifest reads honestly rather than stale forever.
+        let diff = manifest_diff(&manifest_json, &current, |path| {
+            class_dir
+                .as_deref()
+                .and_then(|dir| current_hash(conn, class_id, dir, path).ok().flatten())
+        });
         guides.push(GuideInfo {
-            stale: manifest_is_stale(&manifest_json, &current),
+            stale: diff.is_stale(),
+            diff,
             session: crate::db::is_session_scope(&scope),
+            practice: crate::db::is_practice_scope(&scope),
             label: scope_label(&scope, unit_name.as_deref()),
             scope,
             rel_path,
@@ -733,11 +1165,12 @@ pub fn list_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
 ///
 /// Study guides only. A session digest also lives in this table and also goes
 /// stale, but the badge means "guides worth regenerating" and the Lectures
-/// listing carries its own affordance for a stale session.
+/// listing carries its own affordance for a stale session; an exam is not
+/// regenerated either.
 pub fn stale_guide_count(conn: &Connection, class_id: i64) -> Result<i64> {
     Ok(list_guides(conn, class_id)?
         .iter()
-        .filter(|g| g.stale && !g.session)
+        .filter(|g| g.stale && !g.session && !g.practice)
         .count() as i64)
 }
 
@@ -776,7 +1209,7 @@ mod tests {
         fs::write(dir.join(format!("{base}.html")), "earlier today").expect("write");
         assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base} (2).html"));
 
-        let payload = serde_json::to_string(&PracticePayload { rel_path: format!("{base} (2).html") })
+        let payload = serde_json::to_string(&PracticePayload { rel_path: format!("{base} (2).html"), source_manifest: None })
             .expect("payload");
         conn.execute(
             "INSERT INTO jobs (kind, class_id, scope, status, payload, created_at, owner_pid)
@@ -921,5 +1354,83 @@ mod tests {
         assert_eq!(label("unit:24"), "Week 2 — Responsible AI");
         assert_eq!(label("master"), "Semester Master");
         assert_eq!(label("Module 1"), "Module 1");
+    }
+    /// The master's roster (SPEC §8.2) is the course's own divisions in its
+    /// own order, each with its date or its week range, never a folder.
+    #[test]
+    fn the_master_s_roster_is_rendered_from_the_divisions() {
+        let unit = |ordinal: i64, kind: &str, name: &str, starts_on: Option<&str>, weeks: Option<(i64, i64)>| {
+            crate::units::UnitInfo {
+                id: ordinal,
+                ordinal,
+                kind: kind.into(),
+                name: name.into(),
+                number: Some(ordinal),
+                rel_path: None,
+                starts_on: starts_on.map(Into::into),
+                ends_on: None,
+                first_week: weeks.map(|(f, _)| f),
+                last_week: weeks.map(|(_, l)| l),
+                source: "syllabus".into(),
+                materials: None,
+            }
+        };
+        let block = roster_block(&[
+            unit(1, "week", "Week 1 — Introduction", Some("2026-08-20"), None),
+            unit(2, "week", "Reading Days — No Class", None, None),
+            unit(3, "part", "Part II: Alignment", None, Some((9, 12))),
+        ]);
+        assert_eq!(
+            block,
+            "- Week 1 — Introduction (from 2026-08-20)\n- Reading Days — No Class\n- Part II: Alignment (Weeks 9–12)"
+        );
+        assert!(roster_block(&[]).starts_with("(the course declares no divisions yet"));
+    }
+
+    /// The cards file's contract (SPEC §8.1, §8.4): an array of two-sided
+    /// cards, empty allowed; anything else fails the run that wrote it.
+    #[test]
+    fn the_cards_file_is_checked_for_its_shape() {
+        assert_eq!(parse_cards("[]").unwrap(), 0);
+        assert_eq!(
+            parse_cards(r#"[{"front":"MCAR?","back":"Missing completely at random","source":"00:50","topic":"missingness"},{"front":"a","back":"b"}]"#).unwrap(),
+            2
+        );
+        for bad in [r#"{"front":"x","back":"y"}"#, r#"[{"front":"x"}]"#, r#"[{"front":"","back":"y"}]"#, "nope"] {
+            assert!(parse_cards(bad).is_err(), "{bad}");
+        }
+        assert_eq!(cards_rel_path("Study Guides/Week 3 — Data.html"), ".classhub/cards/Week 3 — Data.json");
+        assert_eq!(cards_rel_path(MASTER_OUTPUT), ".classhub/cards/Semester Master.json");
+        assert_eq!(scope_label("practice:Study Guides/Practice/Week 3 — 2026-09-08.html", None), "Week 3 — 2026-09-08");
+    }
+
+    /// The exam's `{assessment}` block (SPEC §8.3): the weights, the next open
+    /// quiz or exam from the given day, and the kinds on the calendar.
+    #[test]
+    fn the_assessment_block_names_the_weights_and_the_next_quiz() {
+        let conn = crate::db::memory_db();
+        assert!(assessment_block(&conn, 3, "2026-09-08").unwrap().starts_with("(no weights"));
+        for (name, weight) in [("Assignments", 50.0), ("Quizzes", 20.0), ("Survey", 0.0)] {
+            conn.execute(
+                "INSERT INTO grade_categories (class_id, name, weight) VALUES (3, ?1, ?2)",
+                rusqlite::params![name, weight],
+            )
+            .unwrap();
+        }
+        for (title, kind, due) in [("Quiz 1", "quiz", "2026-09-03"), ("Homework 1", "assignment", "2026-09-13"), ("Quiz 2", "quiz", "2026-09-24")] {
+            conn.execute(
+                "INSERT INTO deadlines (class_id, title, kind, due_at, status, source)
+                 VALUES (3, ?1, ?2, ?3, 'open', 'syllabus')",
+                rusqlite::params![title, kind, due],
+            )
+            .unwrap();
+        }
+        let block = assessment_block(&conn, 3, "2026-09-08").unwrap();
+        assert_eq!(
+            block,
+            "- Grade weights: Assignments 50% · Quizzes 20% · Survey (no weight stated)\n\
+             - Next assessment on the calendar: Quiz 2 (quiz) on 2026-09-24\n\
+             - Kinds of assessment the calendar holds: assignment, quiz"
+        );
     }
 }

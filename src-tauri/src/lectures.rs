@@ -436,6 +436,7 @@ fn record_contribution(
     let corpus_rel = corpus_rel_path(&slot.unit_name, rel_path);
     refuse_held_note(conn, class_id, class_dir, &slot.unit_name, &corpus_rel, rel_path)?;
     let (end_ms, lines) = span_of(markdown);
+    drop_hints(conn, class_id, rel_path)?;
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
         rusqlite::params![class_id, rel_path],
@@ -592,11 +593,20 @@ pub fn refile_lecture(
     if old_row.is_none() && !is_filed_transcript(dest_rel) {
         return Ok(effects);
     }
+    // The flagged items are the lecture's, like its note (SPEC §8.4): read
+    // off the row about to go, written back under the row that replaces it.
+    let carried = held_hints(conn, class_id, source_rel)?;
+    drop_hints(conn, class_id, source_rel)?;
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
         rusqlite::params![class_id, source_rel],
     )?;
     let moved = contribution_for(conn, class_id, class_dir, dest_rel)?;
+    if let Some((unit_id, ..)) = &moved {
+        if let Some(id) = contribution_id(conn, class_id, dest_rel)? {
+            replace_hints(conn, class_id, *unit_id, id, &carried)?;
+        }
+    }
     let (old_corpus, old_summary) = match old_row {
         Some((corpus, summary)) => (Some(corpus), Some(summary)),
         None => (None, None),
@@ -711,6 +721,15 @@ impl NoteMove {
                     );
                     return;
                 }
+                // The sidecars are the note's (SPEC §8.4) and follow it.
+                for kind in SIDECAR_KINDS {
+                    let (side_from, side_to) = (sidecar_path(&from, kind), sidecar_path(&to, kind));
+                    if side_from.is_file() {
+                        if let Err(e) = fs::rename(&side_from, &side_to) {
+                            eprintln!("sidecar move failed ({}): {e}", side_from.display());
+                        }
+                    }
+                }
                 // `remove_dir` refuses a folder with anything left in it, which
                 // is the whole check: a unit's corpus folder outlives its last
                 // note only as clutter.
@@ -722,6 +741,14 @@ impl NoteMove {
                 if let Err(e) = fs::remove_file(&path) {
                     eprintln!("corpus note removal failed ({}): {e}", path.display());
                     return;
+                }
+                for kind in SIDECAR_KINDS {
+                    let side = sidecar_path(&path, kind);
+                    if side.is_file() {
+                        if let Err(e) = fs::remove_file(&side) {
+                            eprintln!("sidecar removal failed ({}): {e}", side.display());
+                        }
+                    }
                 }
                 // The same check as above: a folder emptied of its last note
                 // is clutter, and `remove_dir` refuses one that is not empty.
@@ -770,7 +797,7 @@ fn refile_session(
     let Some((id, manifest)) = row else {
         return Ok(orphaned);
     };
-    // An unreadable manifest is read the way `manifest_is_stale` reads one: as
+    // An unreadable manifest is read the way `manifest_diff` reads one: as
     // stale, never as an error. Failing here would roll back the whole move
     // over one corrupt row; the scope still follows, and the digest shows as
     // stale, which is the honest answer.
@@ -851,6 +878,7 @@ pub fn lecture_left(
             |row| row.get(0),
         )
         .optional()?;
+    drop_hints(conn, class_id, rel_path)?;
     conn.execute(
         "DELETE FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
         rusqlite::params![class_id, rel_path],
@@ -952,6 +980,310 @@ pub fn corpus_block(notes: &[(String, String)]) -> String {
         .map(|(corpus, transcript)| format!("- {corpus}\n  transcript: {transcript}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The two sidecars a note carries (SPEC §8.4).
+const SIDECAR_KINDS: [&str; 2] = ["hints", "cards"];
+
+/// The contribution row keyed by a transcript, if any.
+fn contribution_id(conn: &Connection, class_id: i64, rel_path: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, rel_path],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// The flagged items on a transcript's row, for a refile to carry.
+fn held_hints(conn: &Connection, class_id: i64, rel_path: &str) -> Result<Vec<Hint>> {
+    let mut stmt = conn.prepare(
+        "SELECT h.kind, h.text, h.anchor FROM lecture_hints h
+         JOIN lecture_contributions lc ON lc.id = h.contribution_id
+         WHERE lc.class_id = ?1 AND lc.rel_path = ?2 ORDER BY h.id",
+    )?;
+    let hints = stmt
+        .query_map(rusqlite::params![class_id, rel_path], |row| {
+            Ok(Hint { kind: row.get(0)?, text: row.get(1)?, anchor: row.get(2)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(hints)
+}
+
+/// Removes a transcript's flagged items with its row. Stated rather than
+/// left to the schema's cascade, since a connection without foreign keys on
+/// — a test's, another build's — would otherwise leave them pointing at a
+/// row that is gone.
+fn drop_hints(conn: &Connection, class_id: i64, rel_path: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM lecture_hints WHERE contribution_id IN
+           (SELECT id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2)",
+        rusqlite::params![class_id, rel_path],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The ledger (SPEC §8.4): what the professor flagged
+
+/// The kinds a hint may carry, in the sidecar's own words.
+pub const HINT_KINDS: &[&str] =
+    &["emphasis", "exam_hint", "correction", "confusion", "action", "thread"];
+
+/// A kind as the workspace's chips and the prompts say it.
+pub fn hint_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "emphasis" => "Emphasis",
+        "exam_hint" => "Exam hint",
+        "correction" => "Correction",
+        "confusion" => "Where the room got stuck",
+        "action" => "Action",
+        "thread" => "Builds on",
+        _ => "Flagged",
+    }
+}
+
+/// Past this a "hint" is a paragraph of the session document, which the
+/// document already holds.
+const MAX_HINT_CHARS: usize = 600;
+
+/// One item of a hints sidecar, as the digest writes it.
+#[derive(Deserialize)]
+struct RawHint {
+    kind: String,
+    text: String,
+    #[serde(default)]
+    anchor: Option<String>,
+}
+
+/// One flagged item, parsed, its anchor resolved to a heading the transcript
+/// actually carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    pub kind: String,
+    pub text: String,
+    pub anchor: Option<String>,
+}
+
+/// The sidecars beside a corpus note: `<note minus .md>.hints.json` and
+/// `.cards.json`, derived the way the note's own path is, so the app can ask
+/// for them by name and carry them with the note.
+pub(crate) fn note_sidecar(note_rel: &str, kind: &str) -> String {
+    format!("{}.{kind}.json", note_rel.strip_suffix(".md").unwrap_or(note_rel))
+}
+
+/// The same derivation on an absolute note path, for the moves.
+fn sidecar_path(note: &Path, kind: &str) -> PathBuf {
+    note.with_extension(format!("{kind}.json"))
+}
+
+/// Parses a hints sidecar. An empty array is valid; anything that is not an
+/// array of `{kind, text, anchor}` with a known kind and a non-empty text
+/// fails the digest the way a missing markdown twin does, because the file
+/// is the point. An anchor is resolved to the transcript's own `## HH:MM`
+/// heading at or before it — the one a link can open — and dropped where the
+/// transcript has none there, so a stored anchor is always one that resolves.
+pub(crate) fn parse_hints(json: &str, anchors: &[i64]) -> Result<Vec<Hint>> {
+    let items: Vec<serde_json::Value> =
+        serde_json::from_str(json).context("the hints sidecar is not a JSON array")?;
+    let mut hints = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let raw: RawHint = serde_json::from_value(item.clone())
+            .with_context(|| format!("hint {} is not {{kind, text, anchor}}", index + 1))?;
+        let kind = raw.kind.trim().to_lowercase();
+        if !HINT_KINDS.contains(&kind.as_str()) {
+            bail!("hint {} has an unknown kind '{}'", index + 1, raw.kind);
+        }
+        let text = raw.text.trim();
+        if text.is_empty() {
+            bail!("hint {} has no text", index + 1);
+        }
+        hints.push(Hint {
+            kind,
+            text: crate::db::truncate(text, MAX_HINT_CHARS),
+            anchor: raw.anchor.as_deref().and_then(|cited| resolve_anchor(cited, anchors)),
+        });
+    }
+    Ok(hints)
+}
+
+/// `HH:MM` as minutes.
+fn anchor_minutes(anchor: &str) -> Option<i64> {
+    let (hours, minutes) = anchor.trim().split_once(':')?;
+    let hours = hours.trim().parse::<i64>().ok()?;
+    let minutes = minutes.trim().parse::<i64>().ok()?;
+    (hours >= 0 && (0..60).contains(&minutes)).then_some(hours * 60 + minutes)
+}
+
+/// A transcript's own anchors, in minutes, off its `## HH:MM` headings.
+pub(crate) fn transcript_anchors(markdown: &str) -> Vec<i64> {
+    markdown
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .filter_map(anchor_minutes)
+        .collect()
+}
+
+/// The heading a cited time opens: the last anchor at or before it.
+fn resolve_anchor(cited: &str, anchors: &[i64]) -> Option<String> {
+    let minutes = anchor_minutes(cited)?;
+    let at = anchors.iter().copied().filter(|a| *a <= minutes).max()?;
+    Some(format!("{:02}:{:02}", at / 60, at % 60))
+}
+
+/// Replaces one contribution's flagged items with the sidecar's, inside the
+/// caller's transaction.
+fn replace_hints(
+    conn: &Connection,
+    class_id: i64,
+    unit_id: i64,
+    contribution_id: i64,
+    hints: &[Hint],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM lecture_hints WHERE contribution_id = ?1",
+        [contribution_id],
+    )?;
+    let stamp = now();
+    for hint in hints {
+        conn.execute(
+            "INSERT INTO lecture_hints
+             (class_id, unit_id, contribution_id, kind, text, anchor, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![class_id, unit_id, contribution_id, hint.kind, hint.text, hint.anchor, stamp],
+        )?;
+    }
+    Ok(())
+}
+
+/// One flagged item as the workspace's Flagged section, the prompts and the
+/// chat overview read it: with the session it came from.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HintInfo {
+    pub id: i64,
+    pub kind: String,
+    pub text: String,
+    pub anchor: Option<String>,
+    pub unit_id: i64,
+    pub unit_name: String,
+    /// The transcript, class-relative — what the anchor opens.
+    pub rel_path: String,
+    /// The session's date off the transcript's name, `YYYY-MM-DD`.
+    pub date: String,
+    /// What the session was about — the digest's title.
+    pub title: String,
+}
+
+/// The session date a filed transcript's name opens with, else nothing.
+pub(crate) fn session_date(rel_path: &str) -> String {
+    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    let date: String = name.chars().take(10).collect();
+    if date.len() == 10 && chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok() {
+        date
+    } else {
+        String::new()
+    }
+}
+
+/// Every flagged item of a class, newest session first (SPEC §8.4).
+pub fn list_hints(conn: &Connection, class_id: i64) -> Result<Vec<HintInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT h.id, h.kind, h.text, h.anchor, h.unit_id, u.name, lc.rel_path, lc.summary
+         FROM lecture_hints h
+         JOIN units u ON u.id = h.unit_id
+         JOIN lecture_contributions lc ON lc.id = h.contribution_id
+         WHERE h.class_id = ?1
+         ORDER BY h.id",
+    )?;
+    let mut hints = stmt
+        .query_map([class_id], |row| {
+            let rel_path: String = row.get(6)?;
+            let summary: String = row.get(7)?;
+            Ok(HintInfo {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                text: row.get(2)?,
+                anchor: row.get(3)?,
+                unit_id: row.get(4)?,
+                unit_name: row.get(5)?,
+                date: session_date(&rel_path),
+                title: summary.strip_prefix(PLACEHOLDER_SUMMARY).map_or(summary.clone(), |_| String::new()),
+                rel_path,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    hints.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then_with(|| b.rel_path.cmp(&a.rel_path))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(hints)
+}
+
+/// The `{hints}` block a guide, an exam and the master receive (SPEC §8.1):
+/// what the professor flagged, one session at a time, newest first, each
+/// item with its kind and its anchor into the transcript. Filtered to the
+/// given divisions where a scope is one of them; every row for the master.
+pub fn hints_block(hints: &[HintInfo], units: Option<&[i64]>) -> String {
+    let mut out = String::new();
+    let mut session: Option<&str> = None;
+    for hint in hints {
+        if units.is_some_and(|ids| !ids.contains(&hint.unit_id)) {
+            continue;
+        }
+        if session != Some(hint.rel_path.as_str()) {
+            session = Some(hint.rel_path.as_str());
+            out.push_str(&format!(
+                "\nSession {}{} — {} (transcript: {})\n",
+                hint.date,
+                if hint.title.is_empty() { String::new() } else { format!(" — {}", hint.title) },
+                hint.unit_name,
+                hint.rel_path
+            ));
+        }
+        let anchor = hint.anchor.as_deref().map_or(String::new(), |a| format!(" · {a}"));
+        out.push_str(&format!("- [{}{anchor}] {}\n", hint_kind_label(&hint.kind), hint.text));
+    }
+    if out.is_empty() {
+        return "(none — no session of this scope has been distilled for what was flagged yet)"
+            .to_string();
+    }
+    out.trim_start().to_string()
+}
+
+/// The `{previous}` block of the digest prompt: what the class's earlier
+/// sessions were about, newest first and capped, so the digest can say what
+/// this one built on. A placeholder summary is a session not yet read.
+fn previous_sessions_block(conn: &Connection, class_id: i64, transcript_rel: &str) -> Result<String> {
+    const SHOWN: usize = 8;
+    let mut stmt = conn.prepare(
+        "SELECT lc.rel_path, lc.summary, u.name FROM lecture_contributions lc
+         JOIN units u ON u.id = lc.unit_id
+         WHERE lc.class_id = ?1 AND lc.status = 'applied' AND lc.rel_path != ?2",
+    )?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![class_id, transcript_rel], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, summary, _)| !summary.starts_with(PLACEHOLDER_SUMMARY))
+        .map(|(rel_path, summary, unit)| (session_date(&rel_path), summary, unit))
+        .filter(|(date, ..)| date.as_str() < session_date(transcript_rel).as_str() || session_date(transcript_rel).is_empty())
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    if rows.is_empty() {
+        return Ok("(none — this is the first session of the course to be distilled)".to_string());
+    }
+    Ok(rows
+        .iter()
+        .take(SHOWN)
+        .map(|(date, summary, unit)| format!("- {date} — {summary} ({unit})"))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1435,7 @@ pub fn enqueue_digest(
                 mapped.as_ref().map(|(unit_id, ..)| *unit_id),
             )?,
             corpus: &corpus_instruction(mapped.as_ref()),
+            previous: &previous_sessions_block(conn, class_id, transcript_rel_path)?,
         });
         let manifest =
             serde_json::to_string(&crate::extract::current_manifest(conn, class_id, &scope)?)?;
@@ -1153,11 +1486,35 @@ fn corpus_instruction(mapped: Option<&(i64, String, String)>) -> String {
              and this is written to be built from, so drop the logistics, the narrative of how \
              the class went, and anything an exam could not touch. Where the session covered a \
              topic only partially, say so: a guide reading this must not present a fragment as a \
-             treatment."
+             treatment.\n\n\
+             ### The two sidecars — required outputs\n\n\
+             Beside the note, two JSON files at exactly these paths. The app reads both, and \
+             fails the run if either is missing or malformed, the way it does for a missing \
+             markdown twin.\n\n\
+             **`{hints}`** — what the professor flagged, as a JSON array of \
+             `{{\"kind\": …, \"text\": …, \"anchor\": \"HH:MM\" or null}}`: one item per point the \
+             session document puts under *Said out loud, not on the slides* (kind `emphasis`, \
+             `exam_hint` or `correction`, whichever it is), one per item under *Questions asked* \
+             where the room got stuck or a question exposed a confusion (kind `confusion`), one \
+             per thing assigned or dated under *Action items & dates* (kind `action`), and three \
+             to five items of kind `thread` naming what this session built on from the earlier \
+             sessions listed under *Earlier sessions* below — a concept picked up again, a method \
+             extended, a promise kept — each naming the earlier session it draws on; where no \
+             earlier session exists, write no threads. `text` is one or two sentences in the \
+             professor's own terms, and `anchor` the `HH:MM` the point was made at, or null for \
+             an untimed transcript. An empty array is a valid answer for a session with nothing \
+             flagged; a missing file is not.\n\n\
+             **`{cards}`** — active-recall cards, as a JSON array of \
+             `{{\"front\": …, \"back\": …, \"source\": \"HH:MM\", \"topic\": …}}`: one per term under \
+             *Terms introduced* and one per key point that stands alone as a question. `front` \
+             asks, `back` answers completely, `source` is the anchor, `topic` the concept in two \
+             or three words. Nothing reads the cards yet; the shape is the contract.",
+            hints = note_sidecar(corpus_rel, "hints"),
+            cards = note_sidecar(corpus_rel, "cards"),
         ),
         None => "None for this session. It is not mapped to one of the course's own divisions \
                  — a transcript filed outside `Weeks/`, or a course that publishes no schedule \
-                 — so write only the two documents above."
+                 — so write only the two documents above, and no sidecars."
             .into(),
     }
 }
@@ -1177,6 +1534,8 @@ struct DigestPromptVars<'a> {
     accent_dark: &'a str,
     context: &'a str,
     corpus: &'a str,
+    /// The class's earlier sessions, for the threads this one built on.
+    previous: &'a str,
 }
 
 fn render_prompt(vars: &DigestPromptVars<'_>) -> String {
@@ -1189,6 +1548,7 @@ fn render_prompt(vars: &DigestPromptVars<'_>) -> String {
         .replace("{accent_light}", vars.accent_light)
         .replace("{accent_dark}", vars.accent_dark)
         .replace("{context}", vars.context)
+        .replace("{previous}", vars.previous)
         .replace("{corpus}", vars.corpus)
 }
 
@@ -1274,6 +1634,7 @@ pub fn finalize_digest(
     class_id: i64,
     payload: &str,
     result_text: &str,
+    read: &std::collections::BTreeSet<String>,
 ) -> Result<String> {
     let payload: DigestPayload =
         serde_json::from_str(payload).context("parsing digest job payload")?;
@@ -1284,6 +1645,16 @@ pub fn finalize_digest(
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
     let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    // The manifest the row records is what the job was told about, widened
+    // by what its log shows it read (SPEC §7 step 5): the deck filed beside
+    // the transcript, if it opened it.
+    let listed = serde_json::from_str::<Vec<crate::extract::ManifestEntry>>(&payload.source_manifest)
+        .unwrap_or_default();
+    let manifest = crate::extract::union_manifest(&conn, class_id, &class_dir, listed, read)?;
+    let payload = DigestPayload {
+        source_manifest: serde_json::to_string(&manifest)?,
+        ..payload
+    };
 
     let recorded = record_session(&conn, class_id, &class_dir, &payload, &result);
     if recorded.is_err() {
@@ -1379,14 +1750,34 @@ fn record_session(
     // a contribution row names it, so a missing note is a unit guide quietly
     // built without the lecture it was supposed to be built from. The job asks
     // for it by an exact path, so there is nothing to interpret here.
-    if let Some(corpus_rel) = &payload.corpus_rel_path {
-        let written = fs::metadata(class_dir.join(corpus_rel))
-            .map(|m| m.is_file() && m.len() > 0)
-            .unwrap_or(false);
-        if !written {
-            bail!("no corpus note written at {corpus_rel}");
+    // The sidecars are checked on the same terms as the note (SPEC §8.4): a
+    // hints file that is missing or malformed fails the run, since the ledger
+    // is the point, and the cards file has to be there and parse.
+    let hints = match &payload.corpus_rel_path {
+        Some(corpus_rel) => {
+            let written = fs::metadata(class_dir.join(corpus_rel))
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false);
+            if !written {
+                bail!("no corpus note written at {corpus_rel}");
+            }
+            let hints_rel = note_sidecar(corpus_rel, "hints");
+            let json = fs::read_to_string(class_dir.join(&hints_rel))
+                .with_context(|| format!("no hints sidecar written at {hints_rel}"))?;
+            let anchors = transcript_anchors(
+                &fs::read_to_string(class_dir.join(&payload.transcript_rel_path)).unwrap_or_default(),
+            );
+            let hints = parse_hints(&json, &anchors)
+                .with_context(|| format!("the hints sidecar at {hints_rel} is malformed"))?;
+            let cards_rel = note_sidecar(corpus_rel, "cards");
+            let cards = fs::read_to_string(class_dir.join(&cards_rel))
+                .with_context(|| format!("no cards sidecar written at {cards_rel}"))?;
+            crate::guides::parse_cards(&cards)
+                .with_context(|| format!("the cards sidecar at {cards_rel} is malformed"))?;
+            Some(hints)
         }
-    }
+        None => None,
+    };
 
     let scope = session_scope(&payload.transcript_rel_path);
     let superseded: Option<String> = conn
@@ -1397,7 +1788,9 @@ fn record_session(
         )
         .optional()?;
 
-    conn.execute(
+    // The session row, the summary and the ledger land together.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
         "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(class_id, scope) DO UPDATE SET
@@ -1412,6 +1805,34 @@ fn record_session(
             payload.source_manifest
         ],
     )?;
+    if let Some(hints) = &hints {
+        let row: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT id, unit_id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+                rusqlite::params![class_id, &payload.transcript_rel_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, unit_id)) = row {
+            replace_hints(&tx, class_id, unit_id, id, hints)?;
+        }
+    }
+
+    // The row's summary was a placeholder from filing time. Now that the
+    // session has been read, it carries what the session was about — which is
+    // what the Lectures listing shows beside the division it feeds.
+    if payload.corpus_rel_path.is_some() {
+        tx.execute(
+            "UPDATE lecture_contributions SET summary = ?1
+             WHERE class_id = ?2 AND rel_path = ?3",
+            rusqlite::params![
+                crate::db::truncate(result.title.trim(), 120),
+                class_id,
+                payload.transcript_rel_path
+            ],
+        )?;
+    }
+    tx.commit()?;
 
     // The job names its own file, so a re-run under a different topic leaves
     // the previous pair on disk with nothing pointing at it — and chat's search
@@ -1422,21 +1843,6 @@ fn record_session(
                 let _ = fs::remove_file(abs);
             }
         }
-    }
-
-    // The row's summary was a placeholder from filing time. Now that the
-    // session has been read, it carries what the session was about — which is
-    // what the Lectures listing shows beside the division it feeds.
-    if payload.corpus_rel_path.is_some() {
-        conn.execute(
-            "UPDATE lecture_contributions SET summary = ?1
-             WHERE class_id = ?2 AND rel_path = ?3",
-            rusqlite::params![
-                crate::db::truncate(result.title.trim(), 120),
-                class_id,
-                payload.transcript_rel_path
-            ],
-        )?;
     }
     Ok(format!("{} · {}", result.title, payload.date))
 }
@@ -1588,6 +1994,7 @@ mod tests {
             accent_dark: "oklch(0.732 0.13 158)",
             context: "- Module 1/slides.pdf",
             corpus: &corpus,
+            previous: "(none)",
         });
 
         // A leftover reads as `{lower_snake}`; the JSON contract's own braces
@@ -1637,6 +2044,7 @@ mod tests {
         // instruction half-filled.
         let unmapped = render_prompt(&DigestPromptVars {
             corpus: &corpus_instruction(None),
+            previous: "(none)",
             ..DigestPromptVars {
                 class: "AI in Health Design Studio I",
                 date: "2026-08-26",
@@ -1646,6 +2054,7 @@ mod tests {
                 accent_dark: "oklch(0.748 0.145 50)",
                 context: "(none filed alongside this session yet)",
                 corpus: "",
+                previous: "(none)",
             }
         });
         assert!(placeholders(&unmapped).is_empty(), "{:?}", placeholders(&unmapped));
@@ -1750,7 +2159,31 @@ mod tests {
             "# Lecture\n\n## 00:00\n\nHello.\n",
         )
         .expect("contribution");
+        // The sidecars are checked on the same terms (SPEC §8.4): the ledger
+        // first, then the cards; both must be there and parse.
+        let err = record_session(&conn, 1, &dir, &payload, &result).expect_err("no hints");
+        assert!(format!("{err:#}").contains("no hints sidecar"), "{err:#}");
+        let hints_rel = note_sidecar(corpus_rel, "hints");
+        fs::write(dir.join(&hints_rel), "not json").expect("hints");
+        let err = record_session(&conn, 1, &dir, &payload, &result).expect_err("malformed");
+        assert!(format!("{err:#}").contains("malformed"), "{err:#}");
+        fs::write(
+            dir.join(&hints_rel),
+            r#"[{"kind":"exam_hint","text":"Study designs are on the quiz","anchor":"00:03"}]"#,
+        )
+        .expect("hints");
+        let err = record_session(&conn, 1, &dir, &payload, &result).expect_err("no cards");
+        assert!(format!("{err:#}").contains("no cards sidecar"), "{err:#}");
+        fs::write(dir.join(note_sidecar(corpus_rel, "cards")), "[]").expect("cards");
+        fs::create_dir_all(dir.join(&payload.transcript_rel_path).parent().expect("parent"))
+            .expect("week dir");
+        fs::write(dir.join(&payload.transcript_rel_path), "# Lecture\n\n## 00:00\n\nHello.\n")
+            .expect("transcript");
         record_session(&conn, 1, &dir, &payload, &result).expect("records");
+        let flagged = list_hints(&conn, 1).expect("hints");
+        assert_eq!(flagged.len(), 1, "{flagged:?}");
+        assert_eq!(flagged[0].anchor.as_deref(), Some("00:00"), "resolved to the heading");
+        assert_eq!(flagged[0].title, "Study Designs");
         let summary: String = conn
             .query_row(
                 "SELECT summary FROM lecture_contributions WHERE class_id = 1",
@@ -2161,7 +2594,7 @@ mod tests {
         assert_eq!(entries[0].sha256, "abc");
 
         // A manifest that does not parse is left as it is — stale, the way
-        // `manifest_is_stale` already reads it — rather than failing the move.
+        // `manifest_diff` already reads it — rather than failing the move.
         let back = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md";
         conn.execute(
             "UPDATE guides SET source_manifest = 'not json' WHERE class_id = 1",
@@ -2257,6 +2690,101 @@ mod tests {
         let inbox = resolve_filing(&conn, 2, None, name).expect("unpicked, with weeks");
         assert!(inbox.slot.is_none());
         assert_eq!(inbox.dir_rel, "_Inbox");
+        let _ = fs::remove_dir_all(&root);
+    }
+    /// The sidecar parser (SPEC §8.4): an empty array is valid; a cited time
+    /// resolves to the transcript's own heading at or before it, and one
+    /// before the first heading resolves to none; a file that is not an array
+    /// of known-kind items with text fails, since the file is the point.
+    #[test]
+    fn the_hints_sidecar_parses_resolves_anchors_and_refuses_malformed_files() {
+        let anchors = transcript_anchors("# L\n\n## 00:08\n\ntext\n\n## 00:17\n\nmore\n\n## 01:20\n\nend\n");
+        assert_eq!(anchors, vec![8, 17, 80]);
+        assert!(parse_hints("[]", &anchors).unwrap().is_empty());
+        let hints = parse_hints(
+            r#"[{"kind":"exam_hint","text":" Quiz covers today ","anchor":"01:23"},
+                {"kind":"Thread","text":"builds on week 2","anchor":null},
+                {"kind":"confusion","text":"MAR","anchor":"00:05"}]"#,
+            &anchors,
+        )
+        .unwrap();
+        assert_eq!(
+            hints[0],
+            Hint { kind: "exam_hint".into(), text: "Quiz covers today".into(), anchor: Some("01:20".into()) }
+        );
+        assert_eq!((hints[1].kind.as_str(), hints[1].anchor.as_deref()), ("thread", None));
+        assert_eq!(hints[2].anchor, None, "before the first heading");
+        for bad in [
+            r#"{"kind":"x"}"#,
+            r#"[{"kind":"guess","text":"x"}]"#,
+            r#"[{"kind":"emphasis","text":"  "}]"#,
+            r#"[{"text":"no kind"}]"#,
+            "not json",
+        ] {
+            assert!(parse_hints(bad, &anchors).is_err(), "{bad}");
+        }
+        assert_eq!(
+            note_sidecar(".classhub/corpus/W/2026-09-03 — Lecture.md", "hints"),
+            ".classhub/corpus/W/2026-09-03 — Lecture.hints.json"
+        );
+        assert_eq!(session_date("Weeks/Week 03 — X/2026-09-03 — Lecture.md"), "2026-09-03");
+        assert_eq!(session_date("Weeks/Week 03 — X/Lecture.md"), "");
+    }
+
+    /// The flagged items are the lecture's (SPEC §8.4): a refile carries them
+    /// onto the row that replaces the old one, under the new division, and a
+    /// lecture that leaves the tree takes them along.
+    #[test]
+    fn a_refile_carries_the_flagged_items_and_a_removal_drops_them() {
+        let root = scratch("classhub-hints-refile");
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        let folder: String = conn
+            .query_row("SELECT folder_name FROM classes WHERE id = 1", [], |row| row.get(0))
+            .expect("class");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let dir = root.join(folder);
+        for (ordinal, name) in [(2, "Week 2 — Study Designs"), (3, "Week 3 — Data Exploration")] {
+            conn.execute(
+                "INSERT INTO units (class_id, ordinal, kind, name, source)
+                 VALUES (1, ?1, 'week', ?2, 'syllabus')",
+                rusqlite::params![ordinal, name],
+            )
+            .expect("unit");
+        }
+        let markdown = "# Lecture\n\n## 00:00\n\nHello.\n";
+        let from = "Weeks/Week 02 — Study Designs/2026-08-27 — Lecture.md".to_string();
+        let to = "Weeks/Week 03 — Data Exploration/2026-08-27 — Lecture.md".to_string();
+        for rel in [&from, &to] {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+        }
+        fs::write(dir.join(&from), markdown).unwrap();
+        let slot = crate::units::slot_for_week(&conn, 1, 2).expect("slots").expect("slot");
+        record_contribution(&conn, 1, &dir, &slot, &from, markdown).expect("record");
+        let id = contribution_id(&conn, 1, &from).unwrap().unwrap();
+        replace_hints(
+            &conn,
+            1,
+            slot.unit_id,
+            id,
+            &[Hint { kind: "exam_hint".into(), text: "covers today".into(), anchor: Some("00:00".into()) }],
+        )
+        .unwrap();
+        assert_eq!(list_hints(&conn, 1).unwrap().len(), 1);
+
+        fs::rename(dir.join(&from), dir.join(&to)).unwrap();
+        refile_lecture(&conn, 1, &dir, &from, &to).expect("refile").apply();
+        let carried = list_hints(&conn, 1).unwrap();
+        assert_eq!(carried.len(), 1, "{carried:?}");
+        assert_eq!(carried[0].rel_path, to);
+        assert_eq!(carried[0].unit_name, "Week 3 — Data Exploration");
+        assert_eq!(carried[0].date, "2026-08-27");
+        let block = hints_block(&carried, Some(&[carried[0].unit_id]));
+        assert!(block.contains("[Exam hint · 00:00] covers today"), "{block}");
+        assert!(hints_block(&carried, Some(&[-1])).starts_with("(none"));
+
+        lecture_left(&conn, 1, &dir, &to, None).expect("settled").expect("keyed").apply();
+        assert!(list_hints(&conn, 1).unwrap().is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 }

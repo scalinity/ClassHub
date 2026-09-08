@@ -633,6 +633,7 @@ fn class_block(
     out.push_str(&lectures_block(conn, class.id, &contributions, &guides, current.as_ref(), detailed)?);
     out.push_str(&material_line(conn, class.id)?);
     out.push_str(&guides_line(&guides, detailed));
+    out.push_str(&flagged_block(conn, class.id, detailed)?);
     out.push_str(&waiting_block(conn, class.id, detailed)?);
     if detailed {
         out.push_str(&grades_line(conn, class.id)?);
@@ -830,6 +831,8 @@ fn material_line(conn: &Connection, class_id: i64) -> Result<String> {
 /// path and the age. A session document is named for what the session was
 /// about, which its scope (the transcript's path) is not.
 fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
+    // An exam's row is not a guide (SPEC §8.3); the exams are listed nowhere here.
+    let guides: Vec<&crate::guides::GuideInfo> = guides.iter().filter(|g| !g.practice).collect();
     if guides.is_empty() {
         return "Guides: none generated yet\n".to_string();
     }
@@ -856,6 +859,40 @@ fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!("Guides: {described}\n")
+}
+
+/// How many flagged items the detailed form lists per class.
+const FLAGGED_SHOWN: usize = 20;
+
+/// `Flagged:` — what the professor flagged across the class's distilled
+/// sessions (SPEC §8.4): a count and the earliest session's date in the
+/// compact form, the items newest first and capped in the detailed one.
+/// Nothing when no session has been read for them.
+fn flagged_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<String> {
+    let hints = crate::lectures::list_hints(conn, class_id)?;
+    if hints.is_empty() {
+        return Ok(String::new());
+    }
+    let since = hints
+        .iter()
+        .map(|h| h.date.as_str())
+        .filter(|d| !d.is_empty())
+        .min()
+        .unwrap_or("the first distilled session");
+    if !detailed {
+        return Ok(format!("Flagged: {} since {since}\n", plural(hints.len(), "item")));
+    }
+    let mut out = format!("Flagged ({} since {since}, newest first):\n", plural(hints.len(), "item"));
+    for h in hints.iter().take(FLAGGED_SHOWN) {
+        let anchor = h.anchor.as_deref().map_or(String::new(), |a| format!(" {a}"));
+        out.push_str(&format!(
+            "- {}{anchor} · {} · {}\n",
+            h.date,
+            crate::lectures::hint_kind_label(&h.kind).to_lowercase(),
+            h.text.split_whitespace().collect::<Vec<_>>().join(" ")
+        ));
+    }
+    Ok(out)
 }
 
 /// `Waiting:` — both confirm queues (SPEC §10, §11), so the model can say
@@ -2466,5 +2503,46 @@ mod tests {
             Some("2 file move proposal(s) and 9 deadline proposal(s) awaiting Daniel's approval")
         );
     }
-}
 
+    /// What the professor flagged rides the overview (SPEC §8.4): a count and
+    /// the earliest session's date in the compact form, the items newest
+    /// first in the detailed one, and no line for a class with none.
+    #[test]
+    fn the_overview_counts_what_was_flagged() {
+        let conn = fixture();
+        let compact = block(
+            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(!compact.contains("Flagged"), "{compact}");
+        let contribution: i64 = conn
+            .query_row("SELECT id FROM lecture_contributions WHERE class_id = 3", [], |row| row.get(0))
+            .expect("contribution");
+        let week2: i64 = conn
+            .query_row("SELECT unit_id FROM lecture_contributions WHERE id = ?1", [contribution], |row| row.get(0))
+            .expect("unit");
+        for (kind, text, anchor) in [
+            ("exam_hint", "Study designs are on Quiz 1", Some("00:45")),
+            ("confusion", "Case-control versus cohort", None),
+        ] {
+            conn.execute(
+                "INSERT INTO lecture_hints (class_id, unit_id, contribution_id, kind, text, anchor, created_at)
+                 VALUES (3, ?1, ?2, ?3, ?4, ?5, 1)",
+                rusqlite::params![week2, contribution, kind, text, anchor],
+            )
+            .expect("hint");
+        }
+        let compact = block(
+            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(compact.contains("\nFlagged: 2 items since 2026-08-27\n"), "{compact}");
+        let detailed = block(
+            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(detailed.contains("\nFlagged (2 items since 2026-08-27, newest first):\n"), "{detailed}");
+        assert!(detailed.contains("\n- 2026-08-27 00:45 · exam hint · Study designs are on Quiz 1\n"), "{detailed}");
+        assert!(detailed.contains("\n- 2026-08-27 · where the room got stuck · Case-control versus cohort\n"), "{detailed}");
+    }
+}

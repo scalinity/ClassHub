@@ -72,9 +72,17 @@ export function saveNote(
   return invoke("save_note", { classId, title, content, relPath });
 }
 
+/** A practice exam on disk, with its row's freshness where one exists (SPEC §8.3):
+ *  exams written before rows carry none. */
+export interface PracticeFile extends ManagedFile {
+  scope: string | null;
+  stale: boolean | null;
+  diff: import("@/lib/guides").ManifestDiff | null;
+}
+
 /** Generated practice exams in Study Guides/Practice, newest first. */
-export function listPractice(classId: number): Promise<ManagedFile[]> {
-  return invoke<ManagedFile[]>("list_practice", { classId });
+export function listPractice(classId: number): Promise<PracticeFile[]> {
+  return invoke<PracticeFile[]>("list_practice", { classId });
 }
 
 /**

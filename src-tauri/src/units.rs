@@ -93,6 +93,10 @@ pub struct NewUnit {
     /// source clears — because a Part without its range files no lectures at
     /// all, and a rescan that happens not to state it must not cost that.
     pub weeks: Option<(i64, i64)>,
+    /// What the division set out to teach, as the syllabus states it (SPEC
+    /// §11). `None` keeps what the row holds — a scan that finds none must
+    /// not clear what an earlier one read — and `Some` replaces it.
+    pub objectives: Option<Vec<String>>,
     pub source: &'static str,
 }
 
@@ -410,10 +414,11 @@ struct Held {
     number: Option<i64>,
     first_week: Option<i64>,
     last_week: Option<i64>,
+    objectives: Option<String>,
 }
 
 const HELD_COLUMNS: &str = "id, source, ordinal, kind, name, canvas_id, rel_path, starts_on, ends_on, \
-                            number, first_week, last_week";
+                            number, first_week, last_week, objectives";
 
 fn read_held(row: &rusqlite::Row<'_>) -> rusqlite::Result<Held> {
     Ok(Held {
@@ -429,6 +434,7 @@ fn read_held(row: &rusqlite::Row<'_>) -> rusqlite::Result<Held> {
         number: row.get(9)?,
         first_week: row.get(10)?,
         last_week: row.get(11)?,
+        objectives: row.get(12)?,
     })
 }
 
@@ -583,8 +589,8 @@ fn write(
         conn.execute(
             "INSERT INTO units
              (class_id, ordinal, kind, name, number, canvas_id, rel_path, starts_on, ends_on,
-              first_week, last_week, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              first_week, last_week, source, objectives)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 class_id,
                 unit.ordinal,
@@ -597,7 +603,8 @@ fn write(
                 unit.ends_on,
                 unit.weeks.map(|(first, _)| first),
                 unit.weeks.map(|(_, last)| last),
-                unit.source
+                unit.source,
+                objectives_json(unit.objectives.as_deref()),
             ],
         )?;
         return settled(conn.last_insert_rowid(), Outcome::Inserted);
@@ -662,6 +669,12 @@ fn write(
         Some((first, last)) => (Some(first), Some(last)),
         None => (held.first_week, held.last_week),
     };
+    // And the objectives: a scan that states none leaves what an earlier
+    // one read (`NewUnit::objectives`).
+    let merged_objectives = match unit.objectives.as_deref() {
+        Some(stated) => objectives_json(Some(stated)),
+        None => held.objectives.clone(),
+    };
     let number = free_number(conn, class_id, unit.source, &kind, number, Some(held.id))?;
     let unchanged = held.ordinal == unit.ordinal
         && held.kind == kind
@@ -673,7 +686,8 @@ fn write(
         && held.starts_on == merged_starts
         && held.ends_on == merged_ends
         && held.first_week == first_week
-        && held.last_week == last_week;
+        && held.last_week == last_week
+        && held.objectives == merged_objectives;
     if unchanged {
         return settled(held.id, Outcome::Unchanged);
     }
@@ -686,7 +700,8 @@ fn write(
     conn.execute(
         "UPDATE units
          SET ordinal = ?1, kind = ?2, name = ?3, number = ?4, canvas_id = ?5, rel_path = ?6,
-             starts_on = ?7, ends_on = ?8, first_week = ?9, last_week = ?10, source = ?11
+             starts_on = ?7, ends_on = ?8, first_week = ?9, last_week = ?10, source = ?11,
+             objectives = ?13
          WHERE id = ?12",
         params![
             unit.ordinal,
@@ -700,10 +715,33 @@ fn write(
             first_week,
             last_week,
             unit.source,
-            held.id
+            held.id,
+            merged_objectives
         ],
     )?;
     Ok((Upserted { id: held.id, outcome: Outcome::Updated }, effects))
+}
+
+/// The column's shape: a JSON array of the stated lines, `None` for an empty
+/// list, so a division with nothing stated reads the same as one never read.
+fn objectives_json(objectives: Option<&[String]>) -> Option<String> {
+    let lines: Vec<&str> = objectives?
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&lines).ok()
+}
+
+/// A division's stated objectives, read back off the column; an unreadable
+/// or absent value is none.
+pub fn objectives_of(value: Option<&str>) -> Vec<String> {
+    value
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
 }
 
 /// What a rename carries with it: every contribution row's corpus path and the
@@ -1397,6 +1435,7 @@ mod tests {
             starts_on: starts_on.map(Into::into),
             ends_on: None,
             weeks: None,
+            objectives: None,
             source: "syllabus",
         }
     }
@@ -1587,6 +1626,7 @@ mod tests {
         for (i, name) in parts.iter().enumerate() {
             let part = NewUnit {
                 weeks: declared_weeks("part", name, None),
+                objectives: None,
                 ..unit(i as i64 + 1, "part", name, None)
             };
             assert_eq!(write(&conn, 4, &part), Outcome::Inserted);
@@ -1622,6 +1662,7 @@ mod tests {
         // A rescan stating a new range replaces the held one.
         let widened = NewUnit {
             weeks: Some((13, 17)),
+            objectives: None,
             ..unit(3, "part", "Part III: Agentic AI in Medicine", None)
         };
         assert_eq!(write(&conn, 4, &widened), Outcome::Updated);
@@ -2035,6 +2076,7 @@ mod tests {
         ] {
             let part = NewUnit {
                 weeks: declared_weeks("part", name, None),
+                objectives: None,
                 ..unit(ordinal, "part", name, None)
             };
             write(&conn, 4, &part);
@@ -2064,6 +2106,7 @@ mod tests {
         let conn = db();
         let part = NewUnit {
             weeks: Some((1, 8)),
+            objectives: None,
             ..unit(1, "part", "Part I (Weeks 1-8)", None)
         };
         write(&conn, 1, &part);
@@ -2320,5 +2363,31 @@ mod tests {
             "{}",
             claims[0]
         );
+    }
+    /// A division's objectives (SPEC §11) are stored as the scan states them:
+    /// a list replaces the column, none stated keeps it, and the row reads
+    /// unchanged when neither the list nor anything else moved.
+    #[test]
+    fn objectives_are_kept_unless_a_scan_states_new_ones() {
+        let conn = db();
+        let stated = NewUnit {
+            objectives: Some(vec!["Missing data".into(), " Data quality ".into()]),
+            ..unit(3, "week", "Week 3 — Data Exploration", Some("2026-09-03"))
+        };
+        assert_eq!(write(&conn, 3, &stated), Outcome::Inserted);
+        let read = |conn: &Connection| -> Vec<String> {
+            let stored: Option<String> = conn
+                .query_row("SELECT objectives FROM units WHERE class_id = 3", [], |row| row.get(0))
+                .expect("row");
+            objectives_of(stored.as_deref())
+        };
+        assert_eq!(read(&conn), vec!["Missing data", "Data quality"]);
+        let silent = unit(3, "week", "Week 3 — Data Exploration", Some("2026-09-03"));
+        assert_eq!(write(&conn, 3, &silent), Outcome::Unchanged, "none stated keeps the column");
+        assert_eq!(read(&conn), vec!["Missing data", "Data quality"]);
+        let replaced = NewUnit { objectives: Some(vec!["Imputation".into()]), ..silent };
+        assert_eq!(write(&conn, 3, &replaced), Outcome::Updated);
+        assert_eq!(read(&conn), vec!["Imputation"]);
+        assert!(objectives_of(Some("not json")).is_empty());
     }
 }

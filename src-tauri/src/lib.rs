@@ -188,8 +188,9 @@ fn generate_practice(
     scope: String,
     generated_at_label: String,
     date_label: String,
+    focus: Option<String>,
 ) -> Result<i64, String> {
-    guides::generate_practice(&app, class_id, &scope, None, &generated_at_label, &date_label)
+    guides::generate_practice(&app, class_id, &scope, focus.as_deref(), &generated_at_label, &date_label)
         .map(|(job_id, _)| job_id)
         .map_err(|e| format!("{e:#}"))
 }
@@ -234,7 +235,7 @@ fn list_notes(
 fn list_practice(
     state: tauri::State<Db>,
     class_id: i64,
-) -> Result<Vec<notes::NoteFile>, String> {
+) -> Result<Vec<guides::PracticeInfo>, String> {
     let conn = db::lock(&state.0);
     guides::list_practice(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
@@ -356,6 +357,16 @@ fn lecture_weeks(
 }
 
 /// Which division each filed lecture feeds (SPEC §8.5), for the Lectures list.
+/// SPEC §8.4: what the professor flagged, for the workspace's Flagged section.
+#[tauri::command(async)]
+fn list_hints(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<lectures::HintInfo>, String> {
+    let conn = db::lock(&state.0);
+    lectures::list_hints(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command(async)]
 fn list_lecture_contributions(
     state: tauri::State<Db>,
@@ -766,6 +777,7 @@ pub fn run() {
             digest_lecture,
             lecture_weeks,
             list_lecture_contributions,
+            list_hints,
             list_guides,
             read_guide,
             read_class_file,

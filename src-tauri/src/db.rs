@@ -45,6 +45,15 @@ pub const SESSION_SCOPE_PREFIX: &str = "session:";
 /// a scope keyed on the name would strand its guide.
 pub const UNIT_SCOPE_PREFIX: &str = "unit:";
 
+/// SPEC §8.3: a practice exam's row is scoped by its file — `practice:Study
+/// Guides/Practice/<name>.html` — so several exams of one scope each keep a
+/// row, and its staleness reads off its own manifest alone.
+pub const PRACTICE_SCOPE_PREFIX: &str = "practice:";
+
+pub fn is_practice_scope(scope: &str) -> bool {
+    scope.starts_with(PRACTICE_SCOPE_PREFIX)
+}
+
 /// The scope of one of the course's divisions.
 pub fn unit_scope(unit_id: i64) -> String {
     format!("{UNIT_SCOPE_PREFIX}{unit_id}")
@@ -174,6 +183,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0011_announcements.sql"),
     UNIT_LABELS_MIGRATION,
     CONTRIBUTION_NOTES_MIGRATION,
+    include_str!("../migrations/0014_lecture_hints.sql"),
 ];
 
 /// The migration that makes one note per transcript name in a division

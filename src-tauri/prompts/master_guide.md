@@ -6,22 +6,59 @@ connective tissue between modules that no single module guide can offer.
 Class: {class}
 Output file (relative to the working directory): {output}
 
-Modules in scope, in semester order:
+The course's own divisions, in its own order — the semester map names these, and Key
+concepts groups by them:
 {modules}
 
-## Source material — full raw re-synthesis
+## Source material — full re-synthesis
 
-This document is synthesized from RAW source material every time. Do not read, consult,
-or reuse any prior study guide (module guides or an older master): everything under
-`Study Guides/` is off-limits as input. Read every markdown extract listed below in
-full — across ALL modules — before writing anything. Bracketed notes like
-`[Figure: ...]` mark figures in the original document; when a figure is load-bearing
-(a diagram whose structure matters, a chart whose axes or values matter), open the
-listed original PDF and inspect the real thing before describing or reproducing it.
-Files marked `(learner work)` are Daniel's own classwork — raw material for the
-worked-examples section; distinguish what the class provided from what Daniel wrote.
+This document is synthesized from the raw material every time: every markdown extract
+listed below, across every division, and every distilled lecture through its corpus
+note. Do not read, consult, or reuse any prior study guide (division guides or an older
+master): everything under `Study Guides/` is off-limits as input. Read every extract and
+every note in full before writing anything. Bracketed notes like `[Figure: ...]` mark
+figures in the original document; when a figure is load-bearing (a diagram whose
+structure matters, a chart whose axes or values matter), open the listed original PDF
+and inspect the real thing before describing or reproducing it. Files marked
+`(learner work)` are Daniel's own classwork — raw material for the worked-examples
+section; distinguish what the class provided from what Daniel wrote.
 
 {files}
+
+### What was said in the room
+
+Each lecture of the course has been distilled once into a corpus note: the high-yield
+content of that session, every point carrying an `HH:MM` anchor back to the transcript
+it came from. Read every note in full — this is where the professor's own framing,
+emphasis and exam hints live, and none of it is on a slide. Work from the notes: a
+transcript is a three-hour verbatim record, read only through its note; open one only
+where the distillation is not enough and you need the exact wording, and read the
+stretch the anchor points at rather than the whole file.
+
+{corpus}
+
+#### What the professor flagged
+
+The distilled sessions carry a ledger of what was flagged in the room: emphasis, exam
+hints, corrections to the slides, where the room got stuck, what was assigned, and what
+each session built on (the *Builds on* items are the threads the course itself drew —
+the Cross-division threads section starts from them). These are the professor's own
+words about what matters. The ★ rail, the self-test and the weighting of the whole
+master lean toward them, and an entry that draws on one cites its anchor (`00:45`) in
+its citation chip.
+
+{hints}
+
+### What each division set out to teach
+
+The syllabus states these objectives per division, where it states any; each
+division's group in Key concepts opens with its own, and the ★ entries align to them.
+
+{objectives}
+
+### What changed since the last master
+
+{changes}
 
 ## Required content — the master anatomy
 
@@ -29,8 +66,10 @@ Write ONE complete, self-contained HTML document to {output} containing exactly 
 seven sections, in this order:
 
 1. **Key concepts** — dense, high-yield summaries of everything the semester taught,
-   grouped by module in semester order (each module group opens with a mono module
-   eyebrow), and within each module by topic in teaching order. Exam-oriented:
+   grouped by division in semester order, the course's own divisions named as the
+   course names them (each group opens with a mono eyebrow carrying that name, and
+   with the division's stated objectives as a one-line list where the syllabus
+   states any), and within each module by topic in teaching order. Exam-oriented:
    definitions stated precisely, distinctions sharpened, common traps called out.
    Mark the entries most likely to be examined as high-yield (yield rail, below).
    This section is a selection with a bar, not a transcript: an entry earns its
@@ -38,11 +77,12 @@ seven sections, in this order:
    write one sharp entry. Where an entry's content has structure — a taxonomy, a
    decision, a contrast — render that structure inline as a mini-diagram or
    comparison table instead of prose.
-2. **Cross-module threads** — the section only this document has. Each thread is a
-   named through-line of the semester: a concept, quantity, method, or assumption
+2. **Cross-division threads** — the section only this document has. Each thread is a
+   named through-line of the semester — start from the *Builds on* items the
+   professor's own sessions flagged, then add what the sources show: a concept, quantity, method, or assumption
    that recurs, evolves, or pays off across the material (e.g. a quantity defined
    descriptively in one module that becomes the engine of inference in another).
-   For each thread: a serif thread title, the module tags it spans (thread-device
+   For each thread: a serif thread title, the division tags it spans (thread-device
    styling below), and dense connective prose explaining how the idea develops and
    what the connection means for the exam. Threads must be real and traceable —
    cite the sources on both ends. If only ONE module exists so far, open the section
@@ -116,7 +156,7 @@ Type (system stacks only — no web fonts, nothing fetched):
 - Body: `-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
   sans-serif`, 15px/1.6, set for density.
 - Apparatus — everything that is a label rather than prose (eyebrows, section
-  numbers, module tags, citation chips, figure captions, table headers, quiz
+  numbers, division tags, citation chips, figure captions, table headers, quiz
   numbers, the footer): `ui-monospace, "SF Mono", Menlo, monospace`, 10–11px,
   uppercase with `letter-spacing: 0.12em` where it is a label. Code samples use the
   same mono at 13px, no uppercase.
@@ -128,15 +168,17 @@ Layout:
 - Single column, `max-width: 72ch`, centered, generous margins (`padding: 4rem 2rem
   6rem`). Whitespace does the separating; hairline rules do the structuring.
 - Header: mono eyebrow `{class} · SEMESTER MASTER` in accent, then the serif title
-  "Semester Master", then a muted meta line, then the semester map — the module
-  roster as a row of mono module tags (accent-washed chips, one per module, in
-  semester order). The map states this document's scope at a glance; with one
-  module it is a single honest chip.
+  "Semester Master", then a muted meta line, then the semester map — the
+  divisions above as a row of mono tags (accent-washed chips, one per division, in
+  the course's order, each carrying the course's own name for it: `WEEK 3`, `PART II`).
+  The map states this document's scope at a glance; with one division it is a
+  single honest chip.
 - Each section opens with a mono eyebrow `01 · KEY CONCEPTS` (…through `07`) in
   accent above the serif section heading, with a hairline rule — the numbering is
   real: the anatomy is a fixed sequence.
-- Module grouping inside Key concepts: a mono module eyebrow (`MODULE 1`) with a
-  hairline rule opens each group.
+- Division grouping inside Key concepts: a mono eyebrow carrying the division's
+  own name (`WEEK 3 — DATA EXPLORATION, PROCESSING, AND QUALITY`) with a hairline
+  rule opens each group.
 - Tables: hairline borders, mono uppercase column headers, generous cell padding,
   accent bottom-rule under the header row.
 
@@ -183,8 +225,8 @@ chips wrap BETWEEN chips — each chip holds together (`display: inline-block`),
 the chip row never carries `white-space: nowrap`. Long file names in prose wrap
 with `overflow-wrap: anywhere`.
 
-Thread device (Cross-module threads only): each thread entry opens with a row of
-small mono module tags naming the modules it spans (accent-washed chips joined by a
+Thread device (Cross-division threads only): each thread entry opens with a row of
+small mono division tags naming the modules it spans (accent-washed chips joined by a
 muted `→` when the thread develops in sequence), above the serif thread title. The
 chips are apparatus — quiet, informative, never decorative.
 
@@ -231,6 +273,14 @@ be discarded, and waste the work. Build the file incrementally:
 4. Verify with Grep that no `<!-- CONTINUE -->` remains and the file ends with
    `</html>`.
 
+## The cards file (required second output)
+
+After the master, write `{cards}`: a JSON array of `{"front": …, "back": …, "source": …,
+"topic": …}` — one card per self-test question (front the question, back the complete
+answer) and one per glossary term (front the term, back its definition), `source` the
+citation the entry carries and `topic` the concept in two or three words. Nothing reads
+the cards yet; the app checks the file exists and parses, and fails the run otherwise.
+
 ## Hard constraints
 
 - ONE file, entirely self-contained: a single `<style>` block in `<head>`, inline
@@ -249,7 +299,7 @@ be discarded, and waste the work. Build the file incrementally:
 - Never modify, move, or delete source files.
 - Never read anything under `Study Guides/` — no module guide, no older master.
   This document is synthesized from raw source extracts and originals only.
-- Write only {output}; create no other files.
+- Write only {output} and {cards}; create no other files.
 - No external requests of any kind, in the document or during synthesis.
 
 When finished, reply with exactly one line:

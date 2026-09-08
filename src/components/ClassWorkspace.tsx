@@ -14,6 +14,7 @@ import { AddLecture } from "@/components/AddLecture";
 import { DeadlinesSection } from "@/components/Deadlines";
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
+import { FlaggedSection, hintsQuery } from "@/components/Flagged";
 import { GradesSection } from "@/components/Grades";
 import { GuideViewer } from "@/components/GuideViewer";
 import { InboxQueue, inboxShown } from "@/components/InboxQueue";
@@ -24,6 +25,7 @@ import { SectionHeading } from "@/components/SectionHeading";
 import { StructureSection } from "@/components/Structure";
 import { CLASS_ACCENTS, classesQuery, type ClassInfo } from "@/lib/classes";
 import {
+  deltaTitle,
   formatGeneratedAt,
   generatePractice,
   listGuides,
@@ -54,6 +56,7 @@ import { getSortState, useDragState } from "@/lib/sorter";
 import {
   buttonText,
   buttonTextMuted,
+  chipAmber,
   errorLine,
   meta,
   pulseDot,
@@ -216,12 +219,24 @@ export function ClassWorkspace({
       setMaterialsError(`The guide didn't start: ${String(e)}`),
     );
   };
-  const handlePractice = (scope: string) => {
+  const handlePractice = (scope: string, focus: string | null) => {
     setMaterialsError(null);
-    generatePractice(info.id, scope).catch((e) =>
+    generatePractice(info.id, scope, focus).catch((e) =>
       setMaterialsError(`The practice exam didn't start: ${String(e)}`),
     );
   };
+  // What the professor flagged (SPEC §8.4): the section, its nav link, and
+  // which sessions have been read for it — a session document with no items
+  // was distilled before the ledger existed, and says so on its row.
+  const { data: hints } = useQuery(hintsQuery(info.id));
+  const hintedPaths = new Set((hints ?? []).map((h) => h.relPath));
+  const openTranscriptAt = (relPath: string, anchor: string) =>
+    setViewFile({
+      relPath,
+      name: (relPath.split("/").pop() ?? relPath).replace(/\.md$/i, ""),
+      kind: "md",
+      anchor,
+    });
   /**
    * A Materials row asked to be read in-app (SPEC §12). A PDF is framed
    * from its own path and a deck from its converted twin; a deck the pipeline
@@ -291,6 +306,7 @@ export function ClassWorkspace({
     { id: "grades", label: "Grades" },
     { id: "materials", label: "Materials" },
     { id: "lectures", label: "Lectures" },
+    (hints?.length ?? 0) > 0 && { id: "flagged", label: "Flagged" },
     hasPractice && { id: "practice-exams", label: "Practice exams" },
     { id: "notes", label: "Notes" },
   ].filter((l): l is { id: string; label: string } => l !== false);
@@ -371,7 +387,7 @@ export function ClassWorkspace({
             activeScopes,
             activePracticeScopes,
             onSynthesize: (unitId) => synthesizeUnit(info.id, unitId),
-            onPractice: (scope) => generatePractice(info.id, scope),
+            onPractice: (scope, focus) => generatePractice(info.id, scope, focus),
             onView: setViewScope,
           }}
         />
@@ -518,50 +534,61 @@ export function ClassWorkspace({
                 </span>
               </div>
             ))}
-            {sessions.map((session) => (
-              <ManagedRow
-                key={session.scope}
-                icon={Mic}
-                file={{
-                  name: session.relPath.split("/").pop() ?? session.relPath,
-                  relPath: session.relPath,
-                  modifiedAt: session.generatedAt,
-                }}
-                strippedExt=".html"
-                stamp={formatGeneratedAt(session.generatedAt)}
-                badge={
-                  <FeedsUnit
-                    unitName={unitFor.get(
-                      session.scope.slice(SESSION_SCOPE_PREFIX.length),
-                    )}
-                  />
-                }
-                // Digesting removes the transcript from the pending list, so a
-                // session whose transcript has since changed had no way back.
-                action={
-                  session.stale
-                    ? {
-                        label: "Distill again",
-                        onSelect: () => {
-                          const relPath = session.scope.slice(
-                            SESSION_SCOPE_PREFIX.length,
-                          );
-                          setDigestError(null);
-                          digestLecture(
-                            info.id,
-                            relPath,
-                            dateFromFileName(relPath.split("/").pop() ?? "") ??
-                              todayIso(),
-                          ).catch((e) => setDigestError(String(e)));
-                        },
-                      }
-                    : undefined
-                }
-                onView={() => setViewScope(session.scope)}
-              />
-            ))}
+            {sessions.map((session) => {
+              const transcript = session.scope.slice(SESSION_SCOPE_PREFIX.length);
+              // A session read before the ledger existed has a document and
+              // no flagged items; only a lecture mapped to a division carries
+              // any, so an unmapped one is not asked to.
+              const unread =
+                unitFor.has(transcript) && !hintedPaths.has(transcript);
+              return (
+                <ManagedRow
+                  key={session.scope}
+                  icon={Mic}
+                  file={{
+                    name: session.relPath.split("/").pop() ?? session.relPath,
+                    relPath: session.relPath,
+                    modifiedAt: session.generatedAt,
+                  }}
+                  strippedExt=".html"
+                  stamp={formatGeneratedAt(session.generatedAt)}
+                  badge={
+                    <>
+                      {unread && (
+                        <span className="hidden shrink-0 text-fine text-muted-foreground/70 sm:block">
+                          Not yet read for what was flagged
+                        </span>
+                      )}
+                      <FeedsUnit unitName={unitFor.get(transcript)} />
+                    </>
+                  }
+                  // Digesting removes the transcript from the pending list, so a
+                  // session whose transcript has since changed had no way back;
+                  // one never read for the ledger takes the same way.
+                  action={
+                    session.stale || unread
+                      ? {
+                          label: "Distill again",
+                          onSelect: () => {
+                            setDigestError(null);
+                            digestLecture(
+                              info.id,
+                              transcript,
+                              dateFromFileName(transcript.split("/").pop() ?? "") ??
+                                todayIso(),
+                            ).catch((e) => setDigestError(String(e)));
+                          },
+                        }
+                      : undefined
+                  }
+                  onView={() => setViewScope(session.scope)}
+                />
+              );
+            })}
           </div>
         </section>
+
+        <FlaggedSection classId={info.id} onOpenTranscript={openTranscriptAt} />
 
         {hasPractice && (
           <section id="practice-exams" className="mt-14 scroll-mt-20">
@@ -594,6 +621,15 @@ export function ClassWorkspace({
                   file={exam}
                   strippedExt=".html"
                   stamp={formatGeneratedAt(exam.modifiedAt)}
+                  // An exam's row records what it was built from (SPEC §8.3);
+                  // one written before rows existed carries no freshness.
+                  badge={
+                    exam.stale === true && exam.diff !== null ? (
+                      <span title={deltaTitle(exam.diff)} className={chipAmber}>
+                        stale
+                      </span>
+                    ) : undefined
+                  }
                   onView={(name) =>
                     setViewFile({ relPath: exam.relPath, name, kind: "html" })
                   }

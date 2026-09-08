@@ -541,6 +541,10 @@ struct RawUnit {
     first_week: Option<i64>,
     #[serde(default)]
     last_week: Option<i64>,
+    /// What the division set out to teach, where the syllabus states it
+    /// (SPEC §11): the bullet list under its topic, each line a string.
+    #[serde(default)]
+    objectives: Option<Vec<serde_json::Value>>,
 }
 
 /// One entry of the scan's `grading` array — a component of the final grade
@@ -816,6 +820,8 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
                 // as nothing at all in the workspace.
                 starts_on: entry.starts_on.filter(|d| valid_due_at(d)).map(day_of),
                 ends_on: entry.ends_on.filter(|d| valid_due_at(d)).map(day_of),
+                // A stated list replaces the column; none stated keeps it.
+                objectives: stated_objectives(entry.objectives.as_deref()),
                 source: "syllabus",
             };
             match crate::units::upsert(conn, class_id, &unit, &mut batch) {
@@ -891,6 +897,27 @@ fn record_units(app: &AppHandle, class_id: i64, raw: &[serde_json::Value]) -> Op
             Some("divisions could not be recorded".to_string())
         }
     }
+}
+
+/// How many objectives a division may state, and how long one line may run:
+/// a model copying a week's whole reading list into the field should not
+/// cost the scan the week.
+const MAX_OBJECTIVES: usize = 20;
+const MAX_OBJECTIVE_CHARS: usize = 300;
+
+/// The scan's objectives for one division as `NewUnit` takes them: the
+/// strings of the list, trimmed and capped; `None` when the entry stated
+/// none, so the column keeps what an earlier scan read.
+fn stated_objectives(raw: Option<&[serde_json::Value]>) -> Option<Vec<String>> {
+    let lines: Vec<String> = raw?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::db::truncate(s, MAX_OBJECTIVE_CHARS))
+        .take(MAX_OBJECTIVES)
+        .collect();
+    (!lines.is_empty()).then_some(lines)
 }
 
 /// What a scan's grading part did, for the job summary.
@@ -2218,5 +2245,22 @@ mod tests {
             quiz("2026-09-03T23:59", "canvas", Some("5002")),
             Recorded::Proposed
         ));
+    }
+    /// The objectives a scan reports for a division (SPEC §11): the strings
+    /// of its list, trimmed and capped; none stated keeps the column.
+    #[test]
+    fn a_scan_s_objectives_are_read_per_division() {
+        let entry: RawUnit = serde_json::from_value(serde_json::json!({
+            "name": "Week 3 — Data Exploration", "kind": "week", "ordinal": 3,
+            "objectives": [" Missing data mechanisms ", "", 7, "Data quality"]
+        }))
+        .expect("entry");
+        assert_eq!(
+            stated_objectives(entry.objectives.as_deref()),
+            Some(vec!["Missing data mechanisms".to_string(), "Data quality".to_string()])
+        );
+        let none: RawUnit = serde_json::from_value(serde_json::json!({"name": "Week 4"})).expect("entry");
+        assert_eq!(stated_objectives(none.objectives.as_deref()), None);
+        assert_eq!(stated_objectives(Some(&[])), None);
     }
 }

@@ -808,6 +808,12 @@ pub fn current_manifest(
     // lectures the calendar mapped to it (SPEC §8.5). The union is what makes
     // a unit guide go stale when its lecture or its deck changes — with either
     // left out nothing visibly breaks, the guide just quietly stops updating.
+    // A practice exam's scope is its file (SPEC §8.3): no set of its own, so
+    // its staleness is its manifest's entries resolved one by one.
+    if crate::db::is_practice_scope(scope) {
+        return Ok(Vec::new());
+    }
+
     if scope.starts_with(crate::db::UNIT_SCOPE_PREFIX) {
         // A unit scope from before ids names no row, and neither does one
         // whose division is gone: no sources, rather than the whole class.
@@ -930,15 +936,210 @@ pub fn unit_manifest(
     Ok(entries)
 }
 
-/// SPEC §7 step 5: a guide is stale when its stored `source_manifest` differs
-/// from the current set (order-insensitive set comparison).
-pub fn manifest_is_stale(stored_manifest_json: &str, current: &[ManifestEntry]) -> bool {
-    let Ok(stored) = serde_json::from_str::<Vec<ManifestEntry>>(stored_manifest_json) else {
-        return true; // unparseable manifest = stale
+
+/// What separates a guide's stored manifest from its sources as they are now
+/// (SPEC §7 step 5): the scope's entries the manifest never named, the named
+/// entries whose hash moved, and the named entries that are gone. The three
+/// lists are what the row's `Rewrite · 2 files added, 1 changed` reads, and
+/// what a rewrite's prompt is told; `is_stale` is their union being non-empty.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestDiff {
+    pub added: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl ManifestDiff {
+    pub fn is_stale(&self) -> bool {
+        !(self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty())
+    }
+
+}
+
+/// The diff between a stored manifest and the scope's current set. A stored
+/// entry the set does not name is looked up through `resolve`, which answers
+/// with its current hash — the index's for a file row, the file's on disk for
+/// a corpus note or a Canvas page mirror — or `None` when it is gone; that is
+/// what lets a manifest widen past its scope (SPEC §7 step 5) without reading
+/// as stale forever. An unreadable manifest is stale over every current entry.
+pub fn manifest_diff(
+    stored_manifest_json: &str,
+    current: &[ManifestEntry],
+    resolve: impl Fn(&str) -> Option<String>,
+) -> ManifestDiff {
+    let stored = serde_json::from_str::<Vec<ManifestEntry>>(stored_manifest_json).unwrap_or_default();
+    let current_by_path: std::collections::HashMap<&str, &str> = current
+        .iter()
+        .map(|e| (e.rel_path.as_str(), e.sha256.as_str()))
+        .collect();
+    let stored_paths: std::collections::HashSet<&str> =
+        stored.iter().map(|e| e.rel_path.as_str()).collect();
+    let mut diff = ManifestDiff::default();
+    for entry in current {
+        if !stored_paths.contains(entry.rel_path.as_str()) {
+            diff.added.push(entry.rel_path.clone());
+        }
+    }
+    for entry in &stored {
+        match current_by_path.get(entry.rel_path.as_str()) {
+            Some(hash) => {
+                if *hash != entry.sha256 {
+                    diff.changed.push(entry.rel_path.clone());
+                }
+            }
+            None => match resolve(&entry.rel_path) {
+                Some(hash) if hash == entry.sha256 => {}
+                Some(_) => diff.changed.push(entry.rel_path.clone()),
+                None => diff.removed.push(entry.rel_path.clone()),
+            },
+        }
+    }
+    for list in [&mut diff.added, &mut diff.changed, &mut diff.removed] {
+        list.sort();
+        list.dedup();
+    }
+    diff
+}
+
+/// Whether a path outside the file index still counts as a source a manifest
+/// may name: a corpus note, a Canvas page mirror, one of the reader's notes.
+/// Everything else outside the index — a guide, an inbox file, a job's own
+/// output — is never a source.
+fn hashed_from_disk(rel_path: &str) -> bool {
+    rel_path.starts_with(&format!("{}/", crate::db::CORPUS_DIR))
+        || rel_path.starts_with(&format!("{}/Canvas/", crate::db::EXTRACTS_DIR))
+        || rel_path.starts_with(&format!("{}/", crate::db::NOTES_DIR))
+}
+
+/// The current hash of a manifest entry: the index's for a file row, the
+/// file's own for a path the index does not hold and `hashed_from_disk`
+/// admits, `None` for a path that is gone or was never a source.
+pub fn current_hash(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    rel_path: &str,
+) -> Result<Option<String>> {
+    let indexed: Option<String> = conn
+        .query_row(
+            "SELECT sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, rel_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if indexed.is_some() {
+        return Ok(indexed);
+    }
+    if !hashed_from_disk(rel_path) || !plain_relative(rel_path) {
+        return Ok(None);
+    }
+    let abs = class_dir.join(rel_path);
+    if !abs.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(crate::scanner::hash_file(&abs)?))
+}
+
+/// Every component ordinary and the path relative: what a manifest may name.
+fn plain_relative(rel_path: &str) -> bool {
+    !rel_path.is_empty()
+        && Path::new(rel_path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// The manifest entry a job's read of `rel_path` stands for (SPEC §7 step 5):
+/// the file row it names, or the row behind the extract or converted twin it
+/// opened, with the index's hash; a corpus note, a Canvas page mirror or a
+/// note with the hash of the file on disk; nothing for anything else — its own
+/// output under `Study Guides/`, an inbox file, a path that is no source.
+pub fn source_of(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    rel_path: &str,
+) -> Result<Option<ManifestEntry>> {
+    if !plain_relative(rel_path) {
+        return Ok(None);
+    }
+    let row = |sql: &str, key: &str| -> Result<Option<ManifestEntry>> {
+        Ok(conn
+            .query_row(sql, rusqlite::params![class_id, key], |row| {
+                Ok(ManifestEntry {
+                    rel_path: row.get(0)?,
+                    sha256: row.get(1)?,
+                })
+            })
+            .optional()?)
     };
-    let stored: std::collections::HashSet<&ManifestEntry> = stored.iter().collect();
-    let current: std::collections::HashSet<&ManifestEntry> = current.iter().collect();
-    stored != current
+    if let Some(entry) = row(
+        "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+        rel_path,
+    )? {
+        return Ok(Some(entry));
+    }
+    if let Some(entry) = row(
+        "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 AND extract_rel_path = ?2",
+        rel_path,
+    )? {
+        return Ok(Some(entry));
+    }
+    let extracts = format!("{}/", crate::db::EXTRACTS_DIR);
+    if let Some(mirrored) = rel_path.strip_prefix(&extracts) {
+        // A converted twin or an extract whose row has yet to record it:
+        // strip the mirror suffix and the source is what is left.
+        for suffix in MIRROR_SUFFIXES {
+            if let Some(source) = mirrored.strip_suffix(suffix) {
+                if let Some(entry) = row(
+                    "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+                    source,
+                )? {
+                    return Ok(Some(entry));
+                }
+            }
+        }
+    }
+    if !hashed_from_disk(rel_path) {
+        return Ok(None);
+    }
+    let abs = class_dir.join(rel_path);
+    if !abs.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(ManifestEntry {
+        rel_path: rel_path.to_string(),
+        sha256: crate::scanner::hash_file(&abs)?,
+    }))
+}
+
+/// The manifest a finished job records (SPEC §7 step 5): what it was told
+/// about, at the hashes captured when it was enqueued, widened by what its own
+/// log shows it read. A listed source the job never opened stays — it was
+/// told about it, and a change to it is still a reason to rebuild — so the
+/// union only widens; a read the listing already names keeps the listed hash.
+pub fn union_manifest(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    listed: Vec<ManifestEntry>,
+    read: &std::collections::BTreeSet<String>,
+) -> Result<Vec<ManifestEntry>> {
+    let mut entries = listed;
+    let mut named: std::collections::HashSet<String> =
+        entries.iter().map(|e| e.rel_path.clone()).collect();
+    for rel_path in read {
+        if named.contains(rel_path) {
+            continue;
+        }
+        if let Some(entry) = source_of(conn, class_id, class_dir, rel_path)? {
+            if named.insert(entry.rel_path.clone()) {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -1221,7 +1422,7 @@ mod tests {
         )
         .expect("edit");
         let after = current_manifest(&conn, 1, &scope).expect("manifest");
-        assert!(super::manifest_is_stale(&stored, &after), "the union missed the lecture");
+        assert!(super::manifest_diff(&stored, &after, |_| None).is_stale(), "the union missed the lecture");
     }
 
     /// SPEC §4/§8.5: what is filed under a week folder is that week's
@@ -1300,7 +1501,7 @@ mod tests {
         conn.execute("UPDATE files SET sha256 = 'a2' WHERE rel_path = 'Weeks/Week 01/deck.pdf'", [])
             .expect("edit");
         let after = current_manifest(&conn, 4, &crate::db::unit_scope(37)).expect("manifest");
-        assert!(super::manifest_is_stale(&stored, &after), "the week folder's deck was missed");
+        assert!(super::manifest_diff(&stored, &after, |_| None).is_stale(), "the week folder's deck was missed");
     }
 
     /// A division nothing declares any more has no sources, rather than
@@ -1379,5 +1580,103 @@ mod tests {
         let out = strip_html("<p>a</p><SCRIPT>junk</SCRIPT><p>b</p>");
         assert!(!out.contains("junk"), "{out:?}");
         assert!(out.contains("b"), "{out:?}");
+    }
+    /// The diff behind `stale` (SPEC §7 step 5): what the scope now holds that
+    /// the manifest never named, what it named whose hash moved — resolved
+    /// through the index or the disk for an entry outside the scope's own set
+    /// — and what it named that is gone. Equal sets are fresh; an unreadable
+    /// manifest is stale over everything.
+    #[test]
+    fn the_manifest_diff_names_what_was_added_changed_and_removed() {
+        use super::{manifest_diff, ManifestEntry};
+        let entry = |p: &str, h: &str| ManifestEntry { rel_path: p.into(), sha256: h.into() };
+        let stored = serde_json::to_string(&[
+            entry("a.pdf", "1"),
+            entry("b.Rmd", "2"),
+            entry(".classhub/corpus/W/n.md", "n1"),
+            entry("gone.pdf", "g"),
+        ])
+        .unwrap();
+        let current = [entry("a.pdf", "1"), entry("b.Rmd", "2x"), entry("c.pptx", "3")];
+        let diff = manifest_diff(&stored, &current, |path| match path {
+            ".classhub/corpus/W/n.md" => Some("n2".to_string()),
+            _ => None,
+        });
+        assert_eq!(diff.added, vec!["c.pptx"]);
+        assert_eq!(diff.changed, vec![".classhub/corpus/W/n.md", "b.Rmd"]);
+        assert_eq!(diff.removed, vec!["gone.pdf"]);
+        assert!(diff.is_stale());
+
+        let same = manifest_diff(&serde_json::to_string(&current).unwrap(), &current, |_| None);
+        assert!(!same.is_stale(), "{same:?}");
+        let unread = manifest_diff("not json", &current, |_| None);
+        assert_eq!(unread.added.len(), 3);
+        assert!(unread.is_stale());
+    }
+
+    /// The union a finished job records (SPEC §7 step 5): a read outside the
+    /// listed sources joins — an extract as the source row it mirrors, with the
+    /// index's hash; a corpus note as itself, hashed from disk — a listed
+    /// source never read stays at its listed hash even when the index has
+    /// moved on, and the job's own output and an inbox file never join.
+    #[test]
+    fn the_manifest_union_widens_by_what_the_log_read_and_keeps_what_was_listed() {
+        use super::{current_hash, union_manifest, ManifestEntry};
+        use std::fs;
+        let conn = crate::db::memory_db();
+        let root = std::env::temp_dir().join(format!("classhub-union-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let class_dir = root.join("Biostatistics for AI");
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        for (rel, sha, extract) in [
+            ("Slides/deck.pptx", "d1", Some(".classhub/extracts/Slides/deck.pptx.md")),
+            ("Reading/p.pdf", "p1", None),
+            ("Weeks/Week 03/L.md", "t2", None),
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind, extract_rel_path)
+                 VALUES (3, ?1, ?2, 1, 1, 'other', ?3)",
+                rusqlite::params![rel, sha, extract],
+            )
+            .expect("file");
+        }
+        let note = class_dir.join(".classhub/corpus/Week 3/n.md");
+        fs::create_dir_all(note.parent().unwrap()).unwrap();
+        fs::write(&note, "# distilled").unwrap();
+        let note_hash = crate::scanner::hash_file(&note).unwrap();
+
+        let listed = vec![ManifestEntry { rel_path: "Weeks/Week 03/L.md".into(), sha256: "t1".into() }];
+        let read: std::collections::BTreeSet<String> = [
+            ".classhub/extracts/Slides/deck.pptx.md",
+            ".classhub/extracts/Reading/p.pdf.md",
+            ".classhub/corpus/Week 3/n.md",
+            "Weeks/Week 03/L.md",
+            "Study Guides/Week 3.html",
+            "_Inbox/x.pdf",
+            "../outside.md",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let union = union_manifest(&conn, 3, &class_dir, listed, &read).expect("union");
+        let pairs: Vec<(String, String)> =
+            union.iter().map(|e| (e.rel_path.clone(), e.sha256.clone())).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (".classhub/corpus/Week 3/n.md".to_string(), note_hash),
+                ("Reading/p.pdf".to_string(), "p1".to_string()),
+                ("Slides/deck.pptx".to_string(), "d1".to_string()),
+                ("Weeks/Week 03/L.md".to_string(), "t1".to_string()),
+            ]
+        );
+        // Resolving the widened entries reads the same places back.
+        assert_eq!(
+            current_hash(&conn, 3, &class_dir, ".classhub/corpus/Week 3/n.md").unwrap().as_deref(),
+            Some(union[0].sha256.as_str())
+        );
+        assert_eq!(current_hash(&conn, 3, &class_dir, "Slides/deck.pptx").unwrap().as_deref(), Some("d1"));
+        assert_eq!(current_hash(&conn, 3, &class_dir, "Study Guides/Week 3.html").unwrap(), None);
+        let _ = fs::remove_dir_all(&root);
     }
 }

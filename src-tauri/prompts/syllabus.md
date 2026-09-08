@@ -65,6 +65,12 @@ How to decide — divisions:
 - `first_week` and `last_week` only for a division that groups weeks — a Part or
   Module the course says runs Weeks 1–8 — as the course states them. Omit both for a
   week, and never invent a span.
+- `objectives`: where the syllabus states what a division sets out to teach — the
+  bullet list under a week's topic in a schedule table, a module's stated objectives
+  or learning outcomes — report each line as one string in the course's own words,
+  the topics and skills only: leave out the readings, the assignment due that week and
+  the logistics. Omit the field for a division that states none; never pad one from the
+  course-level outcomes.
 - If the material publishes no structure above the level of individual readings,
   return an empty `units` array. That is a real answer.
 
@@ -93,13 +99,13 @@ Output contract — your final reply must be ONLY this JSON object, no prose and
 fences:
 
 {"deadlines": [{"title": "<short name>", "kind": "assignment|exam|quiz|project|other", "due_at": "YYYY-MM-DD or YYYY-MM-DDTHH:MM", "notes": "<one optional line>"}],
- "units": [{"name": "<the course's own name for it>", "kind": "week|module|part", "ordinal": 1, "starts_on": "YYYY-MM-DD", "ends_on": "YYYY-MM-DD", "first_week": 1, "last_week": 8}],
+ "units": [{"name": "<the course's own name for it>", "kind": "week|module|part", "ordinal": 1, "starts_on": "YYYY-MM-DD", "ends_on": "YYYY-MM-DD", "first_week": 1, "last_week": 8, "objectives": ["<one stated objective>", "…"]}],
  "grading": [{"name": "<an existing category's name, or the syllabus's own>", "weight": 50}]}
 
 - Any array may be empty. An honest empty array beats invented deadlines, an invented
   structure or an invented breakdown.
-- Omit `notes`, `starts_on`, `ends_on`, `first_week` and `last_week` rather than filling
-  them with guesses.
+- Omit `notes`, `starts_on`, `ends_on`, `first_week`, `last_week` and `objectives`
+  rather than filling them with guesses.
 - `starts_on` and `ends_on` are dates, never times.
 - Never write, move, or delete anything — your tools are read-only. No deadline is
   added to the list without approval; the divisions you report are recorded
