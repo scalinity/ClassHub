@@ -466,6 +466,16 @@ pub(crate) fn undo_save_category(conn: &Connection, payload: &serde_json::Value)
     let (Some(old_name), Some(weight)) = (before["name"].as_str(), before["weight"].as_f64()) else {
         bail!("the row carries no earlier state for {name} — edit it instead");
     };
+    // The row must still hold what this change wrote; a later edit is its
+    // own row's to undo.
+    let current_weight: f64 =
+        conn.query_row("SELECT weight FROM grade_categories WHERE id = ?1", [id], |r| r.get(0))?;
+    let after = &payload["after"];
+    if after["name"].as_str().is_some_and(|n| n != name)
+        || after["weight"].as_f64().is_some_and(|w| (w - current_weight).abs() > 1e-9)
+    {
+        bail!("{name} has been edited since — its current state is not this change's");
+    }
     conn.execute(
         "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
         params![old_name, weight, id],
@@ -552,6 +562,20 @@ pub(crate) fn undo_save_item(conn: &Connection, payload: &serde_json::Value) -> 
     ) else {
         bail!("the row carries no earlier state for {name}");
     };
+    // The row must still hold what this change wrote; a later edit is its
+    // own row's to undo.
+    let (current_score, current_max): (f64, f64) = conn.query_row(
+        "SELECT score, max_score FROM grade_items WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let after = &payload["after"];
+    if after["name"].as_str().is_some_and(|n| n != name)
+        || after["score"].as_f64().is_some_and(|s| (s - current_score).abs() > 1e-9)
+        || after["maxScore"].as_f64().is_some_and(|m| (m - current_max).abs() > 1e-9)
+    {
+        bail!("{name} has been edited since — its current state is not this change's");
+    }
     conn.execute(
         "UPDATE grade_items SET name = ?1, score = ?2, max_score = ?3 WHERE id = ?4",
         params![old_name, score, max_score, id],

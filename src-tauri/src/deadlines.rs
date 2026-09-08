@@ -392,6 +392,21 @@ pub(crate) fn undo_upsert(conn: &Connection, payload: &serde_json::Value) -> Res
     ) else {
         bail!("the row carries no earlier state for deadline #{id}");
     };
+    // The row must still hold what this change wrote: a later edit is not
+    // this row's to undo, the rule the note undo keeps with its hash.
+    let after = &payload["after"];
+    let current: (String, String, String, Option<String>) = conn.query_row(
+        "SELECT title, kind, due_at, notes FROM deadlines WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let still_this_change = after["title"].as_str().is_none_or(|t| t == current.0)
+        && after["kind"].as_str().is_none_or(|k| k == current.1)
+        && after["dueAt"].as_str().is_none_or(|d| d == current.2)
+        && (after.get("notes").is_none() || after["notes"].as_str() == current.3.as_deref());
+    if !still_this_change {
+        bail!("{title} has been edited since — its current state is not this change's");
+    }
     conn.execute(
         "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
         params![old_title, kind, due_at, before["notes"].as_str(), id],
@@ -438,14 +453,19 @@ pub(crate) fn undo_status(conn: &Connection, payload: &serde_json::Value) -> Res
         (None, Some("open")) => "done",
         (None, _) => "open",
     };
-    let (title, class_id): (String, i64) = conn
+    let (title, class_id, status): (String, i64, String) = conn
         .query_row(
-            "SELECT title, class_id FROM deadlines WHERE id = ?1",
+            "SELECT title, class_id, status FROM deadlines WHERE id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?
         .with_context(|| format!("deadline #{id} is no longer on the list"))?;
+    // A status the row no longer holds was changed since; that change is
+    // its own row's to undo.
+    if payload["status"].as_str().is_some_and(|written| written != status) {
+        bail!("{title} has been changed since — its status is not this change's");
+    }
     conn.execute("UPDATE deadlines SET status = ?1 WHERE id = ?2", params![before, id])?;
     let what = if before == "done" {
         format!("Marked {title} done again")

@@ -570,3 +570,84 @@ mod reissued_id_tests {
         crate::db::memory_db()
     }
 }
+
+#[cfg(test)]
+mod edited_since_tests {
+    use super::*;
+
+    /// An edit's undo restores `before` only while the row still holds its
+    /// `after`: a later edit, or a status changed since, is refused by name.
+    #[test]
+    fn an_edit_undo_refuses_a_row_edited_since() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+             VALUES (7, 1, 'Homework 1', 'assignment', '2026-09-08', 'open', 'manual')",
+            [],
+        )
+        .unwrap();
+        let first = crate::db::audit(
+            &conn,
+            "ui.upsert_deadline",
+            json!({ "id": 7, "classId": 1,
+                    "before": { "title": "Homework 1", "kind": "assignment", "dueAt": "2026-09-07", "notes": null },
+                    "after": { "title": "Homework 1", "kind": "assignment", "dueAt": "2026-09-08", "notes": null } }),
+        )
+        .unwrap();
+        conn.execute("UPDATE deadlines SET due_at = '2026-09-09' WHERE id = 7", []).unwrap();
+        let refused = undo_one(&conn, first).expect_err("edited since");
+        assert!(refused.to_string().contains("edited since"), "{refused:#}");
+        conn.execute("UPDATE deadlines SET due_at = '2026-09-08' WHERE id = 7", []).unwrap();
+        undo_one(&conn, first).expect("holds the change's state again");
+        let due: String = conn.query_row("SELECT due_at FROM deadlines WHERE id = 7", [], |r| r.get(0)).unwrap();
+        assert_eq!(due, "2026-09-07");
+
+        conn.execute("UPDATE deadlines SET status = 'done' WHERE id = 7", []).unwrap();
+        let done = crate::db::audit(
+            &conn,
+            "ui.set_deadline_status",
+            json!({ "id": 7, "classId": 1, "status": "done", "before": "open" }),
+        )
+        .unwrap();
+        conn.execute("UPDATE deadlines SET status = 'open' WHERE id = 7", []).unwrap();
+        let refused = undo_one(&conn, done).expect_err("reopened since");
+        assert!(refused.to_string().contains("changed since"), "{refused:#}");
+
+        conn.execute(
+            "INSERT INTO grade_categories (id, class_id, name, weight) VALUES (4, 1, 'Quizzes', 25)",
+            [],
+        )
+        .unwrap();
+        let reweighted = crate::db::audit(
+            &conn,
+            "ui.save_grade_category",
+            json!({ "id": 4, "classId": 1,
+                    "before": { "name": "Quizzes", "weight": 20 },
+                    "after": { "name": "Quizzes", "weight": 25 } }),
+        )
+        .unwrap();
+        conn.execute("UPDATE grade_categories SET weight = 30 WHERE id = 4", []).unwrap();
+        let refused = undo_one(&conn, reweighted).expect_err("edited since");
+        assert!(refused.to_string().contains("edited since"), "{refused:#}");
+        conn.execute(
+            "INSERT INTO grade_items (id, category_id, name, score, max_score) VALUES (5, 4, 'Quiz 1', 8, 10)",
+            [],
+        )
+        .unwrap();
+        let rescored = crate::db::audit(
+            &conn,
+            "ui.save_grade_item",
+            json!({ "id": 5, "categoryId": 4, "classId": 1, "category": "Quizzes",
+                    "before": { "name": "Quiz 1", "score": 9, "maxScore": 10 },
+                    "after": { "name": "Quiz 1", "score": 8, "maxScore": 10 } }),
+        )
+        .unwrap();
+        conn.execute("UPDATE grade_items SET score = 7 WHERE id = 5", []).unwrap();
+        let refused = undo_one(&conn, rescored).expect_err("edited since");
+        assert!(refused.to_string().contains("edited since"), "{refused:#}");
+        conn.execute("UPDATE grade_items SET score = 8 WHERE id = 5", []).unwrap();
+        undo_one(&conn, rescored).expect("holds the change's state again");
+        let score: f64 = conn.query_row("SELECT score FROM grade_items WHERE id = 5", [], |r| r.get(0)).unwrap();
+        assert_eq!(score, 9.0);
+    }
+}
