@@ -208,10 +208,12 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     })
 }
 
-/// `name.pdf` → `name (2).pdf` when the inbox already holds that name.
+/// `name.pdf` → `name (2).pdf` when the folder already holds that name.
 ///
 /// Every path that puts a file in the inbox goes through this, so no ingestion
-/// route can overwrite what another one left there waiting for approval.
+/// route can overwrite what another one left there waiting for approval;
+/// `beside_existing` asks the same question of a week folder, where the answer
+/// is a proposed destination that approval re-checks before any rename.
 pub(crate) fn free_slot(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
@@ -1358,8 +1360,11 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 /// ended up proposed for a `Week 1/Slides/` that nobody had said existed.
 ///
 /// A chat proposal is the reader asking, so it replaces a Canvas row. A by-name
-/// proposal is the reader clicking, and never meets one: its source is a file
-/// in the tree, and `week_filing` refuses an inbox source before this is reached.
+/// proposal has two writers, and neither replaces a placement: a Materials
+/// row's click takes a file in the tree, and `week_filing` refuses an inbox
+/// source before this is reached; the sync's own card for a file Canvas keeps
+/// loose (`propose_loose_by_name`) does take an inbox source, and `refuse_held`
+/// turns it away while a pending card from another route holds that source.
 ///
 /// Chat is not that exception: a chat move is the user asking for one, which is
 /// a decision rather than a guess. Either way the card's own "Change
