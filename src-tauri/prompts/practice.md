@@ -126,7 +126,10 @@ at least three):
   frame's parent: `window.parent.postMessage({exam: <the output file name>, results:
   [{question: "Q01", topic: <its data-topic>, correct: true or false}]}, "*")` —
   every question once, a free-response question counted correct at full marks. The
-  app listens for nothing yet; the message is the contract.
+  app listens for nothing yet; the message is the contract, and the listener that
+  comes will match `event.source` against the frame it framed — a sandboxed frame's
+  origin reads `null`, so the origin proves nothing — and treat the payload as model
+  output, never as a number to trust.
 - An exam timer: a start control and a mm:ss readout counting down the suggested
   time — display only, nothing stored, no alarm beyond the readout reaching zero.
 

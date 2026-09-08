@@ -1075,7 +1075,10 @@ the kinds of assessment the calendar holds — and its rubric matches them, its 
 the assessment it rehearses for, rather than a volume guessed from the material. Two lines
 settled for M37: every question block carries a `data-topic` naming the concept it tests,
 and the self-scoring panel, once totalled, posts `{exam, results: [{question, topic,
-correct}]}` to `window.parent`, which a sandboxed frame may; nothing receives it yet.
+correct}]}` to `window.parent`, which a sandboxed frame may; nothing receives it yet, and
+the listener that comes matches `event.source` against the frame it framed — an
+opaque-origin frame's `event.origin` reads `null` and proves nothing — and treats the
+payload as model output.
 Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style questions with hidden
 answers + scoring rubric; the row shows `Writing the exam…` while it is written, and the
 exam appears in the workspace's Practice exams listing when the job succeeds, with a
