@@ -252,6 +252,13 @@ fn paused_on(conn: &Connection) -> Option<String> {
     setting(conn, PAUSED_ON).ok().flatten().filter(|s| !s.is_empty())
 }
 
+/// Tonight's key by the settings' window: the one night every reader of "tonight"
+/// — the manual trigger, the pause, the panel, the tray — asks about.
+fn tonight(conn: &Connection) -> String {
+    let (start, end) = settings(conn).window();
+    night_key(Local::now().naive_local(), start, end).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // The run row
 
@@ -518,10 +525,7 @@ fn tick(app: &AppHandle) {
 
 /// `Run the shift now` (SPEC §6): trigger `manual`, once a night like the rest.
 pub fn run_now(app: &AppHandle) -> Result<i64> {
-    let night = with_conn(app, |conn| {
-        let (start, end) = settings(conn).window();
-        Ok(night_key(Local::now().naive_local(), start, end).to_string())
-    })?;
+    let night = with_conn(app, |conn| Ok(tonight(conn)))?;
     start(app, "manual", &night)
 }
 
@@ -551,8 +555,7 @@ pub fn pause_tonight(app: &AppHandle, paused: bool) -> Result<()> {
         if let Some(run) = current.map(|id| run_by_id(conn, id)).transpose()?.flatten() {
             return Ok(run.night);
         }
-        let (start, end) = settings(conn).window();
-        Ok(night_key(Local::now().naive_local(), start, end).to_string())
+        Ok(tonight(conn))
     })?;
     crate::settings::set_audited(app, PAUSED_ON, if paused { &night } else { "" })?;
     emit_changed(app);
@@ -1282,8 +1285,7 @@ pub fn status(app: &AppHandle) -> Result<ShiftStatus> {
     let current = *lock(&state.run_id);
     with_conn(app, |conn| {
         let s = settings(conn);
-        let (start, end) = s.window();
-        let night = night_key(Local::now().naive_local(), start, end).to_string();
+        let night = tonight(conn);
         let run = match current {
             Some(id) => run_by_id(conn, id)?,
             None => latest_run(conn)?,
@@ -1322,8 +1324,8 @@ pub fn tray_summary(app: &AppHandle) -> TraySummary {
     let now = Local::now();
     with_conn(app, |conn| {
         let s = settings(conn);
-        let (start, end) = s.window();
-        let night = night_key(now.naive_local(), start, end).to_string();
+        let (start, _) = s.window();
+        let night = tonight(conn);
         let paused = paused_on(conn).as_deref() == Some(night.as_str());
         let run = match current {
             Some(id) => run_by_id(conn, id)?,
