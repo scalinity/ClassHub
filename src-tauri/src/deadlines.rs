@@ -1473,6 +1473,47 @@ const SAME_TITLE_AND_DAY: &str =
 const NOT_ANOTHER_ASSIGNMENT: &str =
     "(?4 IS NULL OR canvas_assignment_id IS NULL OR canvas_assignment_id = ?4)";
 
+/// How far apart two readings of one assignment's due date may fall: a
+/// syllabus names the week's Sunday and Canvas the Monday at 11:59 pm.
+const SAME_ASSIGNMENT_DAYS: i64 = 2;
+
+/// A title reduced to what names the assignment (SPEC §7.2): lowercased,
+/// `#` and punctuation dropped, `hw` and `assignment` read as `homework` —
+/// the syllabus's `Homework 1`, Canvas's `Homework Assignment 1` and a
+/// `HW #1` are one key — and repeats collapsed.
+pub(crate) fn assignment_key(title: &str) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    let lowered = title.to_lowercase();
+    for word in lowered
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let word = match word {
+            "hw" | "assignment" | "assignments" | "homeworks" => "homework",
+            other => other,
+        };
+        if words.last() != Some(&word) {
+            words.push(word);
+        }
+    }
+    words.join(" ")
+}
+
+/// Whether two readings name one assignment: the same key, due within
+/// `SAME_ASSIGNMENT_DAYS` of each other. Pure, since the wrong answer is
+/// silent either way — a row beside its own duplicate, or two homeworks
+/// folded into one.
+pub(crate) fn same_assignment(title_a: &str, due_a: &str, title_b: &str, due_b: &str) -> bool {
+    if assignment_key(title_a) != assignment_key(title_b) {
+        return false;
+    }
+    let day = |due: &str| chrono::NaiveDate::parse_from_str(due.get(..10).unwrap_or(""), "%Y-%m-%d").ok();
+    match (day(due_a), day(due_b)) {
+        (Some(a), Some(b)) => (a - b).num_days().abs() <= SAME_ASSIGNMENT_DAYS,
+        _ => false,
+    }
+}
+
 /// canvas > syllabus, for a card both readers can propose.
 ///
 /// Canvas returns the assignment's own `due_at`; a syllabus scan returns a
@@ -1587,6 +1628,22 @@ pub(crate) fn record_proposal(
     if existing > 0 {
         return Ok(Recorded::AlreadyDeadline);
     }
+    // A reader without an id — the syllabus scan — proposing what the list
+    // already holds under Canvas's words and Canvas's day (SPEC §7.2): the
+    // same assignment, not a card beside it.
+    if canvas_id.is_none() {
+        let mut stmt = conn.prepare(
+            "SELECT title, due_at FROM deadlines WHERE class_id = ?1",
+        )?;
+        let named = stmt
+            .query_map([class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .any(|(t, d)| same_assignment(title, due_at, &t, &d));
+        if named {
+            return Ok(Recorded::AlreadyDeadline);
+        }
+    }
     let dismissed_before: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM deadline_proposals
@@ -1663,6 +1720,9 @@ pub(crate) struct Settled {
     /// A card waiting for the assignment left the queue with the settle,
     /// which the sync's `deadlineProposals` push has to follow.
     pub card_resolved: bool,
+    /// The titles of the untracked rows that named this assignment beside
+    /// the tracked one — the syllabus's reading of it — and were folded in.
+    pub merged: Vec<String>,
 }
 
 /// Brings the deadline for a Canvas assignment up to date, if there is one.
@@ -1704,25 +1764,28 @@ pub(crate) fn settle_canvas_deadline(
     // so it lands with its own audit row and never without the move that
     // follows it.
     let tx = conn.unchecked_transaction()?;
+    // The class's rows no assignment tracks, an open one before a done one:
+    // what a syllabus scan or a hand put on the list, and what this
+    // assignment may be the Canvas reading of.
+    let untracked = |tx: &Connection| -> rusqlite::Result<Vec<Row>> {
+        let mut stmt = tx.prepare(
+            "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
+             WHERE class_id = ?1 AND canvas_assignment_id IS NULL
+             ORDER BY (status = 'open') DESC, id",
+        )?;
+        let rows = stmt.query_map([class_id], read)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    };
     let row = match (by_id, canvas_due) {
         (Some(row), _) => row,
-        // Without a day there is no (title, day) to match a legacy row on.
+        // Without a day there is no reading to match a legacy row on.
         (None, None) => return Ok(None),
         (None, Some(canvas_due)) => {
-            // An open row over a done one, when two share a title and a day:
+            // The first untracked row that names this assignment (SPEC §7.2):
             // the open one is the one a submission has something to close.
-            let legacy: Option<Row> = tx
-                .query_row(
-                    &format!(
-                        "SELECT id, title, due_at, status, canvas_assignment_id FROM deadlines
-                         WHERE class_id = ?1 AND {SAME_TITLE_AND_DAY}
-                           AND canvas_assignment_id IS NULL
-                         ORDER BY (status = 'open') DESC, id LIMIT 1"
-                    ),
-                    params![class_id, title, canvas_due],
-                    read,
-                )
-                .optional()?;
+            let legacy = untracked(&tx)?
+                .into_iter()
+                .find(|r| same_assignment(&title, canvas_due, &r.1, &r.2));
             let Some(row) = legacy else {
                 return Ok(None);
             };
@@ -1739,7 +1802,7 @@ pub(crate) fn settle_canvas_deadline(
             row
         }
     };
-    let (id, title, due_at, status, _) = row;
+    let (id, row_title, due_at, status, _) = row;
     // A card waiting for an assignment the list now tracks leaves the queue
     // with it: the deadline is on the list, so the card has nothing to ask.
     let cards = tx.execute(
@@ -1749,19 +1812,31 @@ pub(crate) fn settle_canvas_deadline(
     )?;
 
     let mut settled = Settled { card_resolved: cards > 0, ..Settled::default() };
+    // Canvas's own words for the assignment and its own date: the row follows
+    // both, and one audit row carries whatever moved.
+    let mut before = serde_json::Map::new();
+    let mut after = serde_json::Map::new();
+    if row_title != title {
+        tx.execute("UPDATE deadlines SET title = ?1 WHERE id = ?2", params![title, id])?;
+        before.insert("title".into(), json!(row_title));
+        after.insert("title".into(), json!(title));
+    }
     if let Some(canvas_due) = canvas_due.filter(|d| *d != due_at) {
         tx.execute(
             "UPDATE deadlines SET due_at = ?1 WHERE id = ?2",
             params![canvas_due, id],
         )?;
+        before.insert("dueAt".into(), json!(due_at));
+        after.insert("dueAt".into(), json!(canvas_due));
+        settled.due_moved = true;
+    }
+    if !before.is_empty() {
         audit(
             &tx,
             "canvas.update_deadline",
             json!({ "id": id, "classId": class_id, "canvasAssignmentId": assignment.id,
-                    "title": title, "before": { "dueAt": due_at },
-                    "after": { "dueAt": canvas_due } }),
+                    "title": title, "before": before, "after": after }),
         )?;
-        settled.due_moved = true;
     }
     if let Some(submitted_at) = assignment.submitted_at.filter(|_| status == "open") {
         tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
@@ -1772,6 +1847,42 @@ pub(crate) fn settle_canvas_deadline(
                     "title": title, "submittedAt": submitted_at }),
         )?;
         settled.completed = true;
+    }
+    // Any other untracked row that names this assignment — the syllabus's
+    // reading of it, left beside the tracked row — is folded in: its notes
+    // carried onto the row, its own row removed, and the fold audited. Not
+    // reversible, as no `canvas.*` row is: the next sync would fold it again.
+    let due_now = canvas_due.unwrap_or(due_at.as_str());
+    for dup in untracked(&tx)? {
+        if dup.0 == id || !same_assignment(&title, due_now, &dup.1, &dup.2) {
+            continue;
+        }
+        let (kind, notes, source): (String, Option<String>, String) = tx.query_row(
+            "SELECT kind, notes, source FROM deadlines WHERE id = ?1",
+            [dup.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if let Some(theirs) = notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            let mine: Option<String> =
+                tx.query_row("SELECT notes FROM deadlines WHERE id = ?1", [id], |r| r.get(0))?;
+            let kept = match mine.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(mine) if mine.contains(theirs) => None,
+                Some(mine) => Some(format!("{mine} · {theirs}")),
+                None => Some(theirs.to_string()),
+            };
+            if let Some(kept) = kept {
+                tx.execute("UPDATE deadlines SET notes = ?1 WHERE id = ?2", params![kept, id])?;
+            }
+        }
+        tx.execute("DELETE FROM deadlines WHERE id = ?1", [dup.0])?;
+        audit(
+            &tx,
+            "canvas.merge_deadline",
+            json!({ "id": dup.0, "classId": class_id, "mergedInto": id,
+                    "canvasAssignmentId": assignment.id, "title": dup.1, "kind": kind,
+                    "dueAt": dup.2, "notes": notes, "status": dup.3, "source": source }),
+        )?;
+        settled.merged.push(dup.1);
     }
     tx.commit()?;
     Ok(Some(settled))
@@ -2077,6 +2188,124 @@ mod tests {
     /// The real schema, classes included — `0001_init.sql` seeds them.
     fn db() -> rusqlite::Connection {
         crate::db::memory_db()
+    }
+
+    fn deadline(
+        conn: &rusqlite::Connection,
+        class_id: i64,
+        title: &str,
+        due_at: &str,
+        source: &str,
+        notes: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
+             VALUES (?1, ?2, 'assignment', ?3, ?4, 'open', ?5)",
+            params![class_id, title, due_at, notes, source],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// One assignment under two readers' words (SPEC §7.2): the syllabus's
+    /// `Homework 1` on the Sunday and Canvas's `Homework Assignment 1` on the
+    /// Monday at 11:59 pm are one; another number, another kind or a week
+    /// apart are not.
+    #[test]
+    fn two_readings_name_one_assignment_by_key_and_day() {
+        assert!(same_assignment("Homework Assignment 1", "2026-09-14T23:59", "Homework 1", "2026-09-13"));
+        assert!(same_assignment("HW #1", "2026-09-14", "Homework 1", "2026-09-16"));
+        assert!(same_assignment("Assignment 1", "2026-09-14", "Homework 1", "2026-09-14"));
+        assert!(!same_assignment("Homework 2", "2026-09-14", "Homework 1", "2026-09-14"));
+        assert!(!same_assignment("Quiz 1", "2026-09-14", "Homework 1", "2026-09-14"));
+        assert!(!same_assignment("Homework 1", "2026-09-21", "Homework 1", "2026-09-14"), "a week apart");
+        assert!(!same_assignment("Homework 1", "soon", "Homework 1", "2026-09-14"));
+        assert_eq!(assignment_key("Homework Assignment #1"), "homework 1");
+        assert_eq!(assignment_key("Problem Set 2"), "problem set 2");
+    }
+
+    /// A syllabus row is the Canvas assignment's on first contact by that
+    /// rule, and follows Canvas's words and day from then on.
+    #[test]
+    fn a_settle_links_the_syllabus_reading_and_takes_canvas_words() {
+        let conn = db();
+        let id = deadline(&conn, 1, "Homework 1", "2026-09-13", "syllabus", Some("Chapter 3 problems"));
+        let assignment = CanvasAssignment {
+            id: "77",
+            title: "Homework Assignment 1",
+            due_at: Some("2026-09-14T23:59"),
+            submitted_at: None,
+        };
+        let settled = settle_canvas_deadline(&conn, 1, &assignment).unwrap().expect("linked");
+        assert!(settled.due_moved);
+        assert!(settled.merged.is_empty());
+        let (title, due, canvas_id): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT title, due_at, canvas_assignment_id FROM deadlines WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (title.as_str(), due.as_str(), canvas_id.as_deref()),
+            ("Homework Assignment 1", "2026-09-14T23:59", Some("77"))
+        );
+        let update: String = conn
+            .query_row(
+                "SELECT payload FROM audit_log WHERE action = 'canvas.update_deadline' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(update.contains("\"title\":\"Homework 1\"") && update.contains("\"dueAt\":\"2026-09-13\""), "{update}");
+    }
+
+    /// A syllabus reading left beside a tracked row is folded into it on the
+    /// next sync — its notes carried, its row gone, the fold audited and named
+    /// — and a second sync folds nothing. `Homework 2` is another assignment
+    /// and stays.
+    #[test]
+    fn a_settle_folds_the_syllabus_duplicate_into_the_tracked_row() {
+        let conn = db();
+        let canvas = deadline(&conn, 1, "Homework Assignment 1", "2026-09-14T23:59", "canvas", Some("From Canvas · 10 points"));
+        conn.execute("UPDATE deadlines SET canvas_assignment_id = '77' WHERE id = ?1", [canvas]).unwrap();
+        let dup = deadline(&conn, 1, "Homework 1", "2026-09-13", "syllabus", Some("Chapter 3 problems"));
+        let other = deadline(&conn, 1, "Homework 2", "2026-10-04", "syllabus", None);
+        let assignment = CanvasAssignment {
+            id: "77",
+            title: "Homework Assignment 1",
+            due_at: Some("2026-09-14T23:59"),
+            submitted_at: None,
+        };
+        let settled = settle_canvas_deadline(&conn, 1, &assignment).unwrap().expect("tracked");
+        assert_eq!(settled.merged, vec!["Homework 1".to_string()]);
+        let count = |id: i64| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM deadlines WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!((count(dup), count(other), count(canvas)), (0, 1, 1));
+        let notes: String = conn
+            .query_row("SELECT notes FROM deadlines WHERE id = ?1", [canvas], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notes, "From Canvas · 10 points · Chapter 3 problems");
+        let folds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log WHERE action = 'canvas.merge_deadline'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(folds, 1);
+        let again = settle_canvas_deadline(&conn, 1, &assignment).unwrap().expect("tracked");
+        assert!(again.merged.is_empty());
+    }
+
+    /// A syllabus rescan proposing what Canvas already tracks under its own
+    /// words is told the deadline exists rather than given a card.
+    #[test]
+    fn a_syllabus_proposal_for_a_tracked_assignment_is_already_a_deadline() {
+        let conn = db();
+        let canvas = deadline(&conn, 1, "Homework Assignment 1", "2026-09-14T23:59", "canvas", None);
+        conn.execute("UPDATE deadlines SET canvas_assignment_id = '77' WHERE id = ?1", [canvas]).unwrap();
+        let recorded = record_proposal(&conn, 1, "Homework 1", "assignment", "2026-09-13", None, "syllabus", None).unwrap();
+        assert!(matches!(recorded, Recorded::AlreadyDeadline));
+        let recorded = record_proposal(&conn, 1, "Homework 2", "assignment", "2026-10-04", None, "syllabus", None).unwrap();
+        assert!(matches!(recorded, Recorded::Proposed));
     }
 
     fn propose(conn: &rusqlite::Connection, due_at: &str, source: &str) -> Recorded {
@@ -2492,7 +2721,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &unsubmitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: false, card_resolved: false })
+            Some(Settled { due_moved: true, completed: false, card_resolved: false, merged: Vec::new() })
         );
         assert_eq!(
             row(),
@@ -2518,7 +2747,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("submitted"),
-            Some(Settled { due_moved: false, completed: true, card_resolved: false })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new() })
         );
         assert_eq!(row().2, "done");
         let named: i64 = conn
@@ -2601,7 +2830,8 @@ mod tests {
 
     /// Two rows sharing a title and a day — one already done by hand, one
     /// open — and the open one is the one Canvas's submission has something
-    /// to close, so it is the one that takes the id.
+    /// to close, so it is the one that takes the id; the done one is the
+    /// same quiz twice and is folded into it.
     #[test]
     fn the_open_row_is_linked_when_two_share_a_title_and_day() {
         let conn = db();
@@ -2620,7 +2850,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: true, card_resolved: false })
+            Some(Settled { due_moved: true, completed: true, card_resolved: false, merged: vec!["Quiz 1".to_string()] })
         );
         let (source, status): (String, String) = conn
             .query_row(
@@ -2653,7 +2883,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &tracked).expect("settle"),
-            Some(Settled { due_moved: false, completed: true, card_resolved: false })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new() })
         );
         let (due_at, status): (String, String) = conn
             .query_row(

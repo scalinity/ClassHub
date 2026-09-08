@@ -5619,3 +5619,224 @@ tests' commit). What future sessions should know:
 - The shell's working directory carried a `cd src-tauri` into the next
   call, so `git add src-tauri/src/…` looked for `src-tauri/src-tauri/`;
   absolute paths, or `cd` to the repo root in the same command.
+
+## M34 — The idle shift (2026-09-08)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database taken at 13:43
+(`user_version` 16, jobs at 326, 242 audit rows, none active, the installed app
+8f1a363 running alone, Canvas synced at 12:33) and 183 job logs:
+
+- **The runner's week**, every non-self-check job since Sept 1, cost from the
+  log's `total_cost_usd`: digests 286 (12 min, $3.06), 303 (15, $3.98), 304
+  (9, $2.11), 310 (12, $2.99), 314 (18, $4.82); division guides 287 (18,
+  $5.59), 306 (21, $7.86), 311 (20, $7.86), 316 (23, $10.60); the master 317
+  (32, $18.38); exams 292 (10, $3.74), 293 (8, $2.37), 318 (10, $3.64); extracts
+  from $0.14 (a refused run) to $8.33 (308, 88 min over Biostatistics' readings);
+  sorts and syllabus scans under a minute and under $0.61. Start hours: half the
+  synthesis ran past midnight — the Sept 3 scans 00:41–03:17, the M32 runs
+  01:53–03:22 on Sept 8 — and the rest between 12:33 and 22:40. So the brief's
+  "none past midnight" does not hold; a 21:00–06:00 window covers what the
+  sessions actually did. Nothing ran between 06:00 and 12:00.
+- **`rate_limit_event`**: 229 events in 172 of the 183 logs, one near the top
+  of each run (line 2 of digest 314's) and one after each turn that crossed a
+  window boundary (lines 188 and 194 of 229). Every one carries
+  `"status":"allowed"` with `rateLimitType` `five_hour` and
+  `unifiedWindows.{five_hour,seven_day}.utilization`; the highest seen 0.77 on
+  the five-hour window and 0.71 on the seven-day. The runner keeps
+  `rateLimitType` for the self-check's verdict text and shows nothing else.
+  The stop rule therefore keys on `status != "allowed"`, a value never yet
+  logged; `resetsAt` says when it lifts.
+- **Idle time**: `ioreg -c IOHIDSystem` prints `"HIDIdleTime" = 240022790625`
+  after four minutes untouched — nanoseconds, as expected.
+- **`/usr/bin/caffeinate`** is present (136 KB, root). `pmset -g` on the
+  current source: `displaysleep 60`, `sleep 1` (prevented at that moment by
+  `powerd, caffeinate, Claude`), so the machine sleeps a minute after its
+  display does, an hour into an idle evening; a shift that starts at twenty
+  minutes idle and holds `caffeinate -i` is what keeps it up, and one that
+  finds the machine asleep runs nothing.
+- **What the first shift finds**: every applied contribution has its note on
+  disk; three carry no `hints_read_at` — Applied's Aug 25 and Sept 1 sessions
+  and Fundamentals' Sept 1 — so the distill step lists three redistills,
+  oldest first, at $2–5 each. Division guides: Part I (row 7, stale over
+  Sept 1's redistilled note and its deck) and Design Studio's Week 1 (no row;
+  `Introduction.pdf` under its week folder; met Aug 26) are due once Applied's
+  Tuesday meeting has ended; Biostatistics' Week 4 (the attempted reading,
+  meets Thursday) and Fundamentals' Week 3 (an empty folder) are not. The
+  Module 1 folder guide (row 1) is a folder's, not a division's, and stays a
+  click. The Week 4 reading is marked attempted, so the extract step enqueues
+  nothing.
+- **The self-check** already writes one row a day: since M15's gate the rows
+  fall on Sept 2, 3 and 7, one each, with five, eight and one launch on those
+  days and eight launches on Sept 8 writing none — `startup_self_check`
+  restores the standing verdict without a row. The brief's "one per launch"
+  premise does not hold and there is nothing to build.
+- **The settings the runner reads at spawn**: `job_model` (opus), `job_effort`
+  (xhigh) through `settings::job_spawn_options` in `execute_job`, and
+  `job_concurrency` (4) in `pump`; no per-kind key exists. `settings` holds
+  seven rows in all.
+- Migration `0016` is M33's (`duplicate_files`); the shift's is `0017`.
+
+### What was built
+
+- **The shift** (`shift.rs`, migration 0017 `shift_runs`, `user_version` 17).
+  `start_scheduler` runs a thread: a catch-up check at launch (`catch_up`:
+  the last closed window with no run row, only once a run exists at all),
+  then a minute `tick` that reads the settings, the night's key
+  (`night_key`: the date the window opened on, yesterday inside a window
+  that crossed midnight), the window (`in_window`), the pause
+  (`shift_paused_on` equal to the night's key), the run row for the night
+  (`ran_on`) and whether this process runs shifts (`runs_here`: a release
+  build always, a dev build with `shift_in_dev_build`), and only then
+  spawns `ioreg` for `HIDIdleTime` (`parse_idle`). `should_start` is the
+  pure decision; `insert_run` claims the night in one IMMEDIATE
+  transaction; `run_shift` holds `caffeinate -i -w <pid>`, runs `run_plan`
+  under `catch_unwind`, writes the row's `stopped_by` and `summary`, and
+  notifies. `run_plan` walks the five steps through a `Progress` that
+  saves the steps and jobs JSON on every change and emits `shift-changed`:
+  the sync through `canvas_sync::sync_now` (the thread body of `spawn_with`
+  refactored into `run_reporting`, returning `SyncEnd`), skipped with a
+  line when no session is stored; `File` from the outcomes' `files_filed`;
+  `extract::run_pipeline_now` per class (the pipeline now returns its job
+  id); `digest_candidates` — every applied contribution without its note,
+  then every one with `hints_read_at` null, oldest session first — through
+  `lectures::enqueue_digest` with `session_date`; `guide_candidates` —
+  every division with materials or notes whose `unit:` guide is absent or
+  stale (`guides::unit_guides`) and whose `meeting_end` has passed —
+  through `guides::synthesize_unit` with a server-side label. `capped`
+  cuts each list at its cap and counts what it left; `wait_for_job` polls
+  the row every five seconds; `stop_reason` reads the pause and
+  `jobs::rate_limit_reached` between jobs. `startup_recovery` settles a
+  run whose owner is gone; `shutdown` settles the run under way on quit.
+  `meter` counts the week's digests, guides, exams and extracts and their
+  minutes from `jobs`; `status` serves the panel; `tray_summary` the tray.
+- **The runner** (`jobs.rs`, `settings.rs`). `RATE_LIMIT` keeps the latest
+  `rate_limit_event` (`status`, `rateLimitType`, `resetsAt`);
+  `limit_reached` is the rule and the run's progress names it.
+  `job_spawn_options(app, kind)` reads `job_model.<kind>` and
+  `job_effort.<kind>` over the global pair (`spawn_options_in`), each half
+  on its own; `set_job_kind_model` and `set_job_kind_effort` audit and
+  clear; `flag` reads the yes/no settings; `NOTIFY_JOB_FAILED` and
+  `NOTIFY_SHIFT_FINISHED` gate the two notifications; a failed job (not a
+  cancel, not the self-check) notifies from `run_job`. `owner_gone` and
+  `kind_label` are shared out.
+- **Always there** (`lib.rs`, `tray.rs`). `tauri-plugin-notification` and
+  `tauri-plugin-autostart` (LaunchAgent) are initialised;
+  `set_login_item` registers or removes the plist and audits the
+  executable it named; `tray::install` builds the tray from a drawn
+  template ring, `refresh` rebuilds its menu on the main thread from
+  `tray_summary` on every `shift-changed` and every tick; `CloseRequested`
+  hides the window, `Reopen` shows it, `ExitRequested` settles the shift
+  before the jobs. Commands: `get_shift_status`, `run_shift_now`,
+  `pause_shift_tonight`, `set_shift_setting`, `set_job_kind_model`,
+  `set_job_kind_effort`, `set_notify_setting`, `set_login_item`.
+- **The frontend.** `lib/jobs.ts` carries `shift: ShiftStatus` in the
+  jobs store, refetched on `shift-changed`, with `runShiftNow`,
+  `pauseShiftTonight` and `formatMinutes`; `JobCenter.tsx` opens the panel
+  with `ShiftPanel` — the run's title and summary, the numbered plan with
+  a mark and outcome per step, the week's meter, tonight in one line, the
+  two controls — and the pill reads `Shift · step 4 of 5` while a run is
+  under way. `Settings.tsx` gains a row per kind, `The idle shift` (a
+  switch, two time fields, three number fields applied on Enter or blur,
+  the dev-build switch) and `Always there` (the login item and the two
+  notifications) on a `Switch` and a `ValueField`; `lib/settings.ts` the
+  setters. `Picker.tsx` replaces every native `<select>` — the per-kind
+  pairs, a deadline's kind, the Add lecture form's week — with a listbox on
+  the app's surface, since the system popup takes no stylesheet.
+- SPEC §6, §7, §7.2, §8.1, §8.2, §8.4, §12, §13, §14 and §15 state the
+  design; the brief was revised where Phase 0 contradicted it.
+- **One assignment, two readers** (`deadlines.rs`, `canvas_sync.rs`; asked for
+  mid-session, on the list showing the syllabus's `Homework 1` beside Canvas's
+  `Homework Assignment 1`). `assignment_key` reduces a title — lowercased, `#`
+  and punctuation dropped, `hw` and `assignment` read as `homework`, repeats
+  collapsed — and `same_assignment` is the rule: one key, due within two days.
+  `settle_canvas_deadline` links an untracked row by it on first contact,
+  takes Canvas's title as it takes Canvas's date (one `canvas.update_deadline`
+  row holding both), and then folds every other untracked row that names the
+  assignment into the tracked one — notes carried where they add anything,
+  the row removed under `canvas.merge_deadline`, `Settled.merged` naming it —
+  so the sync report and a notice say `Merged Homework 1 into Homework
+  Assignment 1 from Canvas`; `record_proposal` tells a syllabus rescan the
+  deadline exists rather than carding it again. Not reversible, as no
+  `canvas.*` row is: the next sync would fold it again.
+
+### Verified
+
+- `cargo test`: 302 pass, sixteen new — the window and the night across
+  midnight; the decision condition by condition; a night's one run across
+  two inserts; the idle read; the caps; a division's meeting; the distill
+  list (a note missing before a ledger unread, a read one not listed); the
+  rebuild list (sources and no guide listed, a meeting ahead not, a fresh
+  guide not, an empty folder not, the master never, a changed deck stale and
+  first, the cap holding); the rate-limit stop on a status other than
+  `allowed` with its reset ahead; the per-kind fallback half by half; a flag;
+  the same-assignment rule; a settle linking by it and taking Canvas's words;
+  a fold of the syllabus's duplicate with its notes carried and a second sync
+  folding nothing; a syllabus proposal for a tracked assignment refused. `npx
+  tsc --noEmit` clean.
+- **Live on the dev build**, migration 0017 applied at launch (`user_version`
+  17), beside the installed app 8f1a363. The tray read through System Events:
+  `Next class · Wed 5:10 pm · AI in Health Design Studio I`, `Shift tonight at
+  9:00 pm`, `Open ClassHub`, `Run the shift now`, `Pause tonight`, `Quit
+  ClassHub`. Settings showed a row per kind, `The idle shift` and `Always
+  there`; `Open ClassHub at login` wrote `~/Library/LaunchAgents/ClassHub.plist`
+  naming `target/debug/classhub` (audit 243) and removed it (244); the sort
+  kind's model and effort were set to Sonnet and Medium (245–246); the window
+  was typed as 4:25 pm–8:00 pm segment by segment. With `shift_in_dev_build`
+  on, idle at 0, one digest and no guide allowed: the minute tick started run
+  1 at 16:25:48 (trigger `idle`, `caffeinate` pid 15647 a child of the build);
+  the sync ended with `Canvas wants a sign-in — not synced` (the stored session
+  had lapsed) and `File` was skipped, `Extract` found nothing stale, `Distill`
+  enqueued job 327 — Applied's Aug 25 session, the oldest unread — and the
+  pill read `Shift · step 4 of 5  Lecture digest 00:44`, the panel the plan
+  with its marks and outcomes, the tray `Shift running · step 4 of 5` with
+  `4/5` beside the glyph. `Pause tonight` pressed during the job; the run
+  ended at 16:39:19 as `paused — 1 session distilled` without opening the
+  rebuild step, `caffeinate` gone, the row `[327]`. Job 327: 13 min, 10
+  turns, $3.91, 40 hints recorded and the contribution's `hints_read_at` set.
+  `Run the shift now` from the tray afterwards: `the shift already ran
+  tonight (2026-09-08); it runs once a night`. A sort over a fixture CSV in
+  the Biostatistics inbox (job 328) spawned with `claude-sonnet-5` in its init
+  event — the digest with `claude-opus-5` — 20 s, $0.17; the fixture was
+  removed and its card resolved as vanished. ⌘W hid the window with the
+  process alive (0 windows) and the tray's `Open ClassHub` brought it back.
+  The themed picker opened on the app's surface for the kinds, the deadline
+  form and the Add lecture week, a typed letter jumping to `quiz`. The
+  self-check wrote no row across the day's nine launches.
+- Session cost, all on the subscription: the digest $3.91 (327) and the sort
+  $0.17 (328). No chat turn, nothing on credits.
+
+### Left as it is
+
+- The shift-finished notification: the plugin attributes a dev build's
+  notification to Terminal and drops the result, and Notification Center
+  recorded nothing at 16:39; the installed app, under its own bundle id, is
+  where it shows. Verified there after the install (below).
+- Tonight's run row is the verification run, so the installed app runs no
+  shift on Sept 8; the first real shift is Sept 9's window, on the defaults
+  (21:00–06:00, 20 minutes idle, four digests, two guides). The pause and
+  the verification caps were cleared; the sort kind stays on Sonnet at
+  Medium, the light tier the brief suggests.
+- The stored Canvas session lapsed before the run, so the sync step reported
+  a sign-in and the existing `Homework 1` beside `Homework Assignment 1`
+  waits for the next signed-in sync to fold it — the rule is in the settle,
+  so that sync does it for every class at once.
+- `sorter::week_filing` is dead outside the tests at the baseline too, and
+  the lib build has said so since M33.
+- The login item registered from a dev build names the dev binary; the
+  installed app registers itself.
+
+### Gotchas
+
+- `ManifestEntry` serialises camelCase (`relPath`), so a test's stored
+  manifest written as `rel_path` reads as removed and the guide as stale.
+- The `MutexGuard` of a `lock(&state.field).take()` in a tail expression
+  outlives `state`; bind the taken value first.
+- A native `<select>` opens the system popup, which no stylesheet reaches;
+  the AX driver's `press` on the app's `Picker` opens it, its options are
+  not in the tree, and a typed letter with Return picks one.
+- The menu bar auto-hides here, so the tray is read through System Events
+  (`menu bar 2` of the process), never a screenshot.
+- Each Rust edit relaunched the dev build (three times this session); the
+  Job Center and the shift block were checked before each.

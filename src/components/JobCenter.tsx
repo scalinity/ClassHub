@@ -14,17 +14,23 @@ import {
   cancelJob,
   ensureOutput,
   formatElapsed,
+  formatMinutes,
   jobKindLabel,
+  pauseShiftTonight,
   rerunAuthCheck,
+  runShiftNow,
   toggleJobPanel,
   useJobs,
   type JobInfo,
   type JobProgressEvent,
+  type ShiftRun,
+  type ShiftStatus,
+  type ShiftStep,
 } from "@/lib/jobs";
 import { NoticeLine } from "@/components/NoticeToast";
 import { CLASS_ACCENTS } from "@/lib/classes";
 import { useNotices } from "@/lib/notices";
-import { formatClock } from "@/lib/schedule";
+import { formatClock, formatStamp, formatTime } from "@/lib/schedule";
 import { getAppSettings } from "@/lib/settings";
 import {
   buttonIcon,
@@ -44,7 +50,7 @@ function accentStyle(color: string | null): CSSProperties {
 const isActive = (j: JobInfo) => j.status === "running" || j.status === "queued";
 
 export function JobCenter() {
-  const { jobs, output, panelOpen, nowSec, error } = useJobs();
+  const { jobs, output, panelOpen, nowSec, error, shift } = useJobs();
   const { notices } = useNotices();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -74,6 +80,8 @@ export function JobCenter() {
                 : "Nothing running"}
             </span>
           </header>
+
+          {shift !== null && <ShiftPanel shift={shift} onError={setActionError} />}
 
           {notice !== null && (
             <p
@@ -136,9 +144,16 @@ export function JobCenter() {
         lastJob={jobs[0] ?? null}
         nowSec={nowSec}
         panelOpen={panelOpen}
+        shift={shift}
       />
     </div>
   );
+}
+
+/** `step 3 of 5` while a run is under way. */
+function shiftStepLabel(run: ShiftRun): string | null {
+  const index = run.steps.findIndex((s) => s.state === "running");
+  return index === -1 ? null : `step ${index + 1} of ${run.steps.length}`;
 }
 
 function Pill({
@@ -146,15 +161,18 @@ function Pill({
   lastJob,
   nowSec,
   panelOpen,
+  shift,
 }: {
   running: JobInfo[];
   lastJob: JobInfo | null;
   nowSec: number;
   panelOpen: boolean;
+  shift: ShiftStatus | null;
 }) {
   const oldest = running[running.length - 1];
   const failedIdle =
     running.length === 0 && lastJob !== null && lastJob.status === "failed";
+  const shiftRun = shift?.running ? shift.run : null;
 
   return (
     <button
@@ -165,7 +183,19 @@ function Pill({
       style={accentStyle(oldest?.classColor ?? null)}
       className="pointer-events-auto flex h-9 cursor-pointer items-center gap-2 rounded-full bg-surface px-4 text-body shadow-md ring-1 ring-border transition-shadow hover:shadow-lg focus-visible:outline-2 focus-visible:outline-ring"
     >
-      {oldest ? (
+      {shiftRun ? (
+        <>
+          <span aria-hidden className={pulseDot} />
+          <span className="font-medium">
+            {`Shift · ${shiftStepLabel(shiftRun) ?? "starting"}`}
+          </span>
+          {oldest && (
+            <span className="tabular-nums text-muted-foreground">
+              {jobKindLabel(oldest.kind)} {formatElapsed(oldest.startedAt ?? nowSec, nowSec)}
+            </span>
+          )}
+        </>
+      ) : oldest ? (
         <>
           <span aria-hidden className={pulseDot} />
           <span className="font-medium">
@@ -365,6 +395,137 @@ function OutputPane({
         )}
       </div>
     </div>
+  );
+}
+
+/** What the run's title line says about how it ended. */
+const STOPPED_BY_COPY: Record<NonNullable<ShiftRun["stoppedBy"]>, string> = {
+  done: "",
+  budget: "· capped for the night",
+  rate_limit: "· stopped at the rate limit",
+  paused: "· paused",
+  error: "· stopped",
+};
+
+function runTitle(run: ShiftRun, running: boolean): string {
+  const started = new Date(run.startedAt * 1000);
+  if (running) {
+    const by = run.trigger === "manual" ? "started by hand" : run.trigger === "launch" ? "catching up" : "running";
+    return `Tonight's shift · ${by} since ${formatClock(started)}`;
+  }
+  const ended = run.finishedAt ? formatStamp(new Date(run.finishedAt * 1000)) : formatStamp(started);
+  const how = run.stoppedBy ? STOPPED_BY_COPY[run.stoppedBy] : "";
+  return `Last shift · ${ended} ${how}`.trim();
+}
+
+/** Tonight, in one line: when it runs, or why it will not. */
+function tonightLine(shift: ShiftStatus): string {
+  const { settings, running, ranTonight, paused, runsHere } = shift;
+  if (running) return "Running now";
+  if (!runsHere) return "Runs in the installed app, not this build";
+  if (!settings.enabled) return "Off — switch it on in Settings";
+  if (paused) return "Paused tonight";
+  if (ranTonight) return "Ran tonight · next window tomorrow";
+  const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  return `Tonight from ${formatTime(settings.start)} once the Mac has been idle ${settings.idleMinutes} min · up to ${count(settings.digestsPerNight, "digest", "digests")}, ${count(settings.guidesPerNight, "guide", "guides")}`;
+}
+
+function StepMark({ state }: { state: ShiftStep["state"] }) {
+  switch (state) {
+    case "running":
+      return <span aria-hidden className={pulseDot} />;
+    case "done":
+      return <Check size={12} aria-hidden className="text-muted-foreground" />;
+    case "skipped":
+      return <Minus size={12} aria-hidden className="text-muted-foreground/60" />;
+    default:
+      return (
+        <span
+          aria-hidden
+          className="size-1.5 shrink-0 rounded-full border border-muted-foreground/50"
+        />
+      );
+  }
+}
+
+/**
+ * SPEC §6 — the shift's place in the panel: this week's meter in counts and
+ * minutes, the current or last run's plan with each step's outcome, tonight
+ * in one line, and the two controls the tray also carries.
+ */
+function ShiftPanel({
+  shift,
+  onError,
+}: {
+  shift: ShiftStatus;
+  onError: (message: string | null) => void;
+}) {
+  const { run, meter, running, paused, ranTonight } = shift;
+  const [busy, setBusy] = useState(false);
+  const act = (change: Promise<unknown>) => {
+    setBusy(true);
+    onError(null);
+    change.catch((e) => onError(String(e))).finally(() => setBusy(false));
+  };
+
+  return (
+    <section
+      aria-label="The shift"
+      style={accentStyle(null)}
+      className="border-b border-border/70 px-4 py-3"
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="min-w-0 truncate text-body font-medium">
+          {run ? runTitle(run, running) : "The shift has not run yet"}
+        </p>
+        <p className={`shrink-0 ${meta}`}>
+          This week · {meter.digests} {meter.digests === 1 ? "digest" : "digests"} ·{" "}
+          {meter.guides} {meter.guides === 1 ? "guide" : "guides"} · {formatMinutes(meter.minutes)}
+        </p>
+      </div>
+      {run?.summary && (
+        <p className="mt-0.5 text-body text-muted-foreground">{run.summary}</p>
+      )}
+      {run && (
+        <ol aria-label="The plan" className="mt-2 space-y-1">
+          {run.steps.map((step, index) => (
+            <li key={step.name} className="flex min-h-5 items-center gap-2.5 text-body">
+              <span className="flex w-4 shrink-0 justify-center">
+                <StepMark state={step.state} />
+              </span>
+              <span className={`w-4 shrink-0 ${meta}`}>{index + 1}</span>
+              <span className={step.state === "pending" ? "text-muted-foreground" : ""}>
+                {step.name}
+              </span>
+              {step.outcome && (
+                <span className="min-w-0 truncate text-muted-foreground" title={step.outcome}>
+                  · {step.outcome}
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      <div className="mt-2.5 flex items-center gap-1">
+        <span className={`min-w-0 flex-1 truncate ${meta}`}>{tonightLine(shift)}</span>
+        <button
+          type="button"
+          disabled={busy || running || ranTonight}
+          onClick={() => act(runShiftNow())}
+          className={buttonTextNeutral}
+        >
+          Run the shift now
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act(pauseShiftTonight(!paused))}
+          className={buttonTextNeutral}
+        >
+          {paused ? "Resume tonight" : "Pause tonight"}
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -66,6 +66,63 @@ const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// `finished_at` in the table.
 const SELF_CHECK_INTERVAL: i64 = 24 * 60 * 60;
 
+/// The latest `rate_limit_event` any run streamed (SPEC §6): every one logged
+/// so far says `allowed`, and the shift reads this between jobs for the day
+/// one does not.
+static RATE_LIMIT: Mutex<Option<RateLimit>> = Mutex::new(None);
+
+#[derive(Clone, Debug)]
+pub struct RateLimit {
+    /// `allowed`, or whatever the CLI says when it is not.
+    pub status: String,
+    /// `five_hour` or `seven_day`.
+    pub window: Option<String>,
+    /// When the window resets, unix seconds, where the event said.
+    pub resets_at: Option<i64>,
+}
+
+impl RateLimit {
+    fn describe(&self) -> String {
+        let window = match self.window.as_deref() {
+            Some("five_hour") => "the five-hour window",
+            Some("seven_day") => "the seven-day window",
+            _ => "the subscription window",
+        };
+        match self.resets_at {
+            Some(at) if at > now() => {
+                let minutes = (at - now()) / 60;
+                if minutes >= 60 {
+                    format!("{window} resets in {} h {} min", minutes / 60, minutes % 60)
+                } else {
+                    format!("{window} resets in {minutes} min")
+                }
+            }
+            _ => format!("{window} is at its limit"),
+        }
+    }
+}
+
+/// Whether an event says the limit is reached: a status other than `allowed`
+/// whose reset, where it named one, is still ahead. Pure, since the wrong
+/// answer is silent either way — a shift that never stops, or one that never
+/// starts on an event that lifted hours ago.
+pub(crate) fn limit_reached(limit: &RateLimit, now: i64) -> bool {
+    limit.status != "allowed" && limit.resets_at.is_none_or(|at| at > now)
+}
+
+/// What the shift asks between jobs: a reason to stop, when the latest event
+/// says the limit is reached.
+pub fn rate_limit_reached() -> Option<String> {
+    let latest = lock(&RATE_LIMIT).clone()?;
+    limit_reached(&latest, now()).then(|| latest.describe())
+}
+
+/// Whether the process that owns a row is gone, for a recovery that runs
+/// outside this module (the shift's runs).
+pub(crate) fn owner_gone(owner: Option<i64>) -> bool {
+    is_orphan(owner, std::process::id(), &process_alive)
+}
+
 /// Says once, in the run's own progress stream, that the raw log is short —
 /// the job itself is unaffected and keeps going.
 fn log_write_failed(app: &AppHandle, job: &QueuedJob, reported: &mut bool, e: &std::io::Error) {
@@ -1558,6 +1615,35 @@ fn run_job(
     if let Err(e) = update {
         eprintln!("job {} finalize failed: {e:#}", job.id);
     }
+    // SPEC §12: one of the two notifications. A cancel is the owner's own
+    // doing and says nothing; the self-check's failure has its own dialog.
+    if status == "failed" && job.kind != "self_check" {
+        let scope = with_conn(&app, |conn| {
+            let unit_name: Option<String> = match job.scope.as_deref().and_then(crate::db::unit_scope_id) {
+                Some(unit_id) => conn
+                    .query_row("SELECT name FROM units WHERE id = ?1", [unit_id], |row| row.get(0))
+                    .optional()?,
+                None => None,
+            };
+            Ok(job
+                .scope
+                .as_deref()
+                .map(|s| crate::guides::scope_label(s, unit_name.as_deref())))
+        })
+        .ok()
+        .flatten();
+        let what = [Some(kind_label(&job.kind).to_string()), scope]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        crate::shift::notify(
+            &app,
+            crate::settings::NOTIFY_JOB_FAILED,
+            "A job failed",
+            &format!("{what} — {}", error.as_deref().unwrap_or("no reason recorded")),
+        );
+    }
 
     {
         let mgr = app.state::<JobManager>();
@@ -1834,9 +1920,10 @@ fn execute_job(
 
     let home = dirs::home_dir().context("resolving home directory")?;
     let claude = home.join(".local").join("bin").join("claude");
-    // The Settings screen's job model/effort, read at spawn time so a change
-    // applies to the very next job — queued jobs included.
-    let (model, effort) = crate::settings::job_spawn_options(app);
+    // The Settings screen's job model/effort — the kind's own pair, else the
+    // global one (SPEC §6) — read at spawn time so a change applies to the
+    // very next job, queued jobs included.
+    let (model, effort) = crate::settings::job_spawn_options(app, &job.kind);
     let mut cmd = Command::new(&claude);
     cmd.arg("-p")
         .arg(&job.prompt)
@@ -2113,9 +2200,22 @@ fn handle_event(app: &AppHandle, job: &QueuedJob, value: &Value, stream: &mut St
             _ => {}
         },
         "rate_limit_event" => {
-            stream.rate_limit_type = value["rate_limit_info"]["rateLimitType"]
-                .as_str()
-                .map(str::to_string);
+            let info = &value["rate_limit_info"];
+            stream.rate_limit_type = info["rateLimitType"].as_str().map(str::to_string);
+            let latest = RateLimit {
+                status: info["status"].as_str().unwrap_or("unknown").to_string(),
+                window: stream.rate_limit_type.clone(),
+                resets_at: info["resetsAt"].as_i64(),
+            };
+            if limit_reached(&latest, now()) {
+                push_event(
+                    app,
+                    job.id,
+                    "status",
+                    format!("rate limit reached — {}", latest.describe()),
+                );
+            }
+            *lock(&RATE_LIMIT) = Some(latest);
         }
         // Partial message chunks (master_guide only): the long silent stretch of
         // a 30-min job is the model streaming one huge Write input. Tracking its
@@ -2345,6 +2445,15 @@ fn tool_result_text(block: &Value) -> String {
     }
 }
 
+/// What a job kind is called on screen — the Settings list's word for it
+/// (SPEC §6), the kind itself where the list has none.
+pub(crate) fn kind_label(kind: &str) -> &str {
+    crate::settings::JOB_KINDS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map_or(kind, |(_, label)| label)
+}
+
 fn count_label(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
@@ -2404,9 +2513,9 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_written_paths, excluding_app_writes, insert_unique_job, is_orphan, parse_entries,
-        parse_object, process_alive, recover_orphans, standing_self_check, unescape_fragment,
-        wait_bounded, AppWrite,
+        app_written_paths, excluding_app_writes, insert_unique_job, is_orphan, limit_reached,
+        parse_entries, parse_object, process_alive, recover_orphans, standing_self_check,
+        unescape_fragment, wait_bounded, AppWrite, RateLimit,
     };
     use crate::db::now;
     use std::fs;
@@ -2782,6 +2891,33 @@ mod tests {
     /// The launch gate stands on the latest verdict, not the latest success: a
     /// day-old success has lapsed, a fresh one stands, a row still in flight is
     /// not a verdict, and a failure after a success is the verdict.
+    /// The shift's stop rule (SPEC §6): every event logged so far says
+    /// `allowed`, and only a status that is not — whose reset, where named,
+    /// is still ahead — is a reason to stop. An event that lifted hours ago
+    /// must not stop tonight's shift.
+    #[test]
+    fn the_rate_limit_is_reached_on_a_status_other_than_allowed_with_its_reset_ahead() {
+        let allowed = RateLimit {
+            status: "allowed".into(),
+            window: Some("five_hour".into()),
+            resets_at: Some(2_000),
+        };
+        assert!(!limit_reached(&allowed, 1_000));
+        let reached = RateLimit {
+            status: "rejected".into(),
+            window: Some("five_hour".into()),
+            resets_at: Some(2_000),
+        };
+        assert!(limit_reached(&reached, 1_000));
+        assert!(!limit_reached(&reached, 2_000), "lifted at its reset");
+        let unsaid = RateLimit {
+            status: "rejected".into(),
+            window: None,
+            resets_at: None,
+        };
+        assert!(limit_reached(&unsaid, 1_000), "no reset named: it stands");
+    }
+
     #[test]
     fn the_self_check_gate_stands_on_the_latest_verdict_only() {
         let conn = crate::db::memory_db();

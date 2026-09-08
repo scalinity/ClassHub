@@ -160,79 +160,126 @@ pub fn spawn(app: &AppHandle, class_ids: Vec<i64>) -> Result<()> {
 /// `launch` is the sync nobody pressed: the window stays hidden and Canvas
 /// wanting a sign-in ends it rather than asking.
 fn spawn_with(app: &AppHandle, class_ids: Vec<i64>, launch: bool) -> Result<()> {
-    // Refused here rather than reported over the progress channel. That channel
-    // carries one snapshot, so a "already running" terminal event would
-    // overwrite the running sync's own progress and render as SYNC STOPPED for
-    // a sync that is still going.
-    {
-        let mut busy = lock(&SYNCING);
-        if *busy {
-            bail!("a Canvas sync is already running");
-        }
-        *busy = true;
-    }
+    let claim = claim()?;
     let app = app.clone();
     std::thread::spawn(move || {
-        let emit = |stage: &str, done: bool, results: Option<Vec<ClassOutcome>>, error: Option<String>| {
+        // Released however this thread ends.
+        let _claim = claim;
+        run_reporting(&app, &class_ids, launch);
+    });
+    Ok(())
+}
+
+/// The shift's sync (SPEC §6): the launch's quiet path, run to its end on the
+/// calling thread and reported over the same channel, so the Settings report
+/// shows it like any other. Refused while a sync is running.
+pub(crate) fn sync_now(app: &AppHandle) -> Result<SyncEnd> {
+    let _claim = claim()?;
+    Ok(run_reporting(app, &[], true))
+}
+
+/// Takes the one-sync-at-a-time claim, or refuses. Refused here rather than
+/// reported over the progress channel: that channel carries one snapshot, so
+/// an "already running" terminal event would overwrite the running sync's own
+/// progress and render as SYNC STOPPED for a sync that is still going.
+fn claim() -> Result<Claim> {
+    let mut busy = lock(&SYNCING);
+    if *busy {
+        bail!("a Canvas sync is already running");
+    }
+    *busy = true;
+    Ok(Claim)
+}
+
+struct Claim;
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        *lock(&SYNCING) = false;
+    }
+}
+
+/// What a sync ended with, for the caller that waited on it.
+pub(crate) struct SyncEnd {
+    pub results: Option<Vec<ClassOutcome>>,
+    /// Ended because Canvas wants a sign-in the sync was not allowed to ask for.
+    pub sign_in_needed: bool,
+    pub error: Option<String>,
+}
+
+/// Runs a sync and reports it over `PROGRESS_EVENT`, the terminal event
+/// included, returning what it ended with.
+fn run_reporting(app: &AppHandle, class_ids: &[i64], launch: bool) -> SyncEnd {
+    let emit = |stage: &str, done: bool, results: Option<Vec<ClassOutcome>>, error: Option<String>| {
+        let _ = app.emit(
+            PROGRESS_EVENT,
+            Progress {
+                stage: stage.to_string(),
+                done,
+                launch,
+                sign_in_needed: false,
+                results,
+                error,
+            },
+        );
+    };
+    let on_stage = |stage: &str| emit(stage, false, None, None);
+    let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(app, class_ids, &on_stage, launch)
+    }));
+    match finished {
+        Ok(Ok(results)) => {
+            emit("Synced", true, Some(results.clone()), None);
+            emit_hub_change(app, "units");
+            SyncEnd {
+                results: Some(results),
+                sign_in_needed: false,
+                error: None,
+            }
+        }
+        // The one outcome a launch sync expects: the stored session was
+        // turned down. Flagged as such, so the report can say so quietly.
+        Ok(Err(e)) if e.chain().any(|cause| cause.is::<SignInNeeded>()) => {
             let _ = app.emit(
                 PROGRESS_EVENT,
                 Progress {
-                    stage: stage.to_string(),
-                    done,
+                    stage: "Not synced".to_string(),
+                    done: true,
                     launch,
-                    sign_in_needed: false,
-                    results,
-                    error,
+                    sign_in_needed: true,
+                    results: None,
+                    error: Some(format!("{SignInNeeded}")),
                 },
             );
-        };
-        // Claimed above, released here however this thread ends.
-        struct Claim;
-        impl Drop for Claim {
-            fn drop(&mut self) {
-                *lock(&SYNCING) = false;
+            SyncEnd {
+                results: None,
+                sign_in_needed: true,
+                error: Some(format!("{SignInNeeded}")),
             }
         }
-        let _claim = Claim;
-
-        let on_stage = |stage: &str| emit(stage, false, None, None);
-        let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run(&app, &class_ids, &on_stage, launch)
-        }));
-        match finished {
-            Ok(Ok(results)) => {
-                emit("Synced", true, Some(results), None);
-                emit_hub_change(&app, "units");
+        Ok(Err(e)) => {
+            let error = format!("{e:#}");
+            emit("Failed", true, None, Some(error.clone()));
+            SyncEnd {
+                results: None,
+                sign_in_needed: false,
+                error: Some(error),
             }
-            // The one outcome a launch sync expects: the stored session was
-            // turned down. Flagged as such, so the report can say so quietly.
-            Ok(Err(e)) if e.chain().any(|cause| cause.is::<SignInNeeded>()) => {
-                let _ = app.emit(
-                    PROGRESS_EVENT,
-                    Progress {
-                        stage: "Not synced".to_string(),
-                        done: true,
-                        launch,
-                        sign_in_needed: true,
-                        results: None,
-                        error: Some(format!("{SignInNeeded}")),
-                    },
-                );
-            }
-            Ok(Err(e)) => emit("Failed", true, None, Some(format!("{e:#}"))),
-            // The claim releases during the unwind, so the backend recovers —
-            // but without a terminal event `done` stays false forever, and both
-            // screens derive their button state from it. The backend would be
-            // fine and the UI would have no way back short of a relaunch.
-            Err(_) => emit(
-                "Failed",
-                true,
-                None,
-                Some("the sync stopped unexpectedly — nothing was left half-written".into()),
-            ),
         }
-    });
-    Ok(())
+        // The claim releases during the unwind, so the backend recovers —
+        // but without a terminal event `done` stays false forever, and both
+        // screens derive their button state from it. The backend would be
+        // fine and the UI would have no way back short of a relaunch.
+        Err(_) => {
+            let error = "the sync stopped unexpectedly — nothing was left half-written".to_string();
+            emit("Failed", true, None, Some(error.clone()));
+            SyncEnd {
+                results: None,
+                sign_in_needed: false,
+                error: Some(error),
+            }
+        }
+    }
 }
 
 /// The sync proper. `class_ids` empty means every class; `quiet` is the
@@ -616,7 +663,7 @@ fn sync_assignments(
     assignments: &[Value],
     outcome: &mut ClassOutcome,
 ) -> Result<()> {
-    let (recorded, undated, known, completed, moved, declined, cards_resolved) = with_conn(app, |conn| {
+    let (recorded, undated, known, completed, moved, declined, cards_resolved, merged) = with_conn(app, |conn| {
         let mut recorded = 0usize;
         let mut undated = 0usize;
         let mut known = 0usize;
@@ -624,6 +671,9 @@ fn sync_assignments(
         let mut moved = 0usize;
         let mut declined = 0usize;
         let mut cards_resolved = 0usize;
+        // The syllabus's readings folded into Canvas's rows (SPEC §7.2), as
+        // `(theirs, Canvas's)` for the notice.
+        let mut merged: Vec<(String, String)> = Vec::new();
         for assignment in assignments {
             let Some(title) = assignment["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -655,6 +705,9 @@ fn sync_assignments(
                         }
                         if settled.card_resolved {
                             cards_resolved += 1;
+                        }
+                        for theirs in settled.merged {
+                            merged.push((theirs, title.to_string()));
                         }
                         continue;
                     }
@@ -718,11 +771,28 @@ fn sync_assignments(
                 Err(e) => eprintln!("canvas: skipping assignment '{title}': {e:#}"),
             }
         }
-        Ok((recorded, undated, known, completed, moved, declined, cards_resolved))
+        Ok((recorded, undated, known, completed, moved, declined, cards_resolved, merged))
     })?;
 
     outcome.deadlines_recorded = recorded;
     outcome.deadlines_completed = completed;
+    if !merged.is_empty() {
+        outcome.notes.push(format!(
+            "{} syllabus reading(s) of an assignment folded into Canvas's row",
+            merged.len()
+        ));
+        // Said on the window as well, since a row left the list; nothing to
+        // undo, as the next sync would fold it again (SPEC §6).
+        let text = match merged.as_slice() {
+            [(theirs, canvas)] => format!("Merged {theirs} into {canvas} from Canvas"),
+            many => format!(
+                "Merged {} syllabus deadlines into their Canvas rows in {}",
+                many.len(),
+                class.display_name
+            ),
+        };
+        crate::db::notify(app, text, Vec::new(), Some(class.id));
+    }
     if undated > 0 {
         outcome.notes.push(format!(
             "{undated} Canvas assignment(s) have no due date set — not recorded"
@@ -749,7 +819,7 @@ fn sync_assignments(
         // and the badge counts what still asks.
         emit_hub_change(app, "deadlineProposals");
     }
-    if recorded > 0 || completed > 0 || moved > 0 {
+    if recorded > 0 || completed > 0 || moved > 0 || !merged.is_empty() {
         emit_hub_change(app, "deadlines");
     }
     Ok(())
@@ -2650,7 +2720,7 @@ mod waiting_card_tests {
             [],
         )
         .unwrap();
-        let mut card = |source_rel: &str, dest_rel: &str| {
+        let card = |source_rel: &str, dest_rel: &str| {
             conn.execute(
                 "INSERT INTO move_proposals (class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
                  VALUES (3, ?1, ?2, 'Canvas files it under \"x\"', 'canvas', 'pending', 0)",

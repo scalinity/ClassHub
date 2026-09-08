@@ -18,10 +18,12 @@ mod notebook;
 mod notes;
 mod scanner;
 mod settings;
+mod shift;
 mod sorter;
 mod tools;
 mod transcribe;
 mod transcripts;
+mod tray;
 mod undo;
 mod units;
 mod zoom;
@@ -647,6 +649,83 @@ fn run_auth_check(app: tauri::AppHandle) -> Result<i64, String> {
     jobs::enqueue_self_check(&app).map_err(|e| format!("{e:#}"))
 }
 
+// --- The idle shift (SPEC §6) and what sits beside it (§12) --------------------
+
+#[tauri::command(async)]
+fn get_shift_status(app: tauri::AppHandle) -> Result<shift::ShiftStatus, String> {
+    shift::status(&app).map_err(|e| format!("{e:#}"))
+}
+
+/// `Run the shift now`: trigger `manual`, once a night like the rest.
+#[tauri::command]
+fn run_shift_now(app: tauri::AppHandle) -> Result<i64, String> {
+    shift::run_now(&app).map_err(|e| format!("{e:#}"))
+}
+
+/// `Pause tonight`, or its undo; a run under way stops between jobs.
+#[tauri::command]
+fn pause_shift_tonight(app: tauri::AppHandle, paused: bool) -> Result<(), String> {
+    shift::pause_tonight(&app, paused).map_err(|e| format!("{e:#}"))
+}
+
+/// One of the shift's settings by key — the window, the idle threshold, the
+/// caps, the switches — validated backend-side.
+#[tauri::command]
+fn set_shift_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    shift::set_shift_setting(&app, &key, &value).map_err(|e| format!("{e:#}"))
+}
+
+/// A job kind's own model (SPEC §6); `None` returns it to the global pair.
+#[tauri::command]
+fn set_job_kind_model(
+    app: tauri::AppHandle,
+    kind: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    settings::set_job_kind_model(&app, &kind, model.as_deref()).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_job_kind_effort(
+    app: tauri::AppHandle,
+    kind: String,
+    effort: Option<String>,
+) -> Result<(), String> {
+    settings::set_job_kind_effort(&app, &kind, effort.as_deref()).map_err(|e| format!("{e:#}"))
+}
+
+/// One of the two notifications, on or off (SPEC §12).
+#[tauri::command]
+fn set_notify_setting(app: tauri::AppHandle, key: String, on: bool) -> Result<(), String> {
+    settings::set_notify(&app, &key, on).map_err(|e| format!("{e:#}"))
+}
+
+/// The login item (SPEC §12): a LaunchAgent naming this build's executable,
+/// registered and removed from Settings. Audited like a setting, since it
+/// decides whether the shift is there to run at all.
+#[tauri::command]
+fn set_login_item(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let launcher = app.autolaunch();
+    let result = if on { launcher.enable() } else { launcher.disable() };
+    result.map_err(|e| format!("{e}"))?;
+    db::with_conn(&app, |conn| {
+        db::audit(
+            conn,
+            "ui.set_login_item",
+            serde_json::json!({ "after": on, "executable": std::env::current_exe().ok() }),
+        )?;
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Whether the app is registered as a login item, for the Settings toggle.
+pub(crate) fn login_item_enabled(app: &tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
 // --- Agent chat (SPEC §9) ---------------------------------------------------
 
 #[tauri::command(async)]
@@ -758,6 +837,11 @@ fn scan_and_extract_all(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let data_dir = crate::data_dir(app.handle())?;
             std::fs::create_dir_all(&data_dir)?;
@@ -766,6 +850,7 @@ pub fn run() {
                 Err(e) => report_startup_failure(&data_dir, &e),
             };
             jobs::startup_recovery(&conn)?;
+            shift::startup_recovery(&conn)?;
             jobs::prune_logs(&data_dir);
             match db::aibhs_root(&conn) {
                 Ok(root) => allow_asset_root(app.handle(), &root),
@@ -774,6 +859,8 @@ pub fn run() {
             app.manage(Db(Mutex::new(conn)));
             app.manage(jobs::JobManager::default());
             app.manage(chat::ChatState::default());
+            app.manage(shift::ShiftState::default());
+            tray::install(app.handle())?;
             if let Err(e) = jobs::startup_self_check(app.handle()) {
                 eprintln!("startup self-check failed to enqueue: {e:#}");
             }
@@ -787,7 +874,18 @@ pub fn run() {
                 scan_and_extract_all(&handle);
                 canvas_sync::sync_on_launch(&handle);
             });
+            // The shift's minute check, and its catch-up of a missed window
+            // (SPEC §6), on a thread of its own.
+            shift::start_scheduler(app.handle());
             Ok(())
+        })
+        // Closing the window hides it (SPEC §12): the shift's thread survives
+        // the window, and the tray, the dock and ⌘Q are the ways back and out.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_classes,
@@ -850,6 +948,14 @@ pub fn run() {
             get_job_tail,
             get_auth_check,
             run_auth_check,
+            get_shift_status,
+            run_shift_now,
+            pause_shift_tonight,
+            set_shift_setting,
+            set_job_kind_model,
+            set_job_kind_effort,
+            set_notify_setting,
+            set_login_item,
             chat_settings,
             save_chat_key,
             delete_chat_key,
@@ -863,17 +969,19 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
+        .run(|app, event| match event {
             // Children spawned by the job runner are not reaped by dropping
             // their handles, so quitting mid-job would otherwise hand a live
             // `claude` to launchd. ExitRequested covers the ordinary quit;
-            // Exit is the backstop for the paths that skip it.
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
+            // Exit is the backstop for the paths that skip it. The shift's
+            // run row and its `caffeinate` settle the same way.
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                shift::shutdown(app);
                 app.state::<jobs::JobManager>().shutdown();
             }
+            // The dock icon, clicked with the window hidden (SPEC §12).
+            tauri::RunEvent::Reopen { .. } => tray::show_main(app),
+            _ => {}
         });
 }
 

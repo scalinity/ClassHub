@@ -121,7 +121,14 @@ pub fn spawn_pipeline(app: &AppHandle, class_id: i64) {
 /// past it, soffice is wedged rather than slow.
 const CONVERT_TIMEOUT: Duration = Duration::from_secs(180);
 
-fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
+/// The shift's extract step (SPEC §6): the pipeline run to its end on the calling
+/// thread, answering with the extract job it enqueued, if any, so the caller can
+/// wait for it.
+pub(crate) fn run_pipeline_now(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
+    run_pipeline(app, class_id)
+}
+
+fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
     let _serial = lock(&PIPELINE_LOCK);
 
     let (class_dir, stale) = {
@@ -133,13 +140,13 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
             // the guard: the conversions below take long enough for the other
             // process to enqueue meanwhile, so the enqueue re-checks inside its
             // own transaction.
-            return Ok(());
+            return Ok(None);
         }
         (crate::scanner::class_dir(&conn, class_id)?, stale_files(&conn, class_id)?)
     };
     if stale.is_empty() {
         eprintln!("extract pipeline class {class_id}: nothing stale — zero work");
-        return Ok(());
+        return Ok(None);
     }
 
     let mut batch: Vec<BatchItem> = Vec::new();
@@ -188,7 +195,7 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
     }
 
     if batch.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let files_list = batch
         .iter()
@@ -201,13 +208,13 @@ fn run_pipeline(app: &AppHandle, class_id: i64) -> Result<()> {
         // The other process enqueued this class's batch while this one was
         // converting; its run records the results.
         eprintln!("extract pipeline class {class_id}: an extract job is already active — not enqueuing a second");
-        return Ok(());
+        return Ok(None);
     };
     eprintln!(
         "extract pipeline class {class_id}: enqueued extract job {job_id} for {} PDF(s)",
         batch.len()
     );
-    Ok(())
+    Ok(Some(job_id))
 }
 
 /// SPEC §7 step 4: record keeping after a successful claude extract job.

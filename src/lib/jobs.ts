@@ -58,9 +58,65 @@ export interface AuthCheck {
   detail: string;
 }
 
+/** One step of the shift's plan (SPEC §6), with what it did. */
+export interface ShiftStep {
+  name: string;
+  state: "pending" | "running" | "done" | "skipped";
+  outcome: string | null;
+}
+
+export interface ShiftRun {
+  id: number;
+  /** The date the night's window opened on. */
+  night: string;
+  trigger: "idle" | "launch" | "manual";
+  startedAt: number;
+  finishedAt: number | null;
+  steps: ShiftStep[];
+  jobs: number[];
+  stoppedBy: "done" | "budget" | "rate_limit" | "paused" | "error" | null;
+  summary: string | null;
+  ownerPid: number | null;
+}
+
+/** This week's synthesis in counts and minutes — never dollars (SPEC §12). */
+export interface Meter {
+  digests: number;
+  guides: number;
+  exams: number;
+  extracts: number;
+  minutes: number;
+}
+
+export interface ShiftSettings {
+  enabled: boolean;
+  start: string;
+  end: string;
+  idleMinutes: number;
+  guidesPerNight: number;
+  digestsPerNight: number;
+  inDevBuild: boolean;
+}
+
+export interface ShiftStatus {
+  running: boolean;
+  /** The run under way, else the last one. */
+  run: ShiftRun | null;
+  meter: Meter;
+  settings: ShiftSettings;
+  night: string;
+  paused: boolean;
+  ranTonight: boolean;
+  /** Whether this process runs shifts at all (SPEC §6). */
+  runsHere: boolean;
+  devBuild: boolean;
+}
+
 export interface JobsSnapshot {
   jobs: JobInfo[];
   auth: AuthCheck;
+  /** The shift's state, refetched on every `shift-changed` push. */
+  shift: ShiftStatus | null;
   output: ReadonlyMap<number, readonly JobProgressEvent[]>;
   /** Rolling decoded source text a synthesis job is writing (live tail). */
   tails: ReadonlyMap<number, string>;
@@ -93,6 +149,7 @@ const SLEEP_GAP_SEC = 30;
 let snapshot: JobsSnapshot = {
   jobs: [],
   auth: { status: "pending", detail: "" },
+  shift: null,
   output: new Map(),
   tails: new Map(),
   panelOpen: false,
@@ -282,13 +339,25 @@ function releaseJob(jobId: number) {
   }
 }
 
+/** The shift's state, from the run row and the settings (SPEC §6). */
+async function refreshShift() {
+  try {
+    const shift = await invoke<ShiftStatus>("get_shift_status");
+    emitChange({ shift, error: null });
+  } catch (e) {
+    emitChange({ error: String(e) });
+  }
+}
+
 let initialized = false;
 function init() {
   if (initialized) return;
   initialized = true;
   void listen("jobs-changed", () => void refreshJobs());
+  void listen("shift-changed", () => void refreshShift());
   void listen<AuthCheck>("auth-check", (e) => emitChange({ auth: e.payload }));
   void refreshJobs();
+  void refreshShift();
   void invoke<AuthCheck>("get_auth_check").then((auth) => emitChange({ auth }));
 }
 init();
@@ -315,6 +384,23 @@ export function cancelJob(jobId: number): Promise<void> {
 
 export function rerunAuthCheck(): Promise<number> {
   return invoke<number>("run_auth_check");
+}
+
+/** `Run the shift now` (SPEC §6): once a night, like the idle trigger. */
+export function runShiftNow(): Promise<number> {
+  return invoke<number>("run_shift_now");
+}
+
+/** `Pause tonight`, or its undo; a run under way stops between jobs. */
+export function pauseShiftTonight(paused: boolean): Promise<void> {
+  return invoke("pause_shift_tonight", { paused });
+}
+
+/** `2 h 10 m`, `45 m`, `0 m` — the meter's minutes (SPEC §12). */
+export function formatMinutes(minutes: number): string {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return hours > 0 ? `${hours} h ${rest} m` : `${rest} m`;
 }
 
 // --- Formatting helpers ---

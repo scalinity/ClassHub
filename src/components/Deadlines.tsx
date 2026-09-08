@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Pencil, Trash2 } from "lucide-react";
 
+import { Picker } from "@/components/Picker";
 import { SectionHeading } from "@/components/SectionHeading";
 import { canvasSyllabus } from "@/lib/canvas";
 import {
@@ -539,18 +540,13 @@ function DeadlineForm({
           autoFocus
           className={`${input} min-w-40 flex-1`}
         />
-        <select
+        <Picker
+          label="Deadline kind"
           value={kind}
-          onChange={(e) => setKind(e.target.value as DeadlineKind)}
-          aria-label="Deadline kind"
-          className={`${input} cursor-pointer`}
-        >
-          {DEADLINE_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
+          options={DEADLINE_KINDS.map((k) => ({ value: k, label: k }))}
+          onChange={(next) => setKind(next as DeadlineKind)}
+          className="w-32"
+        />
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
         <input

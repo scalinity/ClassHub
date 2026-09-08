@@ -19,7 +19,7 @@ once a milestone's acceptance criteria are verified.
 ## One database, two processes
 
 - Database: `~/Library/Application Support/com.danny.classhub/classhub.db`, WAL,
-  `user_version` 15; job logs under `logs/` beside it. Read it with `sqlite3 -readonly`.
+  `user_version` 17; job logs under `logs/` beside it. Read it with `sqlite3 -readonly`.
 - The installed app and a dev build share it. Check `lsof -nP -iTCP:1420` before
   `npm run tauri dev`; find the dev build with `pgrep -f target/debug/classhub` and stop it by
   pid, which ends `tauri dev` and frees the port.
@@ -121,3 +121,21 @@ session rather than from a prompt.
   with `=` is expanded as a command path, so `echo ====` fails; never use `|` as a perl
   delimiter when either side holds a pipe; a `cd` in one Bash call does not carry into the
   next — use absolute paths or `git -C`.
+
+## The idle shift (M34)
+
+- Only one process runs shifts: a release build always, a dev build only with the
+  `shift_in_dev_build` setting on (Settings → The idle shift). A night takes one run
+  (`shift_runs.night`); a second trigger is refused. Before editing under `src-tauri/`,
+  check the Job Center's shift block as well as the jobs: the shift starts jobs on its own.
+- Verification caps: set `shift_digests_per_night`, `shift_guides_per_night`,
+  `shift_idle_minutes` and the window through Settings or the `settings` table, and put
+  them back afterwards (defaults 4, 2, 20, 21:00–06:00).
+- The tray is not in the AX window tree; read and click it through System Events on
+  `menu bar 2` of the process (`tell (first process whose unix id is <pid>) to tell menu
+  bar 2 to tell menu bar item 1 to (click) & (get name of every menu item of menu 1)`).
+- A time input's segments are `hour` and `minutes` (`AX_NTH` picks the field); type each,
+  a right arrow and `P` or `A` for the meridiem, then Tab to commit. A `Picker` (the app's
+  drop-down) opens on `press '<label>'`; its options are not in the AX tree, so type the option's first letter (repeat to cycle) and Return to pick it, or arrow keys.
+- The menu bar auto-hides on this Mac, so a screenshot of the top of the screen shows no
+  tray; the System Events read above is the check.

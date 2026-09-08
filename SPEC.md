@@ -610,7 +610,48 @@ claude -p <prompt>
   reversible write emits a notice with the rows it wrote (§12), so a command, a chat tool
   and the sync reach the same `Undo`.
 - **Models**: one global model/effort pair, set in Settings and read at spawn time so a
-  change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
+  change applies to the next job — queued ones included. Defaults to Opus at `xhigh`. A
+  kind may carry its own pair (`job_model.<kind>`, `job_effort.<kind>`), each half falling
+  back to the global one on its own, so a sort or a syllabus scan — a listing read and
+  answered in seconds — can run Sonnet at `medium` while every synthesis kind inherits the
+  global pair; Settings shows one row per kind, `Default · Opus` until picked, and every
+  setter audits its before and after.
+- **The latest `rate_limit_event` is kept**, not just its window: the CLI streams one near
+  the top of every run and again after a turn crosses a window boundary, each carrying
+  `status`, `rateLimitType` and `resetsAt` (every one logged so far says `allowed`). A
+  status other than `allowed` whose reset is still ahead is what the shift reads between
+  jobs, and what the run's own progress names as `rate limit reached`.
+- **The idle shift** (`shift.rs`) is the one thing that runs synthesis without a click. A
+  thread checks once a minute and starts the night's run when the shift is on and not
+  paused, the clock is inside the window (21:00–06:00 by default, filed under the date it
+  opened on), the machine has been idle at least the threshold (`HIDIdleTime` through a
+  bounded `ioreg`, 20 minutes by default), no run exists for the night, and this process
+  is the one that runs shifts — a release build always, a dev build only with
+  `shift_in_dev_build` on. The run row (`shift_runs`) is inserted in one IMMEDIATE
+  transaction keyed on the night, so two builds on one database never both start one,
+  and it records the trigger (`idle`, `launch` for a catch-up, `manual` for `Run the
+  shift now`), each step's outcome, the jobs it ran, why it stopped (`done`, `budget`,
+  `rate_limit`, `paused`, `error`) and its summary. The plan, in order: sync Canvas
+  through the launch's quiet path (a stored session it lacks, or a sign-in Canvas wants,
+  ends the step and not the run); file what the sync placed (§7.2); run the extract
+  pipeline for every class, waiting on each job; distill every applied contribution
+  without its note, then every one never read for its ledger (§8.4), oldest session
+  first, up to `shift_digests_per_night`; rebuild the division guides with sources whose
+  guide is stale or absent and whose meeting has passed — the class's first meeting on or
+  after a dated division's start, this calendar week's for an undated Part — oldest
+  meeting first, up to `shift_guides_per_night`; never the master, never a folder guide.
+  Each job goes through the ordinary enqueue and its guards, and the run waits for it to
+  settle before the next, so the caps are real and the concurrency setting stays in
+  charge; between jobs it stops for the pause (`Pause tonight`, the night's key on a
+  setting the next night leaves behind) or the rate limit, leaving the rest for tomorrow.
+  While it runs the app holds `/usr/bin/caffeinate -i -w <pid>` as a child and ends it
+  with the run; the machine asleep at the window runs nothing, and at launch a window
+  that closed since the last run with no run row is caught up at once — with no run on
+  record, nothing was missed. A run whose process is gone is settled at launch as a
+  job's is, and quitting mid-run settles it on the way out. The meter beside it counts
+  this week's digests, guides and exams and their minutes from the `jobs` table, never
+  dollars. Two notifications, each a setting: `Shift finished` with the summary, and `A
+  job failed` naming the kind and scope of any failed job.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
   use, result). Persist raw lines to `log_path`; forward condensed progress events to the
   frontend via Tauri events (`job://{id}/progress`).
@@ -705,7 +746,8 @@ agent and synthesis prompts can search text instead of re-reading binaries.
    badges.
 
 Extraction is triggered automatically after a scan finds changes (extraction is cheap:
-sonnet + mostly local), but **guide synthesis is never automatic**.
+sonnet + mostly local). A digest and a division guide run on a click or in the idle shift's
+plan within its caps (§6); **the master runs only on a click**.
 
 Caption tracks (`.vtt`, `.srt`, and `.txt`, since Zoom's in-meeting transcript is a caption
 track in everything but extension) found in the tree are extracted locally through the same
@@ -854,8 +896,8 @@ off-limits (§1). Canvas sets the lifetime: a refusal deletes the stored copy an
 sign-in window, which is what a password change, an admin revoke and Canvas's own timeout each
 look like from here. A copy no sync has used for 30 days is refused and deleted the next time a
 sync asks for it — that being the window Duo's device-trust cookie keeps, past which the full
-sign-in was coming anyway. The check is made on use rather than on a timer, because a sync runs
-when asked or once at launch, and nothing here should introduce a scheduler.
+sign-in was coming anyway. The check is made on use rather than on a timer: a sync runs when
+asked, once at launch, or as the idle shift's first step (§6), and each of those is a use.
 
 A window that has not navigated anywhere yet is not a Canvas asking for a sign-in. The initial
 empty document reports no host at all, and reading that as "somewhere other than Canvas" would
@@ -896,17 +938,19 @@ and a matcher that fires once is one whose only real behaviour is its wrong answ
 its place when the tree grows per-division folders, or when Canvas file attribution supplies the
 join instead.
 
-**Sync runs when asked, and once on launch — never on a timer.** A launch syncs on its own when
-a session is stored in the Keychain and the last sync is a day old or there has never been one,
-through a window that stays hidden whatever happens: Canvas wanting a sign-in ends the sync
-rather than prompting for one, whether it is found at the first probe or when the session
-lapses mid-sync, and the stored copy is discarded on the same evidence a manual sync acts on —
-a 401 or a bounce to SSO, never a 403, which is Canvas declining one call — so the next press
-asks. The Settings report says `Synced on launch`, or `Not synced on launch` with the reason
-as a quiet line when a sign-in is what it needed; any other failure is a stopped sync, on
-launch as by hand. It follows the launch scan on the same thread, so its duplicate check reads
-a fresh index, and nothing schedules a second one. The dashboard header names the sync's age
-(§12).
+**Sync runs when asked, once on launch, and as the idle shift's first step each night (§6).**
+A launch syncs on its own when a session is stored in the Keychain and the last sync is a day
+old or there has never been one, through a window that stays hidden whatever happens: Canvas
+wanting a sign-in ends the sync rather than prompting for one, whether it is found at the first
+probe or when the session lapses mid-sync, and the stored copy is discarded on the same
+evidence a manual sync acts on — a 401 or a bounce to SSO, never a 403, which is Canvas
+declining one call — so the next press asks. The Settings report says `Synced on launch`, or
+`Not synced on launch` with the reason as a quiet line when a sign-in is what it needed; any
+other failure is a stopped sync, on launch as by hand. It follows the launch scan on the same
+thread, so its duplicate check reads a fresh index. The shift's sync is the same quiet path
+run to its end on the shift's thread and reported over the same channel; with no stored
+session it says so on the run's row and the plan goes on. The dashboard header names the
+sync's age (§12).
 
 **Sync and rescan are non-destructive, and both update in place.** New units are inserted and
 existing ones updated; units that no longer appear in Canvas or in a rescan are kept, not
@@ -940,20 +984,29 @@ settle failed is left for the next sync rather than written beside the row it ma
 track. The proposal queue keeps the readings that are a model's, the syllabus scan's, and the
 badge and the chat overview count what still asks.
 
-**A deadline already on the list is tracked by its assignment.** A row the syllabus scan put
-there before Canvas could — the same title on the same calendar day, titles compared with `#`
-dropped so Canvas's `Homework #1` claims the syllabus's `Homework 1`, carrying no id, an open
-row before a done one — takes the assignment's id on first contact, with an audit row of its
-own, and is found by it after; a card waiting for that assignment leaves the queue with it. A
-tracked deadline follows Canvas's due date, with an audit row holding the one it had, and is
-marked done the moment Canvas holds a submission for it, with an audit row naming the
-submission — an assignment Canvas has stopped dating still closes the deadline it is tracked
-by. From then on the row's badge reads `from Canvas` whoever first put it on the list, the same
-words the grade item's tag uses, since the same thing is true of both: an edit lasts until
-the next sync. Nothing reopens: a deadline done by hand stays done. The ids are also what
-make a re-sync an update in place rather than a second card — an assignment whose due date
-moved refreshes its card on the new day, and one whose deadline was deleted by hand comes back
-as the same card.
+**A deadline already on the list is tracked by its assignment.** Two readings name one
+assignment when their titles reduce to one key — lowercased, `#` and punctuation dropped,
+`hw` and `assignment` read as `homework`, so the syllabus's `Homework 1`, Canvas's `Homework
+Assignment 1` and a `HW #1` are one — and their due dates fall within two days of each
+other, the syllabus naming the week's Sunday and Canvas the Monday at 11:59 pm. A row the
+syllabus scan put there before Canvas could, carrying no id, an open row before a done one,
+takes the assignment's id on first contact by that rule, with an audit row of its own, and is
+found by it after; a card waiting for that assignment leaves the queue with it. A tracked
+deadline follows Canvas's words and Canvas's due date — one audit row holding the title and
+the date it had — and is marked done the moment Canvas holds a submission for it, with an
+audit row naming the submission; an assignment Canvas has stopped dating still closes the
+deadline it is tracked by. Any other untracked row that names the assignment beside the
+tracked one — the syllabus's reading, left there by an earlier sync — is folded in on the
+next: its notes carried onto the row where they add anything, its own row removed under a
+`canvas.merge_deadline` audit row, the sync report and a notice saying so; not reversible,
+as no `canvas.*` row is, since the next sync would fold it again. A syllabus rescan that
+proposes what Canvas tracks under its own words is told the deadline exists rather than
+given a card. From then on the row's badge reads `from Canvas` whoever first put it on the
+list, the same words the grade item's tag uses, since the same thing is true of both: an
+edit lasts until the next sync. Nothing reopens: a deadline done by hand stays done. The ids
+are also what make a re-sync an update in place rather than a second card — an assignment
+whose due date moved refreshes its card on the new day, and one whose deadline was deleted
+by hand comes back as the same card.
 
 **Grades come from the same read.** Assignment groups become `grade_categories`, keyed on the
 group id; a hand-made category with a group's name (case-insensitive, the chat tool's rule) is
@@ -1054,7 +1107,8 @@ skipped, since without it neither the duplicate check nor the size ceiling can d
 
 ### 8.1 Unit guides (`module_guide` job)
 
-Manual trigger per unit from the Class Workspace — one guide for one of the course's own
+Triggered per unit from the Class Workspace, or by the idle shift once the division's meeting
+has passed and its guide is stale or absent (§6) — one guide for one of the course's own
 divisions (§5), whatever that course calls them. The job kind keeps its original name; the UI
 shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
 
@@ -1097,8 +1151,8 @@ shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
 
 ### 8.2 Semester master file (`master_guide` job)
 
-Manual trigger per class ("Generate Semester Master"). **Full re-synthesis from all raw
-material every time** (deliberate quality-first decision — not map-reduce over module guides):
+Manual trigger per class ("Generate Semester Master"), never the idle shift's (§6). **Full
+re-synthesis from all raw material every time** (deliberate quality-first decision — not map-reduce over module guides):
 every extract, every corpus note, and the transcripts through their notes, opened only where
 a note is not enough. The prompt's roster comes from `units` — the course's own divisions in
 its own order, each with its start date and, for a Part, its week range — never from the
@@ -1150,8 +1204,9 @@ that predate them, which carry no freshness.
 
 ### 8.4 Session documents (`lecture_digest` job)
 
-Manual trigger per filed transcript, from the Add lecture form or the Lectures listing. The
-job reads the transcript plus the rest of its module (so spoken content ties to the slides it
+Triggered per filed transcript from the Add lecture form or the Lectures listing, or by the
+idle shift for a lecture without its note or never read for its ledger (§6). The job reads
+the transcript plus the rest of its module (so spoken content ties to the slides it
 was about) and writes **two** documents — `Study Guides/Sessions/<date> — <topic>.html` for
 reading, and `.md` alongside it for retrieval, since §9's `search_material` covers
 `Study Guides/` and that markdown twin is the copy chat finds.
@@ -1599,10 +1654,31 @@ and apply it. Non-negotiable per project owner.
   is missing or out of date, and a notebook whose extract the index does not yet hold,
   open in their default app instead)
   · Chat sidebar (global, overlays right side, ⌘J; answers in the reading role, tool calls
-  as chips) · Jobs (bottom bar pill — `Jobs · idle`, `Jobs · Extract 00:42` — expanding to a
-  panel with live logs) · Settings.
+  as chips) · Jobs (bottom bar pill — `Jobs · idle`, `Jobs · Extract 00:42`, `Shift · step 4
+  of 5` while the shift runs — expanding to a panel that opens with the shift: this week's
+  meter in counts and minutes (`This week · 4 digests · 3 guides · 2 h 10 m`, never
+  dollars), the current or last run's title and summary, its plan as a numbered list with
+  each step's mark and outcome, tonight in one line — when it runs, or why it will not —
+  and `Run the shift now` and `Pause tonight` (§6); then the recent actions and the jobs
+  with live logs) · Settings (the library, transcription, the synthesis pair and a row per
+  kind, `The idle shift` — on or off, the window, the idle threshold, the two caps, and in
+  a dev build whether that build runs shifts — `Always there` — the login item and the two
+  notifications — Canvas and chat).
   The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
   previews on the page it will be read on; generated guides keep their own design (§8.1).
+- **The window closes into the tray.** Closing the window hides it — the shift's thread
+  survives the window — and the dock icon or the tray's `Open ClassHub` brings it back;
+  `Quit ClassHub` in the tray and ⌘Q are the ways out. The tray's glyph is a template ring
+  open on the right, and its menu reads the next meeting across the classes (`Next class ·
+  Thu 11:45 am · Biostatistics for AI`) and the shift's state (`Shift tonight at 9:00 pm`,
+  `Shift running · step 2 of 5`, `Shift ran tonight · …`, `Shift paused tonight`, `Shift
+  off`, `Shift runs in the installed app`), then `Open ClassHub`, `Run the shift now`,
+  `Pause tonight` or `Resume tonight`, and `Quit ClassHub`; `2/5` sits beside the glyph
+  while a run is under way.
+- **A drop-down is the app's own** (`Picker`): a control that reads its value, and on click
+  a list on `--surface` with the chosen row checked, in place of the system popup no
+  stylesheet reaches. Arrows move, Enter picks, Escape closes, a click anywhere else closes.
+  The per-kind pairs, a deadline's kind and the Add lecture form's week all use it.
 - Empty states matter: a class with no modules yet shows a friendly drop-target hero, not a
   blank pane, and every other empty section is one line in the reading role and one action.
 - **A notice follows every reversible action** (§6): a surface card at the bottom-left of
@@ -1687,6 +1763,11 @@ and apply it. Non-negotiable per project owner.
   relationship (`TargetMode="External"`, an `http` URL at the listener) converted with
   `EmbedImages` to an `<img>` with an empty payload, and the listener, which logged a
   request before and after the run, saw nothing from LibreOffice.
+- **Two plugins and the tray feature**: `tauri-plugin-notification` for the two
+  notifications, `tauri-plugin-autostart` with its LaunchAgent launcher for the login item
+  (a plist under `~/Library/LaunchAgents/` naming the build's own executable, so a dev
+  build registers itself and the installed app itself), and `tauri`'s `tray-icon`. Each is
+  called from Rust alone; no capability entry widens the window's reach.
 - **One database for every build.** The data directory is Tauri's own `app_data_dir()`
   (`~/Library/Application Support/com.danny.classhub`), resolved by `lib.rs::data_dir` for
   every caller — the database, job logs, the LibreOffice profile, Zoom downloads and the
@@ -1736,7 +1817,13 @@ and apply it. Non-negotiable per project owner.
   (§10), and every undo inverse on fixture rows — a move returned and refused over a taken
   source, a note refused over a later edit or a row without its hash, a created category
   refused while it holds scores, a Canvas row refused, a row reversed once (§6 — an undo
-  that overwrote is silent until the file is opened). UI and job plumbing are exercised by
+  that overwrote is silent until the file is opened), the shift's window and night across
+  midnight, its decision condition by condition, a night's one run across two inserts, the
+  idle read, the caps, a division's meeting, its two lists — a note missing before a ledger
+  unread, a division with sources and no guide listed while one whose meeting is ahead,
+  one with a fresh guide and the master are not — the rate-limit stop and the per-kind
+  fallback half by half (§6 — a shift that runs twice, spends past its cap or stops on a
+  limit that lifted is silent until the morning). UI and job plumbing are exercised by
   running the app.
 
 ## 14. Milestones
@@ -2062,7 +2149,7 @@ Mark the checkbox when the acceptance criteria pass.
   a date-only deadline due today reads `due today` at noon, and the duplicate reading is named
   and listed once among its division's sources.
 
-- [ ] **M34 — The idle shift.** (`milestones/M34-the-idle-shift.md`)
+- [x] **M34 — The idle shift.** (`milestones/M34-the-idle-shift.md`)
   A scheduler thread runs a plan when the owner has stopped for the evening — sync, file,
   extract, distill what has no note or no hints, rebuild stale guides whose meeting has passed —
   under per-night caps, stopping at the first rate-limit event, holding the Mac awake with
@@ -2143,8 +2230,9 @@ Mark the checkbox when the acceptance criteria pass.
   so an update there can move it. Surfaced as a Settings path with a not-found warning, which
   makes it a settings fix instead of a mystery.
 - **Digests are not cheap**: even merged, a long lecture is a large prompt against the shared
-  subscription limits. Like every other synthesis job, it stays manually triggered — never
-  automatic on ingest.
+  subscription limits. Like a division guide, it runs on a click or in the idle shift under
+  its per-night cap (§6), which stops at the first rate-limit event — never automatic on
+  ingest, and the window and the caps are the controls on what a night spends.
 - **Canvas session auth is undocumented and unowned**: UF restricts API tokens (§1), so the
   app reads through a signed-in webview. That works today and is not a supported integration —
   Instructure can change the page or the endpoint without notice, and there is no version to

@@ -1257,6 +1257,13 @@ fn guides_where(
     Ok(guides)
 }
 
+/// The division guides alone, with their staleness — what the shift's
+/// rebuild step reads (SPEC §6). Not the sessions, the exams, the folders
+/// or the master, none of which it builds.
+pub fn unit_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
+    guides_where(conn, class_id, |scope| crate::db::unit_scope_id(scope).is_some())
+}
+
 /// Dashboard card badge (SPEC §12): stale guide count for a class.
 ///
 /// Study guides only. A session digest also lives in this table and also goes

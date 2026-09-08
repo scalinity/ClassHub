@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AudioLines, Captions, Link2, X } from "lucide-react";
 
+import { Picker } from "@/components/Picker";
+
 import {
   addLecture,
   classifySource,
@@ -220,28 +222,28 @@ export function AddLecture({
                 />
               </Field>
               <Field label="Week">
-                <select
-                  value={resolvedWeek ?? ""}
-                  onChange={(e) =>
-                    setWeek(e.target.value === "" ? "" : Number(e.target.value))
-                  }
+                <Picker
+                  label="Week"
+                  value={resolvedWeek === null || resolvedWeek === "" ? "" : String(resolvedWeek)}
+                  onChange={(next) => setWeek(next === "" ? "" : Number(next))}
                   disabled={slots.length === 0}
-                  aria-label="Week"
-                  className={`${input} w-full disabled:opacity-50`}
-                >
-                  <option value="">
-                    {weeks === undefined
+                  className="w-full"
+                  placeholder={
+                    weeks === undefined
                       ? "Reading the schedule…"
                       : slots.length === 0
                         ? "No schedule published"
-                        : "Sort it into a week"}
-                  </option>
-                  {slots.map((s) => (
-                    <option key={s.week} value={s.week}>
-                      {optionLabel(s)}
-                    </option>
-                  ))}
-                </select>
+                        : "Sort it into a week"
+                  }
+                  options={
+                    slots.length === 0
+                      ? []
+                      : [
+                          { value: "", label: "Sort it into a week" },
+                          ...slots.map((s) => ({ value: String(s.week), label: optionLabel(s) })),
+                        ]
+                  }
+                />
               </Field>
             </div>
 

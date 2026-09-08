@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft } from "lucide-react";
 
+import { Picker } from "@/components/Picker";
 import { SectionHeading } from "@/components/SectionHeading";
 import { shortModel } from "@/lib/answer";
 import {
@@ -14,6 +15,7 @@ import {
 } from "@/lib/canvas";
 import { openChatSettings, useChat, EFFORT_LEVELS } from "@/lib/chat";
 import { queryClient } from "@/lib/query";
+import { formatTime } from "@/lib/schedule";
 import {
   getAppSettings,
   JOB_EFFORT_COPY,
@@ -23,7 +25,15 @@ import {
   setParakeetPython,
   setJobConcurrency,
   setJobEffort,
+  setJobKindEffort,
+  setJobKindModel,
   setJobModel,
+  setLoginItem,
+  setNotifySetting,
+  setShiftSetting,
+  type AppSettings,
+  type NotifyKey,
+  type ShiftSettingKey,
 } from "@/lib/settings";
 import {
   buttonFilledNeutral,
@@ -207,7 +217,45 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
               )}
               <span className={`ml-2 ${meta}`}>at once</span>
             </div>
+
+            <p className="mt-6 text-[15px] font-semibold">By kind</p>
+            <p className="mt-1 max-w-xl text-body text-muted-foreground">
+              A kind can run on its own model and effort instead of the pair
+              above. A sort or a syllabus scan reads a listing and answers in
+              seconds; Sonnet at medium is plenty for those, and lighter on the
+              subscription window the guides draw on.
+            </p>
+            <ul className="mt-2.5 max-w-xl">
+              {settings.jobKinds.map((kind) => (
+                <li
+                  key={kind.kind}
+                  className="flex min-h-10 items-center gap-3 border-b border-border/70 last:border-b-0"
+                >
+                  <span className="min-w-0 flex-1 text-body">{kind.label}</span>
+                  <KindSelect
+                    label={`${kind.label} model`}
+                    value={kind.model}
+                    options={settings.jobModels.map((id) => [id, optionCopy(JOB_MODEL_COPY, id).label])}
+                    fallback={optionCopy(JOB_MODEL_COPY, settings.jobModel).label}
+                    disabled={pending}
+                    onChange={(model) => apply(setJobKindModel(kind.kind, model))}
+                  />
+                  <KindSelect
+                    label={`${kind.label} effort`}
+                    value={kind.effort}
+                    options={settings.jobEfforts.map((id) => [id, optionCopy(JOB_EFFORT_COPY, id).label])}
+                    fallback={optionCopy(JOB_EFFORT_COPY, settings.jobEffort).label}
+                    disabled={pending}
+                    onChange={(effort) => apply(setJobKindEffort(kind.kind, effort))}
+                  />
+                </li>
+              ))}
+            </ul>
           </Section>
+
+          <ShiftSection settings={settings} pending={pending} apply={apply} />
+
+          <AlwaysThereSection settings={settings} pending={pending} apply={apply} />
 
           <CanvasSection />
 
@@ -215,6 +263,270 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
         </>
       )}
     </main>
+  );
+}
+
+/** A kind's model or effort: the global value as `Default`, else its own. */
+function KindSelect({
+  label,
+  value,
+  options,
+  fallback,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string | null;
+  options: [string, string][];
+  fallback: string;
+  disabled: boolean;
+  onChange: (value: string | null) => void;
+}) {
+  return (
+    <Picker
+      label={label}
+      value={value ?? ""}
+      disabled={disabled}
+      neutral
+      className="w-40 shrink-0"
+      options={[
+        { value: "", label: `Default · ${fallback}` },
+        ...options.map(([id, text]) => ({ value: id, label: text })),
+      ]}
+      onChange={(next) => onChange(next === "" ? null : next)}
+    />
+  );
+}
+
+/** An on/off control that says what it switches; the change applies at once. */
+function Switch({
+  label,
+  note,
+  on,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  note?: string;
+  on: boolean;
+  disabled: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className="flex w-full max-w-xl cursor-pointer items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none"
+    >
+      <span
+        aria-hidden
+        className={
+          "relative h-4 w-7 shrink-0 rounded-full transition-colors " +
+          (on ? "bg-foreground" : "bg-muted-foreground/30")
+        }
+      >
+        <span
+          className={
+            "absolute top-0.5 size-3 rounded-full bg-background transition-transform " +
+            (on ? "translate-x-3.5" : "translate-x-0.5")
+          }
+        />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-body font-medium">{label}</span>
+        {note && (
+          <span className="block text-fine leading-snug text-muted-foreground">{note}</span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+/** A time or a number the backend validates; applied on Enter or blur. */
+function ValueField({
+  label,
+  type,
+  current,
+  unit,
+  pending,
+  onApply,
+  min,
+  max,
+}: {
+  label: string;
+  type: "time" | "number";
+  current: string;
+  unit?: string;
+  pending: boolean;
+  onApply: (value: string) => void;
+  min?: number;
+  max?: number;
+}) {
+  const [value, setValue] = useState(current);
+  const commit = () => {
+    if (value.trim() !== current && !pending) onApply(value.trim());
+  };
+  return (
+    <label className="flex items-center gap-2 text-body">
+      <span className="w-40 shrink-0 text-muted-foreground">{label}</span>
+      <input
+        type={type}
+        value={value}
+        min={min}
+        max={max}
+        aria-label={label}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+        }}
+        className={`${inputNeutral} w-24 tabular-nums`}
+      />
+      {unit && <span className={meta}>{unit}</span>}
+    </label>
+  );
+}
+
+type Apply = (change: Promise<void>, invalidateAll?: boolean) => void;
+
+/**
+ * SPEC §6 — the idle shift's settings: whether it runs, the window, how long
+ * the Mac has to have been idle, the caps, and — in a dev build — whether
+ * this build runs it instead of the installed app.
+ */
+function ShiftSection({
+  settings,
+  pending,
+  apply,
+}: {
+  settings: AppSettings;
+  pending: boolean;
+  apply: Apply;
+}) {
+  const shift = settings.shift;
+  const set = (key: ShiftSettingKey, value: string) => apply(setShiftSetting(key, value));
+  // Fields remount on the stored value, so a refused change shows the value
+  // that stands rather than the one that was typed.
+  const key = `${shift.start}-${shift.end}-${shift.idleMinutes}-${shift.digestsPerNight}-${shift.guidesPerNight}`;
+  return (
+    <Section
+      title="The idle shift"
+      lead={`Once the evening's window opens and the Mac has sat untouched for a
+        while, ClassHub syncs Canvas, files what it placed, extracts, distills
+        the lectures that have no note or were never read for what was flagged,
+        and rebuilds the guides of divisions whose meeting has passed — up to
+        the caps, stopping at the first rate-limit event, and holding the Mac
+        awake while it works. The semester master never runs on its own. A
+        night the Mac sleeps through is caught up at the next launch.`}
+    >
+      <div className="mt-4">
+        <Switch
+          label="Run the shift"
+          note={
+            shift.enabled
+              ? `Tonight from ${formatTime(shift.start)} to ${formatTime(shift.end)}.`
+              : "Off. Digests and guides wait for a click."
+          }
+          on={shift.enabled}
+          disabled={pending}
+          onChange={(on) => set("shift_enabled", on ? "1" : "0")}
+        />
+      </div>
+      <div key={key} className="mt-3 space-y-2 pl-2">
+        <ValueField label="Window opens" type="time" current={shift.start} pending={pending} onApply={(v) => set("shift_start", v)} />
+        <ValueField label="Window closes" type="time" current={shift.end} pending={pending} onApply={(v) => set("shift_end", v)} />
+        <ValueField
+          label="Start after idle"
+          type="number"
+          current={String(shift.idleMinutes)}
+          unit="minutes untouched"
+          min={0}
+          max={180}
+          pending={pending}
+          onApply={(v) => set("shift_idle_minutes", v)}
+        />
+        <ValueField
+          label="Digests a night"
+          type="number"
+          current={String(shift.digestsPerNight)}
+          unit="at most"
+          min={0}
+          max={20}
+          pending={pending}
+          onApply={(v) => set("shift_digests_per_night", v)}
+        />
+        <ValueField
+          label="Guides a night"
+          type="number"
+          current={String(shift.guidesPerNight)}
+          unit="at most"
+          min={0}
+          max={20}
+          pending={pending}
+          onApply={(v) => set("shift_guides_per_night", v)}
+        />
+      </div>
+      {settings.devBuild && (
+        <div className="mt-3">
+          <Switch
+            label="Run shifts in this dev build"
+            note="Off, the installed app runs them and this build never does. Both share one database, and a night takes one run."
+            on={shift.inDevBuild}
+            disabled={pending}
+            onChange={(on) => set("shift_in_dev_build", on ? "1" : "0")}
+          />
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** SPEC §12 — the login item and the two notifications. */
+function AlwaysThereSection({
+  settings,
+  pending,
+  apply,
+}: {
+  settings: AppSettings;
+  pending: boolean;
+  apply: Apply;
+}) {
+  const notify = (key: NotifyKey, on: boolean) => apply(setNotifySetting(key, on));
+  return (
+    <Section
+      title="Always there"
+      lead="The shift can only run while ClassHub is open. Closing the window
+        hides it rather than quitting; the menu bar item brings it back, and
+        opening at login means it is there every evening without a thought."
+    >
+      <div className="mt-4 space-y-1">
+        <Switch
+          label="Open ClassHub at login"
+          note={settings.loginItem ? "Registered as a login item." : "Not registered."}
+          on={settings.loginItem}
+          disabled={pending}
+          onChange={(on) => apply(setLoginItem(on))}
+        />
+        <Switch
+          label="Notify when the shift finishes"
+          note="What it distilled, rebuilt and filed, in one line."
+          on={settings.notifyShiftFinished}
+          disabled={pending}
+          onChange={(on) => notify("notify_shift_finished", on)}
+        />
+        <Switch
+          label="Notify when a job fails"
+          note="Any job, from a click or the shift — a cancelled one says nothing."
+          on={settings.notifyJobFailed}
+          disabled={pending}
+          onChange={(on) => notify("notify_job_failed", on)}
+        />
+      </div>
+    </Section>
   );
 }
 
@@ -253,9 +565,9 @@ function CanvasSection() {
         reads it through a Canvas window you sign in to, and keeps that
         session's own cookie in your Keychain so relaunching the app does not
         mean signing in again. Nothing is minted, and Canvas decides when the
-        session ends. Syncing runs when you ask, and once on launch when the
-        saved session is still live and the last sync is a day old — never on
-        a schedule."
+        session ends. Syncing runs when you ask, once on launch when the
+        saved session is still live and the last sync is a day old, and as
+        the idle shift's first step each night."
     >
       <dl className="mt-5 space-y-1.5 text-body">
         <div className="flex gap-3">

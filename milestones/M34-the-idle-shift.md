@@ -66,14 +66,17 @@ values like the existing ones.
 shift's remaining budget for tonight. Never dollars: M3 recorded that the CLI's cost figure is
 notional under subscription auth and is not to be shown as money.
 
-**The self-check inserts no row when the daily verdict stands** — the restored verdict lives in
-the runner's memory — so the table stops filling with restarts.
+**The self-check already inserts no row when the daily verdict stands**: Phase 0 measured one
+row a day since M15's gate — eight launches on Sept 8 wrote none — because `startup_self_check`
+restores the standing verdict into the runner's memory. Nothing to build; the acceptance line
+is the measurement.
 
 ## Phase 2 — The shift
 
-A `shift.rs` beside `jobs.rs`. Migration `0016`: `shift_runs(id, started_at, finished_at,
+A `shift.rs` beside `jobs.rs`. Migration `0017` (`0016` is M33's duplicate marking):
+`shift_runs(id, night TEXT — the date the window opened on, started_at, finished_at,
 trigger TEXT — idle|launch|manual, steps TEXT — JSON, jobs TEXT — JSON ids, stopped_by TEXT —
-done|budget|rate_limit|paused|sign_in|error, owner_pid)`. Settings: `shift_enabled` (on),
+done|budget|rate_limit|paused|sign_in|error, summary TEXT, owner_pid)`. Settings: `shift_enabled` (on),
 `shift_start` (21:00), `shift_end` (06:00), `shift_idle_minutes` (20), `shift_guides_per_night`
 (2), `shift_digests_per_night` (4), `shift_paused` (off), and `shift_in_dev_build` (off).
 
@@ -83,7 +86,9 @@ threshold (`HIDIdleTime` through a bounded `ioreg`); no run started today; and t
 the one that runs shifts — the installed app, unless `shift_in_dev_build` is on — recorded by
 `owner_pid` on the run row so two builds on one database never both start one. At launch, a
 missed window since the last run starts a catch-up run at once, trigger `launch`, the pause
-toggle its only brake. `Run the shift now` in the Job Center and the tray is trigger `manual`.
+toggle its only brake; with no run on record nothing was missed, and the first shift waits for
+its window rather than starting at install. `Run the shift now` in the Job Center and the tray
+is trigger `manual`.
 
 **The plan**, in order, each step an existing path and each recorded on the run row with its
 outcome:
@@ -92,20 +97,25 @@ outcome:
    run, and is named in the summary.
 2. **File** — M33's auto-filing runs inside the sync; nothing new here.
 3. **Extract** — `spawn_pipeline` for every class, as the scan already does.
-4. **Distill** every applied contribution whose corpus note is missing, then every session
-   document without a `.hints.json`, oldest first, up to `shift_digests_per_night`.
+4. **Distill** every applied contribution whose corpus note is missing, then every one whose
+   `hints_read_at` is null — the Lectures row's `Not yet read for what was flagged` (§8.4), the
+   ledger's own state rather than a sidecar's presence — oldest session first, up to
+   `shift_digests_per_night`.
 5. **Rebuild** guides: every division with sources whose guide is stale or absent and whose
-   meeting this week is in the past, oldest stale first, up to `shift_guides_per_night`; never
-   the master.
+   meeting is in the past — a dated division's meeting is the class's meeting on or after its
+   start date, an undated Part's is this calendar week's — oldest meeting first, up to
+   `shift_guides_per_night`; never the master, and never a folder guide, which has no meeting
+   and stays a click.
 6. Later milestones add steps here — recordings and announcements (M35), briefs, workbooks,
    pre-reads and note reviews (M36), a quiz before a quiz (M37) — each a function that lists
    its work and a cap.
 
 Jobs go through the existing enqueue guards (one per kind and scope); the shift waits for each
 job to settle before enqueuing the next so the caps are real and the concurrency setting stays
-in charge. The runner's `rate_limit_event` handler sets a flag the shift reads between jobs
-and, when the event says the limit is reached, the shift stops with `rate_limit` and leaves the
-rest for tomorrow. While a run is under way, the app holds `/usr/bin/caffeinate -i -w <pid>` as
+in charge. The runner's `rate_limit_event` handler keeps the latest event's `status` and
+`resetsAt` — every event logged so far says `allowed` — and the shift reads it between jobs:
+a status other than `allowed` whose reset is still ahead stops the shift with `rate_limit`
+and leaves the rest for tomorrow. While a run is under way, the app holds `/usr/bin/caffeinate -i -w <pid>` as
 a child and ends it with the run.
 
 **What it says.** The Job Center's pill reads `Shift · step 4 of 5` while it runs and the panel
@@ -140,7 +150,8 @@ tray, the meter and the settings; §13 the two plugins.
   the same night does nothing; `Pause tonight` stops the plan between jobs.
 - `caffeinate` is a child of the app during the run and gone after.
 - A sort job spawned with a per-kind override shows that model in its log's init event.
-- The self-check inserts no row on a second launch the same day.
+- The self-check inserts no row on a second launch the same day (measured in Phase 0; the
+  gate already holds).
 - The login item registers and unregisters from Settings; the tray's items work; closing the
   window leaves the process running.
 - The installed app, once installed, runs the shift and the dev build does not.

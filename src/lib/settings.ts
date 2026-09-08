@@ -1,5 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { ShiftSettings } from "@/lib/jobs";
+
+/** One job kind's own model and effort (SPEC §6); null is the global pair. */
+export interface JobKindSettings {
+  kind: string;
+  label: string;
+  model: string | null;
+  effort: string | null;
+}
+
 export interface AppSettings {
   aibhsRoot: string;
   /** Whether the configured root exists on disk right now. */
@@ -7,6 +17,7 @@ export interface AppSettings {
   jobModel: string;
   jobEffort: string;
   jobConcurrency: number;
+  jobKinds: JobKindSettings[];
   /** Interpreter the on-device transcriber runs through. It lives inside
    *  LocalFlow's bundle, so an update there can move it out from under us. */
   parakeetPython: string;
@@ -15,6 +26,13 @@ export interface AppSettings {
   jobModels: string[];
   jobEfforts: string[];
   maxConcurrency: number;
+  shift: ShiftSettings;
+  notifyShiftFinished: boolean;
+  notifyJobFailed: boolean;
+  /** Whether the app is registered as a login item (SPEC §12). */
+  loginItem: boolean;
+  /** A dev build, where the shift's "run in this build" switch means something. */
+  devBuild: boolean;
 }
 
 /**
@@ -77,4 +95,38 @@ export function setJobEffort(effort: string): Promise<void> {
 
 export function setJobConcurrency(count: number): Promise<void> {
   return invoke("set_job_concurrency", { count });
+}
+
+/** A kind's own model (SPEC §6); null returns it to the global pair. */
+export function setJobKindModel(kind: string, model: string | null): Promise<void> {
+  return invoke("set_job_kind_model", { kind, model });
+}
+
+export function setJobKindEffort(kind: string, effort: string | null): Promise<void> {
+  return invoke("set_job_kind_effort", { kind, effort });
+}
+
+/** The shift's settings by key, as the backend names them (SPEC §6). */
+export type ShiftSettingKey =
+  | "shift_enabled"
+  | "shift_start"
+  | "shift_end"
+  | "shift_idle_minutes"
+  | "shift_guides_per_night"
+  | "shift_digests_per_night"
+  | "shift_in_dev_build";
+
+export function setShiftSetting(key: ShiftSettingKey, value: string): Promise<void> {
+  return invoke("set_shift_setting", { key, value });
+}
+
+export type NotifyKey = "notify_shift_finished" | "notify_job_failed";
+
+export function setNotifySetting(key: NotifyKey, on: boolean): Promise<void> {
+  return invoke("set_notify_setting", { key, on });
+}
+
+/** Registers or removes the login item (SPEC §12). */
+export function setLoginItem(on: boolean): Promise<void> {
+  return invoke("set_login_item", { on });
 }
