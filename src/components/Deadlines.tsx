@@ -638,7 +638,13 @@ function SeriesCard({
     setBusy("skip");
     setError(null);
     dismissDeadlineProposals(series.ids)
-      .then(() => onResolved(series.ids))
+      .then((outcome) => {
+        onResolved(outcome.approved);
+        if (outcome.skipped.length > 0) {
+          setError(`Not skipped: ${outcome.skipped.join(" · ")}`);
+        }
+        setBusy(null);
+      })
       .catch((e) => {
         setError(String(e));
         setBusy(null);

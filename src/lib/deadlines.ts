@@ -145,9 +145,13 @@ export function getDeadlineProposals(classId: number): Promise<DeadlineQueue> {
   return invoke<DeadlineQueue>("get_deadline_proposals", { classId });
 }
 
-/** A series card's Skip: every member card dismissed at once. */
-export function dismissDeadlineProposals(proposalIds: number[]): Promise<void> {
-  return invoke("dismiss_deadline_proposals", { proposalIds });
+/** A series card's Skip: every member card dismissed at once; `approved`
+ *  holds the ids that left the queue, `skipped` a line per card that could
+ *  not (already resolved elsewhere), which stays as it was. */
+export function dismissDeadlineProposals(
+  proposalIds: number[],
+): Promise<BatchOutcome> {
+  return invoke<BatchOutcome>("dismiss_deadline_proposals", { proposalIds });
 }
 
 /** Scan one class file (relPath) or the whole class folder (null). */

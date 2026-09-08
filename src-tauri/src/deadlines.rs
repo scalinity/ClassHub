@@ -1797,9 +1797,10 @@ pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Res
     Ok(resolved.summary)
 }
 
-/// What a batch approval did: which cards can leave the queue, and one line
-/// per card that could not be added (its proposal row stays pending).
-#[derive(Serialize)]
+/// What a batch did: which cards can leave the queue — approved, or
+/// dismissed by a series' Skip — and one line per card that could not be
+/// resolved (its proposal row stays as it was).
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchOutcome {
     pub approved: Vec<i64>,
@@ -1855,16 +1856,25 @@ pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchO
     Ok(outcome)
 }
 
-/// A series card's Skip: every member card dismissed, one hub push.
-pub fn dismiss_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<()> {
-    with_conn(app, |conn| {
-        for &id in proposal_ids {
-            resolve_in_conn(conn, id, false)?;
-        }
-        Ok(())
-    })?;
+/// A series card's Skip: every member card dismissed, one hub push. A card
+/// that cannot be — resolved from another window since — costs itself and
+/// is named, never the rest, the way `approve_proposals` treats a batch;
+/// the queue is refetched whatever happened, so the card reads what stands.
+pub fn dismiss_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchOutcome> {
+    let outcome = with_conn(app, |conn| Ok(dismiss_in_conn(conn, proposal_ids)))?;
     emit_hub_change(app, "deadlineProposals");
-    Ok(())
+    Ok(outcome)
+}
+
+fn dismiss_in_conn(conn: &Connection, proposal_ids: &[i64]) -> BatchOutcome {
+    let mut outcome = BatchOutcome { approved: Vec::new(), skipped: Vec::new() };
+    for &id in proposal_ids {
+        match resolve_in_conn(conn, id, false) {
+            Ok(_) => outcome.approved.push(id),
+            Err(e) => outcome.skipped.push(format!("{e:#}")),
+        }
+    }
+    outcome
 }
 
 /// What resolving one card did.
@@ -2946,5 +2956,34 @@ mod declined_delete_tests {
         let cards: i64 =
             conn.query_row("SELECT COUNT(*) FROM deadline_proposals", [], |r| r.get(0)).unwrap();
         assert_eq!(cards, 1, "one declined card, none for the untracked row");
+    }
+}
+
+#[cfg(test)]
+mod dismiss_tests {
+    use super::*;
+
+    /// A series' Skip dismisses every card it can and names the one it
+    /// cannot, rather than stopping at it with the rest half done.
+    #[test]
+    fn a_skip_dismisses_what_it_can_and_names_the_rest() {
+        let conn = crate::db::memory_db();
+        for (id, status) in [(1, "pending"), (2, "approved"), (3, "pending")] {
+            conn.execute(
+                "INSERT INTO deadline_proposals
+                 (id, class_id, title, kind, due_at, status, source, created_at)
+                 VALUES (?1, 1, 'Live coding session', 'assignment', '2026-09-08', ?2, 'syllabus', 1)",
+                params![id, status],
+            )
+            .unwrap();
+        }
+        let outcome = dismiss_in_conn(&conn, &[1, 2, 3]);
+        assert_eq!(outcome.approved, [1, 3]);
+        assert_eq!(outcome.skipped.len(), 1, "{outcome:?}");
+        assert!(outcome.skipped[0].contains("already resolved"), "{outcome:?}");
+        let dismissed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deadline_proposals WHERE status = 'dismissed'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dismissed, 2);
     }
 }

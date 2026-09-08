@@ -449,12 +449,13 @@ fn get_deadline_proposals(
     deadlines::queue(&conn, class_id).map_err(|e| format!("{e:#}"))
 }
 
-/// A series card's Skip: every member card dismissed at once.
+/// A series card's Skip: every member card dismissed at once, one that
+/// cannot be named while the rest go.
 #[tauri::command]
 fn dismiss_deadline_proposals(
     app: tauri::AppHandle,
     proposal_ids: Vec<i64>,
-) -> Result<(), String> {
+) -> Result<deadlines::BatchOutcome, String> {
     deadlines::dismiss_proposals(&app, &proposal_ids).map_err(|e| format!("{e:#}"))
 }
 
