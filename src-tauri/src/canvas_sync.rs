@@ -70,7 +70,9 @@ pub struct ClassOutcome {
     /// Open deadlines closed because Canvas holds a submission for them.
     pub deadlines_completed: usize,
     pub files_staged: usize,
-    /// Staged files the sync filed on the spot, where Canvas or the name placed them.
+    /// Of this run's staged files, those the sync filed on the spot, where
+    /// Canvas or the name placed them; the rest wait in the inbox. Cards an
+    /// earlier sync left and this one filed are a note, not a count here.
     pub files_filed: usize,
     /// Grade items written or updated from graded, posted submissions.
     pub grades_recorded: usize,
@@ -1025,13 +1027,24 @@ fn sync_files(
     let mut filed = Vec::new();
     // A card already waiting is refreshed rather than stacked, and under the
     // rule below a Canvas placement is a move: the cards an earlier sync left
-    // are filed first, by the same reading a fresh download takes.
+    // are filed first, by the same reading a fresh download takes. They are
+    // a line of their own, since the report's counts are this run's
+    // downloads and a waiting card's file was staged by an earlier one.
     match file_waiting_cards(app, class.id, &class_dir, &batch) {
-        Ok(moved) => filed.extend(moved),
+        Ok(moved) => {
+            if !moved.is_empty() {
+                outcome.notes.push(format!(
+                    "{} file(s) waiting from an earlier sync filed where Canvas keeps them",
+                    moved.len()
+                ));
+            }
+            filed.extend(moved);
+        }
         Err(e) => outcome.notes.push(format!("a waiting card could not be filed: {e:#}")),
     }
 
     let mut staged = 0usize;
+    let mut filed_now = 0usize;
     let mut skipped = 0usize;
     let mut loose = 0usize;
     let mut by_name = 0usize;
@@ -1113,12 +1126,15 @@ fn sync_files(
             Ok(Landing::Loose) => loose += 1,
             Ok(Landing::ByName) => by_name += 1,
             Ok(Landing::Placed) => {}
-            Ok(Landing::Filed(audit_id)) => filed.push(audit_id),
+            Ok(Landing::Filed(audit_id)) => {
+                filed.push(audit_id);
+                filed_now += 1;
+            }
         }
     }
 
     outcome.files_staged = staged;
-    outcome.files_filed = filed.len();
+    outcome.files_filed = filed_now;
     if skipped > 0 {
         outcome.notes.push(format!("{skipped} file(s) already in the class"));
     }
