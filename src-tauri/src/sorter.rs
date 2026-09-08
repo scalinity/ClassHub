@@ -731,14 +731,14 @@ fn has_active_sort(conn: &Connection, class_id: i64) -> Result<bool> {
 fn build_prompt(conn: &Connection, class_id: i64, manual: bool) -> Result<Option<String>> {
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let (pending, dismissed) = proposal_sources(conn, class_id)?;
-    let placed = canvas_placed(conn, class_id)?;
+    let placed = recorded_placements(conn, class_id)?;
     let inbox: Vec<InboxFile> = list_inbox(&class_dir)
         .into_iter()
         .filter(|f| {
             let key = format!("{INBOX_DIR}/{}", f.name);
-            // Out of scope even for a manual run: Canvas already said where
-            // this one belongs, and "Change destination" on the card is the way
-            // to disagree with that.
+            // Out of scope even for a manual run: Canvas, or the file's own
+            // name, already said where this one belongs, and "Move to…" on
+            // the card is the way to disagree with that.
             if placed.contains(&key) {
                 return false;
             }
@@ -926,16 +926,21 @@ fn proposal_sources(
     Ok((pending, dismissed))
 }
 
-/// Inbox files Canvas has already placed and that are still awaiting approval.
+/// Inbox files whose pending card came from a record rather than a guess:
+/// Canvas's placement, or the file's own name read by the sync for a file
+/// Canvas keeps loose (SPEC §7.2).
 ///
 /// These are out of scope for a sort job however it was started. Canvas's
-/// destination is where the professor filed the material, so asking a model to
-/// name a folder for it spends a job to produce a guess that `upsert_proposal`
-/// would then have to ignore.
-fn canvas_placed(conn: &Connection, class_id: i64) -> Result<HashSet<String>> {
+/// destination is where the professor filed the material, and a by-name card
+/// is the week the name states, so asking a model to name a folder for either
+/// spends a job to produce a guess that `upsert_proposal` would then have to
+/// ignore. A by-name card the reader declined is not here — dismissal takes it
+/// out of the automatic runs, and a manual Sort the inbox is what reads the
+/// file by content after that.
+fn recorded_placements(conn: &Connection, class_id: i64) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare(
         "SELECT source_rel_path FROM move_proposals
-         WHERE class_id = ?1 AND status = 'pending' AND source = 'canvas'",
+         WHERE class_id = ?1 AND status = 'pending' AND source IN ('canvas', 'by_name')",
     )?;
     let rows = stmt.query_map([class_id], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
@@ -1380,11 +1385,14 @@ fn ensure_no_symlink_ancestors(class_dir: &Path, dest_rel: &str) -> Result<()> {
 /// row instead of stacking. The one path all four producers take, so the rule
 /// cannot drift between them.
 ///
-/// Canvas is the exception the sort job defers to. Where Canvas filed a file is
-/// an *observation* — the professor put it in that folder — while a sort job's
-/// destination is an *inference* from a filename and a tree. Letting the guess
-/// replace the record is how a slide deck Canvas had placed under `Slides/`
-/// ended up proposed for a `Week 1/Slides/` that nobody had said existed.
+/// A Canvas card and a by-name card are the records the sort job defers to.
+/// Where Canvas filed a file is an *observation* — the professor put it in that
+/// folder — and a by-name card is the week the file's own name states, while a
+/// sort job's destination is an *inference* from a filename and a tree. Letting
+/// the guess replace the record is how a slide deck Canvas had placed under
+/// `Slides/` ended up proposed for a `Week 1/Slides/` that nobody had said
+/// existed; a sort run started before the sync wrote a by-name card could
+/// answer for that file too, and its entry is kept out the same way.
 ///
 /// A chat proposal is the reader asking, so it replaces a Canvas row. A by-name
 /// proposal has two writers, and neither replaces a placement: a Materials
@@ -1418,7 +1426,7 @@ pub(crate) fn upsert_proposal(
     match held.as_deref() {
         // Refused, and says so: a caller counting proposals must not count
         // one the record kept out.
-        Some("canvas") if source == "sort_job" => Ok(false),
+        Some("canvas" | "by_name") if source == "sort_job" => Ok(false),
         Some(_) => {
             replace_pending(conn, class_id, source, source_rel, dest_rel, reasoning, confidence)?;
             Ok(true)
@@ -1808,6 +1816,55 @@ mod tests {
             ("Slides/deck.pdf".into(), "canvas".into(), 1),
             "a sort job overwrote Canvas, or stacked a second card"
         );
+    }
+
+    /// A by-name card is the week the file's own name states, and a sort run
+    /// that started before the sync wrote it must not answer over it either.
+    #[test]
+    fn a_sort_job_does_not_replace_a_by_name_card() {
+        let conn = crate::db::memory_db();
+        propose(&conn, "by_name", "Weeks/Week 03/deck.pdf");
+        propose(&conn, "sort_job", "Slides/deck.pdf");
+        assert_eq!(
+            held(&conn),
+            ("Weeks/Week 03/deck.pdf".into(), "by_name".into(), 1),
+            "a sort job overwrote the name's card, or stacked a second one"
+        );
+    }
+
+    /// A manual Sort the inbox re-proposes everything except what a record
+    /// already placed: a pending Canvas or by-name card keeps its file out of
+    /// the prompt, and a declined by-name card puts it back in scope.
+    #[test]
+    fn a_manual_sort_leaves_a_recorded_placement_to_its_card() {
+        let root = std::env::temp_dir().join(format!("classhub-manual-scope-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = crate::scanner::class_dir(&conn, 4).expect("class dir");
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        for name in ["CAI6734_Week3_Colab.ipynb", "deck.pdf", "notes.pdf"] {
+            fs::write(class_dir.join(INBOX_DIR).join(name), "x").expect("inbox file");
+        }
+        let carded = format!("{INBOX_DIR}/CAI6734_Week3_Colab.ipynb");
+        upsert_proposal(&conn, 4, "by_name", &carded, "Weeks/Week 03/CAI6734_Week3_Colab.ipynb", "name", None)
+            .expect("by-name card");
+        upsert_proposal(&conn, 4, "canvas", &format!("{INBOX_DIR}/deck.pdf"), "Slides/deck.pdf", "canvas", None)
+            .expect("canvas card");
+        let prompt = build_prompt(&conn, 4, true).expect("prompt").expect("something in scope");
+        assert!(prompt.contains("_Inbox/notes.pdf"), "the uncarded file is in scope");
+        assert!(!prompt.contains("Colab.ipynb") && !prompt.contains("deck.pdf"), "{prompt}");
+        // Declined: the automatic runs skip it, a manual one reads it.
+        conn.execute(
+            "UPDATE move_proposals SET status = 'dismissed' WHERE source_rel_path = ?1",
+            [&carded],
+        )
+        .expect("declined");
+        let automatic = build_prompt(&conn, 4, false).expect("prompt").expect("notes.pdf");
+        assert!(!automatic.contains("Colab.ipynb"));
+        let manual = build_prompt(&conn, 4, true).expect("prompt").expect("in scope");
+        assert!(manual.contains("Colab.ipynb"), "a declined card leaves the file to a manual sort");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A chat move is the user asking for one, which is a decision rather than

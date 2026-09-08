@@ -911,7 +911,10 @@ invented: a name that reads a week the course declares — the reading a Materia
 written at staging time in a sort job's place, since the reading is the row's own and costs
 nothing (Applied's Week 2 notebook came loose on 2026-09-03 and spent a sort job to reach the
 folder its name said); a name that reads none waits for the content-aware sorter, which the
-sync enqueues for those alone. **A sort job
+sync enqueues for those alone, and for a file that downloaded but could not be proposed.
+Declining the by-name card leaves the file for a manual Sort the inbox, which reads it by
+content; no automatic run covers a file whose pending card came from a record, Canvas's or the
+name's, and a sort job's entry never replaces either card. **A sort job
 never replaces a Canvas destination on its own.** Where Canvas filed a file is an observation —
 the professor put it there — and a sort job's destination is an inference from a filename and a
 tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
