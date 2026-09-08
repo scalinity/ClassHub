@@ -1115,6 +1115,17 @@ enum Landing {
     Loose,
 }
 
+impl Landing {
+    /// The word the `canvas.staged_file` audit row carries for it.
+    fn name(&self) -> &'static str {
+        match self {
+            Landing::Placed => "canvas",
+            Landing::ByName => "by_name",
+            Landing::Loose => "loose",
+        }
+    }
+}
+
 /// Logs a downloaded file and proposes where it goes, saying which card it
 /// got, if any.
 ///
@@ -1137,19 +1148,29 @@ fn record_landed(
     let folder = canvas_folder_path(file, folders, vocabulary);
     let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
     with_conn(app, |conn| {
-        // Logged where the bytes land, not where they are proposed to go: the
-        // question this answers is "what did the sync put on my disk", and a
-        // loose file is on disk just the same.
-        audit(
-            conn,
-            "canvas.staged_file",
-            json!({ "classId": class_id, "source": source_rel, "dest": dest_rel }),
-        )?;
+        // Logged where the bytes land and which card they got: `source` is
+        // what the sync put on the disk, `dest` the card's destination when
+        // one was written, and `landing` which of the three outcomes it was,
+        // so a later read can tell a carded loose file from one the sorter is
+        // still to read.
         let (Some(folder), Some(dest_rel)) = (&folder, &dest_rel) else {
             let by_name =
                 crate::sorter::propose_loose_by_name(conn, class_id, class_dir, source_rel, landed)?;
-            return Ok(if by_name { Landing::ByName } else { Landing::Loose });
+            let landing = if by_name.is_some() { Landing::ByName } else { Landing::Loose };
+            audit(
+                conn,
+                "canvas.staged_file",
+                json!({ "classId": class_id, "source": source_rel, "dest": by_name,
+                        "landing": landing.name() }),
+            )?;
+            return Ok(landing);
         };
+        audit(
+            conn,
+            "canvas.staged_file",
+            json!({ "classId": class_id, "source": source_rel, "dest": dest_rel,
+                    "landing": Landing::Placed.name() }),
+        )?;
         // Says both names when they differ, so a retargeted destination is
         // legible rather than looking like a misread of Canvas.
         let original = raw_canvas_folder(file, folders);

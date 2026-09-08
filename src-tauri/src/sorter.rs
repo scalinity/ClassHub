@@ -595,10 +595,14 @@ fn beside_existing(class_dir: &Path, mut alt: WeekAlternative) -> WeekAlternativ
     let Some((folder_rel, name)) = alt.dest_rel_path.rsplit_once('/') else {
         return alt;
     };
-    let landed = free_slot(&class_dir.join(folder_rel), name)
+    // A shape the slot cannot name — a tail that is no file name — is left as
+    // it came, the way the split above leaves a path with no folder.
+    let Some(landed) = free_slot(&class_dir.join(folder_rel), name)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    else {
+        return alt;
+    };
     if landed == name {
         return alt;
     }
@@ -615,35 +619,54 @@ fn beside_existing(class_dir: &Path, mut alt: WeekAlternative) -> WeekAlternativ
 /// is the row's own and costs nothing — Applied's Week 2 notebook came loose
 /// on 2026-09-03 and spent a sort job to reach the folder its name said.
 /// Canvas placed nothing, so no placement is overridden and no Canvas card is
-/// replaced. `Ok(false)` where the name reads no week, the course lacks it, or
-/// the destination is taken or held: the file stays loose for the sorter.
+/// replaced. Returns the card's destination when one was written; `None`
+/// where the name reads no week, the course lacks it, or the destination is
+/// taken or held, so the file stays loose for the sorter. A guard's refusal is
+/// a decision and stays `None`; a database failure underneath it is not one
+/// and propagates, as the write below would.
 pub(crate) fn propose_loose_by_name(
     conn: &Connection,
     class_id: i64,
     class_dir: &Path,
     source_rel: &str,
     name: &str,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
     let Some((week, reading)) = crate::units::named_week_reading(name, modules_are_weeks) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let Some(slot) = crate::units::slot_for_week(conn, class_id, week)? else {
-        return Ok(false);
+    // The one place the week-folder rule lives, shared with the row's filing.
+    let (slot, folder_rel) = match week_target(conn, class_id, source_rel, name, week) {
+        Ok(target) => target,
+        Err(e) => return refused_or_failed(e),
     };
-    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
     let dest_rel = format!("{folder_rel}/{name}");
-    if validate_dest(class_dir, source_rel, &dest_rel).is_err()
-        || refuse_held(conn, class_id, source_rel, &dest_rel).is_err()
-    {
-        return Ok(false);
+    if let Err(e) = validate_dest(class_dir, source_rel, &dest_rel) {
+        return refused_or_failed(e);
+    }
+    if let Err(e) = refuse_held(conn, class_id, source_rel, &dest_rel) {
+        return refused_or_failed(e);
     }
     let reasoning = week_reason(
         &format!("Canvas keeps it in no folder. {}", reading_words(week, reading)),
         &folder_rel,
         &slot.unit_name,
     );
-    upsert_proposal(conn, class_id, "by_name", source_rel, &dest_rel, &reasoning, None)
+    if !upsert_proposal(conn, class_id, "by_name", source_rel, &dest_rel, &reasoning, None)? {
+        return Ok(None);
+    }
+    Ok(Some(dest_rel))
+}
+
+/// A filing guard's refusal leaves a loose file to the sorter; a database
+/// failure raised underneath the same guard is not a refusal and propagates,
+/// so a busy timeout is never reported as "the name carried no week".
+fn refused_or_failed<T>(e: anyhow::Error) -> Result<Option<T>> {
+    if e.downcast_ref::<rusqlite::Error>().is_some() {
+        Err(e)
+    } else {
+        Ok(None)
+    }
 }
 
 /// The words a by-name card gives the reading that found its week (SPEC §10).
@@ -2612,7 +2635,7 @@ mod tests {
 
         let (written, card) = propose(4, "CAI6734_Week3_Colab.ipynb");
         let (dest, reasoning, source) = card.expect("a by-name card");
-        assert!(written);
+        assert_eq!(written.as_deref(), Some("Weeks/Week 03/CAI6734_Week3_Colab.ipynb"));
         assert_eq!((dest.as_str(), source.as_str()), ("Weeks/Week 03/CAI6734_Week3_Colab.ipynb", "by_name"));
         assert_eq!(
             reasoning,
@@ -2620,7 +2643,7 @@ mod tests {
              among the sources of Part I: Deep Learning."
         );
         let (written, card) = propose(3, "Biostatistics_Module4_Slides_class.pptx");
-        assert!(written);
+        assert!(written.is_some());
         let (dest, reasoning, _) = card.expect("the module reading's card");
         assert_eq!(dest, "Weeks/Week 04 — Probability/Biostatistics_Module4_Slides_class.pptx");
         assert!(reasoning.starts_with("Canvas keeps it in no folder. Its name carries Module 4,"), "{reasoning}");
@@ -2632,14 +2655,37 @@ mod tests {
             (3, "Weekly plan.pdf"),
         ] {
             let (written, card) = propose(class, name);
-            assert!(!written && card.is_none(), "{name} stays loose for the sorter");
+            assert!(written.is_none() && card.is_none(), "{name} stays loose for the sorter");
         }
         // A name the week folder already holds stays loose too.
         let class_dir = crate::scanner::class_dir(&conn, 4).expect("class dir");
         fs::create_dir_all(class_dir.join("Weeks/Week 03")).expect("week folder");
         fs::write(class_dir.join("Weeks/Week 03/CAI6734_Week3_Deck.pdf"), "x").expect("earlier");
         let (written, card) = propose(4, "CAI6734_Week3_Deck.pdf");
-        assert!(!written && card.is_none(), "a taken name stays loose");
+        assert!(written.is_none() && card.is_none(), "a taken name stays loose");
+        // A pending Canvas card holds the source: refused, and the Canvas card
+        // survives with its own destination — the promise of SPEC §10 step 7.
+        let held = format!("{INBOX_DIR}/CAI6734_Week4_Held.pdf");
+        fs::write(class_dir.join(&held), "x").expect("landed");
+        upsert_proposal(&conn, 4, "canvas", &held, "Slides/CAI6734_Week4_Held.pdf", "canvas", None)
+            .expect("canvas card");
+        let (written, card) = propose(4, "CAI6734_Week4_Held.pdf");
+        let (dest, _, source) = card.expect("the canvas card");
+        assert!(written.is_none(), "a held source is refused");
+        assert_eq!((dest.as_str(), source.as_str()), ("Slides/CAI6734_Week4_Held.pdf", "canvas"));
+        // Another pending card already claims the week destination: stays loose.
+        upsert_proposal(
+            &conn,
+            4,
+            "by_name",
+            "Slides/CAI6734_Week5_Twin.pdf",
+            "Weeks/Week 05/CAI6734_Week5_Twin.pdf",
+            "because",
+            None,
+        )
+        .expect("claimant");
+        let (written, card) = propose(4, "CAI6734_Week5_Twin.pdf");
+        assert!(written.is_none() && card.is_none(), "a claimed destination stays loose");
         let _ = fs::remove_dir_all(&root);
     }
 }
