@@ -74,7 +74,14 @@ export function PracticeAction({
           }}
           className={`${input} h-7 w-44 text-meta`}
         />
-        <button type="submit" className={buttonText}>
+        {/* WebKit does not focus a button on click, so the mousedown would
+            blur the field with no related target and close the form before
+            the click lands; keeping focus in the field lets the click submit. */}
+        <button
+          type="submit"
+          onMouseDown={(e) => e.preventDefault()}
+          className={buttonText}
+        >
           Write the exam
         </button>
       </form>
