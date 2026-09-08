@@ -1169,17 +1169,24 @@ fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
             Some(name) => vec![resolve_class(conn, &name)?],
             None => class_rows(conn)?,
         };
-        // A duplicate's extract answers for a reading its canonical copy
-        // already answers for (SPEC §7 step 1): its hits are dropped.
+        // A duplicate answers for a reading its canonical copy already
+        // answers for (SPEC §7 step 1): a hit in its extract, or in the file
+        // itself where the source is searchable text, is dropped.
         let mut duplicate_extracts = std::collections::HashSet::new();
         for class in &classes {
             let mut stmt = conn.prepare(
-                "SELECT extract_rel_path FROM files
-                 WHERE class_id = ?1 AND duplicate_of IS NOT NULL
-                   AND extract_rel_path IS NOT NULL",
+                "SELECT rel_path, extract_rel_path FROM files
+                 WHERE class_id = ?1 AND duplicate_of IS NOT NULL",
             )?;
-            for extract in stmt.query_map([class.id], |row| row.get::<_, String>(0))? {
-                duplicate_extracts.insert(format!("{}/{}", class.folder_name, extract?));
+            let rows = stmt.query_map([class.id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            for row in rows {
+                let (rel_path, extract) = row?;
+                duplicate_extracts.insert(format!("{}/{}", class.folder_name, rel_path));
+                if let Some(extract) = extract {
+                    duplicate_extracts.insert(format!("{}/{}", class.folder_name, extract));
+                }
             }
         }
         Ok((root, classes, duplicate_extracts))
