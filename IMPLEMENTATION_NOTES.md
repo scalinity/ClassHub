@@ -5911,16 +5911,23 @@ sessions should know:
   `run_pipeline` is called directly, its alias gone; one `tonight` reader of
   the night key; the launch-gate doc comment sits over its own test again;
   the distill-list test uses a scratch guard that removes itself.
-- **Left as it is**: the SQL `SAME_TITLE_AND_DAY` rule still decides the
-  proposal queue's exact matches beside the Rust rule for deadlines — two
-  notions in one module, named by the auditor; unifying them is a rewrite
-  of the queue's five queries for no behaviour the app needs today.
-  `sorter::week_filing` stays a test-only function at the baseline.
-- **Tests**: 309 pass, eleven new — the rate limit per window and the
+- **A declined card covers the scan's next reading of it**: the
+  dismissed-before check matched the exact title and day, so a card
+  declined as `Homework 2` did not cover a later `HW #2`; a syllabus
+  proposal is now matched against dismissed cards by the fold's reading.
+  The exact SQL rule still decides the pending-card refresh, where a
+  looser match could refresh the wrong card; the module says which is which.
+- **The shift's settings validation stands on its own**
+  (`validate_shift_setting`) and is tested key by key, being the trust
+  boundary for what the webview may write.
+- **Left as it is**: `sorter::week_filing` stays a test-only function at
+  the baseline.
+- **Tests**: 310 pass, twelve new — the rate limit per window and the
   unsaid reset; a hand-typed row linking only on the same key and day and
-  never folded; the launch fold across classes; the meter; a step's
-  outcome line; the next meeting; a run finishing once and an orphan
-  settled at launch; a candidate that failed lately waiting. `npx tsc
+  never folded; the launch fold across classes; a declined card covering a
+  later reading; the meter; a step's outcome line; the next meeting; a run
+  finishing once and an orphan settled at launch; a candidate that failed
+  lately waiting; the settings' validation. `npx tsc
   --noEmit` clean. Nothing was pushed.
 
 ### Gotchas
