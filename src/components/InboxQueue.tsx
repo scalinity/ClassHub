@@ -6,6 +6,7 @@ import { SectionHeading } from "@/components/SectionHeading";
 import { useJobs } from "@/lib/jobs";
 import { formatSize, type TreeNode } from "@/lib/materials";
 import {
+  approveAllMoves,
   clearDropNotice,
   getSortState,
   INBOX_DIR,
@@ -126,6 +127,8 @@ export function InboxQueue({
   const { jobs } = useJobs();
   const drag = useDragState();
   const [actionError, setActionError] = useState<string | null>(null);
+  // Held while Approve all runs, so no card takes a second click meanwhile.
+  const [approvingAll, setApprovingAll] = useState(false);
 
   // Which jobs the snapshot knows: a card that started a sort holds itself
   // until the job it was handed shows up here.
@@ -143,6 +146,23 @@ export function InboxQueue({
     setActionError(null);
     runSortJob(classId).catch((e) => setActionError(String(e)));
   };
+  // Every card's ordinary approval under one batch and one Undo (SPEC §10);
+  // a card whose move fails stays in the queue and is named.
+  const approveAll = () => {
+    setActionError(null);
+    setApprovingAll(true);
+    approveAllMoves(classId)
+      .then((outcome) => {
+        if (outcome.skipped.length > 0) {
+          setActionError(`Not moved: ${outcome.skipped.join(" · ")}`);
+        }
+        setApprovingAll(false);
+      })
+      .catch((e) => {
+        setActionError(String(e));
+        setApprovingAll(false);
+      });
+  };
 
   return (
     <section
@@ -154,22 +174,35 @@ export function InboxQueue({
         title="Inbox"
         count={count === 0 ? undefined : count === 1 ? "1 to sort" : `${count} to sort`}
         actions={
-          active ? (
-            // A scoped sort is one card's: that card carries the state, and a
-            // second signal in the header would announce the same run twice.
-            active.scope === null ? (
-              <span className={statusLine}>
-                <span aria-hidden className={pulseDot} />
-                {active.status === "running"
-                  ? "Proposing destinations…"
-                  : "Sort queued"}
-              </span>
-            ) : undefined
-          ) : unproposed.length > 0 || dismissed.length > 0 ? (
-            <button type="button" onClick={sortNow} className={buttonText}>
-              Sort the inbox
-            </button>
-          ) : undefined
+          <>
+            {proposals.length > 1 && !active && (
+              <button
+                type="button"
+                onClick={approveAll}
+                disabled={approvingAll}
+                className={buttonText}
+              >
+                {approvingAll ? "Approving…" : `Approve all ${proposals.length}`}
+              </button>
+            )}
+            {active ? (
+              // A scoped sort is one card's: that card carries the state, and
+              // a second signal in the header would announce the same run
+              // twice.
+              active.scope === null ? (
+                <span className={statusLine}>
+                  <span aria-hidden className={pulseDot} />
+                  {active.status === "running"
+                    ? "Proposing destinations…"
+                    : "Sort queued"}
+                </span>
+              ) : undefined
+            ) : unproposed.length > 0 || dismissed.length > 0 ? (
+              <button type="button" onClick={sortNow} className={buttonTextMuted}>
+                Sort the inbox
+              </button>
+            ) : undefined}
+          </>
         }
       />
 
@@ -212,6 +245,7 @@ export function InboxQueue({
             sorting={active !== null && active.scope === p.sourceRelPath}
             sortActive={active !== null}
             jobIds={jobIds}
+            held={approvingAll}
           />
         ))}
         {(unproposed.length > 0 || dismissed.length > 0) && (
@@ -261,6 +295,7 @@ function ProposalCard({
   sorting,
   sortActive,
   jobIds,
+  held: heldBySection,
 }: {
   proposal: MoveProposal;
   /** null while the tree is loading. */
@@ -273,6 +308,8 @@ function ProposalCard({
   sortActive: boolean;
   /** Every job id the jobs snapshot currently knows. */
   jobIds: ReadonlySet<number>;
+  /** Approve all is running over every card. */
+  held: boolean;
 }) {
   // Busy holds until the hub-changed refetch removes the card (or an error
   // re-enables the actions) — a resolved proposal must not be re-clickable.
@@ -289,7 +326,7 @@ function ProposalCard({
   const awaitingJob = sortJobId !== null && !jobIds.has(sortJobId);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const held = busy || sorting || sortStarting || awaitingJob;
+  const held = busy || sorting || sortStarting || awaitingJob || heldBySection;
 
   const source = proposal.sourceRelPath;
   const fileName = source.slice(source.lastIndexOf("/") + 1);

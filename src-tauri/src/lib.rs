@@ -22,6 +22,7 @@ mod sorter;
 mod tools;
 mod transcribe;
 mod transcripts;
+mod undo;
 mod units;
 mod zoom;
 
@@ -437,15 +438,30 @@ fn delete_deadline(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     deadlines::delete_deadline(&app, id).map_err(|e| format!("{e:#}"))
 }
 
-/// Pending proposed deadlines for the class's confirm cards — from either
-/// reader, the syllabus scan or the Canvas sync.
+/// Pending proposed deadlines for the class's confirm cards, and the series
+/// among them (SPEC §11).
 #[tauri::command(async)]
 fn get_deadline_proposals(
     state: tauri::State<Db>,
     class_id: i64,
-) -> Result<Vec<deadlines::DeadlineProposal>, String> {
+) -> Result<deadlines::DeadlineQueue, String> {
     let conn = db::lock(&state.0);
-    deadlines::pending_proposals(&conn, class_id).map_err(|e| format!("{e:#}"))
+    deadlines::queue(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// A series card's Skip: every member card dismissed at once.
+#[tauri::command]
+fn dismiss_deadline_proposals(
+    app: tauri::AppHandle,
+    proposal_ids: Vec<i64>,
+) -> Result<(), String> {
+    deadlines::dismiss_proposals(&app, &proposal_ids).map_err(|e| format!("{e:#}"))
+}
+
+/// SPEC §6: reverses the audit rows a notice carries, newest first.
+#[tauri::command]
+fn undo_audit(app: tauri::AppHandle, audit_ids: Vec<i64>) -> Result<undo::UndoOutcome, String> {
+    undo::undo(&app, &audit_ids).map_err(|e| format!("{e:#}"))
 }
 
 /// Scan a chosen file (rel_path) or the whole class folder (None) for dated
@@ -576,16 +592,25 @@ fn resolve_move_proposal(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// A file named for a week, proposed into that week's folder from its row in
-/// Materials (SPEC §10); what it wrote comes back — the destination and the
-/// card count.
+/// A file or folder named for a week, filed into that week's folder from its
+/// row in Materials (SPEC §10); what it did comes back — the destination, the
+/// count and the audit rows the notice's `Undo` reverses.
 #[tauri::command]
-fn propose_week_filing(
+fn file_under_week(
     app: tauri::AppHandle,
     class_id: i64,
     rel_path: String,
 ) -> Result<sorter::WeekFiling, String> {
-    sorter::propose_week_filing(&app, class_id, &rel_path).map_err(|e| format!("{e:#}"))
+    sorter::file_under_week(&app, class_id, &rel_path).map_err(|e| format!("{e:#}"))
+}
+
+/// Approve all over a class's pending cards (SPEC §10): one batch, one `Undo`.
+#[tauri::command]
+fn approve_move_proposals(
+    app: tauri::AppHandle,
+    class_id: i64,
+) -> Result<deadlines::BatchOutcome, String> {
+    sorter::approve_all(&app, class_id).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
@@ -814,7 +839,10 @@ pub fn run() {
             run_sort_job,
             sort_by_content,
             resolve_move_proposal,
-            propose_week_filing,
+            file_under_week,
+            approve_move_proposals,
+            dismiss_deadline_proposals,
+            undo_audit,
             list_jobs,
             cancel_job,
             get_job_events,

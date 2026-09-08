@@ -23,7 +23,10 @@ import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { announcementsQuery, NoticesSection } from "@/components/Notices";
 import { SectionHeading } from "@/components/SectionHeading";
 import { StructureSection } from "@/components/Structure";
+import { listUnits } from "@/lib/canvas";
 import { CLASS_ACCENTS, classesQuery, type ClassInfo } from "@/lib/classes";
+import { getDeadlineProposals, listDeadlines } from "@/lib/deadlines";
+import { listGrades } from "@/lib/grades";
 import {
   deltaTitle,
   formatGeneratedAt,
@@ -293,25 +296,49 @@ export function ClassWorkspace({
   const scannedLabel =
     dataUpdatedAt > 0 ? formatClock(new Date(dataUpdatedAt)) : null;
 
-  // The nav lists a section only while it is on screen (SPEC §12): the inbox
-  // and the notices read the same truth their sections do, and the practice
-  // exams the same gate as their section below.
+  // The nav lists a section only while it has content (SPEC §12): each link
+  // reads the query its section renders — TanStack dedupes them, so none
+  // costs a second request — and an empty section is reached by scrolling.
   const { data: announcements } = useQuery(announcementsQuery(info.id));
+  const { data: units } = useQuery({
+    queryKey: ["units", info.id],
+    queryFn: () => listUnits(info.id),
+  });
+  const { data: allDeadlines } = useQuery({
+    queryKey: ["deadlines"],
+    queryFn: listDeadlines,
+  });
+  const { data: deadlineQueue } = useQuery({
+    queryKey: ["deadlineProposals", info.id],
+    queryFn: () => getDeadlineProposals(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const { data: grades } = useQuery({
+    queryKey: ["grades", info.id],
+    queryFn: () => listGrades(info.id),
+  });
+  const hasMaterials = tree !== undefined && tree.length > 0;
+  const hasDeadlines =
+    (allDeadlines ?? []).some((d) => d.classId === info.id && d.status === "open") ||
+    (deadlineQueue?.proposals.length ?? 0) > 0;
+  const hasLectures =
+    sessions.length + activeDigests.length + pendingTranscripts.length > 0;
   const hasPractice = activePractice.length > 0 || (practice?.length ?? 0) > 0;
   const links = [
+    hasMaterials && { id: "master", label: "Semester master" },
     inboxShown(sortState, jobs, info.id, drag.notice) && {
       id: "inbox",
       label: "Inbox",
     },
     (announcements?.length ?? 0) > 0 && { id: "notices", label: "Notices" },
-    { id: "structure", label: "Structure" },
-    { id: "deadlines", label: "Deadlines" },
-    { id: "grades", label: "Grades" },
-    { id: "materials", label: "Materials" },
-    { id: "lectures", label: "Lectures" },
+    (units?.length ?? 0) > 0 && { id: "structure", label: "Structure" },
+    hasDeadlines && { id: "deadlines", label: "Deadlines" },
+    (grades?.categories.length ?? 0) > 0 && { id: "grades", label: "Grades" },
+    hasMaterials && { id: "materials", label: "Materials" },
+    hasLectures && { id: "lectures", label: "Lectures" },
     (hints?.length ?? 0) > 0 && { id: "flagged", label: "Flagged" },
     hasPractice && { id: "practice-exams", label: "Practice exams" },
-    { id: "notes", label: "Notes" },
+    (notes?.length ?? 0) > 0 && { id: "notes", label: "Notes" },
   ].filter((l): l is { id: string; label: string } => l !== false);
 
   return (
@@ -517,7 +544,7 @@ export function ClassWorkspace({
                       dateFromFileName(transcript.name) ?? todayIso(),
                     ).catch((e) => setDigestError(String(e)));
                   }}
-                  className={`${buttonText} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
+                  className={`${buttonText}`}
                 >
                   Distill
                 </button>
@@ -769,7 +796,7 @@ function ManagedRow({
         <button
           type="button"
           onClick={action.onSelect}
-          className={`${buttonText} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
+          className={`${buttonText}`}
         >
           {action.label}
         </button>

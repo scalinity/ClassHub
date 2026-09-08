@@ -77,21 +77,37 @@ export function sortByContent(proposalId: number): Promise<number> {
   return invoke<number>("sort_by_content", { proposalId });
 }
 
-/** What a filing click wrote (SPEC §10): where it lands — a file's own
- *  destination, or a folder's under the week folder — and how many cards. */
+/** What a filing click did (SPEC §10): where it landed — a file's own
+ *  destination, or a folder's under the week folder — how many files moved,
+ *  and the audit rows the notice's `Undo` reverses. */
 export interface WeekFiling {
   destRel: string;
-  cards: number;
+  moved: number;
+  auditIds: number[];
+  name: string;
 }
 
-/** A file or folder named for a week, proposed into that week's folder from
- *  its row in Materials (SPEC §10). The cards land in the inbox queue and
- *  approval is the ordinary move. */
-export function proposeWeekFiling(
+/** A file or folder named for a week, filed into that week's folder from its
+ *  row in Materials (SPEC §10): the click is the move, with its audit row and
+ *  a notice whose `Undo` puts it back. */
+export function fileUnderWeek(
   classId: number,
   relPath: string,
 ): Promise<WeekFiling> {
-  return invoke<WeekFiling>("propose_week_filing", { classId, relPath });
+  return invoke<WeekFiling>("file_under_week", { classId, relPath });
+}
+
+/** What Approve all did: the cards moved, and one line per card that could
+ *  not be (it stays in the queue). */
+export interface MoveBatchOutcome {
+  approved: number[];
+  skipped: string[];
+}
+
+/** Approve all over a class's pending cards (SPEC §10): each the ordinary
+ *  move with its audit row, under one batch and one `Undo`. */
+export function approveAllMoves(classId: number): Promise<MoveBatchOutcome> {
+  return invoke<MoveBatchOutcome>("approve_move_proposals", { classId });
 }
 
 /** Approve the move (optionally to a picked folder) or leave the file put. */

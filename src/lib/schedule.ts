@@ -117,10 +117,29 @@ function localMidnight(iso: string): Date {
   return new Date(y, (m || 1) - 1, d || 1);
 }
 
-/** Whole days from today to the ISO date's day: 0 today, negative overdue. */
+/** Whole days from today to the ISO date's day: 0 today, negative past. */
 export function daysUntil(iso: string, now: Date = new Date()): number {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   return Math.round((localMidnight(iso).getTime() - today.getTime()) / 86_400_000);
+}
+
+/**
+ * The instant a due date names (SPEC §11), the twin of `due_instant` in
+ * deadlines.rs: a date-only value is the end of its day, a timed one its own
+ * time. Parsed by parts, never through `new Date(iso)` (see above).
+ */
+export function dueInstant(dueAt: string): Date {
+  const [datePart, timePart] = dueAt.split("T");
+  const [y, m, d] = datePart.split("-").map(Number);
+  if (!timePart) return new Date(y, (m || 1) - 1, d || 1, 23, 59, 59);
+  const [hh, mm, ss] = timePart.split(":").map(Number);
+  return new Date(y, (m || 1) - 1, d || 1, hh || 0, mm || 0, ss || 0);
+}
+
+/** Whether the due instant has passed: a date-only deadline due today is
+ *  open all day and overdue the next morning; a timed one once its time is. */
+export function isOverdue(dueAt: string, now: Date = new Date()): boolean {
+  return dueInstant(dueAt).getTime() < now.getTime();
 }
 
 /**
@@ -132,7 +151,7 @@ export function dueDayLabel(dueAt: string): string {
   const days = daysUntil(dueAt);
   const timePart = dueAt.split("T")[1];
   const time = timePart ? ` at ${formatTime(timePart.slice(0, 5))}` : "";
-  if (days < 0) return `overdue since ${formatMonthDay(localMidnight(dueAt))}`;
+  if (isOverdue(dueAt)) return `overdue since ${formatMonthDay(localMidnight(dueAt))}`;
   if (days === 0) return `today${time}`;
   if (days === 1) return `tomorrow${time}`;
   const weekday = localMidnight(dueAt).toLocaleDateString("en-US", {

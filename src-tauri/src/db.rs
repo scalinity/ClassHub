@@ -141,13 +141,42 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// One append-only history row. Destructive writes park their prior state
-/// here first — recoverability in place of confirmation prompts.
-pub fn audit(conn: &Connection, action: &str, payload: serde_json::Value) -> Result<()> {
+/// here first — recoverability in place of confirmation prompts. Returns
+/// the row's id, which a notice carries so `Undo` can name the row it
+/// reverses (SPEC §6).
+pub fn audit(conn: &Connection, action: &str, payload: serde_json::Value) -> Result<i64> {
     conn.execute(
         "INSERT INTO audit_log (action, payload, created_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![action, payload.to_string(), now()],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
+}
+
+/// What a notice says and which audit rows its `Undo` reverses (SPEC §12).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub text: String,
+    /// The rows `undo_audit` reverses, in the order they were written; empty
+    /// for a notice with nothing to undo.
+    pub audit_ids: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<i64>,
+}
+
+/// Tells the frontend what a reversible action did, with the audit rows
+/// behind it, so the notice at the bottom of the window can offer `Undo`.
+/// Emitted by the write itself — a command, a chat tool, the sync — so every
+/// surface reaches the same notice.
+pub fn notify(app: &AppHandle, text: impl Into<String>, audit_ids: Vec<i64>, class_id: Option<i64>) {
+    let _ = app.emit(
+        "notice",
+        Notice {
+            text: text.into(),
+            audit_ids,
+            class_id,
+        },
+    );
 }
 
 /// One value from the SPEC §5 settings table (chat.rs and settings.rs share
@@ -185,6 +214,7 @@ const MIGRATIONS: &[&str] = &[
     CONTRIBUTION_NOTES_MIGRATION,
     include_str!("../migrations/0014_lecture_hints.sql"),
     include_str!("../migrations/0015_hints_read_at.sql"),
+    include_str!("../migrations/0016_duplicate_files.sql"),
 ];
 
 /// The migration that makes one note per transcript name in a division
@@ -386,12 +416,16 @@ pub fn list_classes(conn: &Connection, today: &str) -> Result<Vec<ClassCard>> {
         let stale_guides = crate::guides::stale_guide_count(conn, id)?;
         let inbox_pending = crate::sorter::pending_count(conn, id)?;
         let pending_deadline_proposals = crate::deadlines::pending_count(conn, id)?;
-        // ISO text sorts chronologically, so MIN(due_at) is the nearest.
+        // Ordered by the instant, not the text: a date-only row is the end of
+        // its day (SPEC §11), so it follows a timed row on the same day.
         let next_deadline = conn
             .query_row(
-                "SELECT title, due_at FROM deadlines
-                 WHERE class_id = ?1 AND status = 'open'
-                 ORDER BY due_at LIMIT 1",
+                &format!(
+                    "SELECT title, due_at FROM deadlines
+                     WHERE class_id = ?1 AND status = 'open'
+                     ORDER BY {} LIMIT 1",
+                    crate::deadlines::DUE_INSTANT_SQL
+                ),
                 [id],
                 |row| {
                     Ok(DeadlineChip {

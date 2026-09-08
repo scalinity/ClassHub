@@ -41,7 +41,7 @@ impl GradeAccumulator {
     }
 }
 
-use crate::db::{audit, emit_hub_change, with_conn};
+use crate::db::{audit, emit_hub_change, notify, with_conn};
 
 pub(crate) const MAX_NAME_CHARS: usize = 80;
 
@@ -163,7 +163,7 @@ pub fn save_category(
     if !(0.0..=100.0).contains(&weight) {
         bail!("weight is a percentage between 0 and 100");
     }
-    with_conn(app, |conn| {
+    let audit_id = with_conn(app, |conn| {
         let taken: Option<i64> = conn
             .query_row(
                 "SELECT id FROM grade_categories
@@ -176,7 +176,7 @@ pub fn save_category(
             bail!("a category named '{name}' already exists in this class");
         }
         let tx = conn.unchecked_transaction()?;
-        match id {
+        let audit_id = match id {
             None => {
                 tx.execute(
                     "INSERT INTO grade_categories (class_id, name, weight) VALUES (?1, ?2, ?3)",
@@ -187,7 +187,7 @@ pub fn save_category(
                     "ui.save_grade_category",
                     json!({ "id": tx.last_insert_rowid(), "classId": class_id,
                             "name": name, "weight": weight, "created": true }),
-                )?;
+                )?
             }
             Some(id) => {
                 let before = tx
@@ -217,13 +217,15 @@ pub fn save_category(
                     json!({ "id": id, "classId": class_id,
                             "before": { "name": before.1, "weight": before.2 },
                             "after": { "name": name, "weight": weight } }),
-                )?;
+                )?
             }
-        }
+        };
         tx.commit()?;
-        Ok(())
+        Ok(audit_id)
     })?;
     emit_hub_change(app, "grades");
+    let verb = if id.is_none() { "Added" } else { "Changed" };
+    notify(app, format!("{verb} {name}"), vec![audit_id], Some(class_id));
     Ok(())
 }
 
@@ -231,7 +233,7 @@ pub fn save_category(
 /// rides the audit entry, so the deletion is recoverable — that stands in for
 /// a confirmation prompt.
 pub fn delete_category(app: &AppHandle, id: i64) -> Result<()> {
-    with_conn(app, |conn| {
+    let (audit_id, name, class_id) = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
         let head = tx
             .query_row(
@@ -269,16 +271,17 @@ pub fn delete_category(app: &AppHandle, id: i64) -> Result<()> {
             .collect::<rusqlite::Result<_>>()?;
         tx.execute("DELETE FROM grade_items WHERE category_id = ?1", [id])?;
         tx.execute("DELETE FROM grade_categories WHERE id = ?1", [id])?;
-        audit(
+        let audit_id = audit(
             &tx,
             "ui.delete_grade_category",
             json!({ "id": id, "classId": head.0, "name": head.1,
                     "weight": head.2, "canvasGroupId": head.3, "items": items }),
         )?;
         tx.commit()?;
-        Ok(())
+        Ok((audit_id, head.1, head.0))
     })?;
     emit_hub_change(app, "grades");
+    notify(app, format!("Deleted {name}"), vec![audit_id], Some(class_id));
     Ok(())
 }
 
@@ -299,17 +302,18 @@ pub fn save_item(
     if score < 0.0 {
         bail!("score cannot be negative");
     }
-    with_conn(app, |conn| {
-        let category: Option<String> = conn
+    let (audit_id, class_id) = with_conn(app, |conn| {
+        let category: Option<(String, i64)> = conn
             .query_row(
-                "SELECT name FROM grade_categories WHERE id = ?1",
+                "SELECT name, class_id FROM grade_categories WHERE id = ?1",
                 [category_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let category = category.with_context(|| format!("no grade category #{category_id}"))?;
+        let (category, class_id) =
+            category.with_context(|| format!("no grade category #{category_id}"))?;
         let tx = conn.unchecked_transaction()?;
-        match id {
+        let audit_id = match id {
             None => {
                 tx.execute(
                     "INSERT INTO grade_items (category_id, name, score, max_score)
@@ -320,9 +324,9 @@ pub fn save_item(
                     &tx,
                     "ui.save_grade_item",
                     json!({ "id": tx.last_insert_rowid(), "categoryId": category_id,
-                            "category": category, "name": name, "score": score,
-                            "maxScore": max_score, "created": true }),
-                )?;
+                            "classId": class_id, "category": category, "name": name,
+                            "score": score, "maxScore": max_score, "created": true }),
+                )?
             }
             Some(id) => {
                 let before = tx
@@ -352,28 +356,33 @@ pub fn save_item(
                 audit(
                     &tx,
                     "ui.save_grade_item",
-                    json!({ "id": id, "categoryId": category_id, "category": category,
+                    json!({ "id": id, "categoryId": category_id, "classId": class_id,
+                            "category": category,
                             "before": { "name": before.1, "score": before.2,
                                         "maxScore": before.3 },
                             "after": { "name": name, "score": score,
                                        "maxScore": max_score } }),
-                )?;
+                )?
             }
-        }
+        };
         tx.commit()?;
-        Ok(())
+        Ok((audit_id, class_id))
     })?;
     emit_hub_change(app, "grades");
+    let verb = if id.is_none() { "Recorded" } else { "Changed" };
+    notify(app, format!("{verb} {name}"), vec![audit_id], Some(class_id));
     Ok(())
 }
 
 pub fn delete_item(app: &AppHandle, id: i64) -> Result<()> {
-    with_conn(app, |conn| {
+    let (audit_id, name, class_id) = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
         let row = tx
             .query_row(
-                "SELECT category_id, name, score, max_score, graded_at, canvas_assignment_id
-                 FROM grade_items WHERE id = ?1",
+                "SELECT i.category_id, i.name, i.score, i.max_score, i.graded_at,
+                        i.canvas_assignment_id, c.class_id
+                 FROM grade_items i JOIN grade_categories c ON c.id = i.category_id
+                 WHERE i.id = ?1",
                 [id],
                 |r| {
                     Ok(json!({
@@ -384,18 +393,184 @@ pub fn delete_item(app: &AppHandle, id: i64) -> Result<()> {
                         "maxScore": r.get::<_, f64>(3)?,
                         "gradedAt": r.get::<_, Option<String>>(4)?,
                         "canvasAssignmentId": r.get::<_, Option<String>>(5)?,
+                        "classId": r.get::<_, i64>(6)?,
                     }))
                 },
             )
             .optional()?
             .with_context(|| format!("no grade item #{id}"))?;
+        let name = row["name"].as_str().unwrap_or_default().to_string();
+        let class_id = row["classId"].as_i64().unwrap_or_default();
         tx.execute("DELETE FROM grade_items WHERE id = ?1", [id])?;
-        audit(&tx, "ui.delete_grade_item", row)?;
+        let audit_id = audit(&tx, "ui.delete_grade_item", row)?;
         tx.commit()?;
-        Ok(())
+        Ok((audit_id, name, class_id))
     })?;
     emit_hub_change(app, "grades");
+    notify(app, format!("Deleted {name}"), vec![audit_id], Some(class_id));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Undo (SPEC §6): the inverse of each grade write, from its audit row
+
+type Undone = crate::deadlines::Undone;
+
+/// The class a category belongs to, for the notice and the hub push.
+fn class_of_category(conn: &Connection, category_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT class_id FROM grade_categories WHERE id = ?1",
+            [category_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// `ui.save_grade_category` / `chat.upsert_grade_category`: a created row
+/// goes — refused while it holds scores — and an edited one takes its
+/// `before` back. A chat row recorded before it carried its earlier state is
+/// refused rather than guessed at.
+pub(crate) fn undo_save_category(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no category")?;
+    let class_id = payload["classId"].as_i64();
+    let name: Option<String> = conn
+        .query_row("SELECT name FROM grade_categories WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
+    let Some(name) = name else {
+        bail!("category #{id} is no longer on the list");
+    };
+    if payload["created"].as_bool() == Some(true) {
+        let items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM grade_items WHERE category_id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        if items > 0 {
+            bail!("{name} holds {items} score(s) now — delete it from the Grades section instead");
+        }
+        conn.execute("DELETE FROM grade_categories WHERE id = ?1", [id])?;
+        return Ok(Undone { what: format!("Removed {name}"), class_id });
+    }
+    let before = &payload["before"];
+    let (Some(old_name), Some(weight)) = (before["name"].as_str(), before["weight"].as_f64()) else {
+        bail!("the row carries no earlier state for {name} — edit it instead");
+    };
+    conn.execute(
+        "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
+        params![old_name, weight, id],
+    )?;
+    Ok(Undone { what: format!("Restored {old_name}"), class_id })
+}
+
+/// `ui.delete_grade_category`: the category and its scores come back under
+/// their own ids. Refused when the category's id has been taken since.
+pub(crate) fn undo_delete_category(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no category")?;
+    let class_id = payload["classId"].as_i64().context("the row names no class")?;
+    let name = payload["name"].as_str().context("the row carries no name")?;
+    let taken: i64 =
+        conn.query_row("SELECT COUNT(*) FROM grade_categories WHERE id = ?1", [id], |r| r.get(0))?;
+    if taken > 0 {
+        bail!("category #{id} is on the list again already");
+    }
+    if name_taken(conn, class_id, name, None)? {
+        bail!("a category named '{name}' exists again — the deleted one cannot come back beside it");
+    }
+    conn.execute(
+        "INSERT INTO grade_categories (id, class_id, name, weight, canvas_group_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            id,
+            class_id,
+            name,
+            payload["weight"].as_f64().unwrap_or(0.0),
+            payload["canvasGroupId"].as_str()
+        ],
+    )?;
+    for item in payload["items"].as_array().into_iter().flatten() {
+        conn.execute(
+            "INSERT INTO grade_items
+             (id, category_id, name, score, max_score, graded_at, canvas_assignment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                item["id"].as_i64(),
+                id,
+                item["name"].as_str().unwrap_or(""),
+                item["score"].as_f64().unwrap_or(0.0),
+                item["maxScore"].as_f64().unwrap_or(1.0),
+                item["gradedAt"].as_str(),
+                item["canvasAssignmentId"].as_str(),
+            ],
+        )?;
+    }
+    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id) })
+}
+
+/// `ui.save_grade_item` / `chat.add_grade_item`: a created row goes, an
+/// edited one takes its `before` back.
+pub(crate) fn undo_save_item(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no score")?;
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT name, category_id FROM grade_items WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((name, category_id)) = row else {
+        bail!("score #{id} is no longer on the list");
+    };
+    let class_id = class_of_category(conn, category_id)?;
+    // A chat row carries no `created` flag; it is always a create.
+    if payload["created"].as_bool() == Some(true) || payload["before"].is_null() {
+        conn.execute("DELETE FROM grade_items WHERE id = ?1", [id])?;
+        return Ok(Undone { what: format!("Removed {name}"), class_id });
+    }
+    let before = &payload["before"];
+    let (Some(old_name), Some(score), Some(max_score)) = (
+        before["name"].as_str(),
+        before["score"].as_f64(),
+        before["maxScore"].as_f64(),
+    ) else {
+        bail!("the row carries no earlier state for {name}");
+    };
+    conn.execute(
+        "UPDATE grade_items SET name = ?1, score = ?2, max_score = ?3 WHERE id = ?4",
+        params![old_name, score, max_score, id],
+    )?;
+    Ok(Undone { what: format!("Restored {old_name}"), class_id })
+}
+
+/// `ui.delete_grade_item`: the score comes back under its own id, in a
+/// category that still exists.
+pub(crate) fn undo_delete_item(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no score")?;
+    let category_id = payload["categoryId"].as_i64().context("the row names no category")?;
+    let name = payload["name"].as_str().context("the row carries no name")?;
+    let taken: i64 =
+        conn.query_row("SELECT COUNT(*) FROM grade_items WHERE id = ?1", [id], |r| r.get(0))?;
+    if taken > 0 {
+        bail!("score #{id} is on the list again already");
+    }
+    let Some(class_id) = class_of_category(conn, category_id)? else {
+        bail!("the category {name} was in is gone");
+    };
+    conn.execute(
+        "INSERT INTO grade_items
+         (id, category_id, name, score, max_score, graded_at, canvas_assignment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            category_id,
+            name,
+            payload["score"].as_f64().unwrap_or(0.0),
+            payload["maxScore"].as_f64().unwrap_or(1.0),
+            payload["gradedAt"].as_str(),
+            payload["canvasAssignmentId"].as_str(),
+        ],
+    )?;
+    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id) })
 }
 
 // ---------------------------------------------------------------------------

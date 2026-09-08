@@ -43,12 +43,12 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::canvas::{Session, SignInNeeded};
 use crate::db::{audit, emit_hub_change, lock, now, with_conn, write_atomic, EXTRACTS_DIR, INBOX_DIR};
 use crate::extract::strip_html;
-use crate::deadlines::{CanvasAssignment, Recorded};
+use crate::deadlines::{CanvasAssignment, DirectWrite};
 use crate::grades::{CanvasGroup, CanvasScore, CanvasWrite};
 use crate::units::{self, NewUnit};
 
@@ -65,10 +65,13 @@ pub struct ClassOutcome {
     /// The Canvas course this class matched, for confirmation rather than trust.
     pub canvas_course: Option<String>,
     pub units_added: usize,
-    pub deadlines_proposed: usize,
+    /// Deadlines written directly from dated assignments (SPEC §7.2).
+    pub deadlines_recorded: usize,
     /// Open deadlines closed because Canvas holds a submission for them.
     pub deadlines_completed: usize,
     pub files_staged: usize,
+    /// Staged files the sync filed on the spot, where Canvas or the name placed them.
+    pub files_filed: usize,
     /// Grade items written or updated from graded, posted submissions.
     pub grades_recorded: usize,
     /// Announcements recorded or updated — what the workspace's NOTICES gained.
@@ -271,9 +274,10 @@ fn run(
             class_name: class.display_name.clone(),
             canvas_course: None,
             units_added: 0,
-            deadlines_proposed: 0,
+            deadlines_recorded: 0,
             deadlines_completed: 0,
             files_staged: 0,
+            files_filed: 0,
             grades_recorded: 0,
             announcements_recorded: 0,
             pages_written: 0,
@@ -601,20 +605,22 @@ fn fetch_assignments(
 /// An assignment that already has a deadline — approved from an earlier card,
 /// or a syllabus row on the same title and day, which takes the assignment's id
 /// on first contact — is brought up to date in place: Canvas's due date, and
-/// done once a submission exists. Everything else is proposed through the
-/// confirm queue as before.
+/// done once a submission exists. Every other dated assignment becomes its
+/// deadline directly (SPEC §7.2): the due date is the assignment's own field,
+/// and a card between it and the list only cost a click.
 fn sync_assignments(
     app: &AppHandle,
     class: &ClassRow,
     assignments: &[Value],
     outcome: &mut ClassOutcome,
 ) -> Result<()> {
-    let (proposed, undated, known, completed, moved) = with_conn(app, |conn| {
-        let mut proposed = 0usize;
+    let (recorded, undated, known, completed, moved, declined) = with_conn(app, |conn| {
+        let mut recorded = 0usize;
         let mut undated = 0usize;
         let mut known = 0usize;
         let mut completed = 0usize;
         let mut moved = 0usize;
+        let mut declined = 0usize;
         for assignment in assignments {
             let Some(title) = assignment["name"].as_str().map(str::trim).filter(|n| !n.is_empty())
             else {
@@ -673,33 +679,41 @@ fn sync_assignments(
                 .map(|p| format!("From Canvas · {} points", trim_number(p)))
                 .unwrap_or_else(|| "From Canvas".to_string());
 
-            match crate::deadlines::record_proposal(
-                conn,
-                class.id,
+            // An assignment without an id cannot be tracked, and a deadline
+            // the sync could not find again would be a card's worth of doubt
+            // with no card; it is named rather than written.
+            let Some(canvas_id) = canvas_id.as_deref() else {
+                eprintln!("canvas: assignment '{title}' has no id — not recorded");
+                continue;
+            };
+            let submitted_at = assignment["submission"]["submitted_at"]
+                .as_str()
+                .and_then(local_iso);
+            let tracked = CanvasAssignment {
+                id: canvas_id,
                 title,
-                kind,
-                &due_at,
-                Some(&notes),
-                "canvas",
-                canvas_id.as_deref(),
-            ) {
-                Ok(Recorded::Proposed) => proposed += 1,
-                // Already a deadline, already waiting, or declined earlier.
-                // A re-sync of an unchanged course is entirely these, and
-                // reporting them as new would make "nothing happened" read
-                // like work.
-                Ok(_) => known += 1,
+                due_at: Some(&due_at),
+                submitted_at: submitted_at.as_deref(),
+            };
+            match crate::deadlines::insert_canvas_deadline(conn, class.id, &tracked, kind, &notes) {
+                Ok(DirectWrite::Recorded { completed: done }) => {
+                    recorded += 1;
+                    if done {
+                        completed += 1;
+                    }
+                }
+                Ok(DirectWrite::DeclinedBefore) => declined += 1,
                 Err(e) => eprintln!("canvas: skipping assignment '{title}': {e:#}"),
             }
         }
-        Ok((proposed, undated, known, completed, moved))
+        Ok((recorded, undated, known, completed, moved, declined))
     })?;
 
-    outcome.deadlines_proposed = proposed;
+    outcome.deadlines_recorded = recorded;
     outcome.deadlines_completed = completed;
     if undated > 0 {
         outcome.notes.push(format!(
-            "{undated} Canvas assignment(s) have no due date set — not proposed"
+            "{undated} Canvas assignment(s) have no due date set — not recorded"
         ));
     }
     if known > 0 {
@@ -712,10 +726,18 @@ fn sync_assignments(
             "{moved} deadline(s) moved to the due date Canvas states"
         ));
     }
-    if proposed > 0 {
+    if declined > 0 {
+        outcome.notes.push(format!(
+            "{declined} Canvas assignment(s) declined earlier and left off the list — add one by \
+             hand to track it"
+        ));
+    }
+    if recorded > 0 {
+        // The cards the direct write resolved leave the queue, and the badge
+        // counts what still asks.
         emit_hub_change(app, "deadlineProposals");
     }
-    if completed > 0 || moved > 0 {
+    if recorded > 0 || completed > 0 || moved > 0 {
         emit_hub_change(app, "deadlines");
     }
     Ok(())
@@ -987,6 +1009,18 @@ fn sync_files(
         }
     }
 
+    // One batch per class per sync: every file the sync places lands under
+    // it, and the notice's `Undo` reverses the batch as one (SPEC §7.2).
+    let batch = format!("sync-{}-{}", now(), class.id);
+    let mut filed = Vec::new();
+    // A card already waiting is refreshed rather than stacked, and under the
+    // rule below a Canvas placement is a move: the cards an earlier sync left
+    // are filed first, by the same reading a fresh download takes.
+    match file_waiting_cards(app, class.id, &class_dir, &batch) {
+        Ok(moved) => filed.extend(moved),
+        Err(e) => outcome.notes.push(format!("a waiting card could not be filed: {e:#}")),
+    }
+
     let mut staged = 0usize;
     let mut skipped = 0usize;
     let mut loose = 0usize;
@@ -1060,6 +1094,7 @@ fn sync_files(
             &vocabulary,
             &source_rel,
             &landed,
+            &batch,
         ) {
             Err(e) => {
                 outcome.notes.push(format!("{landed}: {e:#}"));
@@ -1068,22 +1103,92 @@ fn sync_files(
             Ok(Landing::Loose) => loose += 1,
             Ok(Landing::ByName) => by_name += 1,
             Ok(Landing::Placed) => {}
+            Ok(Landing::Filed(audit_id)) => filed.push(audit_id),
         }
     }
 
     outcome.files_staged = staged;
+    outcome.files_filed = filed.len();
     if skipped > 0 {
         outcome.notes.push(format!("{skipped} file(s) already in the class"));
     }
     let (notes, sort) = landing_notes(by_name, loose, unproposed);
     outcome.notes.extend(notes);
-    if staged > 0 {
+    if staged > 0 || !filed.is_empty() {
         emit_hub_change(app, "proposals");
         if sort {
             crate::sorter::enqueue_followup(app, class.id);
         }
     }
+    if !filed.is_empty() {
+        // The tree changed under the workspace, and the moved files are new
+        // material to the index: the rescan the workspace would run, run
+        // here, so an auto-filed PDF's extract follows its move whether or
+        // not a workspace is open (SPEC §7.2).
+        emit_hub_change(app, "files");
+        let db = app.state::<crate::Db>();
+        match crate::scanner::scan_class(&db.0, class.id) {
+            Ok(scan) if scan.changed => emit_hub_change(app, "index"),
+            Ok(_) => {}
+            Err(e) => outcome.notes.push(format!("the rescan after filing failed: {e:#}")),
+        }
+        crate::extract::spawn_pipeline(app, class.id);
+        let count = filed.len();
+        let text = if count == 1 {
+            format!("Filed 1 {} file where Canvas keeps it", class.display_name)
+        } else {
+            format!("Filed {count} {} files where Canvas keeps them", class.display_name)
+        };
+        crate::db::notify(app, text, filed, Some(class.id));
+    }
     Ok(())
+}
+
+/// The Canvas cards an earlier sync left waiting, filed by the rule a fresh
+/// download takes (`sorter::auto_filing`): a module reading keeps its card,
+/// and a card whose file has left the inbox is the vanish check's. Returns
+/// the audit rows of the moves it made.
+fn file_waiting_cards(
+    app: &AppHandle,
+    class_id: i64,
+    class_dir: &Path,
+    batch: &str,
+) -> Result<Vec<i64>> {
+    with_conn(app, |conn| {
+        let cards: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT source_rel_path, dest_rel_path, reasoning FROM move_proposals
+                 WHERE class_id = ?1 AND status = 'pending' AND source = 'canvas'
+                 ORDER BY id",
+            )?
+            .query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if cards.is_empty() {
+            return Ok(Vec::new());
+        }
+        let modules_are_weeks = units::modules_read_as_weeks(conn, class_id)?;
+        let slots = units::week_slots(conn, class_id)?;
+        let mut moved = Vec::new();
+        for (source_rel, dest_rel, reasoning) in cards {
+            if !class_dir.join(&source_rel).is_file() {
+                continue;
+            }
+            let name = source_rel.rsplit('/').next().unwrap_or(&source_rel);
+            // The card's own reason opens with Canvas's folder; the rule
+            // reads the destination it named.
+            let canvas_reason = reasoning.trim_end_matches('.');
+            match crate::sorter::auto_filing(&slots, modules_are_weeks, name, Some(&dest_rel), canvas_reason) {
+                crate::sorter::AutoFiling::Filed { dest_rel, reasoning } => {
+                    match crate::sorter::file_now(conn, class_id, class_dir, &source_rel, &dest_rel, &reasoning, batch) {
+                        Ok((_, audit_id)) => moved.push(audit_id),
+                        Err(e) => eprintln!("canvas: {source_rel} stays carded: {e:#}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(moved)
+    })
 }
 
 /// What the report says about the staged files that got no Canvas card, and
@@ -1116,11 +1221,15 @@ fn landing_notes(by_name: usize, loose: usize, unproposed: usize) -> (Vec<String
     (notes, loose > 0 || unproposed > 0)
 }
 
-/// Where a staged file's card came from, if one was written.
+/// What the sync did with a staged file.
 enum Landing {
-    /// A Canvas card toward the folder Canvas keeps it in.
+    /// Moved on the spot, where Canvas or its own name placed it (SPEC §7.2);
+    /// the `canvas.filed` audit row.
+    Filed(i64),
+    /// A Canvas card toward the folder Canvas keeps it in — a module the
+    /// course reads as a week, which keeps its card with the alternative.
     Placed,
-    /// Canvas keeps it loose and its name reads a week the course declares: a
+    /// Canvas keeps it loose and its name reads a module as a week: a
     /// by-name card toward the week folder (`sorter::propose_loose_by_name`).
     ByName,
     /// Canvas keeps it loose and its name reads no week: the sorter's.
@@ -1131,6 +1240,7 @@ impl Landing {
     /// The word the `canvas.staged_file` audit row carries for it.
     fn name(&self) -> &'static str {
         match self {
+            Landing::Filed(_) => "filed",
             Landing::Placed => "canvas",
             Landing::ByName => "by_name",
             Landing::Loose => "loose",
@@ -1138,12 +1248,15 @@ impl Landing {
     }
 }
 
-/// Logs a downloaded file and proposes where it goes, saying which card it
-/// got, if any.
+/// Logs a downloaded file and files it or proposes where it goes, saying
+/// which it was.
 ///
-/// Where Canvas filed something is a proposal, never a placement — approval is
-/// what moves a file (SPEC §10). Canvas keeping it loose in the course root is
-/// no signal at all, so nothing invents it a home: a name that reads a week
+/// Where Canvas filed a file is an observation — the professor put it there
+/// — and so is a week in its own name, so either files the file on the spot
+/// (`sorter::auto_filing`), undone in one from the notice. A module the
+/// course reads as a week is a reading that is knowingly wrong on one course,
+/// so it keeps its card. Canvas keeping a file loose in the course root is no
+/// signal at all, so nothing invents it a home: a name that reads a module
 /// gets the by-name card its row would offer, and the rest stay in the inbox
 /// for the content-aware sorter to read.
 #[allow(clippy::too_many_arguments)]
@@ -1156,44 +1269,59 @@ fn record_landed(
     vocabulary: &[(String, usize)],
     source_rel: &str,
     landed: &str,
+    batch: &str,
 ) -> Result<Landing> {
     let folder = canvas_folder_path(file, folders, vocabulary);
     let dest_rel = folder.as_ref().map(|folder| format!("{folder}/{landed}"));
+    // Says both names when they differ, so a retargeted destination is
+    // legible rather than looking like a misread of Canvas.
+    let original = raw_canvas_folder(file, folders);
+    let canvas_reason = match (&folder, original) {
+        (Some(folder), Some(original)) if !original.eq_ignore_ascii_case(folder) => format!(
+            "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
+        ),
+        (Some(folder), _) => format!("Canvas files it under \"{folder}\""),
+        (None, _) => "Canvas keeps it in no folder".to_string(),
+    };
     with_conn(app, |conn| {
-        // Logged where the bytes land and which card they got: `source` is
-        // what the sync put on the disk, `dest` the card's destination when
-        // one was written, and `landing` which of the three outcomes it was,
-        // so a later read can tell a carded loose file from one the sorter is
-        // still to read.
-        let (Some(folder), Some(dest_rel)) = (&folder, &dest_rel) else {
-            let by_name =
-                crate::sorter::propose_loose_by_name(conn, class_id, class_dir, source_rel, landed)?;
-            let landing = if by_name.is_some() { Landing::ByName } else { Landing::Loose };
-            audit(
-                conn,
-                "canvas.staged_file",
-                json!({ "classId": class_id, "source": source_rel, "dest": by_name,
-                        "landing": landing.name() }),
-            )?;
-            return Ok(landing);
+        let modules_are_weeks = units::modules_read_as_weeks(conn, class_id)?;
+        let slots = units::week_slots(conn, class_id)?;
+        let filing =
+            crate::sorter::auto_filing(&slots, modules_are_weeks, landed, dest_rel.as_deref(), &canvas_reason);
+        // Logged where the bytes land and what became of them: `source` is
+        // what the sync put on the disk, `dest` where it went or the card's
+        // destination when one was written, and `landing` which outcome it
+        // was, so a later read can tell a filed file from a carded one from
+        // one the sorter is still to read.
+        let (landing, dest) = match filing {
+            crate::sorter::AutoFiling::Filed { dest_rel, reasoning } => {
+                let (dest, audit_id) = crate::sorter::file_now(
+                    conn, class_id, class_dir, source_rel, &dest_rel, &reasoning, batch,
+                )?;
+                (Landing::Filed(audit_id), Some(dest))
+            }
+            crate::sorter::AutoFiling::ModuleCard => match &dest_rel {
+                Some(dest_rel) => {
+                    propose_move(conn, class_id, class_dir, source_rel, dest_rel, &canvas_reason)?;
+                    (Landing::Placed, Some(dest_rel.clone()))
+                }
+                None => {
+                    let by_name = crate::sorter::propose_loose_by_name(
+                        conn, class_id, class_dir, source_rel, landed,
+                    )?;
+                    let landing = if by_name.is_some() { Landing::ByName } else { Landing::Loose };
+                    (landing, by_name)
+                }
+            },
+            crate::sorter::AutoFiling::Loose => (Landing::Loose, None),
         };
         audit(
             conn,
             "canvas.staged_file",
-            json!({ "classId": class_id, "source": source_rel, "dest": dest_rel,
-                    "landing": Landing::Placed.name() }),
+            json!({ "classId": class_id, "source": source_rel, "dest": dest,
+                    "landing": landing.name() }),
         )?;
-        // Says both names when they differ, so a retargeted destination is
-        // legible rather than looking like a misread of Canvas.
-        let original = raw_canvas_folder(file, folders);
-        let reasoning = match original {
-            Some(ref original) if !original.eq_ignore_ascii_case(folder) => format!(
-                "Canvas files it under \"{original}\"; this library calls that \"{folder}\""
-            ),
-            _ => format!("Canvas files it under \"{folder}\""),
-        };
-        propose_move(conn, class_id, class_dir, source_rel, dest_rel, &reasoning)?;
-        Ok(Landing::Placed)
+        Ok(landing)
     })
 }
 
@@ -1264,9 +1392,30 @@ fn indexed_files(conn: &Connection, class_id: i64) -> Result<HashSet<(String, i6
     for row in rows {
         let (rel_path, size) = row?;
         let name = rel_path.rsplit('/').next().unwrap_or(&rel_path).to_string();
+        // A copy that landed beside an earlier file of its name carries a
+        // ` (2)` the Canvas listing does not (`sorter::free_slot`): read under
+        // its plain name too, or the next sync downloads it a third time —
+        // Biostatistics' Week 3 notebook did on 2026-09-08.
+        if let Some(plain) = unsuffixed(&name) {
+            out.insert((plain, size));
+        }
         out.insert((name, size));
     }
     Ok(out)
+}
+
+/// `deck (2).pdf` as `deck.pdf`; `None` for a name carrying no such suffix.
+fn unsuffixed(name: &str) -> Option<String> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    let (base, tail) = stem.rsplit_once(" (")?;
+    let number = tail.strip_suffix(')')?;
+    if base.is_empty() || number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{base}{ext}"))
 }
 
 /// The Canvas folder a file sits in, as a class-relative folder path.
@@ -2157,6 +2306,19 @@ mod tests {
         );
         // Same name, different bytes: a revised deck is not the one on disk.
         assert!(!seen.contains(&("week1.pptx".to_string(), 101)));
+        // A copy that landed as ` (2)` answers for the Canvas name too.
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (1, 'Weeks/Week 03/notebook (2).html', 'd', 400, 0, 'html')",
+            [],
+        )
+        .expect("suffixed copy");
+        let seen = indexed_files(&conn, 1).expect("indexed");
+        assert!(seen.contains(&("notebook.html".to_string(), 400)), "the plain name");
+        assert!(seen.contains(&("notebook (2).html".to_string(), 400)), "and its own");
+        assert_eq!(unsuffixed("deck (12).pdf").as_deref(), Some("deck.pdf"));
+        assert_eq!(unsuffixed("Week 3 (draft).pdf"), None);
+        assert_eq!(unsuffixed("README (2)").as_deref(), Some("README"));
     }
 
     /// The predicate between a Canvas submission and a grade item. A muted

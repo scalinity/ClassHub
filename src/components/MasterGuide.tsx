@@ -120,8 +120,9 @@ export function MasterGuideStrip({
 
   return (
     <section
+      id="master"
       aria-label="Semester master"
-      className="mt-8 rounded-xl bg-surface px-5 py-4 ring-1 ring-border"
+      className="mt-8 scroll-mt-20 rounded-xl bg-surface px-5 py-4 ring-1 ring-border"
     >
       <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <h2 className="shrink-0 text-[17px] font-semibold">Semester master</h2>
@@ -188,7 +189,6 @@ export function MasterGuideStrip({
             </>
           )}
           <PracticeAction
-            standing
             active={practiceActive}
             onSelect={practice}
           />

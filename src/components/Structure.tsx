@@ -344,7 +344,7 @@ function UnitGuideCluster({
         <button
           type="button"
           onClick={() => onSynthesize(unitId)}
-          className={`${buttonTextMuted} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+          className={`${buttonTextMuted}`}
         >
           Write guide
         </button>
@@ -378,7 +378,7 @@ function UnitGuideCluster({
           title="Rewrite the guide"
           aria-label={`Resynthesize the ${unitName} guide`}
           onClick={() => onSynthesize(unitId)}
-          className={`${buttonIcon} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+          className={`${buttonIcon}`}
         >
           <RefreshCw size={12} aria-hidden />
         </button>

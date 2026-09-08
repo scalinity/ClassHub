@@ -322,10 +322,11 @@ fn record_contract_breach(app: &AppHandle, job: &QueuedJob, touched: &[String]) 
     }
 }
 
-/// The audit action for an app move, whose `from` and `to` the write guard
+/// The audit actions for an app move, whose `from` and `to` the write guard
 /// reads as a pair: the file left `from`, and what sits at `to` is the app's
-/// only while it still carries the signature it had at `from`.
-const APP_MOVE: &str = "sort.move";
+/// only while it still carries the signature it had at `from`. An approval or
+/// a by-name click, a file the sync placed, and the undo of either (SPEC §6).
+const APP_MOVES: &[&str] = &["sort.move", "canvas.filed", "undo.sort.move", "undo.canvas.filed"];
 
 /// The other audit actions that record the app itself writing into a class
 /// folder, with the payload keys naming the class-relative paths it wrote. The
@@ -338,6 +339,8 @@ const APP_WRITES: &[(&str, &[&str])] = &[
     ("lecture.added", &["relPath"]),
     ("chat.write_note", &["relPath"]),
     ("ui.write_note", &["relPath"]),
+    ("undo.chat.write_note", &["relPath"]),
+    ("undo.ui.write_note", &["relPath"]),
 ];
 
 /// What the app recorded doing to a path inside the guard's window.
@@ -362,7 +365,10 @@ fn app_written_paths(
     since: i64,
 ) -> Result<HashMap<String, AppWrite>> {
     use rusqlite::types::Value;
-    let actions = std::iter::once(APP_MOVE).chain(APP_WRITES.iter().map(|(action, _)| *action));
+    let actions = APP_MOVES
+        .iter()
+        .copied()
+        .chain(APP_WRITES.iter().map(|(action, _)| *action));
     // `since` is whole seconds, and the comparison is inclusive on purpose: a
     // row stamped in the same second as the fingerprint, but before it, can
     // only exclude a path the app also wrote — it widens, never narrows.
@@ -388,7 +394,7 @@ fn app_written_paths(
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
             continue;
         };
-        if action == APP_MOVE {
+        if APP_MOVES.contains(&action.as_str()) {
             if let (Some(from), Some(to)) = (payload["from"].as_str(), payload["to"].as_str()) {
                 // A path a file left is the app's outright, and stays so if a
                 // later move brought another file through it; a path a file
@@ -1434,6 +1440,31 @@ fn run_job(
                 ),
                 2000,
             ));
+        }
+    }
+
+    // An extract the model refused is not a stall: left stale, the pipeline
+    // would enqueue the same refusal on every scan. What the run did write is
+    // recorded, the rest is marked attempted at its hash (SPEC §7 step 3).
+    if job.kind == "extract" && status == "failed" {
+        if let (Some(class_id), Some(payload), Some(reason)) =
+            (job.class_id, job.payload.as_deref(), error.as_deref())
+        {
+            if crate::extract::refused_by_filter(reason) {
+                match crate::extract::record_refusal(&app, class_id, payload) {
+                    Ok(refused) if !refused.is_empty() => {
+                        error = Some(truncate(
+                            &format!(
+                                "{reason} — left without an extract until the file changes: {}",
+                                refused.join(", ")
+                            ),
+                            2000,
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("extract job {} refusal record keeping failed: {e:#}", job.id),
+                }
+            }
         }
     }
 

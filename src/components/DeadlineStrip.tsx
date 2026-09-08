@@ -6,7 +6,7 @@ import { SectionHeading } from "@/components/SectionHeading";
 import { CLASS_ACCENTS } from "@/lib/classes";
 import { listDeadlines, setDeadlineStatus, type Deadline } from "@/lib/deadlines";
 import { queryClient } from "@/lib/query";
-import { daysUntil, dueDayLabel } from "@/lib/schedule";
+import { daysUntil, dueDayLabel, isOverdue } from "@/lib/schedule";
 import { checkCircle, checkCircleDone, errorLine, readingText } from "@/lib/styles";
 
 /**
@@ -101,7 +101,7 @@ function DeadlineChip({
 }) {
   const [busy, setBusy] = useState(false);
   const done = deadline.status === "done";
-  const overdue = !done && daysUntil(deadline.dueAt) < 0;
+  const overdue = !done && isOverdue(deadline.dueAt);
   const style = {
     "--accent": CLASS_ACCENTS[deadline.classColor] ?? "var(--class-blue)",
   } as CSSProperties;

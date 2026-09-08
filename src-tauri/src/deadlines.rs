@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{audit, emit_hub_change, now, truncate, with_conn};
+use crate::db::{audit, emit_hub_change, notify, now, truncate, with_conn};
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/syllabus.md");
 
@@ -91,6 +91,24 @@ pub(crate) fn valid_due_at(s: &str) -> bool {
     true
 }
 
+/// The instant a due date names (SPEC §11): a date-only value is the end of
+/// its day, a timed one its own time. One rule for every comparison, so a
+/// date-only row sorts after a timed row on the same day rather than as its
+/// midnight, and `schedule.ts` reads `overdue` by the same instant. Its live
+/// form is `DUE_INSTANT_SQL`, which the test pins to this function.
+#[cfg(test)]
+pub fn due_instant(due_at: &str) -> String {
+    if due_at.len() == 10 {
+        format!("{due_at}T23:59:59")
+    } else {
+        due_at.to_string()
+    }
+}
+
+/// `due_instant` as the expression an `ORDER BY due_at` takes.
+pub const DUE_INSTANT_SQL: &str =
+    "CASE WHEN length(due_at) = 10 THEN due_at || 'T23:59:59' ELSE due_at END";
+
 // ---------------------------------------------------------------------------
 // Deadline CRUD (UI side; the chat tools in tools.rs share the same rules)
 
@@ -120,12 +138,14 @@ pub struct DeadlineInfo {
 /// Every deadline across every class, due-soonest first — the dashboard strip,
 /// the class tab and the card line all filter this one payload client-side.
 pub fn list_deadlines(conn: &Connection) -> Result<Vec<DeadlineInfo>> {
-    let mut stmt = conn.prepare(
+    // The instant, not the text (`due_instant`): a date-only row is the end
+    // of its day, so it follows a timed row on the same day.
+    let mut stmt = conn.prepare(&format!(
         "SELECT d.id, d.class_id, c.display_name, c.color, d.title, d.kind,
                 d.due_at, d.notes, d.status, d.source, d.canvas_assignment_id
          FROM deadlines d JOIN classes c ON c.id = d.class_id
-         ORDER BY d.due_at, d.id",
-    )?;
+         ORDER BY {DUE_INSTANT_SQL}, d.id"
+    ))?;
     let rows = stmt
         .query_map([], |row| {
             Ok(DeadlineInfo {
@@ -178,9 +198,9 @@ pub fn save_deadline(
         .map(|n| truncate(n, MAX_NOTES_CHARS));
     // Write + audit land as one unit — a history entry must not be lost to a
     // failure between the two statements.
-    with_conn(app, |conn| {
+    let audit_id = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
-        match id {
+        let audit_id = match id {
             None => {
                 tx.execute(
                     "INSERT INTO deadlines (class_id, title, kind, due_at, notes, status, source)
@@ -192,7 +212,7 @@ pub fn save_deadline(
                     "ui.upsert_deadline",
                     json!({ "id": tx.last_insert_rowid(), "classId": class_id, "title": title,
                             "kind": kind, "dueAt": due_at, "notes": notes, "created": true }),
-                )?;
+                )?
             }
             Some(id) => {
                 let before = tx
@@ -227,33 +247,47 @@ pub fn save_deadline(
                                         "dueAt": before.3, "notes": before.4 },
                             "after": { "title": title, "kind": kind,
                                        "dueAt": due_at, "notes": notes } }),
-                )?;
+                )?
             }
-        }
+        };
         tx.commit()?;
-        Ok(())
+        Ok(audit_id)
     })?;
     emit_hub_change(app, "deadlines");
+    let verb = if id.is_none() { "Added" } else { "Changed" };
+    notify(app, format!("{verb} {title}"), vec![audit_id], Some(class_id));
     Ok(())
 }
 
 /// done ↔ open toggle — the row's checkbox. Reopening is as cheap as closing.
 pub fn set_deadline_status(app: &AppHandle, id: i64, done: bool) -> Result<()> {
     let status = if done { "done" } else { "open" };
-    with_conn(app, |conn| {
+    let (audit_id, title, class_id) = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
-        let changed = tx.execute(
+        let (before, title, class_id): (String, String, i64) = tx
+            .query_row(
+                "SELECT status, title, class_id FROM deadlines WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .with_context(|| format!("no deadline #{id}"))?;
+        tx.execute(
             "UPDATE deadlines SET status = ?1 WHERE id = ?2",
             params![status, id],
         )?;
-        if changed == 0 {
-            bail!("no deadline #{id}");
-        }
-        audit(&tx, "ui.set_deadline_status", json!({ "id": id, "status": status }))?;
+        let audit_id = audit(
+            &tx,
+            "ui.set_deadline_status",
+            json!({ "id": id, "classId": class_id, "status": status, "before": before }),
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok((audit_id, title, class_id))
     })?;
     emit_hub_change(app, "deadlines");
+    let verb = if done { "Marked" } else { "Reopened" };
+    let tail = if done { " done" } else { "" };
+    notify(app, format!("{verb} {title}{tail}"), vec![audit_id], Some(class_id));
     Ok(())
 }
 
@@ -261,35 +295,158 @@ pub fn set_deadline_status(app: &AppHandle, id: i64, done: bool) -> Result<()> {
 /// stands in for a confirmation prompt. Delete and audit commit together:
 /// the audit row IS the undo, so the delete must never outlive it.
 pub fn delete_deadline(app: &AppHandle, id: i64) -> Result<()> {
-    with_conn(app, |conn| {
+    let (audit_id, title, class_id) = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
-        let row = tx
-            .query_row(
-                "SELECT class_id, title, kind, due_at, notes, status, source
-                 FROM deadlines WHERE id = ?1",
-                [id],
-                |r| {
-                    Ok(json!({
-                        "id": id,
-                        "classId": r.get::<_, i64>(0)?,
-                        "title": r.get::<_, String>(1)?,
-                        "kind": r.get::<_, String>(2)?,
-                        "dueAt": r.get::<_, String>(3)?,
-                        "notes": r.get::<_, Option<String>>(4)?,
-                        "status": r.get::<_, String>(5)?,
-                        "source": r.get::<_, String>(6)?,
-                    }))
-                },
-            )
-            .optional()?
-            .with_context(|| format!("no deadline #{id}"))?;
+        let row = deadline_row(&tx, id)?.with_context(|| format!("no deadline #{id}"))?;
+        let title = row["title"].as_str().unwrap_or_default().to_string();
+        let class_id = row["classId"].as_i64().unwrap_or_default();
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
-        audit(&tx, "ui.delete_deadline", row)?;
+        let audit_id = audit(&tx, "ui.delete_deadline", row)?;
         tx.commit()?;
-        Ok(())
+        Ok((audit_id, title, class_id))
     })?;
     emit_hub_change(app, "deadlines");
+    notify(app, format!("Deleted {title}"), vec![audit_id], Some(class_id));
     Ok(())
+}
+
+/// A deadline as its delete audits it — the whole row, Canvas id included,
+/// so `undo_delete` can put it back as it was. Shared with the chat tool.
+pub(crate) fn deadline_row(conn: &Connection, id: i64) -> Result<Option<serde_json::Value>> {
+    Ok(conn
+        .query_row(
+            "SELECT class_id, title, kind, due_at, notes, status, source, canvas_assignment_id
+             FROM deadlines WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(json!({
+                    "id": id,
+                    "classId": r.get::<_, i64>(0)?,
+                    "title": r.get::<_, String>(1)?,
+                    "kind": r.get::<_, String>(2)?,
+                    "dueAt": r.get::<_, String>(3)?,
+                    "notes": r.get::<_, Option<String>>(4)?,
+                    "status": r.get::<_, String>(5)?,
+                    "source": r.get::<_, String>(6)?,
+                    "canvasAssignmentId": r.get::<_, Option<String>>(7)?,
+                }))
+            },
+        )
+        .optional()?)
+}
+
+// ---------------------------------------------------------------------------
+// Undo (SPEC §6): the inverse of each deadline write, from its audit row
+
+/// What an undo of one row did, for the notice and the hub pushes.
+#[derive(Debug)]
+pub(crate) struct Undone {
+    pub what: String,
+    pub class_id: Option<i64>,
+}
+
+/// `ui.upsert_deadline` / `chat.upsert_deadline`: a created row is removed,
+/// an edited row takes its `before` back. Refused when the row is gone.
+pub(crate) fn undo_upsert(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no deadline")?;
+    let class_id = payload["classId"].as_i64();
+    let title: Option<String> = conn
+        .query_row("SELECT title FROM deadlines WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
+    let Some(title) = title else {
+        bail!("deadline #{id} is no longer on the list");
+    };
+    if payload["created"].as_bool() == Some(true) {
+        conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+        return Ok(Undone { what: format!("Removed {title}"), class_id });
+    }
+    let before = &payload["before"];
+    let (Some(old_title), Some(kind), Some(due_at)) = (
+        before["title"].as_str(),
+        before["kind"].as_str(),
+        before["dueAt"].as_str(),
+    ) else {
+        bail!("the row carries no earlier state for deadline #{id}");
+    };
+    conn.execute(
+        "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
+        params![old_title, kind, due_at, before["notes"].as_str(), id],
+    )?;
+    Ok(Undone { what: format!("Restored {old_title}"), class_id })
+}
+
+/// `ui.delete_deadline` / `chat.delete_deadline`: the row comes back under
+/// its own id. Refused when that id has since been taken.
+pub(crate) fn undo_delete(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no deadline")?;
+    let class_id = payload["classId"].as_i64().context("the row names no class")?;
+    let title = payload["title"].as_str().context("the row carries no title")?;
+    let taken: i64 =
+        conn.query_row("SELECT COUNT(*) FROM deadlines WHERE id = ?1", [id], |r| r.get(0))?;
+    if taken > 0 {
+        bail!("deadline #{id} is on the list again already");
+    }
+    conn.execute(
+        "INSERT INTO deadlines
+         (id, class_id, title, kind, due_at, notes, status, source, canvas_assignment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            class_id,
+            title,
+            payload["kind"].as_str().unwrap_or("other"),
+            payload["dueAt"].as_str().context("the row carries no due date")?,
+            payload["notes"].as_str(),
+            payload["status"].as_str().unwrap_or("open"),
+            payload["source"].as_str().unwrap_or("manual"),
+            payload["canvasAssignmentId"].as_str(),
+        ],
+    )?;
+    Ok(Undone { what: format!("Restored {title}"), class_id: Some(class_id) })
+}
+
+/// `ui.set_deadline_status` / `chat.complete_deadline`: the status before —
+/// recorded on the row from M33 on, and the other one of the two before it.
+pub(crate) fn undo_status(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["id"].as_i64().context("the row names no deadline")?;
+    let before = match (payload["before"].as_str(), payload["status"].as_str()) {
+        (Some(before), _) => before,
+        (None, Some("open")) => "done",
+        (None, _) => "open",
+    };
+    let (title, class_id): (String, i64) = conn
+        .query_row(
+            "SELECT title, class_id FROM deadlines WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .with_context(|| format!("deadline #{id} is no longer on the list"))?;
+    conn.execute("UPDATE deadlines SET status = ?1 WHERE id = ?2", params![before, id])?;
+    let what = if before == "done" {
+        format!("Marked {title} done again")
+    } else {
+        format!("Reopened {title}")
+    };
+    Ok(Undone { what, class_id: Some(class_id) })
+}
+
+/// `syllabus.insert_deadline`: the deadline goes and its card returns to the
+/// queue. Refused when the deadline is already gone.
+pub(crate) fn undo_insert(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
+    let id = payload["deadlineId"].as_i64().context("the row names no deadline")?;
+    let title = payload["title"].as_str().unwrap_or("the deadline").to_string();
+    let removed = conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
+    if removed == 0 {
+        bail!("{title} is no longer on the list");
+    }
+    if let Some(proposal_id) = payload["proposalId"].as_i64() {
+        conn.execute(
+            "UPDATE deadline_proposals SET status = 'pending', resolved_at = NULL WHERE id = ?1",
+            [proposal_id],
+        )?;
+    }
+    Ok(Undone { what: format!("Removed {title}"), class_id: payload["classId"].as_i64() })
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +501,115 @@ pub fn pending_proposals(conn: &Connection, class_id: i64) -> Result<Vec<Deadlin
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// The queue as the workspace lists it: every pending card, and the series
+/// among them (SPEC §11) — read off the cards each time, never stored, so a
+/// rescan that adds a thirteenth date joins the card.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadlineQueue {
+    pub proposals: Vec<DeadlineProposal>,
+    pub series: Vec<DeadlineSeries>,
+}
+
+pub fn queue(conn: &Connection, class_id: i64) -> Result<DeadlineQueue> {
+    let proposals = pending_proposals(conn, class_id)?;
+    let series = series_of(&proposals);
+    Ok(DeadlineQueue { proposals, series })
+}
+
+/// A recurring proposal read as one card: pending cards of one class sharing
+/// a title stem, a kind, a source and a weekday across three or more dates —
+/// Fundamentals' twelve `Live coding session MM/DD` Tuesdays.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadlineSeries {
+    /// The title with its date token dropped: `Live coding session`.
+    pub stem: String,
+    pub kind: String,
+    pub source: String,
+    /// `Tuesday`, as chrono names it.
+    pub weekday: String,
+    /// The member cards, by date.
+    pub ids: Vec<i64>,
+    pub first_due: String,
+    pub last_due: String,
+}
+
+/// The series among a queue's cards. Pure over the rows, so the grouping is
+/// tested without a database.
+pub fn series_of(proposals: &[DeadlineProposal]) -> Vec<DeadlineSeries> {
+    let mut groups: Vec<((String, String, String, String), Vec<&DeadlineProposal>)> = Vec::new();
+    for proposal in proposals {
+        let Some(weekday) = weekday_of(&proposal.due_at) else {
+            continue;
+        };
+        let key = (
+            title_stem(&proposal.title),
+            proposal.kind.clone(),
+            proposal.source.clone(),
+            weekday,
+        );
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(proposal),
+            None => groups.push((key, vec![proposal])),
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|((stem, kind, source, weekday), mut members)| {
+            members.sort_by(|a, b| a.due_at.cmp(&b.due_at).then(a.id.cmp(&b.id)));
+            let dates: std::collections::BTreeSet<&str> =
+                members.iter().map(|m| &m.due_at[..10]).collect();
+            if dates.len() < 3 {
+                return None;
+            }
+            Some(DeadlineSeries {
+                stem,
+                kind,
+                source,
+                weekday,
+                ids: members.iter().map(|m| m.id).collect(),
+                first_due: members[0].due_at.clone(),
+                last_due: members[members.len() - 1].due_at.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A title with its trailing date-like tokens dropped — `09/08`, `9-8`,
+/// `2026-09-08`, `#3`, `(2)`, a bare number — and a dangling separator after
+/// them: `Live coding session 09/08` and `Homework #1` read as `Live coding
+/// session` and `Homework`. A title that is nothing but a date keeps itself.
+pub fn title_stem(title: &str) -> String {
+    let mut words: Vec<&str> = title.split_whitespace().collect();
+    let date_like = |word: &str| {
+        let core = word.trim_matches(|c: char| c == '(' || c == ')' || c == '#');
+        !core.is_empty()
+            && core.chars().any(|c| c.is_ascii_digit())
+            && core.chars().all(|c| c.is_ascii_digit() || matches!(c, '/' | '-' | '.' | ':'))
+    };
+    loop {
+        let before = words.len();
+        while words.len() > 1 && date_like(words[words.len() - 1]) {
+            words.pop();
+        }
+        while words.len() > 1 && matches!(words[words.len() - 1], "-" | "–" | "—" | ":" | "·") {
+            words.pop();
+        }
+        if words.len() == before {
+            break;
+        }
+    }
+    words.join(" ")
+}
+
+/// The weekday a due date falls on, by its calendar day.
+fn weekday_of(due_at: &str) -> Option<String> {
+    chrono::NaiveDate::parse_from_str(due_at.get(..10)?, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.format("%A").to_string())
 }
 
 /// Enqueues a syllabus_scan over a chosen file (rel_path) or the whole class
@@ -1118,8 +1384,11 @@ pub(crate) enum Recorded {
 /// title) and ?3 (the due date). One definition, so the rule the comment on
 /// `record_proposal` promises cannot drift between the five queries that ask
 /// it.
+/// Titles compare with `#` dropped, so Canvas's `Homework #1` is the
+/// syllabus's `Homework 1` on the same day rather than a row beside it.
 const SAME_TITLE_AND_DAY: &str =
-    "LOWER(title) = LOWER(?2) AND substr(due_at, 1, 10) = substr(?3, 1, 10)";
+    "LOWER(REPLACE(title, '#', '')) = LOWER(REPLACE(?2, '#', ''))
+     AND substr(due_at, 1, 10) = substr(?3, 1, 10)";
 
 /// Keeps a (title, day) match away from rows that are some *other* Canvas
 /// assignment, bound to ?4 — the reader's Canvas id, or NULL for a reader
@@ -1391,6 +1660,13 @@ pub(crate) fn settle_canvas_deadline(
         }
     };
     let (id, title, due_at, status, _) = row;
+    // A card waiting for an assignment the list now tracks leaves the queue
+    // with it: the deadline is on the list, so the card has nothing to ask.
+    tx.execute(
+        "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
+         WHERE class_id = ?2 AND canvas_assignment_id = ?3 AND status = 'pending'",
+        params![now(), class_id, assignment.id],
+    )?;
 
     let mut settled = Settled::default();
     if let Some(canvas_due) = canvas_due.filter(|d| *d != due_at) {
@@ -1427,12 +1703,18 @@ pub(crate) fn settle_canvas_deadline(
 /// Approve inserts the deadline (source='syllabus') and audits it; dismiss
 /// parks the row — either way the card leaves the queue.
 pub fn resolve_proposal(app: &AppHandle, proposal_id: i64, approve: bool) -> Result<String> {
-    let summary = with_conn(app, |conn| resolve_in_conn(conn, proposal_id, approve))?;
+    let resolved = with_conn(app, |conn| resolve_in_conn(conn, proposal_id, approve))?;
     emit_hub_change(app, "deadlineProposals");
     if approve {
         emit_hub_change(app, "deadlines");
+        notify(
+            app,
+            format!("Added {}", resolved.title),
+            resolved.audit_id.into_iter().collect(),
+            Some(resolved.class_id),
+        );
     }
-    Ok(summary)
+    Ok(resolved.summary)
 }
 
 /// What a batch approval did: which cards can leave the queue, and one line
@@ -1444,33 +1726,85 @@ pub struct BatchOutcome {
     pub skipped: Vec<String>,
 }
 
-/// The ADD ALL button: approves each proposal independently — one rejection
-/// (e.g. an identical deadline added by hand since the scan) costs that card,
-/// never the rest — and pushes hub-changed once at the end instead of per
-/// card. Each approval keeps its own transaction inside resolve_in_conn.
+/// The Add all button and a series card's Add the series: approves each
+/// proposal independently — one rejection (e.g. an identical deadline added
+/// by hand since the scan) costs that card, never the rest — and pushes
+/// hub-changed once at the end instead of per card. Each approval keeps its
+/// own transaction inside resolve_in_conn; the batch is one notice with one
+/// `Undo` over every row it wrote.
 pub fn approve_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<BatchOutcome> {
     if proposal_ids.is_empty() {
         bail!("no proposals to approve");
     }
-    let outcome = with_conn(app, |conn| {
+    let batch = format!("deadlines-{}", now());
+    let (outcome, audit_ids, titles, class_id) = with_conn(app, |conn| {
         let mut approved = Vec::new();
         let mut skipped = Vec::new();
+        let mut audit_ids = Vec::new();
+        let mut titles = Vec::new();
+        let mut class_id = None;
         for &id in proposal_ids {
-            match resolve_in_conn(conn, id, true) {
-                Ok(_) => approved.push(id),
+            match resolve_with_batch(conn, id, Some(&batch)) {
+                Ok(resolved) => {
+                    approved.push(id);
+                    audit_ids.extend(resolved.audit_id);
+                    titles.push(resolved.title);
+                    class_id = Some(resolved.class_id);
+                }
                 Err(e) => skipped.push(format!("{e:#}")),
             }
         }
-        Ok(BatchOutcome { approved, skipped })
+        Ok((BatchOutcome { approved, skipped }, audit_ids, titles, class_id))
     })?;
     emit_hub_change(app, "deadlineProposals");
     if !outcome.approved.is_empty() {
         emit_hub_change(app, "deadlines");
+        let text = match titles.as_slice() {
+            [one] => format!("Added {one}"),
+            many => {
+                let stems: std::collections::BTreeSet<String> =
+                    many.iter().map(|t| title_stem(t)).collect();
+                match stems.len() {
+                    1 => format!("Added {} dates of {}", many.len(), stems.iter().next().unwrap()),
+                    _ => format!("Added {} deadlines", many.len()),
+                }
+            }
+        };
+        notify(app, text, audit_ids, class_id);
     }
     Ok(outcome)
 }
 
-fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result<String> {
+/// A series card's Skip: every member card dismissed, one hub push.
+pub fn dismiss_proposals(app: &AppHandle, proposal_ids: &[i64]) -> Result<()> {
+    with_conn(app, |conn| {
+        for &id in proposal_ids {
+            resolve_in_conn(conn, id, false)?;
+        }
+        Ok(())
+    })?;
+    emit_hub_change(app, "deadlineProposals");
+    Ok(())
+}
+
+/// What resolving one card did.
+#[derive(Debug)]
+struct Resolved {
+    summary: String,
+    title: String,
+    class_id: i64,
+    /// The `<source>.insert_deadline` row an approval wrote; none on a skip.
+    audit_id: Option<i64>,
+}
+
+fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result<Resolved> {
+    resolve_with_batch(conn, proposal_id, approve.then_some(""))
+}
+
+/// `batch` is `Some` for an approval — empty for a card approved on its own,
+/// the batch's id for one of several — and `None` for a skip.
+fn resolve_with_batch(conn: &Connection, proposal_id: i64, batch: Option<&str>) -> Result<Resolved> {
+    let approve = batch.is_some();
     let row = conn
         .query_row(
             "SELECT class_id, title, kind, due_at, notes, status, source, canvas_assignment_id
@@ -1502,7 +1836,12 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
              WHERE id = ?2",
             params![now(), proposal_id],
         )?;
-        return Ok(format!("skipped — {title}"));
+        return Ok(Resolved {
+            summary: format!("skipped — {title}"),
+            title,
+            class_id,
+            audit_id: None,
+        });
     }
 
     // Insert + audit + status flip land as one unit — interrupted midway
@@ -1539,12 +1878,13 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
          VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7)",
         params![class_id, title, kind, due_at, notes, source, canvas_id],
     )?;
-    audit(
+    let audit_id = audit(
         &tx,
         &format!("{source}.insert_deadline"),
         json!({ "proposalId": proposal_id, "deadlineId": tx.last_insert_rowid(),
                 "classId": class_id, "title": title, "kind": kind,
-                "dueAt": due_at, "notes": notes, "canvasAssignmentId": canvas_id }),
+                "dueAt": due_at, "notes": notes, "canvasAssignmentId": canvas_id,
+                "batch": batch.filter(|b| !b.is_empty()) }),
     )?;
     tx.execute(
         "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1
@@ -1552,7 +1892,92 @@ fn resolve_in_conn(conn: &Connection, proposal_id: i64, approve: bool) -> Result
         params![now(), proposal_id],
     )?;
     tx.commit()?;
-    Ok(format!("added — {title} due {due_at}"))
+    Ok(Resolved {
+        summary: format!("added — {title} due {due_at}"),
+        title,
+        class_id,
+        audit_id: Some(audit_id),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Canvas assignments are deadlines (SPEC §7.2): the direct write
+
+/// What the sync's direct write did for one assignment.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirectWrite {
+    /// A deadline now on the list, done at once when Canvas holds a submission.
+    Recorded { completed: bool },
+    /// A Canvas card for it was declined earlier; the decision stands.
+    DeclinedBefore,
+}
+
+/// A dated assignment no deadline tracks becomes its deadline directly —
+/// source `canvas`, keyed on the assignment id — with `canvas.insert_deadline`
+/// as its audit row, and done at once where Canvas holds a submission. A
+/// Canvas card waiting for it is resolved as approved; one declined earlier
+/// keeps the assignment off the list, since that was a decision. The claims
+/// `settle_canvas_deadline` makes — by id, then by title and day — run before
+/// this, so the row arrives here only when nothing tracks the assignment.
+pub(crate) fn insert_canvas_deadline(
+    conn: &Connection,
+    class_id: i64,
+    assignment: &CanvasAssignment,
+    kind: &str,
+    notes: &str,
+) -> Result<DirectWrite> {
+    let title = truncate(assignment.title.trim(), MAX_TITLE_CHARS);
+    let due_at = assignment.due_at.context("an undated assignment is not a deadline")?;
+    if !valid_due_at(due_at) {
+        bail!("due_at must be ISO — YYYY-MM-DD or YYYY-MM-DDTHH:MM, got '{due_at}'");
+    }
+    let card: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, status FROM deadline_proposals
+             WHERE class_id = ?1 AND canvas_assignment_id = ?2",
+            params![class_id, assignment.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if matches!(card.as_ref(), Some((_, status)) if status == "dismissed") {
+        return Ok(DirectWrite::DeclinedBefore);
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO deadlines
+         (class_id, title, kind, due_at, notes, status, source, canvas_assignment_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'canvas', ?6)",
+        params![class_id, title, kind, due_at, notes, assignment.id],
+    )?;
+    let id = tx.last_insert_rowid();
+    audit(
+        &tx,
+        "canvas.insert_deadline",
+        json!({ "deadlineId": id, "classId": class_id, "title": title, "kind": kind,
+                "dueAt": due_at, "notes": notes, "canvasAssignmentId": assignment.id,
+                "proposalId": card.as_ref().map(|(id, _)| *id) }),
+    )?;
+    if let Some((proposal_id, _)) = card {
+        tx.execute(
+            "UPDATE deadline_proposals SET status = 'approved', resolved_at = ?1 WHERE id = ?2",
+            params![now(), proposal_id],
+        )?;
+    }
+    let completed = match assignment.submitted_at {
+        Some(submitted_at) => {
+            tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
+            audit(
+                &tx,
+                "canvas.complete_deadline",
+                json!({ "id": id, "classId": class_id, "canvasAssignmentId": assignment.id,
+                        "title": title, "submittedAt": submitted_at }),
+            )?;
+            true
+        }
+        None => false,
+    };
+    tx.commit()?;
+    Ok(DirectWrite::Recorded { completed })
 }
 
 #[cfg(test)]
@@ -2262,5 +2687,145 @@ mod tests {
         let none: RawUnit = serde_json::from_value(serde_json::json!({"name": "Week 4"})).expect("entry");
         assert_eq!(stated_objectives(none.objectives.as_deref()), None);
         assert_eq!(stated_objectives(Some(&[])), None);
+    }
+}
+
+#[cfg(test)]
+mod instant_and_series_tests {
+    use super::*;
+
+    /// A date-only value is the end of its day; a timed one is its own time.
+    #[test]
+    fn a_due_date_names_one_instant() {
+        assert_eq!(due_instant("2026-09-08"), "2026-09-08T23:59:59");
+        assert_eq!(due_instant("2026-09-08T17:00"), "2026-09-08T17:00");
+        assert_eq!(due_instant("2026-09-08T17:00:30"), "2026-09-08T17:00:30");
+        // The SQL expression and the function agree, so a listing and the
+        // card sort as the function reads.
+        let conn = crate::db::memory_db();
+        for (id, due) in [(1, "2026-09-08"), (2, "2026-09-08T11:59"), (3, "2026-09-07T23:59")] {
+            conn.execute(
+                "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+                 VALUES (?1, 1, 'x', 'other', ?2, 'open', 'manual')",
+                params![id, due],
+            )
+            .unwrap();
+        }
+        let order: Vec<i64> = conn
+            .prepare(&format!("SELECT id FROM deadlines ORDER BY {DUE_INSTANT_SQL}"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(order, [3, 2, 1], "the date-only row is last on its day");
+        // Due today at noon and at 23:59:30 the instant is ahead; the next
+        // morning it is behind — the strip's and the tab's `overdue`.
+        let due = due_instant("2026-09-08");
+        assert!(due.as_str() > "2026-09-08T12:00:00");
+        assert!(due.as_str() > "2026-09-08T23:59:30");
+        assert!(due.as_str() < "2026-09-09T07:00:00");
+    }
+
+    fn card(id: i64, title: &str, due_at: &str) -> DeadlineProposal {
+        DeadlineProposal {
+            id,
+            class_id: 1,
+            title: title.to_string(),
+            kind: "assignment".to_string(),
+            due_at: due_at.to_string(),
+            notes: None,
+            created_at: 0,
+            source: "syllabus".to_string(),
+        }
+    }
+
+    /// Three dates on one weekday under one stem group; two do not; a date
+    /// on another weekday splits off.
+    #[test]
+    fn a_series_is_three_dates_of_one_stem_on_one_weekday() {
+        let tuesdays = vec![
+            card(1, "Live coding session 09/08", "2026-09-08"),
+            card(2, "Live coding session 09/15", "2026-09-15"),
+            card(3, "Live coding session 09/22", "2026-09-22"),
+            card(4, "Homework 1", "2026-09-13"),
+            card(5, "Homework 2", "2026-09-20"),
+        ];
+        let series = series_of(&tuesdays);
+        assert_eq!(series.len(), 1, "{series:?}");
+        assert_eq!(series[0].stem, "Live coding session");
+        assert_eq!(series[0].weekday, "Tuesday");
+        assert_eq!(series[0].ids, [1, 2, 3]);
+        assert_eq!((series[0].first_due.as_str(), series[0].last_due.as_str()), ("2026-09-08", "2026-09-22"));
+
+        let split = vec![
+            card(1, "Live coding session 09/08", "2026-09-08"),
+            card(2, "Live coding session 09/15", "2026-09-15"),
+            card(3, "Live coding session 09/23", "2026-09-23"),
+        ];
+        assert!(series_of(&split).is_empty(), "a Wednesday splits the third off");
+        // The series joins a thirteenth date when the queue is listed again.
+        let mut more = tuesdays;
+        more.push(card(6, "Live coding session 12/01", "2026-12-01"));
+        assert_eq!(series_of(&more)[0].ids.len(), 4);
+    }
+
+    #[test]
+    fn a_title_s_stem_drops_its_date_token() {
+        assert_eq!(title_stem("Live coding session 09/08"), "Live coding session");
+        assert_eq!(title_stem("Homework #1"), "Homework");
+        assert_eq!(title_stem("Quiz 3 - 2026-10-08"), "Quiz");
+        assert_eq!(title_stem("Peer Feedback Session"), "Peer Feedback Session");
+        assert_eq!(title_stem("09/08"), "09/08", "a title that is a date keeps itself");
+    }
+}
+
+#[cfg(test)]
+mod tracked_card_tests {
+    use super::*;
+
+    /// A Canvas card waiting for an assignment the list now tracks — by id,
+    /// or by the title-and-day claim with `#` dropped — leaves the queue as
+    /// approved when the sync settles the deadline.
+    #[test]
+    fn a_settled_assignment_resolves_its_waiting_card() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+             VALUES (31, 1, 'Homework 1', 'assignment', '2026-09-07T23:59', 'open', 'syllabus')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO deadline_proposals
+             (id, class_id, title, kind, due_at, status, source, canvas_assignment_id, created_at)
+             VALUES (41, 1, 'Homework #1', 'assignment', '2026-09-07T23:59', 'pending', 'canvas',
+                     '7251558', 1)",
+            [],
+        )
+        .unwrap();
+        let settled = settle_canvas_deadline(
+            &conn,
+            1,
+            &CanvasAssignment {
+                id: "7251558",
+                title: "Homework #1",
+                due_at: Some("2026-09-07T23:59"),
+                submitted_at: Some("2026-09-07T20:00"),
+            },
+        )
+        .expect("settle")
+        .expect("the syllabus row is claimed");
+        assert!(settled.completed);
+        let (linked, status): (Option<String>, String) = conn
+            .query_row("SELECT canvas_assignment_id, status FROM deadlines WHERE id = 31", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((linked.as_deref(), status.as_str()), (Some("7251558"), "done"));
+        let card: String = conn
+            .query_row("SELECT status FROM deadline_proposals WHERE id = 41", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(card, "approved", "the card has nothing left to ask");
     }
 }

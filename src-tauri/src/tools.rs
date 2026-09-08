@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::db::{
-    CORPUS_DIR, EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR, audit, emit_hub_change, now, truncate,
-    with_conn,
+    CORPUS_DIR, EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR, audit, emit_hub_change, notify, now,
+    truncate, with_conn,
 };
 use crate::deadlines::{valid_due_at, DEADLINE_KINDS, MAX_NOTES_CHARS, MAX_TITLE_CHARS};
 use crate::grades::{grades_line, trim_num, weighted_grade, weights_line};
@@ -511,11 +511,12 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
         class_block(conn, &class, detailed, today_iso, &mut out)?;
     }
 
-    let mut deadline_stmt = conn.prepare(
+    let mut deadline_stmt = conn.prepare(&format!(
         "SELECT d.id, c.display_name, d.title, d.kind, d.due_at, d.notes
          FROM deadlines d JOIN classes c ON c.id = d.class_id
-         WHERE d.status = 'open' ORDER BY d.due_at LIMIT 25",
-    )?;
+         WHERE d.status = 'open' ORDER BY {} LIMIT 25",
+        crate::deadlines::DUE_INSTANT_SQL
+    ))?;
     let deadlines = deadline_stmt
         .query_map([], |row| {
             let id: i64 = row.get(0)?;
@@ -1043,7 +1044,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
     let root = crate::db::aibhs_root(conn)?;
 
     let mut stmt = conn.prepare(
-        "SELECT rel_path, kind, size, extracted_sha256 = sha256 FROM files
+        "SELECT rel_path, kind, size, extracted_sha256 = sha256, duplicate_of FROM files
          WHERE class_id = ?1 ORDER BY rel_path",
     )?;
     let rows = stmt
@@ -1053,6 +1054,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<bool>>(3)?.unwrap_or(false),
+                row.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1061,7 +1063,7 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
     let mut shown = 0usize;
     let mut skipped = 0usize;
     let mut matched = 0usize;
-    for (rel_path, kind, size, extracted) in &rows {
+    for (rel_path, kind, size, extracted, duplicate_of) in &rows {
         if let Some(sub) = &subpath {
             let inside = rel_path == sub || rel_path.starts_with(&format!("{sub}/"));
             if !inside {
@@ -1075,10 +1077,14 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
         }
         shown += 1;
         lines.push(format!(
-            "{}/{rel_path} · {kind} · {} · {}",
+            "{}/{rel_path} · {kind} · {} · {}{}",
             class.folder_name,
             format_size(*size),
-            if *extracted { "extract ✓" } else { "no extract yet" }
+            if *extracted { "extract ✓" } else { "no extract yet" },
+            duplicate_of
+                .as_ref()
+                .map(|canonical| format!(" · duplicate of {canonical}, read once through it"))
+                .unwrap_or_default()
         ));
     }
 
@@ -1157,13 +1163,26 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
 /// runner for the whole search.
 fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let query = str_arg(input, "query")?;
-    let (root, classes) = with_conn(app, |conn| {
+    let (root, classes, duplicate_extracts) = with_conn(app, |conn| {
         let root = crate::db::aibhs_root(conn)?;
         let classes = match opt_str_arg(input, "class") {
             Some(name) => vec![resolve_class(conn, &name)?],
             None => class_rows(conn)?,
         };
-        Ok((root, classes))
+        // A duplicate's extract answers for a reading its canonical copy
+        // already answers for (SPEC §7 step 1): its hits are dropped.
+        let mut duplicate_extracts = std::collections::HashSet::new();
+        for class in &classes {
+            let mut stmt = conn.prepare(
+                "SELECT extract_rel_path FROM files
+                 WHERE class_id = ?1 AND duplicate_of IS NOT NULL
+                   AND extract_rel_path IS NOT NULL",
+            )?;
+            for extract in stmt.query_map([class.id], |row| row.get::<_, String>(0))? {
+                duplicate_extracts.insert(format!("{}/{}", class.folder_name, extract?));
+            }
+        }
+        Ok((root, classes, duplicate_extracts))
     })?;
 
     let mut dirs = Vec::new();
@@ -1213,11 +1232,14 @@ fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
         let Some((line_no, text)) = rest.split_once(':') else {
             continue;
         };
-        hits += 1;
         let rel = Path::new(path)
             .strip_prefix(&root)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string());
+        if duplicate_extracts.contains(&rel) {
+            continue;
+        }
+        hits += 1;
         if !files.contains(&rel) {
             files.push(rel.clone());
         }
@@ -1410,18 +1432,26 @@ fn safe_join(root: &Path, rel_path: &str) -> Result<PathBuf> {
 // chat tool, the UI form, and the syllabus scan.
 
 fn upsert_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let outcome = with_conn(app, |conn| {
+    let amending = input.get("id").and_then(Value::as_i64);
+    let (outcome, audit_id, title, class_id) = with_conn(app, |conn| {
         let class = resolve_class(conn, &str_arg(input, "class")?)?;
-        match input.get("id").and_then(Value::as_i64) {
-            Some(id) => amend_deadline(conn, &class, id, input),
-            None => create_deadline(conn, &class, input),
-        }
+        let written = match amending {
+            Some(id) => amend_deadline(conn, &class, id, input)?,
+            None => create_deadline(conn, &class, input)?,
+        };
+        Ok((written.0, written.1, written.2, class.id))
     })?;
     emit_hub_change(app, "deadlines");
+    let verb = if amending.is_none() { "Added" } else { "Changed" };
+    notify(app, format!("{verb} {title}"), vec![audit_id], Some(class_id));
     Ok(outcome)
 }
 
-fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result<Outcome> {
+/// A chat deadline write: the tool's answer, the audit row it wrote and the
+/// title, for the notice.
+type Written = (Outcome, i64, String);
+
+fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result<Written> {
     let title = truncate(&str_arg(input, "title")?, MAX_TITLE_CHARS);
     let kind = opt_str_arg(input, "kind").unwrap_or_else(|| "other".to_string());
     if !DEADLINE_KINDS.contains(&kind.as_str()) {
@@ -1438,20 +1468,21 @@ fn create_deadline(conn: &Connection, class: &ClassRow, input: &Value) -> Result
         params![class.id, title, kind, due_at, notes],
     )?;
     let id = conn.last_insert_rowid();
-    audit(
+    let audit_id = audit(
         conn,
         "chat.upsert_deadline",
         json!({ "id": id, "classId": class.id, "title": title, "kind": kind,
                 "dueAt": due_at, "notes": notes, "created": true }),
     )?;
-    Ok(Outcome::ok(format!(
+    let outcome = Outcome::ok(format!(
         "Deadline recorded — {title} ({kind}) due {due_at} · {} [#{id}]\n\
          Amend with upsert_deadline(id: {id}); close with complete_deadline when it's done.",
         class.display_name
-    )))
+    ));
+    Ok((outcome, audit_id, title))
 }
 
-fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -> Result<Outcome> {
+fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -> Result<Written> {
     let before = conn
         .query_row(
             "SELECT class_id, title, kind, due_at, notes, status FROM deadlines WHERE id = ?1",
@@ -1493,81 +1524,81 @@ fn amend_deadline(conn: &Connection, class: &ClassRow, id: i64, input: &Value) -
         "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
         params![title, kind, due_at, notes, id],
     )?;
-    audit(
+    let audit_id = audit(
         conn,
         "chat.upsert_deadline",
         json!({ "id": id, "classId": class.id,
                 "before": { "title": old_title, "kind": old_kind, "dueAt": old_due, "notes": old_notes },
                 "after": { "title": title, "kind": kind, "dueAt": due_at, "notes": notes } }),
     )?;
-    Ok(Outcome::ok(format!(
+    let outcome = Outcome::ok(format!(
         "Deadline amended — {title} ({kind}) due {due_at} · {} [#{id}]{}",
         class.display_name,
         if status == "done" { "\n(It is marked done.)" } else { "" }
-    )))
+    ));
+    Ok((outcome, audit_id, title))
 }
 
 fn complete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let outcome = with_conn(app, |conn| {
+    let (outcome, written) = with_conn(app, |conn| {
         let id = int_arg(input, "id")?;
         let (title, class_name, status) = deadline_brief(conn, id)?;
         if status == "done" {
-            return Ok(Outcome::ok(format!(
-                "Deadline was already done — {title} · {class_name} [#{id}]"
-            )));
+            return Ok((
+                Outcome::ok(format!(
+                    "Deadline was already done — {title} · {class_name} [#{id}]"
+                )),
+                None,
+            ));
         }
+        let class_id: i64 =
+            conn.query_row("SELECT class_id FROM deadlines WHERE id = ?1", [id], |r| r.get(0))?;
         let tx = conn.unchecked_transaction()?;
         tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
-        audit(&tx, "chat.complete_deadline", json!({ "id": id }))?;
+        let audit_id = audit(
+            &tx,
+            "chat.complete_deadline",
+            json!({ "id": id, "classId": class_id, "status": "done", "before": "open" }),
+        )?;
         tx.commit()?;
-        Ok(Outcome::ok(format!(
-            "Deadline done — {title} · {class_name} [#{id}]"
-        )))
+        Ok((
+            Outcome::ok(format!("Deadline done — {title} · {class_name} [#{id}]")),
+            Some((audit_id, title, class_id)),
+        ))
     })?;
     emit_hub_change(app, "deadlines");
+    if let Some((audit_id, title, class_id)) = written {
+        notify(app, format!("Marked {title} done"), vec![audit_id], Some(class_id));
+    }
     Ok(outcome)
 }
 
 fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let outcome = with_conn(app, |conn| {
+    let (outcome, audit_id, title, class_id) = with_conn(app, |conn| {
         let id = int_arg(input, "id")?;
-        let row = conn
-            .query_row(
-                "SELECT class_id, title, kind, due_at, notes, status, source
-                 FROM deadlines WHERE id = ?1",
-                [id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, String>(6)?,
-                    ))
-                },
-            )
-            .optional()?
+        let row = crate::deadlines::deadline_row(conn, id)?
             .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))?;
-        let (class_id, title, kind, due_at, notes, status, source) = row;
+        let title = row["title"].as_str().unwrap_or_default().to_string();
+        let due_at = row["dueAt"].as_str().unwrap_or_default().to_string();
+        let class_id = row["classId"].as_i64().unwrap_or_default();
         // One transaction, because the promise below — that the row survives
         // in the audit log — is only true if both statements land together.
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
         // The full row rides the audit entry, so a deletion is recoverable.
-        audit(
-            &tx,
-            "chat.delete_deadline",
-            json!({ "id": id, "classId": class_id, "title": title, "kind": kind,
-                    "dueAt": due_at, "notes": notes, "status": status, "source": source }),
-        )?;
+        let audit_id = audit(&tx, "chat.delete_deadline", row)?;
         tx.commit()?;
-        Ok(Outcome::ok(format!(
-            "Deadline deleted — {title} (was due {due_at}) [#{id}]\nThe full row is kept in the audit log."
-        )))
+        Ok((
+            Outcome::ok(format!(
+                "Deadline deleted — {title} (was due {due_at}) [#{id}]\nThe full row is kept in the audit log."
+            )),
+            audit_id,
+            title,
+            class_id,
+        ))
     })?;
     emit_hub_change(app, "deadlines");
+    notify(app, format!("Deleted {title}"), vec![audit_id], Some(class_id));
     Ok(outcome)
 }
 
@@ -1586,62 +1617,68 @@ fn deadline_brief(conn: &Connection, id: i64) -> Result<(String, String, String)
 // Write tools — grades (SPEC §11 math: weighted over graded categories only)
 
 fn upsert_grade_category(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let outcome = with_conn(app, |conn| {
+    let (outcome, audit_id, name, class_id, created) = with_conn(app, |conn| {
         let class = resolve_class(conn, &str_arg(input, "class")?)?;
         let name = str_arg(input, "name")?;
         let weight = float_arg(input, "weight")?;
         if !(0.0..=100.0).contains(&weight) {
             bail!("weight is a percentage between 0 and 100");
         }
-        let existing: Option<(i64, f64)> = conn
+        let existing: Option<(i64, String, f64)> = conn
             .query_row(
-                "SELECT id, weight FROM grade_categories
+                "SELECT id, name, weight FROM grade_categories
                  WHERE class_id = ?1 AND LOWER(name) = LOWER(?2)",
                 params![class.id, name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let verb = match existing {
-            Some((id, old_weight)) => {
+        // The same row shape the Grades section's save writes, so one undo
+        // reads both: the row on a create, `before`/`after` on an edit.
+        let (verb, audit_id, created) = match existing {
+            Some((id, old_name, old_weight)) => {
                 conn.execute(
                     "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
                     params![name, weight, id],
                 )?;
-                audit(
+                let audit_id = audit(
                     conn,
                     "chat.upsert_grade_category",
-                    json!({ "id": id, "classId": class.id, "name": name,
-                            "weight": weight, "previousWeight": old_weight }),
+                    json!({ "id": id, "classId": class.id,
+                            "before": { "name": old_name, "weight": old_weight },
+                            "after": { "name": name, "weight": weight } }),
                 )?;
-                "updated"
+                ("updated", audit_id, false)
             }
             None => {
                 conn.execute(
                     "INSERT INTO grade_categories (class_id, name, weight) VALUES (?1, ?2, ?3)",
                     params![class.id, name, weight],
                 )?;
-                audit(
+                let audit_id = audit(
                     conn,
                     "chat.upsert_grade_category",
                     json!({ "id": conn.last_insert_rowid(), "classId": class.id,
-                            "name": name, "weight": weight }),
+                            "name": name, "weight": weight, "created": true }),
                 )?;
-                "created"
+                ("created", audit_id, true)
             }
         };
-        Ok(Outcome::ok(format!(
+        let outcome = Outcome::ok(format!(
             "Grade category {verb} — {name} at {}% · {}\n{}",
             trim_num(weight),
             class.display_name,
             weights_line(conn, class.id)?
-        )))
+        ));
+        Ok((outcome, audit_id, name, class.id, created))
     })?;
     emit_hub_change(app, "grades");
+    let verb = if created { "Added" } else { "Changed" };
+    notify(app, format!("{verb} {name}"), vec![audit_id], Some(class_id));
     Ok(outcome)
 }
 
 fn add_grade_item(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let outcome = with_conn(app, |conn| {
+    let (outcome, audit_id, name, class_id) = with_conn(app, |conn| {
         let class = resolve_class(conn, &str_arg(input, "class")?)?;
         let category = str_arg(input, "category")?;
         let found: Option<(i64, String)> = conn
@@ -1682,23 +1719,26 @@ fn add_grade_item(app: &AppHandle, input: &Value) -> Result<Outcome> {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![category_id, name, score, max_score, graded_at],
         )?;
-        audit(
+        let audit_id = audit(
             conn,
             "chat.add_grade_item",
-            json!({ "id": conn.last_insert_rowid(), "categoryId": category_id, "name": name,
-                    "score": score, "maxScore": max_score, "gradedAt": graded_at }),
+            json!({ "id": conn.last_insert_rowid(), "categoryId": category_id,
+                    "classId": class.id, "name": name, "score": score,
+                    "maxScore": max_score, "gradedAt": graded_at, "created": true }),
         )?;
         let grade = weighted_grade(conn, class.id)?
             .map(|pct| format!("\nCurrent weighted grade over graded items: {pct:.1}%."))
             .unwrap_or_default();
-        Ok(Outcome::ok(format!(
+        let outcome = Outcome::ok(format!(
             "Grade recorded — {name}: {}/{} in {category_name} · {}{grade}",
             trim_num(score),
             trim_num(max_score),
             class.display_name
-        )))
+        ));
+        Ok((outcome, audit_id, name, class.id))
     })?;
     emit_hub_change(app, "grades");
+    notify(app, format!("Recorded {name}"), vec![audit_id], Some(class_id));
     Ok(outcome)
 }
 
@@ -1715,7 +1755,7 @@ fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
         let written =
             crate::notes::write_note(conn, class.id, &title, &content, "chat.write_note")?;
         let lines = content.lines().count();
-        Ok(Outcome::ok(format!(
+        let outcome = Outcome::ok(format!(
             "Note {} — {}/{} ({lines} line{})\n{}",
             if written.created { "written" } else { "updated" },
             class.folder_name,
@@ -1726,9 +1766,18 @@ fn write_note(app: &AppHandle, input: &Value) -> Result<Outcome> {
             } else {
                 "The previous version is kept in the audit log."
             }
-        )))
+        ));
+        Ok((outcome, written, class.id))
     })?;
     emit_hub_change(app, "notes");
+    let (outcome, written, class_id) = outcome;
+    let verb = if written.created { "Wrote" } else { "Updated" };
+    notify(
+        app,
+        format!("{verb} {}", crate::notes::note_title(&written.rel_path)),
+        vec![written.audit_id],
+        Some(class_id),
+    );
     Ok(outcome)
 }
 

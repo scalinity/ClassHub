@@ -31,7 +31,7 @@ import {
   VIEWABLE_KINDS,
   type TreeNode,
 } from "@/lib/materials";
-import { proposeWeekFiling } from "@/lib/sorter";
+import { fileUnderWeek } from "@/lib/sorter";
 import {
   buttonChip,
   buttonIcon,
@@ -89,22 +89,24 @@ function filesUnder(node: TreeNode): string[] {
 }
 
 /**
- * The by-name action in a row's hover cluster: the click, or the queue's own
- * word while the card waits. Whether a card is waiting is read from the same
- * query the queue renders, so a dismissal or an approval changes it there.
+ * The by-name action on a row: the click is the move (SPEC §10), with a
+ * notice whose Undo puts the file back. While another route's card holds the
+ * file — chat's — the queue's own word stands instead, read from the same
+ * query the queue renders.
  */
 function FilingAction({
   filing,
   proposed,
-  proposing,
+  filing_,
   title,
-  onPropose,
+  onFile,
 }: {
   filing: WeekSlot;
   proposed: boolean;
-  proposing: boolean;
+  /** The move is in flight. */
+  filing_: boolean;
   title: string;
-  onPropose: () => void;
+  onFile: () => void;
 }) {
   if (proposed) {
     return (
@@ -117,15 +119,15 @@ function FilingAction({
     <button
       type="button"
       title={title}
-      onClick={onPropose}
-      disabled={proposing}
+      onClick={onFile}
+      disabled={filing_}
       className={buttonText}
     >
       {/* The inbox card's second approval carries this label word for word
           (InboxQueue.tsx, ProposalCard): the card offers the row's own action,
           and the two must read the same. */}
-      {proposing
-        ? "Proposing…"
+      {filing_
+        ? "Filing…"
         : `File under Week ${String(filing.week).padStart(2, "0")}`}
     </button>
   );
@@ -245,24 +247,23 @@ function DirNode({
     controls.activePracticeScopes.has(node.relPath);
 
   // A folder named for a week the course declares files what it holds by one
-  // click (SPEC §10): one card per file, under the folder's own name in the
-  // week folder. Offered while the folder sits outside that folder and holds
-  // a file; read as proposed while every file under it has a card — the file
-  // row's rule, a card for what is here whatever its destination, since the
-  // inbox is where that card is resolved and the backend refuses a click over
-  // another route's card by name. Derived only where the action is offered.
+  // click (SPEC §10): every file under it, under the folder's own name in the
+  // week folder, as one batch with one Undo. Offered while the folder sits
+  // outside that folder and holds a file; read as proposed while every file
+  // under it has a card from another route, which the backend refuses a click
+  // over by name. Derived only where the action is offered.
   const filing = fileCount > 0 ? filingSlot(node, weekSlots) : undefined;
   const proposed =
     filing !== undefined &&
     filesUnder(node).every((p) => pendingSources.has(p));
-  const [proposing, setProposing] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
-  const propose = () => {
+  const file = () => {
     setFilingError(null);
-    setProposing(true);
-    proposeWeekFiling(classId, node.relPath)
+    setMoving(true);
+    fileUnderWeek(classId, node.relPath)
       .catch((e) => setFilingError(String(e)))
-      .finally(() => setProposing(false));
+      .finally(() => setMoving(false));
   };
 
   return (
@@ -294,13 +295,13 @@ function DirNode({
           </span>
         </button>
         {filing && (
-          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+          <span className="flex shrink-0 items-center gap-0.5">
             <FilingAction
               filing={filing}
               proposed={proposed}
-              proposing={proposing}
-              title={`Propose moving its files into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them`}
-              onPropose={propose}
+              filing_={moving}
+              title={`Move its files into ${WEEKS_DIR}/${filing.folder}/${node.name}, where ${filing.unitName} reads them — Undo puts them back`}
+              onFile={file}
             />
           </span>
         )}
@@ -314,7 +315,7 @@ function DirNode({
         )}
       </div>
       {filingError && (
-        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not proposed: {filingError}</p>
+        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not filed: {filingError}</p>
       )}
 
       {!isCollapsed && node.children.length > 0 && (
@@ -408,7 +409,7 @@ function GuideCluster({
           title="Rewrite the guide"
           aria-label={`Resynthesize the ${scope} guide`}
           onClick={() => controls.onSynthesize(scope)}
-          className={`${buttonIcon} opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100`}
+          className={`${buttonIcon}`}
         >
           <RefreshCw size={12} aria-hidden />
         </button>
@@ -439,19 +440,22 @@ function FileRow({
   const filing = filingSlot(node, weekSlots);
   // The queue's fact: a card left pending from an earlier session shows here.
   const proposed = pendingSources.has(node.relPath);
-  const [proposing, setProposing] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [filingError, setFilingError] = useState<string | null>(null);
+  // A copy of a file the class already holds (SPEC §7 step 1): named for
+  // what it is, reachable in Finder, and read by nothing.
+  const duplicate = node.duplicateOf;
 
   const run = (action: Promise<void>) => {
     action.catch(onEntryMissing);
   };
 
-  const propose = () => {
+  const file = () => {
     setFilingError(null);
-    setProposing(true);
-    proposeWeekFiling(classId, node.relPath)
+    setMoving(true);
+    fileUnderWeek(classId, node.relPath)
       .catch((e) => setFilingError(String(e)))
-      .finally(() => setProposing(false));
+      .finally(() => setMoving(false));
   };
 
   return (
@@ -466,21 +470,33 @@ function FileRow({
               ? onViewFile(node)
               : run(openInDefaultApp(classId, node.relPath))
           }
-          className="min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-body transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)"
+          className={
+            "min-w-0 flex-1 cursor-pointer truncate rounded-sm text-left text-body transition-colors hover:text-(--accent-ink) focus-visible:outline-2 focus-visible:outline-(--accent)" +
+            (duplicate !== undefined ? " text-muted-foreground" : "")
+          }
         >
           {node.name}
         </button>
 
-        <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-          {filing && (
+        {duplicate !== undefined ? (
+          <span
+            title={`The same file as ${duplicate}, which is the copy read — this one is left to you in Finder`}
+            className="min-w-0 max-w-[16rem] shrink truncate text-fine text-muted-foreground"
+          >
+            Duplicate of {duplicate}
+          </span>
+        ) : (
+          filing && (
             <FilingAction
               filing={filing}
               proposed={proposed}
-              proposing={proposing}
-              title={`Propose moving it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it`}
-              onPropose={propose}
+              filing_={moving}
+              title={`Move it into ${WEEKS_DIR}/${filing.folder}, where ${filing.unitName} reads it — Undo puts it back`}
+              onFile={file}
             />
-          )}
+          )
+        )}
+        <span className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             title="Show in Finder"
@@ -490,15 +506,17 @@ function FileRow({
           >
             <FolderSearch size={13} aria-hidden />
           </button>
-          <button
-            type="button"
-            title="Open in default app"
-            aria-label={`Open ${node.name} in its default app`}
-            onClick={() => run(openInDefaultApp(classId, node.relPath))}
-            className={buttonIcon}
-          >
-            <ArrowUpRight size={13} aria-hidden />
-          </button>
+          {duplicate === undefined && (
+            <button
+              type="button"
+              title="Open in default app"
+              aria-label={`Open ${node.name} in its default app`}
+              onClick={() => run(openInDefaultApp(classId, node.relPath))}
+              className={buttonIcon}
+            >
+              <ArrowUpRight size={13} aria-hidden />
+            </button>
+          )}
         </span>
 
         <span className={`w-14 shrink-0 text-right ${meta}`}>
@@ -506,7 +524,7 @@ function FileRow({
         </span>
       </div>
       {filingError && (
-        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not proposed: {filingError}</p>
+        <p className={`${errorLine} ml-8 mt-1 pb-1`}>Not filed: {filingError}</p>
       )}
     </div>
   );

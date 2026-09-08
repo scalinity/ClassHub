@@ -21,7 +21,9 @@ import {
   type JobInfo,
   type JobProgressEvent,
 } from "@/lib/jobs";
+import { NoticeLine } from "@/components/NoticeToast";
 import { CLASS_ACCENTS } from "@/lib/classes";
+import { useNotices } from "@/lib/notices";
 import { formatClock } from "@/lib/schedule";
 import { getAppSettings } from "@/lib/settings";
 import {
@@ -43,6 +45,7 @@ const isActive = (j: JobInfo) => j.status === "running" || j.status === "queued"
 
 export function JobCenter() {
   const { jobs, output, panelOpen, nowSec, error } = useJobs();
+  const { notices } = useNotices();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const notice = actionError ?? error;
@@ -79,6 +82,21 @@ export function JobCenter() {
             >
               {notice}
             </p>
+          )}
+
+          {notices.length > 0 && (
+            // The last few reversible actions, with their Undo, once the
+            // toast has faded (SPEC §12).
+            <ul aria-label="Recent actions" className="border-b border-border/70 px-4 py-2">
+              {notices.map((recent) => (
+                <li key={recent.key} className="flex min-h-8 items-center gap-2">
+                  <NoticeLine notice={recent} />
+                  <span className={`shrink-0 ${meta}`}>
+                    {formatClock(new Date(recent.at))}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
 
           {jobs.length === 0 ? (

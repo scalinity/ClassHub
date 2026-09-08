@@ -7,6 +7,7 @@ import { ClassCard } from "@/components/ClassCard";
 import { ClassWorkspace } from "@/components/ClassWorkspace";
 import { DeadlineStrip } from "@/components/DeadlineStrip";
 import { AuthWarning, JobCenter } from "@/components/JobCenter";
+import { NoticeToast } from "@/components/NoticeToast";
 import { SectionHeading } from "@/components/SectionHeading";
 import { SettingsScreen } from "@/components/Settings";
 import { WeekSchedule } from "@/components/WeekSchedule";
@@ -150,6 +151,7 @@ export default function App() {
           <ClassWorkspace info={view} onBack={() => setView("dashboard")} />
         )}
         <JobCenter />
+        <NoticeToast />
         <ChatSidebar />
         <AuthWarning />
       </div>

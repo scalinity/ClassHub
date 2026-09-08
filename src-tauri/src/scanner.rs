@@ -47,6 +47,11 @@ pub struct TreeNode {
     /// lands, carries none. Absent on a name that carries no week.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub week: Option<i64>,
+    /// The canonical copy's path, on a file whose content another row of the
+    /// class already holds (SPEC §7 step 1): the row reads `Duplicate of
+    /// <path>`, offers no filing and no guide reads it. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
     pub children: Vec<TreeNode>,
 }
 
@@ -218,6 +223,16 @@ pub fn scan_class(
             ),
         }
     }
+    // Two rows with one content are one reading (SPEC §7 step 1): the second
+    // is marked with the first's path, and every reader of a scope's sources
+    // leaves it out. Marked once the vanished rows are gone, so a copy whose
+    // canonical left the tree is canonical from this scan on.
+    let (duplicates, remarked) = mark_duplicates(&tx, class_id)?;
+    changed |= remarked;
+    let mut tree = tree;
+    if !duplicates.is_empty() {
+        mark_tree(&mut tree, &duplicates);
+    }
     // A declared division knows its name and its dates; only the tree knows
     // where its material sits. Joined on every scan so it stays current without
     // a second thing to press (SPEC §8.1). The folders themselves are not
@@ -240,6 +255,78 @@ pub fn scan_class(
         crate::extract::remove_mirror(&dir, rel_path);
     }
     Ok(Scan { tree, changed })
+}
+
+/// Marks every row whose hash another row of the class shares with the
+/// canonical copy's path, and clears the mark on the rest. Returns the marks
+/// and whether any row's mark changed.
+fn mark_duplicates(
+    conn: &Connection,
+    class_id: i64,
+) -> Result<(HashMap<String, String>, bool)> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path, sha256, duplicate_of FROM files
+         WHERE class_id = ?1 ORDER BY sha256, id",
+    )?;
+    let rows: Vec<(i64, String, String, Option<String>)> = stmt
+        .query_map([class_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut marks: HashMap<String, String> = HashMap::new();
+    for group in rows.chunk_by(|a, b| a.2 == b.2) {
+        if group.len() < 2 {
+            continue;
+        }
+        let copies: Vec<(i64, &str)> = group.iter().map(|(id, rel, _, _)| (*id, rel.as_str())).collect();
+        let canonical = copies[canonical_index(&copies)].1.to_string();
+        for (_, rel_path) in &copies {
+            if *rel_path != canonical {
+                marks.insert(rel_path.to_string(), canonical.clone());
+            }
+        }
+    }
+    let mut remarked = false;
+    for (_, rel_path, _, was) in &rows {
+        let now = marks.get(rel_path);
+        if now != was.as_ref() {
+            conn.execute(
+                "UPDATE files SET duplicate_of = ?1 WHERE class_id = ?2 AND rel_path = ?3",
+                params![now, class_id, rel_path],
+            )?;
+            remarked = true;
+        }
+    }
+    Ok((marks, remarked))
+}
+
+/// Which of several copies of one content is the one read (SPEC §7 step 1):
+/// the copy under `Weeks/`, where a division counts it; else the shallower
+/// path; else the older row. Pure over `(id, rel_path)`, so the choice is
+/// tested without a scan.
+pub(crate) fn canonical_index(copies: &[(i64, &str)]) -> usize {
+    let rank = |(id, rel_path): &(i64, &str)| {
+        let under_weeks = rel_path.starts_with(&format!("{}/", crate::db::WEEKS_DIR));
+        (!under_weeks, rel_path.matches('/').count(), *id)
+    };
+    copies
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, copy)| rank(copy))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// Sets each marked file's node to its canonical copy's path.
+fn mark_tree(nodes: &mut [TreeNode], marks: &HashMap<String, String>) {
+    for node in nodes {
+        if node.dir {
+            mark_tree(&mut node.children, marks);
+        } else if let Some(canonical) = marks.get(&node.rel_path) {
+            node.duplicate_of = Some(canonical.clone());
+            // A duplicate files nowhere: the canonical copy is what a week
+            // folder should hold.
+            node.week = None;
+        }
+    }
 }
 
 /// Whether content the index held — a vanished transcript's size and hash —
@@ -497,6 +584,7 @@ fn walk_dir(
                 extract_rel_path: None,
                 labelled,
                 week,
+                duplicate_of: None,
                 children,
             });
         } else {
@@ -536,6 +624,7 @@ fn walk_dir(
                 extract_rel_path,
                 labelled: false,
                 week,
+                duplicate_of: None,
                 children: Vec::new(),
             });
         }
@@ -670,7 +759,7 @@ mod tests {
 
     /// Applied Generative AI's shape in a scratch folder: Parts over week
     /// ranges and no week rows, the class folder where the settings say it is.
-    fn part_numbered_class(name: &str) -> (Mutex<Connection>, PathBuf) {
+    pub(super) fn part_numbered_class(name: &str) -> (Mutex<Connection>, PathBuf) {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
@@ -690,7 +779,7 @@ mod tests {
         (Mutex::new(conn), dir)
     }
 
-    fn write(path: PathBuf, content: &str) {
+    pub(super) fn write(path: PathBuf, content: &str) {
         fs::create_dir_all(path.parent().expect("parent")).expect("dir");
         fs::write(path, content).expect("write");
     }
@@ -839,12 +928,14 @@ mod tests {
     #[test]
     fn the_walk_marks_a_labelled_folder_and_a_file_named_for_a_week() {
         let (db, dir) = part_numbered_class("classhub-scan-labelled");
-        write(dir.join("Module 1/notes.pdf"), "%PDF");
-        write(dir.join("Slides/deck.pdf"), "%PDF");
-        write(dir.join("Slides/CAI6734_Week2_Foundations.pdf"), "%PDF");
+        // Distinct content each: two files with one content are one reading,
+        // and the second would lose its week to the duplicate mark.
+        write(dir.join("Module 1/notes.pdf"), "%PDF notes");
+        write(dir.join("Slides/deck.pdf"), "%PDF deck");
+        write(dir.join("Slides/CAI6734_Week2_Foundations.pdf"), "%PDF week 2");
         write(dir.join("Slides/Biostatistics_Module3_Slides_class.pptx"), "PK");
         write(dir.join("Coding Material/Week 3 Coding Material/lab.R"), "x <- 1");
-        write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF");
+        write(dir.join("Weeks/Week 04/deck.pdf"), "%PDF week 4");
         let tree = scan_class(&db, 4).expect("scan").tree;
         let labelled = |name: &str| tree.iter().find(|n| n.name == name).expect(name).labelled;
         assert!(labelled("Module 1"));
@@ -1284,5 +1375,74 @@ mod tests {
         let vocabulary = folder_vocabulary(&conn).expect("vocabulary");
         assert_eq!(vocabulary.len(), super::MAX_VOCABULARY, "the cap did not hold");
         assert_eq!(vocabulary[0], ("Slides".to_string(), 3), "{vocabulary:?}");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+
+    /// The copy under `Weeks/` is read; else the shallower path; else the
+    /// older row.
+    #[test]
+    fn the_canonical_copy_is_the_filed_one_then_the_shallower_then_the_older() {
+        let copies = [
+            (1, "Module 1/Reading Material/Week 1/Role.pdf"),
+            (30, "Reading Material/Week 1 Role.pdf"),
+        ];
+        assert_eq!(canonical_index(&copies), 1, "the shallower path");
+        let copies = [(1, "Reading Material/Role.pdf"), (30, "Weeks/Week 01 — Intro/Role.pdf")];
+        assert_eq!(canonical_index(&copies), 1, "the filed copy");
+        let copies = [(30, "Slides/Role.pdf"), (1, "Readings/Role.pdf")];
+        assert_eq!(canonical_index(&copies), 1, "the older row at equal depth");
+    }
+
+    /// A scan marks the second copy with the first's path, clears the mark
+    /// when the canonical copy leaves, and leaves a marked row out of the
+    /// scope sets.
+    #[test]
+    fn a_scan_marks_a_duplicate_and_reads_it_once() {
+        let (db, dir) = tests::part_numbered_class("m33-dup");
+        std::fs::create_dir_all(dir.join("Readings")).unwrap();
+        std::fs::create_dir_all(dir.join("Module 1/Readings")).unwrap();
+        tests::write(dir.join("Readings/Role.csv"), "a,b\n1,2\n");
+        tests::write(dir.join("Module 1/Readings/Role.csv"), "a,b\n1,2\n");
+        let scan = scan_class(&db, 4).expect("scan");
+        let conn = db.lock().unwrap();
+        let marked: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT rel_path, duplicate_of FROM files WHERE class_id = 4 ORDER BY rel_path")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            marked,
+            [
+                ("Module 1/Readings/Role.csv".to_string(), Some("Readings/Role.csv".to_string())),
+                ("Readings/Role.csv".to_string(), None),
+            ]
+        );
+        let node = scan.tree.iter().find(|n| n.name == "Module 1").unwrap();
+        let inner = node.children.iter().find(|n| n.name == "Readings").unwrap();
+        assert_eq!(inner.children[0].duplicate_of.as_deref(), Some("Readings/Role.csv"));
+        let master = crate::extract::current_manifest(&conn, 4, "master").unwrap();
+        assert_eq!(master.len(), 1, "{master:?}");
+        let folder = crate::extract::current_manifest(&conn, 4, "Module 1").unwrap();
+        assert!(folder.is_empty(), "{folder:?}");
+        drop(conn);
+        std::fs::remove_file(dir.join("Readings/Role.csv")).unwrap();
+        scan_class(&db, 4).expect("rescan");
+        let conn = db.lock().unwrap();
+        let mark: Option<String> = conn
+            .query_row(
+                "SELECT duplicate_of FROM files WHERE class_id = 4 AND rel_path = 'Module 1/Readings/Role.csv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mark, None, "canonical once the other copy left");
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

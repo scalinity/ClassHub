@@ -12,6 +12,8 @@ export interface TreeNode {
   labelled?: boolean;
   /** The week the name files under — `CAI6734_Week2_….pdf` is 2, the folder `Week 3 Coding Material` is 3, and on a course that reads modules as weeks `…Module3….pptx` is 3 — for the row to offer its week folder (SPEC §10); absent on a week folder under `Weeks/` and on a name carrying none. */
   week?: number;
+  /** The canonical copy's path, on a file whose content another row of the class already holds (SPEC §7 step 1): the row reads `Duplicate of …`, offers no filing, and no guide reads it. */
+  duplicateOf?: string;
   children: TreeNode[];
 }
 

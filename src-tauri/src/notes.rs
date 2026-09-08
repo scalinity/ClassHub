@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{NOTES_DIR, audit, emit_hub_change, with_conn};
+use crate::db::{NOTES_DIR, audit, emit_hub_change, notify, with_conn};
 
 /// Notes are prose; anything bigger than this is not a note.
 const MAX_NOTE_BYTES: usize = 1024 * 1024;
@@ -27,6 +27,8 @@ pub struct NoteFile {
 pub struct WrittenNote {
     pub rel_path: String,
     pub created: bool,
+    /// The audit row the save wrote, for the notice's `Undo`.
+    pub audit_id: i64,
 }
 
 /// A note title becomes its file name; slashes and colons would change the
@@ -117,23 +119,73 @@ fn write_audited(
         Err(e) => bail!("cannot read the existing {rel_path} ({e}) — not overwriting it"),
     };
     let created = previous.is_none();
-    let tx = conn.unchecked_transaction()?;
-    audit(
-        &tx,
-        audit_action,
-        json!({ "classId": class_id, "relPath": rel_path,
-                "created": created, "previousContent": previous }),
-    )?;
-    tx.commit()?;
     let mut text = content.to_string();
     if !text.ends_with('\n') {
         text.push('\n');
     }
+    // The hash of what this save writes rides the row, so an undo can tell
+    // that the note still holds it and refuse to overwrite a later edit.
+    let tx = conn.unchecked_transaction()?;
+    let audit_id = audit(
+        &tx,
+        audit_action,
+        json!({ "classId": class_id, "relPath": rel_path,
+                "created": created, "previousContent": previous,
+                "contentSha256": content_hash(&text) }),
+    )?;
+    tx.commit()?;
     crate::db::write_atomic(abs, &text)?;
     Ok(WrittenNote {
         rel_path: rel_path.to_string(),
         created,
+        audit_id,
     })
+}
+
+fn content_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The inverse of `ui.write_note` and `chat.write_note` (SPEC §6): the
+/// replaced content goes back, or a note the save created goes. Refused
+/// when the note no longer holds what the save wrote — a later edit is not
+/// this row's to undo — or when the row predates the hash that says so.
+pub(crate) fn undo_write(
+    conn: &Connection,
+    payload: &serde_json::Value,
+) -> Result<crate::deadlines::Undone> {
+    let class_id = payload["classId"].as_i64().context("the row names no class")?;
+    let rel_path = payload["relPath"].as_str().context("the row names no note")?;
+    let Some(written) = payload["contentSha256"].as_str() else {
+        bail!("this save was recorded before undo existed — edit the note instead");
+    };
+    let file_name = rel_path
+        .strip_prefix(&format!("{NOTES_DIR}/"))
+        .with_context(|| format!("notes live under {NOTES_DIR}/ — got '{rel_path}'"))?;
+    if file_name.is_empty() || file_name.contains('/') || file_name.starts_with('.') {
+        bail!("not a note file name: '{file_name}'");
+    }
+    let abs = crate::scanner::class_dir(conn, class_id)?.join(NOTES_DIR).join(file_name);
+    let current = fs::read_to_string(&abs)
+        .with_context(|| format!("{rel_path} cannot be read — it may have been removed"))?;
+    if content_hash(&current) != written {
+        bail!("{rel_path} has been edited since — its current text is not this save's");
+    }
+    let name = file_name.trim_end_matches(".md").to_string();
+    match payload["previousContent"].as_str() {
+        Some(previous) => crate::db::write_atomic(&abs, previous)?,
+        None => fs::remove_file(&abs).with_context(|| format!("removing {rel_path}"))?,
+    }
+    let what = if payload["previousContent"].is_null() {
+        format!("Removed {name}")
+    } else {
+        format!("Restored {name}")
+    };
+    Ok(crate::deadlines::Undone { what, class_id: Some(class_id) })
 }
 
 #[derive(Serialize)]
@@ -154,18 +206,30 @@ pub fn save_from_ui(
     content: &str,
     rel_path: Option<&str>,
 ) -> Result<SavedNote> {
-    let saved = with_conn(app, |conn| {
-        let written = match rel_path {
-            Some(rel) => overwrite_note(conn, class_id, rel, content, "ui.write_note")?,
-            None => write_note(conn, class_id, title, content, "ui.write_note")?,
-        };
-        Ok(SavedNote {
-            rel_path: written.rel_path,
-            created: written.created,
-        })
+    let written = with_conn(app, |conn| match rel_path {
+        Some(rel) => overwrite_note(conn, class_id, rel, content, "ui.write_note"),
+        None => write_note(conn, class_id, title, content, "ui.write_note"),
     })?;
     emit_hub_change(app, "notes");
-    Ok(saved)
+    notify(
+        app,
+        format!("Saved {}", note_title(&written.rel_path)),
+        vec![written.audit_id],
+        Some(class_id),
+    );
+    Ok(SavedNote {
+        rel_path: written.rel_path,
+        created: written.created,
+    })
+}
+
+/// A note's name as the listing shows it: the file name without `.md`.
+pub(crate) fn note_title(rel_path: &str) -> &str {
+    rel_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel_path)
+        .trim_end_matches(".md")
 }
 
 pub fn list_notes(conn: &Connection, class_id: i64) -> Result<Vec<NoteFile>> {

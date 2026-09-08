@@ -17,13 +17,10 @@ import { buttonText, buttonTextMuted, input, pulseDot, statusLine } from "@/lib/
  */
 export function PracticeAction({
   active,
-  standing = false,
   onSelect,
 }: {
   /** A practice job for this scope is queued or running. */
   active: boolean;
-  /** Always visible rather than revealed on hover. */
-  standing?: boolean;
   /** Write the exam, focused on the given topics when any were typed. */
   onSelect: (focus: string | null) => void;
 }) {
@@ -92,11 +89,7 @@ export function PracticeAction({
       type="button"
       title="Write a practice exam from this scope's material"
       onClick={() => setOpen(true)}
-      className={`${buttonTextMuted}${
-        standing
-          ? ""
-          : " opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100"
-      }`}
+      className={buttonTextMuted}
     >
       Practice exam
     </button>

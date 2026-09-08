@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::AppHandle;
 
-use crate::db::{EXTRACTS_DIR, INBOX_DIR, WEEKS_DIR, emit_hub_change, now, with_conn};
+use crate::db::{EXTRACTS_DIR, INBOX_DIR, WEEKS_DIR, emit_hub_change, notify, now, with_conn};
 use crate::scanner::APP_MANAGED_DIRS;
 use crate::units::WeekReading;
 
@@ -334,23 +334,38 @@ pub fn sort_by_content(app: &AppHandle, proposal_id: i64) -> Result<i64> {
 /// contents the same way, one card per file (`folder_filing`); a file named
 /// for a module files under that week where the course reads its modules as
 /// weeks (`units::modules_read_as_weeks`), and the card says so.
-pub fn propose_week_filing(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<WeekFiling> {
+pub fn file_under_week(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<WeekFiling> {
     let filed = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         week_filing(conn, class_id, &class_dir, rel_path)
     })?;
     emit_hub_change(app, "proposals");
+    emit_hub_change(app, "files");
+    let text = match filed.moved {
+        1 => format!("Filed {} under {}/", filed.name, folder_of(&filed.dest_rel)),
+        n => format!("Filed {n} files under {}/", filed.dest_rel),
+    };
+    notify(app, text, filed.audit_ids.clone(), Some(class_id));
     Ok(filed)
 }
 
-/// What a filing click wrote (SPEC §10): where it lands — a file's own
-/// destination, or a folder's under the week folder — and how many cards,
-/// one for a file and one per file for a folder.
+/// What a filing click did (SPEC §10): where it landed — a file's own
+/// destination, or a folder's under the week folder — how many files moved,
+/// one for a file and every file under a folder, and the audit rows the
+/// notice's `Undo` reverses.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WeekFiling {
     pub dest_rel: String,
-    pub cards: usize,
+    pub moved: usize,
+    pub audit_ids: Vec<i64>,
+    /// The file's or folder's own name, for the notice.
+    pub name: String,
+}
+
+/// The folder half of a class-relative path, for a notice.
+pub(crate) fn folder_of(rel_path: &str) -> &str {
+    rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
 fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &str) -> Result<WeekFiling> {
@@ -399,21 +414,56 @@ fn week_filing(conn: &Connection, class_id: i64, class_dir: &Path, rel_path: &st
     validate_dest(class_dir, &source_rel, &dest_rel)?;
     refuse_held(conn, class_id, &source_rel, &dest_rel)?;
     let reasoning = week_reason(&reading, &folder_rel, &slot.unit_name);
-    // Written or refused, never silently kept out: a row saying PROPOSED over
-    // nothing recorded is the state this guards against.
-    if !upsert_proposal(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning, None)? {
-        bail!("the proposal for '{name}' was not recorded — another card holds this file");
-    }
-    Ok(WeekFiling { dest_rel, cards: 1 })
+    // The click is the move (SPEC §10): the record of it is an approved
+    // by-name row, so the queue's history reads as it did when the click
+    // wrote a card, and the audit row is the same `sort.move`.
+    let proposal_id = record_approved(conn, class_id, "by_name", &source_rel, &dest_rel, &reasoning)?;
+    let audit_id = move_file(
+        conn,
+        class_id,
+        class_dir,
+        &source_rel,
+        &dest_rel,
+        &Recorded {
+            proposal_id,
+            proposed_by: "by_name",
+            confidence: None,
+            action: "sort.move",
+            extra: json!({ "reasoning": reasoning }),
+        },
+    )?;
+    Ok(WeekFiling { dest_rel, moved: 1, audit_ids: vec![audit_id], name: name.to_string() })
 }
 
-/// A folder named for a week files what it holds: one card per file, each
-/// destined for the folder's own name under the week folder, so the
-/// professor's grouping survives and a division, which counts a file under
-/// its week folder at any depth (SPEC §8.5), reads them all. Every destination
-/// is validated before any card is written, so a collision names the file and
-/// writes nothing. `Weeks/` and a week folder are where filing lands and are
-/// refused; so is a folder holding no file.
+/// An approved row for a move made without a card — a by-name click, or a
+/// file the sync placed — so `move_proposals` stays the record of every move
+/// the app made, and an undo has a row to put back to pending or dismissed.
+pub(crate) fn record_approved(
+    conn: &Connection,
+    class_id: i64,
+    source: &str,
+    source_rel: &str,
+    dest_rel: &str,
+    reasoning: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO move_proposals
+         (class_id, source_rel_path, dest_rel_path, reasoning, confidence,
+          source, status, created_at, resolved_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'approved', ?6, ?6)",
+        params![class_id, source_rel, dest_rel, reasoning, source, now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// A folder named for a week files what it holds: every file under it moves
+/// to the folder's own name under the week folder, so the professor's
+/// grouping survives and a division, which counts a file under its week
+/// folder at any depth (SPEC §8.5), reads them all. Every destination is
+/// validated before anything moves, so a collision names the file and moves
+/// nothing; the moves are one batch, one notice, one `Undo`. `Weeks/` and a
+/// week folder are where filing lands and are refused; so is a folder
+/// holding no file.
 fn folder_filing(
     conn: &Connection,
     class_id: i64,
@@ -454,20 +504,33 @@ fn folder_filing(
         &folder_rel,
         &slot.unit_name,
     );
-    // One transaction, so the promise holds on the write as on the validation:
-    // an error on the k-th card — the other build holding the write lock past
-    // the busy timeout — rolls the first k-1 back rather than leaving a partial
-    // set behind a row that says NOT PROPOSED. The guard inside is the same
-    // insurance the file path carries, and dropping the transaction on its
-    // bail is what makes it mean something here.
-    let tx = conn.unchecked_transaction()?;
+    // Each move is its own rename and transaction, as an approval's is; a
+    // failure part-way — the other build holding the write lock past the busy
+    // timeout — leaves the earlier moves made, each with its audit row, which
+    // the notice's `Undo` reverses. The validation above is what keeps a
+    // collision from being that failure.
+    let batch = format!("by-name-{}-{class_id}", now());
+    let mut audit_ids = Vec::new();
     for (from, to) in &moves {
-        if !upsert_proposal(&tx, class_id, "by_name", from, to, &reasoning, None)? {
-            bail!("the proposal for '{from}' was not recorded — another card holds this file");
-        }
+        let proposal_id = record_approved(conn, class_id, "by_name", from, to, &reasoning)?;
+        let audit_id = move_file(
+            conn,
+            class_id,
+            class_dir,
+            from,
+            to,
+            &Recorded {
+                proposal_id,
+                proposed_by: "by_name",
+                confidence: None,
+                action: "sort.move",
+                extra: json!({ "reasoning": reasoning, "batch": batch }),
+            },
+        )
+        .with_context(|| format!("'{from}' — the files before it moved"))?;
+        audit_ids.push(audit_id);
     }
-    tx.commit()?;
-    Ok(WeekFiling { dest_rel: dest_folder, cards: moves.len() })
+    Ok(WeekFiling { dest_rel: dest_folder, moved: moves.len(), audit_ids, name: name.to_string() })
 }
 
 /// What the queue already holds against a filing (SPEC §10). A pending card
@@ -660,6 +723,183 @@ pub(crate) fn propose_loose_by_name(
         return Ok(None);
     }
     Ok(Some(dest_rel))
+}
+
+// ---------------------------------------------------------------------------
+// Filing without a card (SPEC §7.2, §10): where the sync puts a file
+
+/// Where a file the sync staged goes, and why (SPEC §7.2).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AutoFiling {
+    /// Moved on the spot: an observation, not a guess.
+    Filed { dest_rel: String, reasoning: String },
+    /// A module read as a week: the Canvas card with its week alternative, as
+    /// before — Design Studio's `Module 2` spans two weeks, and that reading
+    /// is knowingly wrong there (SPEC §10 step 7).
+    ModuleCard,
+    /// Canvas keeps it loose and its name reads no week: the sorter's.
+    Loose,
+}
+
+/// The destination rule for a file the sync staged, pure over the course's
+/// slots: `Weeks/<week folder>/<name>` when the file's own name carries a
+/// week the course declares (the reading a Materials row takes); under the
+/// folder's own name inside the week folder when Canvas's folder carries the
+/// week (the alternative's folder reading); else Canvas's folder, mapped
+/// onto the tree's vocabulary, as the card's destination was. A module the
+/// course reads as a week keeps its card, and a loose file whose name reads
+/// no week keeps its sort job. `canvas_dest` is the card's destination —
+/// Canvas's folder with the name — or `None` for a file Canvas keeps loose.
+pub(crate) fn auto_filing(
+    slots: &[crate::units::WeekSlot],
+    modules_are_weeks: bool,
+    name: &str,
+    canvas_dest: Option<&str>,
+    canvas_reason: &str,
+) -> AutoFiling {
+    let week_folder = |week: i64| {
+        slots
+            .iter()
+            .find(|slot| slot.week == week)
+            .map(|slot| (format!("{WEEKS_DIR}/{}", slot.folder), slot.unit_name.as_str()))
+    };
+    match crate::units::named_week_reading(name, modules_are_weeks) {
+        Some((week, WeekReading::Week)) => {
+            if let Some((folder_rel, unit_name)) = week_folder(week) {
+                let reading = match canvas_dest {
+                    Some(_) => format!("{canvas_reason}, and its name carries Week {week}."),
+                    None => format!("Canvas keeps it in no folder. Its name carries Week {week}."),
+                };
+                return AutoFiling::Filed {
+                    dest_rel: format!("{folder_rel}/{name}"),
+                    reasoning: week_reason(&reading, &folder_rel, unit_name),
+                };
+            }
+        }
+        Some((_, WeekReading::Module)) => return AutoFiling::ModuleCard,
+        None => {}
+    }
+    let Some(canvas_dest) = canvas_dest else {
+        return AutoFiling::Loose;
+    };
+    let folder = folder_of(canvas_dest);
+    let segments: Vec<&str> = folder.split('/').collect();
+    for (at, segment) in segments.iter().enumerate() {
+        if at == 1 && segments[0] == WEEKS_DIR {
+            break;
+        }
+        let Some(week) = crate::units::week_in_name(segment) else {
+            continue;
+        };
+        if let Some((folder_rel, unit_name)) = week_folder(week) {
+            return AutoFiling::Filed {
+                dest_rel: format!("{folder_rel}/{}/{name}", segments[at..].join("/")),
+                reasoning: week_reason(
+                    &format!("{canvas_reason}, a folder named for Week {week}."),
+                    &folder_rel,
+                    unit_name,
+                ),
+            };
+        }
+    }
+    AutoFiling::Filed {
+        dest_rel: canvas_dest.to_string(),
+        reasoning: format!("{canvas_reason}."),
+    }
+}
+
+/// A file the sync placed, moved on the spot (SPEC §7.2): an approved Canvas
+/// row for the record and the `canvas.filed` audit row under `batch`, whose
+/// undo returns the file to the inbox with the card pending. A destination a
+/// file of that name already occupies is taken at the next free name, the
+/// way a download lands in the inbox.
+pub(crate) fn file_now(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    dest_rel: &str,
+    reasoning: &str,
+    batch: &str,
+) -> Result<(String, i64)> {
+    let dest_rel = beside_taken(class_dir, dest_rel);
+    validate_dest(class_dir, source_rel, &dest_rel)?;
+    // A card another route holds for the file — chat's, or a sort the reader
+    // asked for — is the reader's own ask; the sync's placement does not walk
+    // over it. Its own Canvas card is the row this move resolves.
+    let other_route: Option<String> = conn
+        .query_row(
+            "SELECT source FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'
+               AND source NOT IN ('canvas', 'by_name')",
+            params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(route) = other_route {
+        bail!("'{source_rel}' has a card from {route} — left to it");
+    }
+    let claimant: Option<String> = conn
+        .query_row(
+            "SELECT source_rel_path FROM move_proposals
+             WHERE class_id = ?1 AND dest_rel_path = ?2 AND status = 'pending'
+               AND source_rel_path != ?3",
+            params![class_id, dest_rel, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(other) = claimant {
+        bail!("'{dest_rel}' is already proposed for '{other}'");
+    }
+    // The card the sync itself wrote earlier, if one is waiting, becomes the
+    // record of this move rather than a second row.
+    let waiting: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM move_proposals
+             WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
+            params![class_id, source_rel],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let proposal_id = match waiting {
+        Some(id) => {
+            conn.execute(
+                "UPDATE move_proposals SET dest_rel_path = ?1, reasoning = ?2, source = 'canvas',
+                        status = 'approved', resolved_at = ?3
+                 WHERE id = ?4",
+                params![dest_rel, reasoning, now(), id],
+            )?;
+            id
+        }
+        None => record_approved(conn, class_id, "canvas", source_rel, &dest_rel, reasoning)?,
+    };
+    let audit_id = move_file(
+        conn,
+        class_id,
+        class_dir,
+        source_rel,
+        &dest_rel,
+        &Recorded {
+            proposal_id,
+            proposed_by: "canvas",
+            confidence: None,
+            action: "canvas.filed",
+            extra: json!({ "reasoning": reasoning, "batch": batch }),
+        },
+    )?;
+    Ok((dest_rel, audit_id))
+}
+
+/// The next free name at a destination a file already occupies (`free_slot`),
+/// or the destination itself.
+fn beside_taken(class_dir: &Path, dest_rel: &str) -> String {
+    let Some((folder_rel, name)) = dest_rel.rsplit_once('/') else {
+        return dest_rel.to_string();
+    };
+    match free_slot(&class_dir.join(folder_rel), name).file_name() {
+        Some(landed) => format!("{folder_rel}/{}", landed.to_string_lossy()),
+        None => dest_rel.to_string(),
+    }
 }
 
 /// A filing guard's refusal leaves a loose file to the sorter; a database
@@ -1520,108 +1760,231 @@ pub fn resolve_proposal(
     approve: bool,
     dest_override: Option<String>,
 ) -> Result<String> {
-    let summary = with_conn(app, |conn| {
-        let row = conn
-            .query_row(
-                "SELECT class_id, source_rel_path, dest_rel_path, status, source, confidence
-                 FROM move_proposals WHERE id = ?1",
-                [proposal_id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("proposal not found")?;
-        let (class_id, source_rel, proposed_dest, status, source, confidence) = row;
-        if status != "pending" {
-            bail!("this proposal was already resolved");
-        }
-
-        if !approve {
-            conn.execute(
-                "UPDATE move_proposals SET status = 'dismissed', resolved_at = ?1 WHERE id = ?2",
-                params![now(), proposal_id],
-            )?;
-            return Ok(format!("left in place — {source_rel}"));
-        }
-
-        // Both branches go through clean_rel — the stored destination was
-        // validated when recorded, but the approve path is the last gate
-        // before an fs operation and re-checks everything it relies on.
-        let dest_rel = match dest_override {
-            Some(over) => clean_rel(&over)?,
-            None => clean_rel(&proposed_dest)?,
-        };
-        let class_dir = crate::scanner::class_dir(conn, class_id)?;
-        let src_abs = class_dir.join(&source_rel);
-        if !src_abs.is_file() {
-            bail!("'{source_rel}' is no longer on disk — leave or dismiss this proposal");
-        }
-        validate_dest(&class_dir, &source_rel, &dest_rel)?;
-
-        // The move itself: folders created as proposed, then a same-volume rename.
-        let dest_abs = class_dir.join(&dest_rel);
-        if let Some(parent) = dest_abs.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&src_abs, &dest_abs)
-            .with_context(|| format!("moving {source_rel} to {dest_rel}"))?;
-
-        // Everything after the rename lands as one unit; on failure the DB
-        // rolls back and the file (plus any moved extract artifacts) goes
-        // back where it was, so the observable states are exactly "nothing
-        // happened" or "everything happened".
-        match record_move(
-            conn,
-            class_id,
-            &class_dir,
-            &source_rel,
-            &dest_rel,
-            proposal_id,
-            &source,
-            confidence.as_deref(),
-        ) {
-            Ok(()) => Ok(format!("moved — {source_rel} → {dest_rel}")),
-            Err(e) => {
-                undo_artifact_moves(&class_dir, &source_rel, &dest_rel);
-                if let Err(undo) = fs::rename(&dest_abs, &src_abs) {
-                    return Err(e.context(format!(
-                        "recording the move failed AND the file could not be moved \
-                         back ({undo}) — it is on disk at {dest_rel}; rescan the class"
-                    )));
-                }
-                Err(e.context("recording the move failed — the file was moved back"))
-            }
-        }
-    })?;
+    let moved = with_conn(app, |conn| approve_in_conn(conn, proposal_id, approve, dest_override, None))?;
     emit_hub_change(app, "proposals");
-    if approve {
+    if let Some(moved) = &moved {
         emit_hub_change(app, "files"); // the tree on disk changed
+        notify(
+            app,
+            format!("Filed {} under {}/", moved.name, folder_of(&moved.dest_rel)),
+            vec![moved.audit_id],
+            Some(moved.class_id),
+        );
+        return Ok(format!("moved — {} → {}", moved.source_rel, moved.dest_rel));
     }
-    Ok(summary)
+    Ok("left in place".to_string())
 }
 
-/// The whole DB side of an approved move in one transaction — stale-row
-/// cleanup, index update, audit entry, proposal resolution — so a failure
-/// anywhere leaves no partial commit and the caller can undo the rename.
-#[allow(clippy::too_many_arguments)]
+/// What an approval moved.
+struct Moved {
+    class_id: i64,
+    source_rel: String,
+    dest_rel: String,
+    name: String,
+    audit_id: i64,
+}
+
+/// One card's resolution: a dismissal parks the row, an approval moves the
+/// file through `move_file`. `None` for a dismissal.
+fn approve_in_conn(
+    conn: &Connection,
+    proposal_id: i64,
+    approve: bool,
+    dest_override: Option<String>,
+    batch: Option<&str>,
+) -> Result<Option<Moved>> {
+    let row = conn
+        .query_row(
+            "SELECT class_id, source_rel_path, dest_rel_path, status, source, confidence
+             FROM move_proposals WHERE id = ?1",
+            [proposal_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .context("proposal not found")?;
+    let (class_id, source_rel, proposed_dest, status, source, confidence) = row;
+    if status != "pending" {
+        bail!("this proposal was already resolved");
+    }
+
+    if !approve {
+        conn.execute(
+            "UPDATE move_proposals SET status = 'dismissed', resolved_at = ?1 WHERE id = ?2",
+            params![now(), proposal_id],
+        )?;
+        return Ok(None);
+    }
+
+    // Both branches go through clean_rel — the stored destination was
+    // validated when recorded, but the approve path is the last gate
+    // before an fs operation and re-checks everything it relies on.
+    let dest_rel = match dest_override {
+        Some(over) => clean_rel(&over)?,
+        None => clean_rel(&proposed_dest)?,
+    };
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let audit_id = move_file(
+        conn,
+        class_id,
+        &class_dir,
+        &source_rel,
+        &dest_rel,
+        &Recorded {
+            proposal_id,
+            proposed_by: &source,
+            confidence: confidence.as_deref(),
+            action: "sort.move",
+            extra: json!({ "batch": batch }),
+        },
+    )?;
+    let name = source_rel.rsplit('/').next().unwrap_or(&source_rel).to_string();
+    Ok(Some(Moved { class_id, source_rel, dest_rel, name, audit_id }))
+}
+
+/// Approve all over a class's pending cards (SPEC §10): each the ordinary
+/// approval with its audit row, under one batch and one `Undo`; a card whose
+/// move fails is left pending and named.
+pub fn approve_all(app: &AppHandle, class_id: i64) -> Result<crate::deadlines::BatchOutcome> {
+    let batch = format!("approve-all-{}-{class_id}", now());
+    let (outcome, audit_ids) = with_conn(app, |conn| {
+        let ids: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM move_proposals
+                 WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
+            )?
+            .query_map([class_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut approved = Vec::new();
+        let mut skipped = Vec::new();
+        let mut audit_ids = Vec::new();
+        for id in ids {
+            match approve_in_conn(conn, id, true, None, Some(&batch)) {
+                Ok(Some(moved)) => {
+                    approved.push(id);
+                    audit_ids.push(moved.audit_id);
+                }
+                Ok(None) => {}
+                Err(e) => skipped.push(format!("{e:#}")),
+            }
+        }
+        Ok((crate::deadlines::BatchOutcome { approved, skipped }, audit_ids))
+    })?;
+    emit_hub_change(app, "proposals");
+    if !outcome.approved.is_empty() {
+        emit_hub_change(app, "files");
+        let count = outcome.approved.len();
+        let text = if count == 1 { "Filed 1 file".to_string() } else { format!("Filed {count} files") };
+        notify(app, text, audit_ids, Some(class_id));
+    }
+    Ok(outcome)
+}
+
+/// What a move records beside its paths: the row it resolves, who proposed
+/// it, the audit action and anything else the payload carries — a reason,
+/// a batch id.
+pub(crate) struct Recorded<'a> {
+    pub proposal_id: i64,
+    pub proposed_by: &'a str,
+    pub confidence: Option<&'a str>,
+    /// `sort.move` for an approval or a by-name click, `canvas.filed` for a
+    /// file the sync placed.
+    pub action: &'a str,
+    pub extra: serde_json::Value,
+}
+
+/// The move itself, the one path every filing takes (SPEC §10 step 4): the
+/// last checks before an fs operation, folders created as proposed, a
+/// same-volume rename, then the database side as one unit — on whose failure
+/// the file and any moved extract artifacts go back where they were, so the
+/// observable states are exactly "nothing happened" or "everything
+/// happened". Returns the audit row's id, which the notice's `Undo` names.
+pub(crate) fn move_file(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    source_rel: &str,
+    dest_rel: &str,
+    recorded: &Recorded<'_>,
+) -> Result<i64> {
+    let src_abs = class_dir.join(source_rel);
+    if !src_abs.is_file() {
+        bail!("'{source_rel}' is no longer on disk — leave or dismiss this proposal");
+    }
+    validate_dest(class_dir, source_rel, dest_rel)?;
+
+    // The folders this move creates ride its audit row, so an undo removes
+    // exactly those, once empty, and never a folder that was already there.
+    let created = missing_parents(class_dir, dest_rel);
+    let dest_abs = class_dir.join(dest_rel);
+    if let Some(parent) = dest_abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&src_abs, &dest_abs)
+        .with_context(|| format!("moving {source_rel} to {dest_rel}"))?;
+
+    let mut recorded_with_dirs = Recorded {
+        proposal_id: recorded.proposal_id,
+        proposed_by: recorded.proposed_by,
+        confidence: recorded.confidence,
+        action: recorded.action,
+        extra: recorded.extra.clone(),
+    };
+    if !created.is_empty() {
+        if let Some(into) = recorded_with_dirs.extra.as_object_mut() {
+            into.insert("createdDirs".to_string(), json!(created));
+        }
+    }
+    let recorded = &recorded_with_dirs;
+    match record_move(conn, class_id, class_dir, source_rel, dest_rel, recorded) {
+        Ok(audit_id) => Ok(audit_id),
+        Err(e) => {
+            undo_artifact_moves(class_dir, source_rel, dest_rel);
+            if let Err(undo) = fs::rename(&dest_abs, &src_abs) {
+                return Err(e.context(format!(
+                    "recording the move failed AND the file could not be moved \
+                     back ({undo}) — it is on disk at {dest_rel}; rescan the class"
+                )));
+            }
+            Err(e.context("recording the move failed — the file was moved back"))
+        }
+    }
+}
+
+/// The class-relative folders a move to `dest_rel` would create, outermost
+/// first: every ancestor of the destination not yet on disk.
+fn missing_parents(class_dir: &Path, dest_rel: &str) -> Vec<String> {
+    let mut created = Vec::new();
+    let mut path = String::new();
+    let segments: Vec<&str> = dest_rel.split('/').collect();
+    for segment in &segments[..segments.len().saturating_sub(1)] {
+        path = if path.is_empty() { segment.to_string() } else { format!("{path}/{segment}") };
+        if !class_dir.join(&path).exists() {
+            created.push(path.clone());
+        }
+    }
+    created
+}
+
+/// The whole DB side of a move in one transaction — stale-row cleanup, index
+/// update, audit entry, proposal resolution — so a failure anywhere leaves no
+/// partial commit and the caller can undo the rename.
 fn record_move(
     conn: &Connection,
     class_id: i64,
     class_dir: &Path,
     source_rel: &str,
     dest_rel: &str,
-    proposal_id: i64,
-    proposed_by: &str,
-    confidence: Option<&str>,
-) -> Result<()> {
+    recorded: &Recorded<'_>,
+) -> Result<i64> {
     // The rename has already happened; an Err below rolls it back explicitly.
     // A hard crash in the window between them is not covered: the file is at
     // the destination while the index and the pending proposal still name the
@@ -1641,26 +2004,26 @@ fn record_move(
     // left naming a path nothing is at.
     let effects =
         crate::lectures::refile_lecture(&tx, class_id, class_dir, source_rel, dest_rel)?;
-    tx.execute(
-        "INSERT INTO audit_log (action, payload, created_at)
-         VALUES ('sort.move', ?1, ?2)",
-        params![
-            json!({
-                "proposalId": proposal_id,
-                "classId": class_id,
-                "from": source_rel,
-                "to": dest_rel,
-                "proposedBy": proposed_by,
-                "confidence": confidence,
-            })
-            .to_string(),
-            now()
-        ],
-    )?;
+    let mut payload = json!({
+        "proposalId": recorded.proposal_id,
+        "classId": class_id,
+        "from": source_rel,
+        "to": dest_rel,
+        "proposedBy": recorded.proposed_by,
+        "confidence": recorded.confidence,
+    });
+    if let (Some(into), Some(extra)) = (payload.as_object_mut(), recorded.extra.as_object()) {
+        for (key, value) in extra {
+            if !value.is_null() {
+                into.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let audit_id = crate::db::audit(&tx, recorded.action, payload)?;
     tx.execute(
         "UPDATE move_proposals
          SET status = 'approved', dest_rel_path = ?1, resolved_at = ?2 WHERE id = ?3",
-        params![dest_rel, now(), proposal_id],
+        params![dest_rel, now(), recorded.proposal_id],
     )?;
     tx.commit()?;
     // Only now: the database can no longer roll back, so the corpus note moves
@@ -1668,7 +2031,118 @@ fn record_move(
     // put, which is what keeps the caller's undo path — the transcript rename
     // and the extract artifacts — the whole of what a failure has to reverse.
     effects.apply();
-    Ok(())
+    Ok(audit_id)
+}
+
+// ---------------------------------------------------------------------------
+// Undo (SPEC §6): a move reversed from its audit row
+
+/// The inverse of `sort.move` and `canvas.filed`: the file goes back through
+/// the same rename, refused by name when its old path is taken or the file
+/// has left the destination. Back in the tree its index row and its extract
+/// follow it; back in the inbox — unindexed, as every inbox file is — its row
+/// and its mirror go, and its card returns to pending so the reader can
+/// redirect it or sort it by content. A by-name click's row is dismissed
+/// instead, so its Materials row offers `File under Week NN` again. Writes
+/// `undo.<action>` with the paths of its own move, which the write guard
+/// reads as it reads any app move.
+pub(crate) fn undo_move(
+    conn: &Connection,
+    action: &str,
+    payload: &serde_json::Value,
+    audit_id: i64,
+) -> Result<crate::deadlines::Undone> {
+    let class_id = payload["classId"].as_i64().context("the row names no class")?;
+    let from = payload["from"].as_str().context("the row names no source")?;
+    let to = payload["to"].as_str().context("the row names no destination")?;
+    let proposed_by = payload["proposedBy"].as_str().unwrap_or("");
+    let class_dir = crate::scanner::class_dir(conn, class_id)?;
+    let at_abs = class_dir.join(to);
+    if !at_abs.is_file() {
+        bail!("'{to}' is no longer where the move put it");
+    }
+    let back_abs = class_dir.join(from);
+    if back_abs.exists() {
+        bail!("'{from}' is taken — something else sits there now");
+    }
+    for segment in from.split('/') {
+        if segment.starts_with('.') {
+            bail!("'{from}' is under a hidden folder");
+        }
+    }
+    ensure_no_symlink_ancestors(&class_dir, from)?;
+    if let Some(parent) = back_abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&at_abs, &back_abs).with_context(|| format!("moving {to} back to {from}"))?;
+
+    let into_inbox = from == INBOX_DIR || from.starts_with(&format!("{INBOX_DIR}/"));
+    let recorded = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        if into_inbox {
+            tx.execute(
+                "DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2",
+                params![class_id, to],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM files WHERE class_id = ?1 AND rel_path = ?2",
+                params![class_id, from],
+            )?;
+            update_index(&tx, class_id, &class_dir, to, from)?;
+        }
+        let effects = crate::lectures::refile_lecture(&tx, class_id, &class_dir, to, from)?;
+        if let Some(proposal_id) = payload["proposalId"].as_i64() {
+            let status = if proposed_by == "by_name" { "dismissed" } else { "pending" };
+            tx.execute(
+                "UPDATE move_proposals SET status = ?1, resolved_at = NULL WHERE id = ?2",
+                params![status, proposal_id],
+            )?;
+        }
+        crate::db::audit(
+            &tx,
+            &format!("undo.{action}"),
+            json!({ "auditId": audit_id, "classId": class_id, "from": to, "to": from }),
+        )?;
+        tx.commit()?;
+        effects.apply();
+        Ok(())
+    })();
+    if let Err(e) = recorded {
+        if !into_inbox {
+            undo_artifact_moves(&class_dir, to, from);
+        }
+        if let Err(back) = fs::rename(&back_abs, &at_abs) {
+            return Err(e.context(format!(
+                "recording the undo failed AND the file could not be moved back ({back}) — \
+                 it is on disk at {from}; rescan the class"
+            )));
+        }
+        return Err(e.context("recording the undo failed — the file stays where the move put it"));
+    }
+    if into_inbox {
+        crate::extract::remove_mirror(&class_dir, to);
+    }
+    // The folders the move created go once empty, innermost first; one that
+    // holds something since stays, as `remove_dir` refuses it.
+    let created: Vec<&str> = payload["createdDirs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for dir in created.iter().rev() {
+        let _ = fs::remove_dir(class_dir.join(dir));
+    }
+    let name = to.rsplit('/').next().unwrap_or(to);
+    let back_to = match folder_of(from) {
+        "" => "the class folder".to_string(),
+        folder => format!("{folder}/"),
+    };
+    Ok(crate::deadlines::Undone {
+        what: format!("Returned {name} to {back_to}"),
+        class_id: Some(class_id),
+    })
 }
 
 /// Best-effort reversal of `update_index`'s artifact renames, for the
@@ -2143,12 +2617,13 @@ mod tests {
             .expect("count");
         assert_eq!(audit_rows, 0, "a vanished row was written for a move that happened");
     }
-    /// SPEC §10: a file named for a week is proposed into the week's folder
-    /// from its row, naming the division that reads the folder; one already
-    /// there, one named for a week the course lacks, and one named for none
-    /// are refused.
+    /// SPEC §10: a file named for a week is filed into the week's folder from
+    /// its row by one click — the move, its `sort.move` row naming the
+    /// division that reads the folder, and an approved by-name row for the
+    /// record; one already there, one named for a week the course lacks, and
+    /// one named for none are refused.
     #[test]
-    fn a_file_named_for_a_week_is_proposed_into_its_week_folder() {
+    fn a_file_named_for_a_week_is_filed_into_its_week_folder() {
         let root = std::env::temp_dir().join(format!("classhub-week-filing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
@@ -2163,24 +2638,43 @@ mod tests {
         let deck = "Slides/CAI6734_Week2_Foundations.pdf";
         fs::create_dir_all(class_dir.join("Slides")).expect("slides");
         fs::write(class_dir.join(deck), "%PDF").expect("deck");
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (4, ?1, 'h', 4, 1, 'pdf')",
+            [deck],
+        )
+        .expect("index row");
 
-        let filed = week_filing(&conn, 4, &class_dir, deck).expect("proposed");
-        assert_eq!((filed.dest_rel.as_str(), filed.cards), ("Weeks/Week 02/CAI6734_Week2_Foundations.pdf", 1));
+        let filed = week_filing(&conn, 4, &class_dir, deck).expect("filed");
+        assert_eq!((filed.dest_rel.as_str(), filed.moved), ("Weeks/Week 02/CAI6734_Week2_Foundations.pdf", 1));
+        assert_eq!(filed.name, "CAI6734_Week2_Foundations.pdf");
         let dest = filed.dest_rel;
-        let (held_dest, source, reasoning): (String, String, String) = conn
+        assert!(class_dir.join(&dest).is_file() && !class_dir.join(deck).exists(), "the click is the move");
+        let (held_dest, source, status, reasoning): (String, String, String, String) = conn
             .query_row(
-                "SELECT dest_rel_path, source, reasoning FROM move_proposals
-                 WHERE class_id = 4 AND source_rel_path = ?1 AND status = 'pending'",
+                "SELECT dest_rel_path, source, status, reasoning FROM move_proposals
+                 WHERE class_id = 4 AND source_rel_path = ?1",
                 [deck],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .expect("row");
-        assert_eq!((held_dest.as_str(), source.as_str()), (dest.as_str(), "by_name"));
+        assert_eq!((held_dest.as_str(), source.as_str(), status.as_str()), (dest.as_str(), "by_name", "approved"));
         assert!(reasoning.contains("Part I: Deep Learning"), "{reasoning}");
+        let (action, payload): (String, String) = conn
+            .query_row(
+                "SELECT action, payload FROM audit_log WHERE id = ?1",
+                [filed.audit_ids[0]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("audit row");
+        assert_eq!(action, "sort.move");
+        assert!(payload.contains("\"proposedBy\":\"by_name\"") && payload.contains("\"reasoning\""), "{payload}");
+        let indexed: String = conn
+            .query_row("SELECT rel_path FROM files WHERE class_id = 4", [], |r| r.get(0))
+            .expect("index");
+        assert_eq!(indexed, dest, "the index row followed the file");
 
-        // Already under its week folder: nothing to propose.
-        fs::create_dir_all(class_dir.join("Weeks/Week 02")).expect("week dir");
-        fs::write(class_dir.join(&dest), "%PDF").expect("filed deck");
+        // Already under its week folder: nothing to file.
         let err = week_filing(&conn, 4, &class_dir, &dest).err().expect("already there");
         assert!(format!("{err:#}").contains("already under"), "{err:#}");
         // A week the course does not declare, and a name carrying none.
@@ -2191,14 +2685,15 @@ mod tests {
         let err = week_filing(&conn, 4, &class_dir, "Slides/deck.pdf").err().expect("no week in name");
         assert!(format!("{err:#}").contains("carries no week"), "{err:#}");
 
-        // Two files, one name, one week: the second collides once the first
-        // is filed, and is refused rather than written.
+        // Two files, one name, one week: the second collides with the first
+        // now filed, and is refused rather than moved beside it.
         fs::create_dir_all(class_dir.join("Readings")).expect("readings");
         fs::write(class_dir.join("Readings/CAI6734_Week2_Foundations.pdf"), "%PDF").expect("twin");
         let err = week_filing(&conn, 4, &class_dir, "Readings/CAI6734_Week2_Foundations.pdf")
             .err()
             .expect("the destination is taken");
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert!(class_dir.join("Readings/CAI6734_Week2_Foundations.pdf").is_file(), "refused, not moved");
         // Under the week folder at any depth: the division counts it there.
         fs::create_dir_all(class_dir.join("Weeks/Week 02/Extra")).expect("extra");
         fs::write(class_dir.join("Weeks/Week 02/Extra/CAI6734_Week2_Notes.pdf"), "%PDF").expect("nested");
@@ -2217,27 +2712,27 @@ mod tests {
         fs::remove_file(class_dir.join("Slides/deck.pdf")).expect("gone");
         let err = week_filing(&conn, 4, &class_dir, "Slides/deck.pdf").err().expect("gone");
         assert!(format!("{err:#}").contains("not on disk"), "{err:#}");
-        // A second click refreshes the pending row rather than stacking one.
+        // A file another route's card holds is the reader's own ask, refused
+        // by name rather than moved from under it.
         fs::write(class_dir.join("Slides/CAI6734_Week3_Deck.pdf"), "%PDF").expect("week 3 deck");
-        for _ in 0..2 {
-            week_filing(&conn, 4, &class_dir, "Slides/CAI6734_Week3_Deck.pdf").expect("proposed");
-        }
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM move_proposals
-                 WHERE class_id = 4 AND source_rel_path = 'Slides/CAI6734_Week3_Deck.pdf' AND status = 'pending'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("count");
-        assert_eq!(pending, 1, "one pending row per source");
+        conn.execute(
+            "INSERT INTO move_proposals (class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
+             VALUES (4, 'Slides/CAI6734_Week3_Deck.pdf', 'Decks/CAI6734_Week3_Deck.pdf', 'asked in chat', 'chat', 'pending', 0)",
+            [],
+        )
+        .expect("chat card");
+        let err = week_filing(&conn, 4, &class_dir, "Slides/CAI6734_Week3_Deck.pdf").err().expect("chat holds it");
+        assert!(format!("{err:#}").contains("from chat"), "{err:#}");
+        assert!(class_dir.join("Slides/CAI6734_Week3_Deck.pdf").is_file());
         let _ = fs::remove_dir_all(&root);
     }
-    /// SPEC §10: a folder named for a week files what it holds — one card per
-    /// file, under the folder's own name inside the week folder, all or none —
-    /// while `Weeks/`, a week folder and an empty folder are refused.
+
+    /// SPEC §10: a folder named for a week files what it holds by one click —
+    /// every file under it moved to the folder's own name inside the week
+    /// folder as one batch, all or none on the validation — while `Weeks/`,
+    /// a week folder and an empty folder are refused.
     #[test]
-    fn a_folder_named_for_a_week_files_its_contents_one_card_per_file() {
+    fn a_folder_named_for_a_week_files_its_contents_as_one_batch() {
         let root = std::env::temp_dir().join(format!("classhub-folder-filing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let conn = crate::db::memory_db();
@@ -2250,62 +2745,83 @@ mod tests {
         )
         .expect("week");
         let folder = "Coding Material/Week 3 Coding Material";
-        for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", "R/deep/helpers.R", ".DS_Store"] {
-            let path = class_dir.join(folder).join(file);
-            fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-            fs::write(path, "x").expect("file");
-        }
+        let seed = |class_dir: &Path| {
+            for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", "R/deep/helpers.R", ".DS_Store"] {
+                let path = class_dir.join(folder).join(file);
+                fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+                fs::write(path, "x").expect("file");
+            }
+        };
+        seed(&class_dir);
         // A symlink inside the folder — to a file and to a folder outside the
-        // class — is skipped the way the walk skips it, so neither earns a card.
+        // class — is skipped the way the walk skips it, so neither moves.
         fs::write(root.join("outside.R"), "y <- 2").expect("outside file");
         fs::create_dir_all(root.join("outside-dir")).expect("outside dir");
         fs::write(root.join("outside-dir/inner.R"), "z <- 3").expect("outside inner");
         std::os::unix::fs::symlink(root.join("outside.R"), class_dir.join(folder).join("link.R")).expect("link");
         std::os::unix::fs::symlink(root.join("outside-dir"), class_dir.join(folder).join("Linked")).expect("dir link");
 
-        let filed = week_filing(&conn, 3, &class_dir, folder).expect("proposed");
-        assert_eq!(filed.cards, 4);
+        let filed = week_filing(&conn, 3, &class_dir, folder).expect("filed");
+        assert_eq!((filed.moved, filed.audit_ids.len()), (4, 4));
         let dest = filed.dest_rel;
         assert_eq!(dest, "Weeks/Week 03 — Data Quality/Week 3 Coding Material");
+        for file in ["intro.Rmd", "intro.html", "R/sketchpad.R", "R/deep/helpers.R"] {
+            assert!(class_dir.join(&dest).join(file).is_file(), "{file} moved");
+            assert!(!class_dir.join(folder).join(file).exists(), "{file} left");
+        }
+        assert!(class_dir.join(folder).join("link.R").symlink_metadata().is_ok(), "the symlink stays");
         let mut stmt = conn
             .prepare(
-                "SELECT source_rel_path, dest_rel_path, source, reasoning FROM move_proposals
-                 WHERE class_id = 3 AND status = 'pending' ORDER BY source_rel_path",
+                "SELECT source_rel_path, dest_rel_path, source, status, reasoning FROM move_proposals
+                 WHERE class_id = 3 ORDER BY source_rel_path",
             )
             .expect("stmt");
-        let rows: Vec<(String, String, String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        let rows: Vec<(String, String, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
             .expect("rows")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        assert_eq!(rows.len(), 4, "one card per file, none for the dot-entry or the symlinks: {rows:?}");
+        assert_eq!(rows.len(), 4, "one row per file, none for the dot-entry or the symlinks: {rows:?}");
         // Two levels deep, the path inside the folder is kept whole.
         assert_eq!(rows[0].0, format!("{folder}/R/deep/helpers.R"));
         assert_eq!(rows[0].1, format!("{dest}/R/deep/helpers.R"));
         assert_eq!(rows[1].1, format!("{dest}/R/sketchpad.R"));
         assert_eq!(rows[3].0, format!("{folder}/intro.html"));
         assert_eq!(rows[3].1, format!("{dest}/intro.html"));
-        assert!(rows.iter().all(|r| r.2 == "by_name"));
-        // The reason names the week folder, which is true of the nested card too.
+        assert!(rows.iter().all(|r| r.2 == "by_name" && r.3 == "approved"));
+        // The reason names the week folder, which is true of the nested file too.
         assert!(
-            rows[0].3.contains("named for Week 3")
-                && rows[0].3.contains("Under Weeks/Week 03 — Data Quality,")
-                && rows[0].3.contains("sources of Week 3 — Data Quality"),
+            rows[0].4.contains("named for Week 3")
+                && rows[0].4.contains("Under Weeks/Week 03 — Data Quality,")
+                && rows[0].4.contains("sources of Week 3 — Data Quality"),
             "{}",
-            rows[0].3
+            rows[0].4
         );
+        // One batch: every audit row carries the same batch id.
+        let batches: Vec<String> = conn
+            .prepare("SELECT DISTINCT json_extract(payload, '$.batch') FROM audit_log WHERE action = 'sort.move'")
+            .expect("stmt")
+            .query_map([], |r| r.get(0))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(batches.len(), 1, "{batches:?}");
 
-        // A collision at one destination refuses the click and writes nothing.
+        // A collision at one destination refuses the click and moves nothing.
         conn.execute("DELETE FROM move_proposals", []).expect("clear");
+        fs::remove_dir_all(class_dir.join(&dest)).expect("clear the filed copies");
         fs::create_dir_all(class_dir.join(&dest)).expect("dest dir");
         fs::write(class_dir.join(&dest).join("intro.Rmd"), "already here").expect("collision");
+        seed(&class_dir);
         let err = week_filing(&conn, 3, &class_dir, folder).err().expect("collision");
         assert!(format!("{err:#}").contains("intro.Rmd") && format!("{err:#}").contains("already exists"), "{err:#}");
-        let pending: i64 = conn
-            .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
+        assert!(class_dir.join(folder).join("R/sketchpad.R").is_file(), "a refused click moved a file");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM move_proposals", [], |r| r.get(0))
             .expect("count");
-        assert_eq!(pending, 0, "a refused click wrote cards");
-        fs::remove_file(class_dir.join(&dest).join("intro.Rmd")).expect("clear collision");
+        assert_eq!(rows, 0, "a refused click wrote rows");
+        fs::remove_dir_all(class_dir.join(&dest)).expect("clear collision");
+        fs::remove_dir_all(class_dir.join(WEEKS_DIR)).expect("clear the week folder");
 
         // A file under the folder holding chat's card is the reader's own ask,
         // named rather than retargeted; the card keeps its destination.
@@ -2327,24 +2843,6 @@ mod tests {
         assert_eq!((pending, chat_dest.as_str()), (1, "Slides/intro.Rmd"), "the chat card was touched");
         conn.execute("DELETE FROM move_proposals", []).expect("clear");
 
-        // Two folders sharing a leaf name claim one destination: the second
-        // click is refused now, naming the first, not at its approval.
-        week_filing(&conn, 3, &class_dir, folder).expect("proposed again");
-        let twin = "Labs/Week 3 Coding Material";
-        fs::create_dir_all(class_dir.join(twin)).expect("twin");
-        fs::write(class_dir.join(twin).join("intro.Rmd"), "x").expect("twin file");
-        let err = week_filing(&conn, 3, &class_dir, twin).err().expect("destination claimed");
-        assert!(
-            format!("{err:#}").contains("already proposed for") && format!("{err:#}").contains(folder),
-            "{err:#}"
-        );
-        let pending: i64 = conn
-            .query_row("SELECT COUNT(*) FROM move_proposals WHERE status = 'pending'", [], |r| r.get(0))
-            .expect("count");
-        assert_eq!(pending, 4, "the twin's click wrote cards");
-        conn.execute("DELETE FROM move_proposals", []).expect("clear");
-        fs::remove_dir_all(class_dir.join("Labs")).expect("drop twin");
-
         // Where filing lands is never filed, nor is the inbox itself; a folder
         // under its week folder is already counted; a folder with nothing in it
         // has nothing to file; a week the course lacks has no folder.
@@ -2354,6 +2852,7 @@ mod tests {
         fs::write(class_dir.join("Labs/Week 17 Coding/lab.R"), "x").expect("week 17 file");
         let err = week_filing(&conn, 3, &class_dir, "Labs/Week 17 Coding").err().expect("no week 17");
         assert!(format!("{err:#}").contains("declares no week 17"), "{err:#}");
+        week_filing(&conn, 3, &class_dir, folder).expect("filed again");
         let err = week_filing(&conn, 3, &class_dir, WEEKS_DIR).err().expect("Weeks");
         assert!(format!("{err:#}").contains("where lectures are filed"), "{err:#}");
         let err = week_filing(&conn, 3, &class_dir, "Weeks/Week 03 — Data Quality").err().expect("week folder");
@@ -2771,5 +3270,75 @@ mod tests {
         let (written, card) = propose(4, "CAI6734_Week5_Twin.pdf");
         assert!(written.is_none() && card.is_none(), "a claimed destination stays loose");
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod auto_filing_tests {
+    use super::*;
+
+    fn slot(week: i64, folder: &str) -> crate::units::WeekSlot {
+        crate::units::WeekSlot {
+            week,
+            folder: folder.to_string(),
+            unit_id: 10 + week,
+            unit_name: format!("Week {week} — Topic"),
+            unit_kind: "week".to_string(),
+            meets_on: None,
+        }
+    }
+
+    /// The week word files, Canvas's week folder files under its own name,
+    /// Canvas's plain folder is the destination, a module reading keeps its
+    /// card, and a loose file whose name reads nothing keeps its sort job.
+    #[test]
+    fn where_a_staged_file_goes() {
+        let slots = [slot(3, "Week 03 — Data"), slot(4, "Week 04 — Probability")];
+        let canvas = "Canvas files it under \"Reading Material\"";
+        match auto_filing(&slots, true, "Week 4 Reinhold.pdf", Some("Reading Material/Week 4 Reinhold.pdf"), canvas) {
+            AutoFiling::Filed { dest_rel, reasoning } => {
+                assert_eq!(dest_rel, "Weeks/Week 04 — Probability/Week 4 Reinhold.pdf");
+                assert!(reasoning.contains("its name carries Week 4"), "{reasoning}");
+                assert!(reasoning.contains("Week 4 — Topic"), "{reasoning}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let folder = "Canvas files it under \"Week 3 Coding Material\"";
+        match auto_filing(&slots, true, "intro.html", Some("Week 3 Coding Material/intro.html"), folder) {
+            AutoFiling::Filed { dest_rel, reasoning } => {
+                assert_eq!(dest_rel, "Weeks/Week 03 — Data/Week 3 Coding Material/intro.html");
+                assert!(reasoning.contains("a folder named for Week 3"), "{reasoning}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let quizzes = "Canvas files it under \"Quizzes\"";
+        assert_eq!(
+            auto_filing(&slots, true, "Quiz 1.pdf", Some("Quizzes/Quiz 1.pdf"), quizzes),
+            AutoFiling::Filed {
+                dest_rel: "Quizzes/Quiz 1.pdf".to_string(),
+                reasoning: "Canvas files it under \"Quizzes\".".to_string(),
+            }
+        );
+        // A week the course does not declare yields to the folder, and then
+        // to Canvas's placement.
+        assert_eq!(
+            auto_filing(&slots, true, "Week 9 notes.pdf", Some("Slides/Week 9 notes.pdf"), "Canvas files it under \"Slides\""),
+            AutoFiling::Filed {
+                dest_rel: "Slides/Week 9 notes.pdf".to_string(),
+                reasoning: "Canvas files it under \"Slides\".".to_string(),
+            }
+        );
+        assert_eq!(
+            auto_filing(&slots, true, "Biostatistics_Module3_Slides.pptx", Some("Slides/Biostatistics_Module3_Slides.pptx"), "x"),
+            AutoFiling::ModuleCard
+        );
+        assert_eq!(auto_filing(&slots, true, "parking.pdf", None, "x"), AutoFiling::Loose);
+        match auto_filing(&slots, false, "Week3 fixture.csv", None, "x") {
+            AutoFiling::Filed { dest_rel, reasoning } => {
+                assert_eq!(dest_rel, "Weeks/Week 03 — Data/Week3 fixture.csv");
+                assert!(reasoning.starts_with("Canvas keeps it in no folder."), "{reasoning}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

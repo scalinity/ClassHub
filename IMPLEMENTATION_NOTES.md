@@ -5289,3 +5289,256 @@ should know:
   a blank line: `sed '$ d'` removes the blank line, not the brace. Check
   the tail with `od -c` first, or use the Edit tool on the last test's
   closing lines.
+
+## M33 — One click, and undo (2026-09-08)
+
+### Phase 0 — measured
+
+Nothing spent. Against a `.backup` copy of the live database taken at 11:46
+(`user_version` 15, 38 file rows, 185 audit rows, jobs at 318, none active,
+5 move cards and 19 deadline proposals pending, 39 deadlines, 4 contributions,
+10 guides, no dev build running, the installed app cc026f7) and the code at
+cc026f7:
+
+- **The audit actions in use**: 29, one more than the brief's Sept 4 count
+  (`canvas.link_deadline` is not among them yet; `canvas.upsert_grade_item`,
+  `canvas.insert_deadline` and `library.*` are). What carries enough to
+  reverse: `sort.move` (`from`, `to`, `proposalId`, `proposedBy`, 41 rows);
+  `ui.write_note` and `chat.write_note` (`previousContent`, null on a
+  create); `ui.upsert_deadline` and `chat.upsert_deadline` (the row on a
+  create, `before`/`after` on an edit); `ui.delete_deadline` and
+  `chat.delete_deadline` (the row, without its Canvas id);
+  `ui.set_deadline_status` (`id`, the new `status` — the previous is the
+  other one); `chat.complete_deadline` (`id`); `ui.save_grade_item` and
+  `ui.save_grade_category` (the row on a create, `before`/`after` on an
+  edit); `ui.delete_grade_item` (the row); `chat.add_grade_item` (the row);
+  `syllabus.insert_deadline` (`deadlineId`, `proposalId`, 48 rows);
+  `syllabus.set_grade_weight` (`before`/`after` when filled). What does not:
+  `chat.upsert_grade_category` (the row after, `previousWeight` on an
+  update, no created flag); `canvas.complete_deadline`,
+  `canvas.insert_deadline`, `canvas.upsert_grade_*` (a sync redoes them);
+  `canvas.staged_file` (a download); `lecture.added`, `job.out_of_contract`,
+  `library.*`, `sort.proposal_vanished`, `ui.set_job_concurrency`.
+- **The pending move cards**: five, every one a Canvas placement with the
+  file in `_Inbox/` and `confidence` NULL — Design Studio 25 and 27 toward
+  `AI Design Project/`, 50 toward `2 HiPerGator/`, Biostatistics 52 toward
+  `Quizzes/` and 53 toward `Reading Material/`. One offers a week
+  alternative, 53, by the week word in its name (`Week 4 2012 Reinhold …`);
+  none by folder or module; no sort card, no loose file. Under the Phase 2
+  rule 53 files into `Weeks/Week 04 — …/` and the other four into their
+  Canvas folders.
+- **`deadlines.due_at` by shape**: 22 date-only, 17 with a time, as
+  expected. Every comparison in Rust is text: `ORDER BY due_at` in
+  `db::list_classes` (the card's next deadline), `deadlines::list_deadlines`
+  and the chat overview's open list, and `substr(due_at, 1, 10)` day
+  matches in `guides::assessment_block` and the `(title, day)` claims. In
+  TypeScript every reading is `daysUntil`, whole days between local
+  midnights: a date-only row due today reads `today` at noon and at 23:59,
+  and `overdue since` the next morning — the brief's premise does not hold
+  in the UI — while a timed row that passed this afternoon also reads
+  `today at 5:00 pm`, and Rust's text sort puts `2026-09-08` before
+  `2026-09-08T11:59`. The one rule to write is the instant, on both sides.
+- **The twelve `Live coding session MM/DD` proposals**: rows 44–55 of class
+  1, all Tuesdays, Sept 8 through Dec 1, date-only, source `syllabus`,
+  created by job 298 (Sept 3); its log carries each of the twelve as its
+  own entry in the scan's JSON. The other seven pending: `Homework #1`
+  (canvas, class 1, Sept 7 23:59, beside the syllabus's open `Homework 1`
+  on the same day under a title that differs by the `#`), `Form Teams`
+  (syllabus, class 2, Sept 2, past), two Canvas cards for Design Studio and
+  three for Biostatistics.
+- **Duplicate hashes within a class**: one pair, Biostatistics files 1
+  (`Module 1/Reading Material/Week 1/The-Role-of-Statistics-…pdf`, depth 3,
+  indexed Aug 16) and 30 (`Reading Material/Week 1 The-Role-of-Statistics-
+  …pdf`, depth 1, Sept 2), 157,285 bytes, both extracted. Neither sits
+  under `Weeks/`, so no division lists it; the master's set and the
+  `Module 1` folder guide's are where it is read twice. The brief's rule
+  makes 30 canonical.
+- **The `opacity-0` controls**, eleven sites: `ClassWorkspace` (`Distill`
+  on a pending transcript, a managed row's action — `Distill again`),
+  `FileTree` (a file row's cluster: `File under Week NN`, Show in Finder,
+  Open; a folder row's filing cluster; the folder guide's rewrite icon),
+  `Deadlines` (edit and delete), `Grades` (a category's add, edit and
+  delete; an item's edit and delete), `PracticeAction` (`Practice exam`
+  where not standing), `Structure` (`Write guide` and the rewrite icon).
+- **The unused dependencies**: `clsx` and `tailwind-merge` are imported by
+  `cn()` in `src/lib/utils.ts` alone, which nothing imports (`sentence` is
+  what the six importers take); `class-variance-authority` and `radix-ui`
+  appear nowhere under `src/`. `tw-animate-css` is imported by `index.css`
+  and `shadcn` is the CLI `components.json` is for; both stay.
+
+### What was built
+
+- **Undo** (`undo.rs`, `db.rs`). `audit` returns the row's id and `notify`
+  emits a `notice` event with the text and the rows it wrote, so a command, a
+  chat tool and the sync reach one notice. `undo_audit(ids)` reverses the rows
+  newest first, dispatching on the action to an inverse in the module that
+  wrote it — `deadlines::undo_upsert`, `undo_delete`, `undo_status`,
+  `undo_insert`; `notes::undo_write`; `grades::undo_save_category`,
+  `undo_delete_category`, `undo_save_item`, `undo_delete_item`;
+  `sorter::undo_move` — each inside one transaction with its `undo.<action>`
+  row naming the row it reversed, a row already reversed or without an inverse
+  refused by name while the rest of the batch runs. What the rows now carry
+  for it: a status write's `before`, a delete's Canvas id, a note save's
+  `contentSha256`, a chat category's `before`/`created`, a move's
+  `createdDirs`. The guard's `APP_MOVES` names the four move actions and the
+  two undo note writes.
+- **Filing without a card** (`sorter.rs`, `canvas_sync.rs`). `move_file` is
+  the one path — the last checks, the rename, `record_move` with its
+  `Recorded` (proposal, source, action, extra payload) — under an approval
+  (`approve_in_conn`), `approve_all` (one batch, one notice), a by-name click
+  (`file_under_week`: a file's move, or a folder's batch after every
+  destination is validated, an approved `by_name` row for the record), and the
+  sync's placement (`file_now`, action `canvas.filed`). `auto_filing` is the
+  pure rule — the week word, Canvas's week folder, Canvas's folder; a module
+  reading keeps its card; a loose file keeps its sort job — and `sync_files`
+  files the cards an earlier sync left first (`file_waiting_cards`), then each
+  download through `record_landed`, rescans and runs the pipeline for a class
+  it moved files for, and emits one notice per class. A destination already
+  taken lands at the next free name (`beside_taken`). `indexed_files` reads a
+  ` (2)` copy under its plain name too.
+- **Canvas assignments are deadlines** (`deadlines.rs`, `canvas_sync.rs`).
+  `insert_canvas_deadline` writes the row directly (`canvas.insert_deadline`),
+  done at once on a submission, resolving a waiting Canvas card and honouring
+  a declined one (`DirectWrite`); `settle_canvas_deadline` resolves a card for
+  an assignment the list now tracks; `SAME_TITLE_AND_DAY` compares titles with
+  `#` dropped. `ClassOutcome.deadlines_recorded` and `files_filed` replace
+  the proposed count, and the report says `N deadlines recorded · N files
+  filed`.
+- **The series** (`deadlines.rs`). `queue` returns the cards and `series_of`
+  over them — `title_stem`, kind, source and chrono's weekday, three or more
+  dates — as `DeadlineQueue`; `approve_proposals` runs a batch under one id
+  and one notice (`Added 12 dates of Live coding session`), `dismiss_proposals`
+  is the series' Skip.
+- **The instant** (`deadlines.rs`, `schedule.ts`). `DUE_INSTANT_SQL` orders
+  the card's next deadline, the tab's listing and the chat overview;
+  `due_instant` is its test-pinned twin. `dueInstant` and `isOverdue` decide
+  `overdue` on the strip, the tab, the card and the label.
+- **Duplicates** (migration 0016, `scanner.rs`, `extract.rs`, `tools.rs`).
+  `mark_duplicates` runs once the vanished rows are gone — `canonical_index`
+  picks the copy under `Weeks/`, then the shallower, then the older — and
+  `mark_tree` names it on the node; `stale_files`, `current_manifest`,
+  `folder_manifest` and the contributions join skip a marked row;
+  `search_material` drops a hit in a duplicate's extract and `list_material`
+  names the canonical copy.
+- **A refused extract** (`extract.rs`, `jobs.rs`). A failed extract whose
+  error is the content filter (`refused_by_filter`) records what the run did
+  write and marks the rest attempted at their hash with no extract
+  (`record_refusal`, `mark_attempted`), the job's error naming them.
+- **The frontend**. `notices.ts` keeps the last eight notices and the toast;
+  `NoticeToast.tsx` is the card at the bottom-left with `Undo` and the
+  `NoticeLine` the Job Center's `Recent actions` list reuses. `InboxQueue`
+  offers `Approve all N`; `Deadlines` reads the queue, renders a `SeriesCard`
+  (`Add the series` / `Skip`) and hides its members from the singles;
+  `FileTree`'s `File under Week NN` is the move (`fileUnderWeek`) and a
+  duplicate's row reads `Duplicate of <path>` with Show in Finder alone; every
+  `opacity-0` cluster is gone from `FileTree`, `ClassWorkspace`, `Deadlines`,
+  `Grades`, `Structure` and `PracticeAction`; the nav gates `Structure`,
+  `Deadlines`, `Grades`, `Materials`, `Lectures` and `Notes` on their queries
+  and leads with `Semester master`, whose strip carries `id="master"`.
+  `cn()`, `clsx`, `tailwind-merge`, `class-variance-authority` and `radix-ui`
+  are gone. The sync report reads `deadlines recorded` and `files filed`.
+- SPEC §4, §5, §6, §7 steps 1 and 3, §7.2, §9, §10, §11, §12, §13 and §14
+  state the design.
+
+### Verified
+
+- `cargo test`: 277 pass, fourteen new — the due instant and its SQL twin's
+  order; the series grouping (three dates group, two do not, a Wednesday
+  splits, a thirteenth joins) and the title stem; the canonical choice and a
+  scan's marking and clearing with the master's and a folder's set; the
+  filing rule's five answers; the by-name click as a move and a folder's
+  batch with their refusals, rewritten from the card tests; the undo of every
+  deadline row and its refusal a second time, a syllabus insert returning its
+  card with a Canvas row and a `lecture.added` row refused, the grade rows
+  with a category holding scores and an old chat row refused, a note save
+  refused over a later edit or a row without its hash, a move returned and
+  refused over a taken source with a by-name row dismissed, a placement
+  returned to the inbox with its card pending and its created folder gone;
+  a refused extract not retried until it changes; a settled assignment
+  resolving its card; a ` (2)` copy read under its plain name. `npx tsc
+  --noEmit` clean.
+- **Live on the dev build**, beside the installed app cc026f7, migration
+  0016 applied at launch (`user_version` 16) and the launch scan marking file
+  1 a duplicate of file 30. On Biostatistics, with the rows' actions visible
+  without hover and the nav reading `Semester master · Inbox · Notices ·
+  Structure · … · Notes`: a `Week03 fixture.csv` at the class root offered
+  `File under Week 03`; one click moved it under the Week 03 folder with
+  audit row 186 (`sort.move`, `proposedBy: by_name`), an approved by-name
+  row, and the notice `Filed Week03 fixture.csv under Weeks/Week 03 — …/`
+  with `Undo` (captured); `Undo` from the Job Center's list moved it back
+  with row 187 (`undo.sort.move`), the row dismissed and the index row
+  following. A `Week 3 fixtures/` folder of two `.csv` files moved as one
+  batch (rows 188–189 under one batch id, `Filed 2 files under …/Week 3
+  fixtures/`) and one `Undo` returned both (rows 190–191, `Undone: 2
+  actions`). On Fundamentals the queue read `Live coding session · 12 dates`
+  over `Add the series` and `Skip`, with `Add all 12` skipping the one past
+  date; `Add the series` wrote twelve rows (192–203, one batch,
+  the tab `20 open`, `Added 12 dates of Live coding session`), and `Undo`
+  removed the twelve and returned the cards pending. A fixture deadline dated
+  today with no time, typed by keystroke, read `today` on the tab and sat in
+  the strip at 12:30 (row 216); edited to yesterday it read `overdue since
+  Sep 7` (row 217); deleted (218), `Undo` restored it under its id (219), and
+  it was deleted again. The duplicate reading's row read `Duplicate of
+  Reading Material/Week 1 The-Role-…pdf`, the master's set holds it once, and
+  the Module 1 folder guide's delta dropped it (`2 files added, 2 changed, 1
+  removed`). `Sync all classes` from Settings filed the five waiting Canvas
+  cards and one new download in one pass — Design Studio's three into `AI
+  Design Project/` and `2 HiPerGator/`, Biostatistics' quiz into `Quizzes/`,
+  the Week 4 reading into a new `Weeks/Week 04 — Probability and Sampling
+  Distributions/`, the notebook under the Week 3 folder by Canvas's week
+  folder — with `canvas.filed` rows 226–228 and 234–236 whose reasons read
+  `Canvas files it under "Reading Material", and its name carries Week 4.
+  Under Weeks/Week 04 — …`, two notices (`Filed 3 Biostatistics for AI files
+  where Canvas keeps them`, the same for Design Studio), the report `2
+  deadlines recorded · 1 deadline done · 3 files filed` and `3 … · 2 … · 3`,
+  five deadlines written directly (223, 225, 229, 230, 232, three of them done
+  at once by their submissions), the syllabus's `Homework 1` linked to
+  Canvas's `Homework #1` and done (221–222), the six Canvas cards resolved,
+  and the extract pipeline run for both classes. `Approve all 2` over two
+  fixture cards in the Biostatistics inbox moved both under one batch
+  (239–240) and one `Undo` returned both with their cards pending (241–242).
+  After the refusal fix, a relaunch's extract (job 326) recorded the quiz's
+  extract and marked the Week 4 reading attempted, and a Rescan enqueued
+  nothing.
+- Session cost, all on the subscription: the Design Studio extract $1.47
+  (job 319, two PDFs), the Biostatistics runs $0.31, $0.14 and $0.14 (320,
+  321, 326, each refused), and four runs the relaunches interrupted or the
+  cancel ended (322–325, no total logged). No chat turn, nothing on credits.
+
+### Left as it is
+
+- The Fundamentals card for `Homework #1` (proposal 41) stays pending until
+  the next sync settles the assignment again: the settle's card resolution
+  landed after the session's sync.
+- Biostatistics' Week 4 reading (the 2012 Reinhold chapter) has no extract:
+  Claude's content filter refused it on four runs, and it is marked attempted
+  until the file changes; a guide over Week 4 lists it as having no extract.
+  The quiz PDF's extract, written in the same runs, is recorded.
+- The third copy of the Week 3 notebook the sync downloaded this session,
+  byte-identical to the ` (2)` copy the class already held, was removed by
+  hand and its approved Canvas row (57) stays as the record; the ` (2)` rule
+  in `indexed_files` keeps a fourth from arriving.
+- Audit rows from before M33 that carry no earlier state — a chat category
+  update's `previousWeight`, a note save without its hash — are refused by
+  name rather than guessed at; the notice's `Undo` never reaches them.
+- The toast's `Undo` is an `AXButton`; under the AX driver a bare `press
+  'Undo'` finds the Edit menu's item first, so the panel's list is the way.
+- Chat's undo tool (M38) and the shift (M34) stand on the same command.
+
+### Gotchas
+
+- A perl `s|…|…|` with `|` in the replacement spliced `|(action, _)| *action));`
+  and `{|conn| {` into two lines, twice in one session, in `jobs.rs` and
+  `tools.rs`; the Edit tool for anything holding a pipe.
+- Every edit under `src-tauri/` relaunched the dev build, and each launch scan
+  enqueued the extract the content filter refuses: three runs interrupted by
+  the next relaunch (322–324) before the refusal was recorded. Stop the dev
+  build before a run of Rust edits when a scan would enqueue anything.
+- Test fixtures written with one content (`"%PDF"`, `"x"`) are duplicates
+  under the new rule; the walk test's week-named deck lost its week to the
+  copy under `Weeks/` until each file got its own bytes.
+- `mark_duplicates` must run after the vanished rows are deleted, or a copy
+  whose canonical left the tree stays marked for a scan.
+- `press 'Undo'` under the AX driver hits the Edit menu's `AXMenuItem`
+  before the toast's `AXButton`; `AX_NTH` after a dump, or the Job Center's
+  `Recent actions` list once the panel is open.

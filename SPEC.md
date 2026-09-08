@@ -344,8 +344,9 @@ Rules:
 - `Weeks/` is **not** app-managed. A transcript is source material like a slide deck: the
   scanner indexes it, extraction routes it through the zero-token text path, and chat searches
   it. Filing it in the tree is what joins it to the pipeline rather than parking it beside.
-- The app never deletes source files. Moves happen only through the confirmed drop-to-sort flow
-  and are audit-logged.
+- The app never deletes source files. Every move is audit-logged and reversible from the notice
+  that follows it (§6): a file moves through an approved card, a click on its own row, or the
+  sync's placement (§10), and `Undo` puts it back.
 
 ## 5. Data model (SQLite)
 
@@ -368,6 +369,8 @@ files(id INTEGER PK, class_id INTEGER FK, rel_path TEXT, sha256 TEXT, size INTEG
                                            -- caption|media|other, by extension (§7)
       extract_rel_path TEXT NULL, extracted_at INTEGER NULL,
       extracted_sha256 TEXT NULL,          -- hash of source when extract was made
+      duplicate_of TEXT NULL,              -- the canonical copy's rel_path, on a row whose
+                                           -- content another row of the class holds (§7)
       UNIQUE(class_id, rel_path));
 
 jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice|lecture_digest
@@ -469,8 +472,10 @@ grade_items(id INTEGER PK, category_id INTEGER FK, name TEXT,
             graded_at TEXT NULL,
             canvas_assignment_id TEXT NULL);
 
--- The drop-to-sort confirm queue (§10). Nothing here has moved anything;
--- approval is what performs the move.
+-- The drop-to-sort confirm queue (§10), and the record of every move the app
+-- made: a pending row is a card, and a move made without one — a by-name
+-- click, a file the sync placed — writes its row approved, so an undo has a
+-- row to return to pending or dismissed.
 move_proposals(id INTEGER PK, class_id INTEGER FK,
                source_rel_path TEXT,       -- class-relative, exists on disk at proposal time
                dest_rel_path TEXT,         -- class-relative target incl. filename
@@ -481,11 +486,11 @@ move_proposals(id INTEGER PK, class_id INTEGER FK,
                created_at INTEGER, resolved_at INTEGER NULL);
 
 -- The proposed-deadline confirm queue (§11), so proposals survive an app restart
--- between proposal and confirmation. Both readers land here — the syllabus scan
--- and the Canvas sync — and approval carries the row's own `source` and Canvas
--- id onto the deadline. One row per (class, assignment) where the id is set: a
--- moved due date refreshes the card, and a card whose deadline was deleted by
--- hand comes back as the same row. Nothing here has created a deadline.
+-- between proposal and confirmation. A model's reading lands here — the
+-- syllabus scan's — and approval carries the row's own `source` onto the
+-- deadline; a Canvas assignment's own due date is written directly (§7.2), and
+-- a Canvas card left from before is resolved as approved by the sync that
+-- writes it, or stays declined. Nothing here has created a deadline.
 deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
                    due_at TEXT, notes TEXT NULL,
                    status TEXT,            -- pending|approved|dismissed
@@ -577,6 +582,29 @@ claude -p <prompt>
   touched list, while a logged write outside `Study Guides/` and `.classhub/` still fails
   the job. The deny list stays the boundary; the log only says which of the changes inside
   it were the run's. A log that cannot be read leaves the guard strict.
+- **Undo is one command over the audit log.** The rows already hold the before-state of
+  every note, deadline and grade edit and the source and destination of every move, so
+  `undo_audit` reverses a row — or a batch of them, newest first — by dispatching on its
+  action to an inverse in the module that wrote it, inside one transaction with its own
+  `undo.<action>` row naming the row it reversed. A row already reversed, or one no inverse
+  exists for, is refused by name while the rest of the batch still runs. What reverses:
+  `sort.move` and `canvas.filed` (the file moves back through the same rename, its index
+  row and extract following where it stays in the tree; back in the inbox it is unindexed
+  as every inbox file is, and its card returns to pending, while a by-name click's row is
+  dismissed so its Materials row offers again — refused by name when the old path is taken
+  or the file has left the destination, and the folders the move created go once empty);
+  the deadline writes (a created row removed, an edit's `before` restored, a deleted row
+  reinserted under its id, a status put back, a syllabus approval removed with its card
+  returned); the note saves (the replaced content restored, or a created note removed —
+  refused when the note no longer holds what the save wrote, which the row records as a
+  hash, or when the row predates it); and the grade writes (a created row removed, an edit
+  restored, a deleted category reinserted with its scores — a created category holding
+  scores is refused). `canvas.*` deadline and grade rows are not reversible: a sync would
+  redo them, and nothing reopens what Canvas closed (§7.2). The write guard reads an undo's
+  move and note rows the way it reads the app's own (`undo.sort.move`, `undo.canvas.filed`
+  carry the paths of their own move; `undo.*.write_note` the note's path). Every
+  reversible write emits a notice with the rows it wrote (§12), so a command, a chat tool
+  and the sync reach the same `Undo`.
 - **Models**: one global model/effort pair, set in Settings and read at spawn time so a
   change applies to the next job — queued ones included. Defaults to Opus at `xhigh`.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
@@ -616,7 +644,14 @@ agent and synthesis prompts can search text instead of re-reading binaries.
    mirror root — because an extract nothing points at would go on answering chat's search
    for a file that is not there. That holds whether the file was deleted, moved (the walk
    finds its new path as new material) or parked under an app-managed folder; a transcript
-   is settled first (§8.5), and a row a refused settle keeps keeps its extract.
+   is settled first (§8.5), and a row a refused settle keeps keeps its extract. Two rows with
+   one content are one reading: the scan marks the second with the canonical copy's path
+   (`duplicate_of`) — the copy under `Weeks/`, where a division counts it, then the shallower
+   path, then the older row — and a marked row is left out of every scope's sources (a
+   folder's, a division's, the master's), out of the pipeline while it is marked, and out of
+   `search_material`'s results, while the tree still lists it as `Duplicate of <path>` with
+   Show in Finder. A copy whose canonical leaves the tree is canonical from the next scan,
+   and its extract follows.
 2. **Convert**: for `.pptx` files, run
    `soffice --headless --convert-to pdf --outdir <extracts mirror dir> <file>`
    producing `<name>.pptx.pdf`; for `.docx` files the same subprocess with
@@ -637,7 +672,10 @@ agent and synthesis prompts can search text instead of re-reading binaries.
      instructs: read the PDF, produce a faithful markdown extract preserving structure,
      tables, formulas, code; **describe every figure/diagram/chart in brackets**
      (e.g. `[Figure: scatterplot of X vs Y showing positive correlation]`); write to the
-     mirrored extract path.
+     mirrored extract path. A run the model refuses outright — its content filter on a
+     PDF, which a retry cannot pass — records the extracts it did write and marks the rest
+     attempted at their hash with no extract, so the same refusal is not enqueued on every
+     scan; the job's error names them, and a changed file is tried again.
 4. **Record**: update `extract_rel_path`, `extracted_at`, `extracted_sha256`.
 5. **Staleness**: a guide's `source_manifest` is what the job was told about, at the hashes
    captured when it was enqueued, widened at finalize by what the job's own stream log
@@ -879,16 +917,21 @@ higher-precedence source fills a unit's fields in rather than replacing them, be
 tree ever learns where the material sits on disk; a source refreshing its own row replaces its
 dates, so a date the course removed can be cleared.
 
-Assignments become `deadline_proposals` with `source='canvas'`, and their UTC due dates are
-converted through the machine's real timezone (§1). One card per (title, calendar day) whichever
-reader proposed it, and Canvas outranks the syllabus on that card: Canvas returns the
-assignment's own `due_at` while a scan returns a model's reading of prose about it, so a rescan
-never replaces a stated time with a bare date.
+**A dated assignment is its deadline.** The due date is the assignment's own field, so a
+dated assignment no deadline tracks becomes one directly — source `canvas`, keyed on the
+assignment id, its UTC due date converted through the machine's real timezone (§1), with
+`canvas.insert_deadline` as its audit row and done at once where Canvas holds a submission —
+and no card: a Canvas card waiting from before is resolved as approved by the sync that writes
+the deadline, and one declined earlier keeps the assignment off the list, which the report
+says, adding it by hand being the way back. An undated assignment is a line in the report. The
+proposal queue keeps the readings that are a model's, the syllabus scan's, and the badge and
+the chat overview count what still asks.
 
-**A deadline already on the list is tracked by its assignment.** Approval carries the Canvas
-id onto the deadline, and a row the syllabus scan put there before Canvas could — the same
-title on the same calendar day, carrying no id, an open row before a done one — takes the
-assignment's id on first contact, with an audit row of its own, and is found by it after. A
+**A deadline already on the list is tracked by its assignment.** A row the syllabus scan put
+there before Canvas could — the same title on the same calendar day, titles compared with `#`
+dropped so Canvas's `Homework #1` claims the syllabus's `Homework 1`, carrying no id, an open
+row before a done one — takes the assignment's id on first contact, with an audit row of its
+own, and is found by it after; a card waiting for that assignment leaves the queue with it. A
 tracked deadline follows Canvas's due date, with an audit row holding the one it had, and is
 marked done the moment Canvas holds a submission for it, with an audit row naming the
 submission — an assignment Canvas has stopped dating still closes the deadline it is tracked
@@ -951,31 +994,36 @@ wrote — `.classhub/extracts/Canvas/` is the sync's own folder, with no `files`
 into it, which is what keeps this compatible with never deleting source material. The
 syllabus scan's picker offers the mirrored syllabus page as a source when it exists (§11).
 
-Files download into `_Inbox/` and are proposed through the §10 confirm queue, destination taken
-from the folder Canvas keeps them in; where Canvas keeps a file loose, no destination is
-invented: a name that reads a week the course declares — the reading a Materials row takes
-(§10 step 7) — gets the by-name card its row would offer, toward `Weeks/<week folder>/<name>`,
-written at staging time in a sort job's place, since the reading is the row's own and costs
-nothing (Applied's Week 2 notebook came loose on 2026-09-03 and spent a sort job to reach the
-folder its name said); a name that reads none waits for the content-aware sorter, which the
-sync enqueues for those alone, and for a file that downloaded but could not be proposed.
-Declining the by-name card leaves the file for a manual Sort the inbox, which reads it by
-content; no automatic run covers a file whose pending card came from a record, Canvas's or the
-name's, and a sort job's entry never replaces either card. **A sort job
-never replaces a Canvas destination on its own.** Where Canvas filed a file is an observation —
-the professor put it there — and a sort job's destination is an inference from a filename and a
-tree; a file Canvas has placed is out of an automatic sort's scope entirely. A chat move is the
-reader asking, so it retargets. Disagreeing with the placement takes one of three explicit
-routes on the card: "change destination" names the folder directly; **Sort by content**
-runs a sort job over that one file and, because it was asked for, lets the sort's destination
-replace Canvas's, and the card then re-renders as a sort proposal with the Canvas folder named
-in its reasoning, so the professor's placement stays visible; and where the destination names
-a week — in the file's name, a module the course reads as a week, or Canvas's own folder —
-the card also offers the week folder as its alternative destination, `File under Week NN`,
-the destination the file's row would offer once it landed where Canvas put it (§10 step 8),
-so the week's material reaches its division in one approval instead of two. Explicit, never
-heuristic: for every file nobody asked about, Canvas's placement still outranks a content
-guess.
+Files download into `_Inbox/`, and where the destination is an observation the sync files
+them on the spot, no card (§10): to `Weeks/<week folder>/<name>` when the file's own name
+carries a week the course declares — the reading a Materials row takes (§10 step 7); under the
+folder's own name inside the week folder when Canvas's folder carries the week (step 8's folder
+reading); else into Canvas's folder mapped onto the tree's vocabulary. A destination a file of
+that name already occupies is taken at the next free name, as a download lands in the inbox. A
+loose file whose name carries a week is filed by it the same way. The Canvas cards an earlier
+sync left waiting are filed first by the same rule, since a re-sync refreshes a waiting card
+rather than stacking one. Each move writes `canvas.filed` with its reason and the sync's batch
+id, the batch is one notice per class with one `Undo` (§6, §12), and the sync rescans a class
+it moved files for and runs the extract pipeline, so a filed PDF's extract follows its move
+whether or not a workspace is open. What keeps a card: a name that reads a *module* as a week
+(§10 step 7), a reading knowingly wrong on one course, keeps its Canvas card with the week
+alternative; a loose file whose name reads a module gets the by-name card its row would offer;
+a loose file whose name reads nothing waits for the content-aware sorter, which the sync
+enqueues for those alone, and for a file that downloaded but could not be filed or proposed.
+Declining a card leaves the file for a manual Sort the inbox, which reads it by content; no
+automatic run covers a file whose pending card came from a record, and a sort job's entry never
+replaces such a card. **A sort job never replaces a Canvas destination on its own.** Where
+Canvas filed a file is an observation — the professor put it there — and a sort job's
+destination is an inference from a filename and a tree; a file Canvas has placed is out of an
+automatic sort's scope entirely. A chat move is the reader asking, so it retargets. Disagreeing
+with a placement takes an explicit route: `Undo` on the sync's notice returns the file to the
+inbox with its Canvas card pending, and on that card "change destination" names the folder
+directly, **Sort by content** runs a sort job over that one file and, because it was asked
+for, lets the sort's destination replace Canvas's, the card then re-rendering as a sort
+proposal with the Canvas folder named in its reasoning, and where the destination names a week
+the card also offers the week folder as its alternative destination, `File under Week NN`
+(§10 step 8). Explicit, never heuristic: for every file nobody asked about, Canvas's placement
+still outranks a content guess.
 
 Each folder name is mapped onto the vocabulary the tree already uses, so a course calling its
 decks "Lecture Slides" does not earn that class a second folder beside the "Slides" every other
@@ -984,8 +1032,9 @@ stripped — "Week 2 Slides" and "Week 3 Slides" are two folders, and collapsing
 two weeks of material together.
 
 Re-syncing is a no-op: files are matched by name and size against everything the class already
-holds, a proposal already waiting is refreshed rather than stacked, and a download never lands
-on a name the inbox already holds. A file whose size Canvas does not publish is named and
+holds — a copy that landed beside an earlier file as ` (2)` answering for its plain name too —
+a proposal already waiting is refreshed rather than stacked, and a download never lands on a
+name the inbox already holds. A file whose size Canvas does not publish is named and
 skipped, since without it neither the duplicate check nor the size ceiling can do its job.
 
 ## 8. Study guide synthesis
@@ -1296,7 +1345,8 @@ its meetings.
     session documents, guides with freshness, waiting proposals with ids, open deadlines
   - `list_material(class, subpath?)` — tree listing
   - `search_material(query, class?)` — ripgrep over extracts (the mirrored Canvas Pages and
-    syllabus page among them, §7.2), corpus notes, notes, and guides
+    syllabus page among them, §7.2), corpus notes, notes, and guides; a hit in a duplicate's
+    extract is dropped (§7), and `list_material` names the duplicate's canonical copy
   - `read_material(path, offset?, limit?)` — bounded file reads (extracts/notes/guides/text
     sources; never binaries)
 - **Write tools** (Milestone 8):
@@ -1325,9 +1375,15 @@ its meetings.
    and returns strict JSON on stdout:
    `[{file, destination_rel_path, create_folders: [], reasoning, confidence: high|medium|low}]`.
 3. UI renders one proposal card per file: destination path, reasoning, confidence badge,
-   with Approve / Change destination (folder picker) / Leave in inbox.
+   with Approve / Change destination (folder picker) / Leave in inbox, and `Approve all N`
+   over the section while more than one card waits.
 4. On approve, Rust performs the move (creating folders as needed), updates the file index,
-   and writes an `audit_log` entry. No file ever moves without explicit approval.
+   writes an `audit_log` entry and emits a notice with `Undo` (§6, §12); `Approve all` is
+   each card's ordinary approval under one batch id and one `Undo`, a card whose move fails
+   left pending and named. A model's reading — a sort job's card, chat's — never moves a file
+   without approval; a file moves without a card only where its destination is an
+   observation (step 7, and the sync's placement, §7.2), and every such move is undone from
+   its notice in one.
 5. The inbox badge on the class card shows pending count.
 6. A pending proposal whose file is no longer on disk — sorted by hand in Finder, or moved
    from another build's queue — is resolved as dismissed with an audit row
@@ -1342,62 +1398,75 @@ its meetings.
    file whose name carries a module (`Biostatistics_Module3_Slides_class.pptx`): such a
    course — Biostatistics, Fundamentals — numbers its Canvas `Module N` pages by week and
    names its decks for them, so its Module 3 is its Week 3. A folder named for a module is a
-   module's folder (§8.3) and is not read so. The click proposes the move into
-   `Weeks/<week folder>/` with source `by_name` and a reason naming the reading and the
-   division that reads the folder; a folder's click proposes one card per file, each
-   destined for the folder's own name under the week folder, every destination validated
-   before any card is written and the cards written in one transaction, so a collision
-   names the file and writes nothing. The cards are approved one at a time — the price of
-   a confirmation and an audit row per move, so a folder of several files is that many
-   approvals. The card carries a `by name` chip and is approved, redirected or left like
-   any other, and approval is the ordinary move, so the extract travels with the file and
-   nothing is re-extracted. Explicit by design: Canvas may have placed the file where it
-   is (§7.2), an automatic sort never overrides that, and the module reading is not
-   universal — Design Studio's `Module 2` page spans its weeks 2 and 3 — so a wrong
-   reading costs a dismissal, never a move. A row's click takes a file or a folder in the
-   tree, never one in `_Inbox/`, so it never replaces a Canvas card; the one by-name card
-   with an inbox source is the sync's own, for a file Canvas keeps loose (§7.2), which has
-   no Canvas card to replace. A source another
-   route's card already holds — chat's — is refused by name rather than retargeted, and so
-   is a destination another pending card claims. A source already under its week folder,
-   at any depth, is refused, as are `Weeks/` and a week folder, which are where filing
-   lands, and a symlink, which the tree never shows.
- 8. A Canvas card (§7.2) whose destination names a week offers the week folder as a second
-   destination beside Canvas's, read when the queue is listed and never stored: the file's
-   own name first, through the reading step 7 takes — a week, or a module where the course
-   reads modules as weeks — landing at `Weeks/<week folder>/<name>`; else the first folder
-   on Canvas's path whose name carries a week (Design Studio's `Week 1 - Introduction`),
-   landing under that folder's own name inside the week folder, as a folder's click files
-   its contents. The first of those readings that names a week the course declares decides,
-   so a name reading a week the course lacks yields to its folder; none when no reading
-   does, none for a destination already under its week folder, and none for a destination
-   another pending card already claims, which only the second approval could refuse. A
-   destination a file of that name already occupies — a re-upload, as Biostatistics' Week 3
-   coding notebook was on 2026-09-08 — lands beside it at the next free name, ` (2)`, the
-   way a download lands in the inbox, and the reason says the earlier file stays and that the
-   week's guide reads both copies until one is removed — the duplicate is the reader's to
-   settle in Finder, since the app never deletes source material (§4); nothing is
-   overwritten, and the click is not spent on a refusal. A row's own filing of a file
-   already in the tree onto a taken name stays refused: two copies in the tree are the
-   reader's to reconcile, while a re-upload is new material. The
-   card shows both routes, each with its reason — Canvas's, then the by-name card's own —
-   and offers `File under Week NN` beside Approve; the click is the ordinary
-   approval with the week folder as its destination, the folder picker's path, so the move
-   carries its audit row and the file's index row. Canvas's placement stays the default:
-   Approve still takes Canvas's folder, no sort runs, and because nothing is stored on the
-   row, a rescan that records a numbered module withdraws the module reading from every
-   card at once, and a renamed week's folder follows its name.
+   module's folder (§8.3) and is not read so. The click is the move: the file goes into
+   `Weeks/<week folder>/` with an approved `by_name` row for the record, a `sort.move` audit
+   row whose reason names the reading and the division that reads the folder, and a notice
+   whose `Undo` puts it back and offers the row again (§6); a folder's click moves every
+   file under it, each to the folder's own name under the week folder, every destination
+   validated before anything moves so a collision names the file and moves nothing, and the
+   moves are one batch, one notice, one `Undo`. The move is the ordinary one, so the extract
+   travels with the file and nothing is re-extracted. Cheap undo in place of a confirmation:
+   the week in a name is the file's own word, so it files on one click, while the module
+   reading is not universal — Design Studio's `Module 2` page spans its weeks 2 and 3 — and
+   Canvas may have placed the file where it is (§7.2), so a wrong reading costs an `Undo`,
+   never a lost file. A row's click takes a file or a folder in the tree, never one in
+   `_Inbox/`, which is the sync's to place or card (§7.2). A source another route's card
+   already holds — chat's — is refused by name rather than moved from under it, and so is a
+   destination another pending card claims. A source already under its week folder, at any
+   depth, is refused, as are `Weeks/` and a week folder, which are where filing lands, and a
+   symlink, which the tree never shows.
+ 8. The week reading the sync files by (§7.2), and the alternative a Canvas card that stays
+   offers: the file's own name first, through the reading step 7 takes — a week, or a module
+   where the course reads modules as weeks — landing at `Weeks/<week folder>/<name>`; else
+   the first folder on Canvas's path whose name carries a week (Design Studio's `Week 1 -
+   Introduction`), landing under that folder's own name inside the week folder, as a
+   folder's click files its contents. The first of those readings that names a week the
+   course declares decides, so a name reading a week the course lacks yields to its folder,
+   and then to Canvas's placement. The sync files on the week word and the folder reading;
+   the module reading keeps its card, which offers the week folder as a second destination
+   beside Canvas's, read when the queue is listed and never stored — none for a destination
+   already under its week folder, and none for a destination another pending card already
+   claims, which only the second approval could refuse. A destination a file of that name
+   already occupies — a re-upload, as Biostatistics' Week 3 coding notebook was on 2026-09-08
+   — lands beside it at the next free name, ` (2)`, the way a download lands in the inbox,
+   and the alternative's reason says the earlier file stays and that the week's guide reads
+   both copies until one is removed — the duplicate is the reader's to settle in Finder,
+   since the app never deletes source material (§4), and a copy with the same content is
+   marked and read once (§7); nothing is overwritten. A row's own filing of a file already
+   in the tree onto a taken name stays refused: two copies in the tree are the reader's to
+   reconcile, while a re-upload is new material. The card shows both routes, each with its
+   reason — Canvas's, then the by-name card's own — and offers `File under Week NN` beside
+   Approve; the click is the ordinary approval with the week folder as its destination, the
+   folder picker's path, so the move carries its audit row and the file's index row.
+   Canvas's placement stays the default: Approve still takes Canvas's folder, no sort runs,
+   and because nothing is stored on the row, a rescan that records a numbered module
+   withdraws the module reading from every card at once, and a renamed week's folder follows
+   its name.
 
 ## 11. Hub features
 
 - **Schedule**: weekly grid (Mon–Fri) built from `meetings`; today highlighted; "next class"
   chip on the dashboard; exam countdown chips (days until each `final_exam_start`).
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
-  chat tools. A strip chip is the tab's checkbox at chip scale: its click marks the deadline
-  done through the same command, with the same audit row, and the chip stays in the strip as
-  done — a second click reopens it, the way back in place of a confirm — until the dashboard
-  is next opened; the strip and the tab read one query, which the write's push refetches, so
-  they agree the moment either changes. A deadline done anywhere else leaves the strip.
+  chat tools, every write followed by a notice with `Undo` (§6, §12). A strip chip is the
+  tab's checkbox at chip scale: its click marks the deadline done through the same command,
+  with the same audit row, and the chip stays in the strip as done — a second click reopens
+  it, the way back in place of a confirm — until the dashboard is next opened; the strip and
+  the tab read one query, which the write's push refetches, so they agree the moment either
+  changes. A deadline done anywhere else leaves the strip. **A due date names one instant**:
+  a date-only value is the end of its day, a timed one its own time — `due_instant` in Rust,
+  as the SQL expression every `ORDER BY due_at` takes (the card's next deadline, the tab's
+  order, the chat overview), and `dueInstant` in `schedule.ts`, which decides `overdue` on
+  the strip, the tab and the card — so a homework due today with no time reads `today` all
+  day and `overdue since` the next morning, a timed one is overdue once its time has
+  passed, and a date-only row sorts after a timed row on the same day rather than as its
+  midnight. **A series is one card**: pending proposals of one class that share a title
+  stem (the title with its date token dropped — `Live coding session 09/08` is `Live coding
+  session`), a kind, a source and a weekday across three or more dates read as one card,
+  `Live coding session · 12 dates`, with `Add the series`, which inserts them all under one
+  batch and one `Undo`, and `Skip`, which dismisses them all; detected when the queue is
+  listed, never stored, so a rescan that adds a thirteenth date joins the card, and `Add
+  all` covers its dates too.
   **Syllabus extraction**: a `syllabus_scan` job reads a chosen file (or whole
   class folder) once and returns three things as one JSON object: deadlines → confirm cards →
   insert with `source='syllabus'`; the course's own divisions, recorded directly (§7.2); and
@@ -1415,7 +1484,7 @@ its meetings.
   The picker offers the Canvas syllabus page a sync mirrored (§7.2) as `Canvas syllabus page`
   when it exists; today every course's is a one-line link to the PDF already in the tree (§1),
   so a scan of it finds no dates and says so.
-  Proposals still waiting, from either reader, are counted on the class card (`N proposed deadlines`) and
+  Proposals still waiting are counted on the class card (`N proposed deadlines`) and
   in the chat overview, since the queue itself lives inside the workspace. A proposal dated
   before today is tagged `past` and left out of Add all: a past date may be a real deadline
   entered late or a scan misreading last year's syllabus, and only its own card can say, so it
@@ -1497,10 +1566,12 @@ and apply it. Non-negotiable per project owner.
   · Class Workspace (a full-width band in the class wash holding the back link, the class
   name in the display role, the current division in the headline role and one meta row —
   meeting, room, credits, instructors — then a sticky row of section links in the page's own
-  order, Inbox · Notices · Structure · Deadlines · Grades · Materials · Lectures · Flagged ·
-  Practice exams · Notes, each present only while its section is; the sections follow in
-  that order, each a headline with its count in meta and its text actions on the right, rows
-  separated by hairlines because they are a list, and decisions — proposals, forms — as
+  order, Semester master · Inbox · Notices · Structure · Deadlines · Grades · Materials ·
+  Lectures · Flagged · Practice exams · Notes, each present only while its section has
+  content, read off the query the section renders; the sections follow in that order, each
+  a headline with its count in meta and its text actions on the right, rows separated by
+  hairlines because they are a list, every row's actions visible at low emphasis — the muted
+  text and icon controls, never revealed on hover — and decisions — proposals, forms — as
   cards on `--surface`; the `Notices` section lists the professor's Canvas announcements
   newest first, each a title and posting time with the text clamped beneath it until opened,
   absent while there are none; the `Flagged` section lists what the professor flagged
@@ -1521,16 +1592,25 @@ and apply it. Non-negotiable per project owner.
   previews on the page it will be read on; generated guides keep their own design (§8.1).
 - Empty states matter: a class with no modules yet shows a friendly drop-target hero, not a
   blank pane, and every other empty section is one line in the reading role and one action.
+- **A notice follows every reversible action** (§6): a surface card at the bottom-left of
+  the window — what happened in the words the action used (`Filed Week03 fixture.csv under
+  Weeks/Week 03 — …/`, `Filed 3 Biostatistics for AI files where Canvas keeps them`, `Added
+  12 dates of Live coding session`, `Marked Homework 1 done`, `Deleted Quiz 1`) and `Undo`.
+  On the window, not the section, so a batch's notice survives a workspace change; it fades
+  after a while, and the Job Center's panel lists the last few under `Recent actions` with
+  their `Undo`, an undone one reading `Undone ·` and a refused one saying why.
 - A row in Materials offers `File under Week NN` when its name files under a week the
   course declares — a week in the name, or a module where the course reads modules as
-  weeks — and it sits outside that week's folder; a folder's row offers it while the
-  folder holds a file and reads `Proposed · see inbox` once every file under it has a
-  card (§10). The inbox card of a Canvas file whose destination names a week shows the
-  week folder as a second route under Canvas's — `or → Weeks/Week 04 — …/`, the folder
-  dash-underlined while it has yet to be created — its reason under Canvas's, and `File
-  under Week NN` beside Approve, which stays the filled default (§10 step 8).
-  The Add lecture form says when a course declares no weeks and keeps Add lecture off,
-  naming the syllabus scan (§7.1).
+  weeks — and it sits outside that week's folder; the click is the move (§10 step 7), and
+  a folder's row moves what it holds as one batch. A row reads `Proposed · see inbox` while
+  another route's card holds its file. A duplicate's row reads `Duplicate of <path>` in the
+  muted ink with Show in Finder alone (§7). The inbox card of a Canvas file the sync left
+  carded — a module read as a week — shows the week folder as a second route under Canvas's
+  — `or → Weeks/Week 04 — …/`, the folder dash-underlined while it has yet to be created —
+  its reason under Canvas's, and `File under Week NN` beside Approve, which stays the filled
+  default (§10 step 8); the Inbox heading offers `Approve all N` while more than one card
+  waits (§10 step 4). The Add lecture form says when a course declares no weeks and keeps
+  Add lecture off, naming the syllabus scan (§7.1).
 - A stale guide's row says what changed rather than that something did: `Rewrite · 2 files
   added, 1 changed` from the manifest diff (§7 step 5), the noun once on the first count,
   the file names behind it in the tooltip; the guide viewer's chip and a stale exam's read
@@ -1633,8 +1713,18 @@ and apply it. Non-negotiable per project owner.
   sidecar passing, or an anchor no heading answers, is silent until the section opens it),
   the cards file's shape, the scan's objectives and their keep-or-replace on the row (§11),
   the master's roster off `units` (§8.2 — a roster of folder names is silent until the
-  master's map is read), and the exam's assessment block (§8.3). UI and job plumbing are
-  exercised by running the app.
+  master's map is read), the exam's assessment block (§8.3), the due instant and its SQL
+  twin's order (§11 — a date-only row sorted as midnight is silent), the series grouping
+  and the title stem (§11 — three dates grouping, two not, a weekday splitting), the
+  duplicate's canonical choice and a scan's marking and clearing (§7 — a reading read twice
+  is silent until a guide's manifest is read), the sync's filing rule (§7.2 — the week
+  word, the week folder, Canvas's folder, a module reading keeping its card, a loose file
+  keeping its sort job), a by-name click's move and a folder's batch with their refusals
+  (§10), and every undo inverse on fixture rows — a move returned and refused over a taken
+  source, a note refused over a later edit or a row without its hash, a created category
+  refused while it holds scores, a Canvas row refused, a row reversed once (§6 — an undo
+  that overwrote is silent until the file is opened). UI and job plumbing are exercised by
+  running the app.
 
 ## 14. Milestones
 
@@ -1946,7 +2036,7 @@ Mark the checkbox when the acceptance criteria pass.
   names every file its log shows it read, an owner's edit during an extract leaves the job
   succeeded, and the `Flagged` section's anchors open the transcript.
 
-- [ ] **M33 — One click, and undo.** (`milestones/M33-one-click-and-undo.md`)
+- [x] **M33 — One click, and undo.** (`milestones/M33-one-click-and-undo.md`)
   One command reverses an audit row and a notice with `Undo` follows every reversible action.
   On that: a file Canvas placed, or whose own name carries a week the course declares, is filed
   without a card and undone in one; a by-name click is the move, a folder's one batch; `Approve

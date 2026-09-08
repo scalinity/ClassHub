@@ -16,13 +16,15 @@ reading M27 and M28 built and tested. A model's guess (a sort job's card) is the
 "no file ever moves without explicit approval" was written to hold, and it keeps holding it.
 
 The same is true of a Canvas assignment's due date: it is the assignment's own field, and the
-card between it and the deadline list only costs a click. Twelve of the sixteen cards waiting
+card between it and the deadline list only costs a click. Twelve of the nineteen cards waiting
 today are one recurring live-coding session — worth 20% of Fundamentals — split into twelve.
-Deadline dates are stored in two shapes, date-only and date-time, and a date-only row sorts as
-midnight, so a homework due "today" reads as overdue at noon. One Biostatistics reading sits in
-both the old and the new layout, indexed and extracted twice and read twice by every guide that
-lists it. And several of the controls this milestone leans on are hover-revealed at
-`opacity-0`: `Write guide`, `Practice exam`, `Distill`, every row edit.
+Deadline dates are stored in two shapes, date-only and date-time, and nothing reads them by one
+rule: the UI reads both by the day, so a timed deadline that passed this afternoon still reads
+`today`, while Rust sorts the text, so a date-only row lands before a timed row on the same
+day — the card's "next deadline" and the tab's order disagree with the strip. One Biostatistics
+reading sits in both the old and the new layout, indexed and extracted twice and read twice by
+every guide that lists it. And several of the controls this milestone leans on are
+hover-revealed at `opacity-0`: `Write guide`, `Practice exam`, `Distill`, every row edit.
 
 What makes the automatic moves safe is the rule the personal-project philosophy states outright:
 cheap undo replaces a confirmation. The audit log already holds the before-state of every note,
@@ -63,28 +65,38 @@ The findings go in the notes; nothing is changed until they are written down.
 
 ## Phase 1 — Undo
 
-`undo_audit(id)` in `lib.rs`, one command, dispatching on the row's `action` to an inverse in the
-module that wrote it, each inside one transaction with its own audit row `undo.<action>` naming
-the row it reversed:
+`undo_audit(ids)` in `lib.rs`, one command over one audit row or a batch of them, dispatching on
+each row's `action` to an inverse in the module that wrote it, each inside one transaction with
+its own audit row `undo.<action>` naming the row it reversed; a row already reversed, or one no
+inverse exists for, is refused by name and the rest of the batch still runs:
 
-- `sort.move` and the by-name and Canvas approvals (the same action): the file moves back through
-  the same-volume rename with its index row and its extract following, refused by name when the
-  source path is now taken.
+- `sort.move` (an approved card, or a by-name click) and `canvas.filed` (a file the sync placed):
+  the file moves back through the same-volume rename with its index row and its extract following
+  where it stays in the tree, refused by name when the source path is now taken. What the move
+  skipped comes back: an approved or sync-placed file returns to the inbox with its card pending
+  again, so the reader can redirect it or sort it by content, and a by-name click's row offers
+  `File under Week NN` again. A file back in the inbox is unindexed, as any inbox file is, so a
+  second filing extracts it again.
 - `ui.upsert_deadline`, `chat.upsert_deadline`, `ui.delete_deadline`, `chat.delete_deadline`,
   `ui.set_deadline_status`, `chat.complete_deadline`: the row before is restored, or the row
-  created is removed. `syllabus.insert_deadline` and the new direct Canvas rows: removed.
+  created is removed. `syllabus.insert_deadline`: removed, and its card returns to the queue.
 - `ui.write_note`, `chat.write_note`: the replaced content is restored — refused when the note's
-  current content is not what the save wrote, which the payload records from now on as a hash.
-- `ui.save_grade_item`, `ui.save_grade_category`, `chat.add_grade_item`, and the deletes: the row
-  before restored or the row created removed.
-- `canvas.*` rows are not reversible: a sync would redo them, and §7.2's rule that nothing
-  reopens what Canvas closed stands.
+  current content is not what the save wrote, which the payload records from now on as a hash,
+  so a save recorded before the hash existed is refused too.
+- `ui.save_grade_item`, `ui.save_grade_category`, `chat.add_grade_item`,
+  `chat.upsert_grade_category`, and the deletes: the row before restored or the row created
+  removed; a chat category row recorded before it carried its previous state is refused.
+- `canvas.*` deadline and grade rows are not reversible: a sync would redo them, and §7.2's rule
+  that nothing reopens what Canvas closed stands. `canvas.filed` is the one Canvas row that is,
+  because a re-sync matches the returned file by name and size and leaves it to its card.
 
 A notice at the bottom of the window after any reversible action — from the UI, from chat, and
 later from the shift — reading what happened and `Undo`: `Filed 9 files where Canvas keeps
-them · Undo`, `Marked Homework 1 done · Undo`. It fades after a while; the last few stay
-reachable from the Job Center's panel. An undo writes its own audit row, so the write guard
-excludes its move the way it excludes any app move.
+them · Undo`, `Marked Homework 1 done · Undo`. The backend emits it with the audit rows it
+wrote, so every surface that writes — a command, a chat tool, the sync — reaches the same
+notice. It fades after a while; the last few stay reachable from the Job Center's panel. An
+undo writes its own audit row carrying the paths it moved, so the write guard excludes its move
+the way it excludes any app move.
 
 ## Phase 2 — Filing without a card
 
@@ -92,18 +104,23 @@ excludes its move the way it excludes any app move.
 supplies is moved on the spot, not carded: to `Weeks/<week folder>/<name>` when the file's own
 name carries a week the course declares (the reading §10 step 7 takes); under the folder's own
 name inside the week folder when Canvas's folder carries the week (step 8's folder reading);
-else into Canvas's folder mapped onto the tree's vocabulary. A file whose name reads a *module*
-as a week keeps its card with the alternative, as today. A loose file still gets its sort job and
-its card. Each move writes `canvas.filed` with the reason and a batch id; the batch is one notice
-with one `Undo`, which reverses every row of the batch. An approved-PDF's extract follows the
-move as it follows an approval today.
+else into Canvas's folder mapped onto the tree's vocabulary. A destination a file of that name
+already occupies lands beside it at the next free name, as the week alternative does today. A
+file whose name reads a *module* as a week keeps its card with the alternative, as today. A
+loose file whose name carries a week is filed by it the same way; one whose name carries none
+still gets its sort job and its card. The Canvas cards already waiting when the sync runs are
+filed by the same rule first, since a re-sync refreshes a waiting card rather than stacking one.
+Each move writes `canvas.filed` with the reason and a batch id; the batch is one notice per class
+with one `Undo`, which reverses every row of the batch. The sync rescans a class it moved files
+for and runs the extract pipeline, so an auto-filed PDF's extract follows the move as it follows
+an approval today.
 
-**A by-name click is the move.** `propose_week_filing` from a file's row moves the file, with the
+**A by-name click is the move.** `file_under_week` from a file's row moves the file, with the
 audit row and the notice, instead of writing a card that needs a second click; a folder's row
 moves every file under it as one batch, one notice, one `Undo`. The validation is unchanged —
-every destination checked before anything moves, a collision names the file and moves nothing —
-and the chip on the row reads `Filed under Week 03` for the rest of the visit. Chat's
-`propose_file_moves` and the sort job's cards stay cards.
+every destination checked before anything moves, a collision names the file and moves nothing.
+The tree refetches on the move, so the row is found under its week folder; the notice carries
+the word. Chat's `propose_file_moves` and the sort job's cards stay cards.
 
 **Approve all.** The Inbox section offers `Approve all N` over its pending cards, each approval
 the ordinary move with its audit row, all under one batch id and one `Undo`; a card whose
@@ -112,16 +129,21 @@ destination fails validation is left pending and named.
 ## Phase 3 — The calendar's shapes
 
 **One instant for a due date.** A `due_instant(due_at)` in `deadlines.rs` — a date-only value is
-the end of its day — used by every sort, strip window, `overdue` and `next deadline` computation
-in Rust, and its twin in `src/lib/schedule.ts` for the strip and the card; tested on a date-only
-row due today at noon (open, due today), at 23:59:30 (open), and the next morning (overdue).
+the end of its day, a timed one its own time — as one SQL expression every `ORDER BY due_at`
+takes (the card's next deadline, the tab's order, the chat overview), and its twin in
+`src/lib/schedule.ts` deciding `overdue` for the strip, the tab and the card, so a timed
+deadline is overdue once its time has passed and a date-only one only the next morning; tested
+on a date-only row due today at noon (open, due today), at 23:59:30 (open), and the next
+morning (overdue).
 
 **Canvas assignments are deadlines.** A dated assignment becomes or updates its deadline
 directly — source `canvas`, keyed on the assignment id, with the same first-contact claim of a
 syllabus row on the same title and day and the same audit row — and no card; an undated one is
-a line in the sync report. The pending Canvas cards are resolved as approved by the first sync
-that reads their assignments. The proposal queue keeps the syllabus's and, from M35, the
-announcements' readings, which are a model's.
+a line in the sync report. Titles compare with `#` dropped, so Canvas's `Homework #1` claims
+the syllabus's `Homework 1` on Sept 7 rather than standing beside it. The pending Canvas cards
+are resolved as approved by the first sync that reads their assignments; a Canvas card declined
+earlier stays declined, and the report says so. The proposal queue keeps the syllabus's and,
+from M35, the announcements' readings, which are a model's.
 
 **A series is one card.** When pending proposals of one class share a title stem and a weekday
 across three or more dates, the queue shows one card — `Live coding session · 12 dates` — with
@@ -129,22 +151,26 @@ across three or more dates, the queue shows one card — `Live coding session ·
 them all. Detected when the queue is listed, never stored, so a rescan that adds a thirteenth
 date joins the card.
 
-**Duplicates.** Migration `0015`: `files.duplicate_of TEXT NULL`. The scan marks the second of
-two rows sharing a hash within a class — the canonical copy is the one under `Weeks/`, then the
-shallower path, then the older row — and a duplicate is left out of a division's sources, a
-guide's manifest and `search_material`'s results (its extract path excluded from the scope), and
-its row reads `Duplicate of <path>` with `Show in Finder`. The tree never removes it.
+**Duplicates.** Migration `0016` (0015 landed in the Post-M32 pass, for `hints_read_at`):
+`files.duplicate_of TEXT NULL`, the canonical copy's path. The scan marks the second of two rows
+sharing a hash within a class — the canonical copy is the one under `Weeks/`, then the shallower
+path, then the older row — and a duplicate is left out of every scope's sources (a folder's, a
+division's, the master's), out of the extract pipeline while it is marked, and out of
+`search_material`'s results (a hit in its extract is dropped), and its row reads `Duplicate of
+<path>` with `Show in Finder` alone. The tree never removes it, and a copy whose canonical
+leaves the tree is canonical at the next scan.
 
 ## Phase 4 — The controls you never found
 
-The frontend-design skill is read first. Row actions render at low emphasis — the `meta` role in
-the muted ink — instead of `opacity-0`, so `Write guide`, `Practice exam`, `Distill`, `File under
-Week NN` and the edit and delete controls are visible on every row. The semester master strip
-gets its link in the sticky row; `Structure`, `Deadlines`, `Grades`, `Materials`, `Lectures` and
-`Notes` links render only while their sections have content, as `Inbox` and `Notices` already
-do. `cn()` and the four dependencies nothing imports (`clsx`, `tailwind-merge`,
-`class-variance-authority`, `radix-ui`) are removed, `npm run build`'s type check confirming
-nothing needed them.
+The frontend-design skill is read first. Row actions render at low emphasis — the muted text
+and icon controls the rows already use — instead of `opacity-0`, so `Write guide`, `Practice
+exam`, `Distill`, `File under Week NN` and the edit and delete controls are visible on every
+row. The semester master strip gets its link in the sticky row; `Structure`, `Deadlines`,
+`Grades`, `Materials`, `Lectures` and `Notes` links render only while their sections have
+content, as `Inbox` and `Notices` already do. `cn()` and the four dependencies nothing imports
+(`clsx`, `tailwind-merge`, `class-variance-authority`, `radix-ui`) are removed, the gate's
+`tsc --noEmit` confirming nothing needed them; `tw-animate-css` is imported by `index.css` and
+`shadcn` is the CLI behind `components.json`, so both stay.
 
 SPEC §7.2 ("Files download into `_Inbox/` and are proposed…"), §10 step 4 ("No file ever moves
 without explicit approval") and steps 7 and 8, §11 (Canvas proposals) and §12 state what is then
@@ -170,8 +196,10 @@ and undoable, and a model's reading still asks.
   and `Undo` removes them; the next sync leaves them alone.
 - A fixture deadline dated today with no time reads `due today` at any hour of the day and
   `overdue` the next morning, on the strip and the tab.
-- The duplicate reading's second row reads `Duplicate of …`, and the Module 1 division's source
-  list (`unit_context`, not a run) names the reading once.
+- The duplicate reading's second row reads `Duplicate of …`, and the semester master's source
+  set (`current_manifest` for `master`, not a run) names the reading once; neither copy sits
+  under `Weeks/`, so no division ever listed it — the master and the Module 1 folder guide are
+  where it counted twice.
 - Every row action is visible without hover; the master strip has a nav link; `package.json`
   carries no unused dependency and the app builds.
 - SPEC §7.2, §10, §11 and §12 state the design; §14's box is ticked; the notes carry the

@@ -9,6 +9,7 @@ import {
   DEADLINE_KINDS,
   deadlineSourceBadge,
   deleteDeadline,
+  dismissDeadlineProposals,
   getDeadlineProposals,
   listDeadlines,
   resolveDeadlineProposal,
@@ -18,10 +19,11 @@ import {
   type Deadline,
   type DeadlineKind,
   type DeadlineProposal,
+  type DeadlineSeries,
 } from "@/lib/deadlines";
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
-import { daysUntil, dueDayLabel, formatDueDate } from "@/lib/schedule";
+import { daysUntil, dueDayLabel, formatDueDate, isOverdue } from "@/lib/schedule";
 import {
   buttonFilled,
   buttonIcon,
@@ -72,7 +74,7 @@ export function DeadlinesSection({
     queryKey: ["deadlines"],
     queryFn: listDeadlines,
   });
-  const { data: proposals } = useQuery({
+  const { data: queue } = useQuery({
     queryKey: ["deadlineProposals", classId],
     queryFn: () => getDeadlineProposals(classId),
     placeholderData: (prev) => prev,
@@ -104,7 +106,14 @@ export function DeadlinesSection({
   const deadlines = (all ?? []).filter((d) => d.classId === classId);
   const open = deadlines.filter((d) => d.status === "open");
   const done = deadlines.filter((d) => d.status === "done");
-  const cards = (proposals ?? []).filter((p) => !resolvedIds.has(p.id));
+  const cards = (queue?.proposals ?? []).filter((p) => !resolvedIds.has(p.id));
+  // A recurring proposal reads as one card (SPEC §11), shown while none of
+  // its dates has been resolved here; its members leave the singles.
+  const series = (queue?.series ?? []).filter((s) =>
+    s.ids.every((id) => !resolvedIds.has(id)),
+  );
+  const inSeries = new Set(series.flatMap((s) => s.ids));
+  const singles = cards.filter((p) => !inSeries.has(p.id));
   // A date already gone is not what Add all is for: it may be a real deadline
   // entered late, or a scan misreading last year's syllabus, and only its own
   // card can tell. Each stays addable one at a time.
@@ -137,8 +146,12 @@ export function DeadlinesSection({
       });
   };
 
-  const markResolved = (id: number) =>
-    setResolvedIds((prev) => new Set(prev).add(id));
+  const markResolved = (ids: number[]) =>
+    setResolvedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
 
   // One backend call for the batch: a rejected card (e.g. its deadline was
   // added by hand after the scan) costs itself, never the rest, and its
@@ -293,12 +306,20 @@ export function DeadlinesSection({
               </button>
             )}
           </div>
-          {cards.map((proposal) => (
+          {series.map((group) => (
+            <SeriesCard
+              key={group.ids.join("-")}
+              series={group}
+              disabled={addingAll}
+              onResolved={markResolved}
+            />
+          ))}
+          {singles.map((proposal) => (
             <ProposalCard
               key={proposal.id}
               proposal={proposal}
               disabled={addingAll}
-              onResolved={markResolved}
+              onResolved={(id) => markResolved([id])}
             />
           ))}
         </div>
@@ -379,7 +400,7 @@ function DeadlineRow({
 }) {
   const [busy, setBusy] = useState(false);
   const isDone = deadline.status === "done";
-  const overdue = !isDone && daysUntil(deadline.dueAt) < 0;
+  const overdue = !isDone && isOverdue(deadline.dueAt);
   const badge = deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId);
 
   const run = (action: Promise<void>) => {
@@ -426,7 +447,7 @@ function DeadlineRow({
           {badge.label}
         </span>
       )}
-      <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+      <span className="flex shrink-0 items-center gap-0.5">
         <button
           type="button"
           title="Edit deadline"
@@ -571,6 +592,95 @@ function DeadlineForm({
           className={buttonTextMuted}
         >
           Cancel
+        </button>
+      </div>
+      {error && <p className={errorLine}>{error}</p>}
+    </div>
+  );
+}
+
+/**
+ * A recurring proposal as one card (SPEC §11): `Live coding session · 12
+ * dates`, the weekday and the span, with `Add the series` — every date under
+ * one batch and one Undo — and `Skip`, which dismisses them all.
+ */
+function SeriesCard({
+  series,
+  disabled,
+  onResolved,
+}: {
+  series: DeadlineSeries;
+  disabled: boolean;
+  onResolved: (ids: number[]) => void;
+}) {
+  const [busy, setBusy] = useState<"add" | "skip" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const badge = deadlineSourceBadge(series.source);
+  const count = series.ids.length;
+
+  const add = () => {
+    setBusy("add");
+    setError(null);
+    approveDeadlineProposals(series.ids)
+      .then((outcome) => {
+        onResolved(outcome.approved);
+        if (outcome.skipped.length > 0) {
+          setError(`Not added: ${outcome.skipped.join(" · ")}`);
+        }
+        setBusy(null);
+      })
+      .catch((e) => {
+        setError(String(e));
+        setBusy(null);
+      });
+  };
+  const skip = () => {
+    setBusy("skip");
+    setError(null);
+    dismissDeadlineProposals(series.ids)
+      .then(() => onResolved(series.ids))
+      .catch((e) => {
+        setError(String(e));
+        setBusy(null);
+      });
+  };
+
+  return (
+    <div className={decisionCard}>
+      <div className="flex items-start justify-between gap-3">
+        <p className="min-w-0 truncate text-[15px] font-semibold">
+          {series.stem}
+          <span className="font-normal text-muted-foreground"> · {count} dates</span>
+        </p>
+        <span className={chipMuted}>{series.kind}</span>
+      </div>
+      <p className="mt-1 flex flex-wrap items-baseline gap-2 text-meta font-medium tabular-nums text-(--accent-ink)">
+        {series.weekday}s, {formatDueDate(series.firstDue)} – {formatDueDate(series.lastDue)}
+        {badge && (
+          <span title={badge.title} className="text-fine font-normal text-muted-foreground">
+            {badge.label}
+          </span>
+        )}
+      </p>
+      <p className="mt-1.5 text-body text-muted-foreground">
+        One deadline per date, {count} in all, added together and undone together.
+      </p>
+      <div className="mt-3 flex items-center gap-1">
+        <button
+          type="button"
+          onClick={add}
+          disabled={busy !== null || disabled}
+          className={buttonFilled}
+        >
+          {busy === "add" ? "Adding…" : "Add the series"}
+        </button>
+        <button
+          type="button"
+          onClick={skip}
+          disabled={busy !== null || disabled}
+          className={buttonTextMuted}
+        >
+          {busy === "skip" ? "Skipping…" : "Skip"}
         </button>
       </div>
       {error && <p className={errorLine}>{error}</p>}

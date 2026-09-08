@@ -119,10 +119,35 @@ export interface DeadlineProposal {
   source: "syllabus" | "canvas";
 }
 
-export function getDeadlineProposals(
-  classId: number,
-): Promise<DeadlineProposal[]> {
-  return invoke<DeadlineProposal[]>("get_deadline_proposals", { classId });
+/** A recurring proposal read as one card (SPEC §11): pending cards sharing a
+ *  title stem, a kind, a source and a weekday across three or more dates —
+ *  derived when the queue is listed, never stored. */
+export interface DeadlineSeries {
+  stem: string;
+  kind: DeadlineKind;
+  source: "syllabus" | "canvas";
+  /** `Tuesday`. */
+  weekday: string;
+  /** The member cards, by date. */
+  ids: number[];
+  firstDue: string;
+  lastDue: string;
+}
+
+/** The queue as the workspace lists it: every pending card, and the series
+ *  among them. */
+export interface DeadlineQueue {
+  proposals: DeadlineProposal[];
+  series: DeadlineSeries[];
+}
+
+export function getDeadlineProposals(classId: number): Promise<DeadlineQueue> {
+  return invoke<DeadlineQueue>("get_deadline_proposals", { classId });
+}
+
+/** A series card's Skip: every member card dismissed at once. */
+export function dismissDeadlineProposals(proposalIds: number[]): Promise<void> {
+  return invoke("dismiss_deadline_proposals", { proposalIds });
 }
 
 /** Scan one class file (relPath) or the whole class folder (null). */

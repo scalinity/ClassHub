@@ -206,7 +206,7 @@ function CategoryRow({
           {CANVAS_CATEGORY_TAG.label}
         </span>
       )}
-      <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+      <span className="flex shrink-0 items-center gap-0.5">
         <button
           type="button"
           title={`Record a score in ${category.name}`}
@@ -277,7 +277,7 @@ function ItemRow({
           {CANVAS_ITEM_TAG.label}
         </span>
       )}
-      <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+      <span className="flex shrink-0 items-center gap-0.5">
         <button
           type="button"
           title="Edit score"

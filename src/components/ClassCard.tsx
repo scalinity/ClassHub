@@ -11,7 +11,7 @@ import {
   washCard,
 } from "@/lib/styles";
 import {
-  daysUntil,
+  isOverdue,
   dueDayLabel,
   formatTimeRange,
   nextMeeting,
@@ -86,7 +86,7 @@ export function ClassCard({
         <p className="mt-5 text-body">
           <span className="font-medium">{info.nextDeadline.title}</span>{" "}
           <span className="text-muted-foreground">
-            {daysUntil(info.nextDeadline.dueAt) < 0 ? "" : "due "}
+            {isOverdue(info.nextDeadline.dueAt) ? "" : "due "}
             {dueDayLabel(info.nextDeadline.dueAt)}
           </span>
         </p>

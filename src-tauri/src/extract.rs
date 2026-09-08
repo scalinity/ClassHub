@@ -220,13 +220,67 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: &str) -> Result<()>
     Ok(())
 }
 
+/// Whether a failed run's error is the model refusing the material outright —
+/// Claude's content filter on a PDF — rather than a stall a retry could pass.
+pub fn refused_by_filter(error: &str) -> bool {
+    error.contains("content filtering")
+}
+
+/// Record keeping after a run the model refused (`refused_by_filter`): an
+/// extract the run did write is recorded as any extract is, and a file it
+/// wrote none for is marked attempted at its current hash with no extract, so
+/// the pipeline does not enqueue the same refusal on every scan — Biostatistics'
+/// Week 4 reading cost a run per launch on 2026-09-08 until it did. A changed
+/// file is tried again, since its hash moves. Returns the paths left without
+/// an extract, for the job's error line.
+pub fn record_refusal(app: &AppHandle, class_id: i64, payload: &str) -> Result<Vec<String>> {
+    let items: Vec<BatchItem> =
+        serde_json::from_str(payload).context("parsing extract batch payload")?;
+    let db = app.state::<crate::Db>();
+    let conn = lock(&db.0);
+    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    let mut refused = Vec::new();
+    for item in items {
+        let written = fs::metadata(class_dir.join(&item.extract_rel_path))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false);
+        if written {
+            record(&conn, &class_dir, class_id, &item.rel_path, &item.extract_rel_path, &item.sha256)?;
+        } else {
+            mark_attempted(&conn, class_id, &item.rel_path, &item.sha256)?;
+            eprintln!(
+                "extract of {} was refused by the model's content filter — left without an \
+                 extract until the file changes",
+                item.rel_path
+            );
+            refused.push(item.rel_path);
+        }
+    }
+    Ok(refused)
+}
+
+/// A row tried at this hash and left without an extract: `stale_files` skips
+/// it until its hash moves, and every reader of `extract_rel_path` already
+/// says "no extract available" for it.
+fn mark_attempted(conn: &Connection, class_id: i64, rel_path: &str, sha256: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET extract_rel_path = NULL, extracted_at = ?1, extracted_sha256 = ?2
+         WHERE class_id = ?3 AND rel_path = ?4",
+        params![now(), sha256, class_id, rel_path],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // DB helpers
 
 fn stale_files(conn: &Connection, class_id: i64) -> Result<Vec<StaleFile>> {
+    // A duplicate is read once, through its canonical copy (SPEC §7 step 1):
+    // it is not extracted while it is marked, and becomes canonical at the
+    // next scan if the other copy leaves.
     let mut stmt = conn.prepare(
         "SELECT rel_path, sha256, kind FROM files
-         WHERE class_id = ?1
+         WHERE class_id = ?1 AND duplicate_of IS NULL
            AND (extracted_sha256 IS NULL OR extracted_sha256 != sha256)
          ORDER BY rel_path",
     )?;
@@ -766,6 +820,7 @@ fn soffice_bin() -> PathBuf {
 /// One `{rel_path, sha256}` pair of a guide's `source_manifest` (SPEC §5).
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct ManifestEntry {
     pub rel_path: String,
     pub sha256: String,
@@ -835,9 +890,12 @@ pub fn current_manifest(
         return unit_manifest(conn, class_id, unit_id, unit_folder.as_deref(), &slots, &filed);
     }
 
+    // A duplicate is left out of every scope's set (SPEC §7 step 1): the
+    // reading is read once, through its canonical copy.
     let entries = if scope == crate::db::MASTER_SCOPE {
         let mut stmt = conn.prepare(
-            "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 ORDER BY rel_path",
+            "SELECT rel_path, sha256 FROM files
+             WHERE class_id = ?1 AND duplicate_of IS NULL ORDER BY rel_path",
         )?;
         let rows = stmt.query([class_id])?;
         read(rows)?
@@ -851,7 +909,8 @@ pub fn current_manifest(
 fn folder_manifest(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec<ManifestEntry>> {
     let mut stmt = conn.prepare(
         "SELECT rel_path, sha256 FROM files
-         WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
+         WHERE class_id = ?1 AND duplicate_of IS NULL
+           AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
          ORDER BY rel_path",
     )?;
     // The separator is appended before matching, so `Module 1` cannot capture
@@ -917,7 +976,8 @@ pub fn unit_manifest(
         "SELECT f.rel_path, f.sha256 FROM files f
          JOIN lecture_contributions lc
            ON lc.class_id = f.class_id AND lc.rel_path = f.rel_path
-         WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'",
+         WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'
+           AND f.duplicate_of IS NULL",
     )?;
     let mapped = stmt
         .query_map(rusqlite::params![class_id, unit_id], |row| {
@@ -1688,5 +1748,34 @@ mod tests {
         assert_eq!(current_hash(&conn, 3, &class_dir, "Slides/deck.pptx").unwrap().as_deref(), Some("d1"));
         assert_eq!(current_hash(&conn, 3, &class_dir, "Study Guides/Week 3.html").unwrap(), None);
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// A file the model refused is tried once at its hash — marked attempted
+    /// with no extract, out of `stale_files` — and again once it changes.
+    #[test]
+    fn a_refused_file_is_not_retried_until_it_changes() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
+             VALUES (3, 'Quizzes/Quiz 1.pdf', 'h1', 4, 1, 'pdf')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(stale_files(&conn, 3).unwrap().len(), 1);
+        mark_attempted(&conn, 3, "Quizzes/Quiz 1.pdf", "h1").unwrap();
+        assert!(stale_files(&conn, 3).unwrap().is_empty(), "not enqueued again");
+        let extract: Option<String> = conn
+            .query_row("SELECT extract_rel_path FROM files WHERE rel_path = 'Quizzes/Quiz 1.pdf'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(extract, None, "no extract is claimed");
+        conn.execute("UPDATE files SET sha256 = 'h2' WHERE rel_path = 'Quizzes/Quiz 1.pdf'", []).unwrap();
+        assert_eq!(stale_files(&conn, 3).unwrap().len(), 1, "a changed file is tried again");
+        assert!(refused_by_filter("API Error: 400 Output blocked by content filtering policy"));
+        assert!(!refused_by_filter("API Error: 529 overloaded"));
     }
 }

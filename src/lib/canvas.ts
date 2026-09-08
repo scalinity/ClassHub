@@ -54,10 +54,12 @@ export interface ClassOutcome {
   className: string;
   canvasCourse: string | null;
   unitsAdded: number;
-  deadlinesProposed: number;
+  deadlinesRecorded: number;
   /** Open deadlines closed because Canvas holds a submission for them. */
   deadlinesCompleted: number;
   filesStaged: number;
+  /** Staged files the sync filed on the spot, where Canvas or the name placed them (SPEC §7.2). */
+  filesFiled: number;
   /** Grade items written or updated from graded, posted submissions. */
   gradesRecorded: number;
   /** Announcements recorded or updated — what NOTICES gained. */
@@ -218,9 +220,9 @@ export function outcomeSummary(outcome: ClassOutcome): string {
       `${outcome.unitsAdded} division${outcome.unitsAdded === 1 ? "" : "s"}`,
     );
   }
-  if (outcome.deadlinesProposed > 0) {
+  if (outcome.deadlinesRecorded > 0) {
     parts.push(
-      `${outcome.deadlinesProposed} deadline${outcome.deadlinesProposed === 1 ? "" : "s"} to review`,
+      `${outcome.deadlinesRecorded} deadline${outcome.deadlinesRecorded === 1 ? "" : "s"} recorded`,
     );
   }
   if (outcome.deadlinesCompleted > 0) {
@@ -243,10 +245,14 @@ export function outcomeSummary(outcome: ClassOutcome): string {
       `${outcome.pagesWritten} Canvas page${outcome.pagesWritten === 1 ? "" : "s"} mirrored`,
     );
   }
-  if (outcome.filesStaged > 0) {
+  if (outcome.filesFiled > 0) {
     parts.push(
-      `${outcome.filesStaged} file${outcome.filesStaged === 1 ? "" : "s"} in the inbox`,
+      `${outcome.filesFiled} file${outcome.filesFiled === 1 ? "" : "s"} filed`,
     );
+  }
+  const waiting = outcome.filesStaged - outcome.filesFiled;
+  if (waiting > 0) {
+    parts.push(`${waiting} file${waiting === 1 ? "" : "s"} in the inbox`);
   }
   return parts.length > 0 ? parts.join(" · ") : "nothing new";
 }
