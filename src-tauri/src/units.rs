@@ -824,6 +824,14 @@ fn rename_effects(
             if from.is_file() {
                 effects.moves.push((from, to));
             }
+            // The guide's cards file is named for the guide (SPEC §8.1) and
+            // follows it; a name already taken under the new stem is left
+            // alone rather than written over.
+            let cards_from = class_dir.join(crate::guides::cards_rel_path(&rel_path));
+            let cards_to = class_dir.join(crate::guides::cards_rel_path(&new_rel));
+            if cards_from.is_file() && free(&cards_from, &cards_to) {
+                effects.moves.push((cards_from, cards_to));
+            }
             conn.execute(
                 "UPDATE guides SET rel_path = ?1 WHERE id = ?2",
                 params![new_rel, guide_id],
