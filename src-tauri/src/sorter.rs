@@ -2096,8 +2096,12 @@ pub(crate) fn undo_move(
     audit_id: i64,
 ) -> Result<crate::deadlines::Undone> {
     let class_id = payload["classId"].as_i64().context("the row names no class")?;
-    let from = payload["from"].as_str().context("the row names no source")?;
-    let to = payload["to"].as_str().context("the row names no destination")?;
+    // The paths come off a payload the app wrote, and go through the same
+    // gate the forward move's do: `clean_rel` is the last check before an fs
+    // operation on either side.
+    let from = clean_rel(payload["from"].as_str().context("the row names no source")?)?;
+    let to = clean_rel(payload["to"].as_str().context("the row names no destination")?)?;
+    let (from, to) = (from.as_str(), to.as_str());
     let proposed_by = payload["proposedBy"].as_str().unwrap_or("");
     let class_dir = crate::scanner::class_dir(conn, class_id)?;
     let at_abs = class_dir.join(to);
