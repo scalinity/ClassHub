@@ -1786,9 +1786,18 @@ fn record_session(
             let hints_rel = note_sidecar(corpus_rel, "hints");
             let json = fs::read_to_string(class_dir.join(&hints_rel))
                 .with_context(|| format!("no hints sidecar written at {hints_rel}"))?;
-            let anchors = transcript_anchors(
-                &fs::read_to_string(class_dir.join(&payload.transcript_rel_path)).unwrap_or_default(),
-            );
+            // Read at finalize, not at enqueue, so a transcript moved while
+            // the run ran is read here as gone: the items keep their text and
+            // lose their anchors, and stderr says why rather than nothing.
+            let markdown = fs::read_to_string(class_dir.join(&payload.transcript_rel_path))
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "digest: {} could not be read, so its flagged items carry no anchor: {e}",
+                        payload.transcript_rel_path
+                    );
+                    String::new()
+                });
+            let anchors = transcript_anchors(&markdown);
             let (hints, skipped) = parse_hints(&json, &anchors)
                 .with_context(|| format!("the hints sidecar at {hints_rel} is malformed"))?;
             if skipped > 0 {
