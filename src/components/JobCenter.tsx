@@ -404,6 +404,7 @@ const STOPPED_BY_COPY: Record<NonNullable<ShiftRun["stoppedBy"]>, string> = {
   budget: "· capped for the night",
   rate_limit: "· stopped at the rate limit",
   paused: "· paused",
+  window: "· ended with its window",
   error: "· stopped",
 };
 

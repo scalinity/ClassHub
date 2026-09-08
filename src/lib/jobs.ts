@@ -74,7 +74,7 @@ export interface ShiftRun {
   finishedAt: number | null;
   steps: ShiftStep[];
   jobs: number[];
-  stoppedBy: "done" | "budget" | "rate_limit" | "paused" | "error" | null;
+  stoppedBy: "done" | "budget" | "rate_limit" | "paused" | "window" | "error" | null;
   summary: string | null;
   ownerPid: number | null;
 }

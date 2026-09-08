@@ -428,7 +428,13 @@ fn catch_up(app: &AppHandle) {
             return Ok(None);
         };
         let (start, end) = s.window();
-        let missed = last_closed_night(Local::now().naive_local(), start, end).to_string();
+        let now_local = Local::now().naive_local();
+        // Inside an open window the coming run covers the same backlog; a
+        // catch-up beside it would spend two nights' caps in one evening.
+        if in_window(now_local.time(), start, end) {
+            return Ok(None);
+        }
+        let missed = last_closed_night(now_local, start, end).to_string();
         if missed <= latest.night || ran_on(conn, &missed)? {
             return Ok(None);
         }
@@ -534,7 +540,13 @@ fn start(app: &AppHandle, trigger: &str, night: &str) -> Result<i64> {
 /// `Pause tonight`, and its undo: the night's key on the setting, which the
 /// next night leaves behind on its own. A run under way stops between jobs.
 pub fn pause_tonight(app: &AppHandle, paused: bool) -> Result<()> {
+    // The night the pause is for: the run under way's, so a press after the
+    // window closed still stops the run still working, else the coming one.
+    let current = *lock(&app.state::<ShiftState>().run_id);
     let night = with_conn(app, |conn| {
+        if let Some(run) = current.map(|id| run_by_id(conn, id)).transpose()?.flatten() {
+            return Ok(run.night);
+        }
         let (start, end) = settings(conn).window();
         Ok(night_key(Local::now().naive_local(), start, end).to_string())
     })?;
@@ -630,6 +642,9 @@ struct Progress<'a> {
     app: &'a AppHandle,
     id: i64,
     night: String,
+    /// idle | launch | manual: an idle run ends with its window; the other
+    /// two start outside it by design.
+    trigger: String,
     steps: Vec<Step>,
     jobs: Vec<i64>,
     filed: usize,
@@ -675,28 +690,40 @@ impl Progress<'_> {
         emit_changed(self.app);
     }
 
-    /// Waits for a job the plan enqueued and records how it ended.
+    /// Waits for a job the plan enqueued and records how it ended. A job
+    /// that has not settled within `JOB_WAIT_LIMIT` is left to the runner's
+    /// own watchdog and counted as failed here, so the run can end.
     fn wait(&mut self, job_id: i64) -> String {
         self.jobs.push(job_id);
         self.save();
-        let status = wait_for_job(self.app, job_id);
-        if status == "failed" {
+        let status = wait_for_job(self.app, job_id, JOB_WAIT_LIMIT);
+        if status == "failed" || status == "unsettled" {
             self.failed += 1;
         }
         status
     }
 
-    /// Whether the run has to stop before the next job: the pause, or the
-    /// rate limit (SPEC §6).
+    /// Whether the run has to stop before the next job (SPEC §6): the pause,
+    /// the rate limit, or — for a run the idle check started — the window's
+    /// close, since the owner is back at the machine by then.
     fn stop_reason(&self) -> Option<End> {
-        let paused = with_conn(self.app, |conn| Ok(paused_on(conn)))
-            .ok()
-            .flatten()
-            .is_some_and(|on| on == self.night);
+        let (paused, window_closed) = with_conn(self.app, |conn| {
+            let paused = paused_on(conn).is_some_and(|on| on == self.night);
+            let (start, end) = settings(conn).window();
+            let closed = self.trigger == "idle" && !in_window(Local::now().time(), start, end);
+            Ok((paused, closed))
+        })
+        .unwrap_or((false, false));
         if paused {
             return Some(End {
                 stopped_by: "paused",
                 summary: format!("{} · paused before the rest", self.tally()),
+            });
+        }
+        if window_closed {
+            return Some(End {
+                stopped_by: "window",
+                summary: format!("{} · the window closed before the rest", self.tally()),
             });
         }
         crate::jobs::rate_limit_reached().map(|why| End {
@@ -735,8 +762,19 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn wait_for_job(app: &AppHandle, job_id: i64) -> String {
+/// How long a run waits on one job before leaving it to the runner. The
+/// longest run measured is an 88-minute extract; the runner's own stall
+/// watchdog covers a silent child, and this covers one that never stops
+/// talking.
+const JOB_WAIT_LIMIT: Duration = Duration::from_secs(3 * 60 * 60);
+
+fn wait_for_job(app: &AppHandle, job_id: i64, limit: Duration) -> String {
+    let started = std::time::Instant::now();
     loop {
+        if started.elapsed() >= limit {
+            eprintln!("shift: job {job_id} has not settled in {} min — left to the runner", limit.as_secs() / 60);
+            return "unsettled".into();
+        }
         std::thread::sleep(JOB_POLL);
         let status = with_conn(app, |conn| {
             Ok(conn
@@ -758,14 +796,15 @@ fn wait_for_job(app: &AppHandle, job_id: i64) -> String {
 }
 
 fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
-    let (night, s) = with_conn(app, |conn| {
+    let (night, trigger, s) = with_conn(app, |conn| {
         let run = run_by_id(conn, id)?.context("the run row is gone")?;
-        Ok((run.night, settings(conn)))
+        Ok((run.night, run.trigger, settings(conn)))
     })?;
     let mut p = Progress {
         app,
         id,
         night,
+        trigger,
         steps: fresh_steps(),
         jobs: Vec::new(),
         filed: 0,
@@ -930,7 +969,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     Ok(if p.left > 0 {
         End {
             stopped_by: "budget",
-            summary: format!("{summary} · {} for tomorrow", plural(p.left, "more waits", "more wait")),
+            summary: format!("{summary} · {} more for tomorrow", p.left),
         }
     } else {
         End {
