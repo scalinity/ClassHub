@@ -154,7 +154,7 @@ fn materials(
     class_id: i64,
     unit: &UnitInfo,
     slots: &[WeekSlot],
-    filed: &[crate::extract::ManifestEntry],
+    filed: &[(crate::extract::ManifestEntry, Option<String>)],
 ) -> Result<i64> {
     let manifest = crate::extract::unit_manifest(
         conn,

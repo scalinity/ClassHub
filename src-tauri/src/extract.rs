@@ -954,12 +954,21 @@ pub fn current_manifest(
     Ok(entries)
 }
 
-/// Everything indexed at or under one folder.
+/// Everything indexed at or under one folder, as a scope's own set: a
+/// duplicate whose canonical copy sits in the same folder is left out — the
+/// reading is read once per scope (SPEC §7 step 1) — while one whose
+/// canonical sits elsewhere is this scope's only copy and stays.
 fn folder_manifest(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec<ManifestEntry>> {
+    let entries = folder_rows(conn, class_id, folder)?;
+    Ok(once_per_scope(entries))
+}
+
+/// Every indexed row at or under one folder, duplicates included, with the
+/// canonical copy's path where the row is one.
+fn folder_rows(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec<(ManifestEntry, Option<String>)>> {
     let mut stmt = conn.prepare(
-        "SELECT rel_path, sha256 FROM files
-         WHERE class_id = ?1 AND duplicate_of IS NULL
-           AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
+        "SELECT rel_path, sha256, duplicate_of FROM files
+         WHERE class_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3 ESCAPE '\\')
          ORDER BY rel_path",
     )?;
     // The separator is appended before matching, so `Module 1` cannot capture
@@ -971,18 +980,38 @@ fn folder_manifest(conn: &Connection, class_id: i64, folder: &str) -> Result<Vec
     let rows = stmt.query(rusqlite::params![class_id, folder, prefix])?;
     Ok(rows
         .mapped(|row| {
-            Ok(ManifestEntry {
-                rel_path: row.get(0)?,
-                sha256: row.get(1)?,
-            })
+            Ok((
+                ManifestEntry {
+                    rel_path: row.get(0)?,
+                    sha256: row.get(1)?,
+                },
+                row.get::<_, Option<String>>(2)?,
+            ))
         })
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Everything indexed under `Weeks/`, read once for a listing that asks about
-/// every division of a class.
-pub fn filed_under_weeks(conn: &Connection, class_id: i64) -> Result<Vec<ManifestEntry>> {
-    folder_manifest(conn, class_id, crate::db::WEEKS_DIR)
+/// A scope's set with each reading once: a duplicate is dropped only where
+/// its canonical copy is in the same set.
+fn once_per_scope(entries: Vec<(ManifestEntry, Option<String>)>) -> Vec<ManifestEntry> {
+    let present: std::collections::HashSet<&str> =
+        entries.iter().map(|(entry, _)| entry.rel_path.as_str()).collect();
+    let keep: Vec<bool> = entries
+        .iter()
+        .map(|(_, canonical)| canonical.as_deref().is_none_or(|c| !present.contains(c)))
+        .collect();
+    entries
+        .into_iter()
+        .zip(keep)
+        .filter_map(|((entry, _), keep)| keep.then_some(entry))
+        .collect()
+}
+
+/// Everything indexed under `Weeks/`, duplicates included with their
+/// canonical copies, read once for a listing that asks about every division
+/// of a class; each division settles its own copies (`unit_manifest`).
+pub fn filed_under_weeks(conn: &Connection, class_id: i64) -> Result<Vec<(ManifestEntry, Option<String>)>> {
+    folder_rows(conn, class_id, crate::db::WEEKS_DIR)
 }
 
 /// A division's manifest (SPEC §8.5): its folder, the week folders its weeks
@@ -999,10 +1028,10 @@ pub fn unit_manifest(
     unit_id: i64,
     unit_folder: Option<&str>,
     slots: &[crate::units::WeekSlot],
-    filed: &[ManifestEntry],
+    filed: &[(ManifestEntry, Option<String>)],
 ) -> Result<Vec<ManifestEntry>> {
     let mut entries = match unit_folder {
-        Some(folder) => folder_manifest(conn, class_id, folder)?,
+        Some(folder) => folder_rows(conn, class_id, folder)?,
         None => Vec::new(),
     };
     let weeks: std::collections::BTreeSet<i64> = slots
@@ -1014,7 +1043,7 @@ pub fn unit_manifest(
         entries.extend(
             filed
                 .iter()
-                .filter(|entry| {
+                .filter(|(entry, _)| {
                     crate::units::week_from_rel_path(&entry.rel_path)
                         .is_some_and(|week| weeks.contains(&week))
                 })
@@ -1022,27 +1051,30 @@ pub fn unit_manifest(
         );
     }
     let mut stmt = conn.prepare(
-        "SELECT f.rel_path, f.sha256 FROM files f
+        "SELECT f.rel_path, f.sha256, f.duplicate_of FROM files f
          JOIN lecture_contributions lc
            ON lc.class_id = f.class_id AND lc.rel_path = f.rel_path
-         WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'
-           AND f.duplicate_of IS NULL",
+         WHERE f.class_id = ?1 AND lc.unit_id = ?2 AND lc.status = 'applied'",
     )?;
     let mapped = stmt
         .query_map(rusqlite::params![class_id, unit_id], |row| {
-            Ok(ManifestEntry {
-                rel_path: row.get(0)?,
-                sha256: row.get(1)?,
-            })
+            Ok((
+                ManifestEntry {
+                    rel_path: row.get(0)?,
+                    sha256: row.get(1)?,
+                },
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     entries.extend(mapped);
     // A transcript is under its week folder and on a contribution row, so it
     // arrives twice, and a manifest that holds a duplicate never equals the
-    // set it is compared against.
-    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    entries.dedup_by(|a, b| a.rel_path == b.rel_path);
-    Ok(entries)
+    // set it is compared against. A copy of a reading another division also
+    // holds is this one's only copy, and stays (`once_per_scope`).
+    entries.sort_by(|a, b| a.0.rel_path.cmp(&b.0.rel_path));
+    entries.dedup_by(|a, b| a.0.rel_path == b.0.rel_path);
+    Ok(once_per_scope(entries))
 }
 
 
@@ -1868,5 +1900,66 @@ mod refusal_tests {
         assert_eq!(refused, ["Quizzes/Quiz 1.pdf"]);
         assert!(stale_files(&conn, 3).unwrap().is_empty());
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod scope_duplicate_tests {
+    use super::*;
+
+    fn slot(week: i64, unit_id: i64) -> crate::units::WeekSlot {
+        crate::units::WeekSlot {
+            week,
+            folder: format!("Week 0{week}"),
+            unit_id,
+            unit_name: format!("Week {week}"),
+            unit_kind: "week".to_string(),
+            meets_on: None,
+        }
+    }
+
+    /// A duplicate leaves a scope only where its canonical copy is in the
+    /// same scope: a paper posted for Week 3 and Week 5 stays in Week 5's
+    /// set, while a second copy inside one folder reads once there, and the
+    /// master reads each content once.
+    #[test]
+    fn a_duplicate_is_read_once_per_scope() {
+        let conn = crate::db::memory_db();
+        for (path, hash, canonical) in [
+            ("Weeks/Week 03/paper.pdf", "p", None),
+            ("Weeks/Week 05/paper.pdf", "p", Some("Weeks/Week 03/paper.pdf")),
+            ("Weeks/Week 03/sub/paper.pdf", "p", Some("Weeks/Week 03/paper.pdf")),
+            ("Module 1/deck.pdf", "d", None),
+            ("Module 1/old/deck.pdf", "d", Some("Module 1/deck.pdf")),
+        ] {
+            conn.execute(
+                "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind, duplicate_of)
+                 VALUES (3, ?1, ?2, 4, 1, 'pdf', ?3)",
+                rusqlite::params![path, hash, canonical],
+            )
+            .unwrap();
+        }
+        let slots = [slot(3, 13), slot(5, 15)];
+        let filed = filed_under_weeks(&conn, 3).unwrap();
+        let week3: Vec<String> = unit_manifest(&conn, 3, 13, None, &slots, &filed)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.rel_path)
+            .collect();
+        assert_eq!(week3, ["Weeks/Week 03/paper.pdf"], "one copy of the paper in Week 3");
+        let week5: Vec<String> = unit_manifest(&conn, 3, 15, None, &slots, &filed)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.rel_path)
+            .collect();
+        assert_eq!(week5, ["Weeks/Week 05/paper.pdf"], "Week 5 keeps its only copy");
+        let module: Vec<String> = folder_manifest(&conn, 3, "Module 1")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.rel_path)
+            .collect();
+        assert_eq!(module, ["Module 1/deck.pdf"]);
+        let master = current_manifest(&conn, 3, "master").unwrap();
+        assert_eq!(master.len(), 2, "{master:?}");
     }
 }
