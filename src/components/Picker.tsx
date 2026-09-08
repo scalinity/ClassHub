@@ -116,6 +116,11 @@ export function Picker({
                 id={`${listId}-${index}`}
                 role="option"
                 aria-selected={index === selected}
+                // The active row stays in view as the arrows move it through
+                // a list taller than the box.
+                ref={(el) => {
+                  if (el && index === active) el.scrollIntoView({ block: "nearest" });
+                }}
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(index)}
                 className={

@@ -64,10 +64,12 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  const apply = (change: Promise<void>, invalidateAll = false) => {
+  // Answers whether the change took, so a field can put back the value that
+  // stands when the backend refused what was typed.
+  const apply = (change: Promise<void>, invalidateAll = false): Promise<boolean> => {
     setPending(true);
     setActionError(null);
-    change
+    return change
       .then(() => {
         setPending(false);
         if (invalidateAll) {
@@ -76,11 +78,13 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
         } else {
           void queryClient.invalidateQueries({ queryKey: ["appSettings"] });
         }
+        return true;
       })
       .catch((e) => {
         setActionError(String(e));
         setPending(false);
         void queryClient.invalidateQueries({ queryKey: ["appSettings"] });
+        return false;
       });
   };
 
@@ -346,7 +350,9 @@ function Switch({
   );
 }
 
-/** A time or a number the backend validates; applied on Enter or blur. */
+/** A time or a number the backend validates; applied on Enter or blur. A
+ *  refused value goes back to the one that stands, so a blur does not send
+ *  the same bad value again. */
 function ValueField({
   label,
   type,
@@ -362,13 +368,16 @@ function ValueField({
   current: string;
   unit?: string;
   pending: boolean;
-  onApply: (value: string) => void;
+  onApply: (value: string) => Promise<boolean>;
   min?: number;
   max?: number;
 }) {
   const [value, setValue] = useState(current);
   const commit = () => {
-    if (value.trim() !== current && !pending) onApply(value.trim());
+    if (value.trim() === current || pending) return;
+    void onApply(value.trim()).then((took) => {
+      if (!took) setValue(current);
+    });
   };
   return (
     <label className="flex items-center gap-2 text-body">
@@ -391,7 +400,7 @@ function ValueField({
   );
 }
 
-type Apply = (change: Promise<void>, invalidateAll?: boolean) => void;
+type Apply = (change: Promise<void>, invalidateAll?: boolean) => Promise<boolean>;
 
 /**
  * SPEC §6 — the idle shift's settings: whether it runs, the window, how long
@@ -409,8 +418,9 @@ function ShiftSection({
 }) {
   const shift = settings.shift;
   const set = (key: ShiftSettingKey, value: string) => apply(setShiftSetting(key, value));
-  // Fields remount on the stored value, so a refused change shows the value
-  // that stands rather than the one that was typed.
+  // Fields remount on the stored values, so a change made elsewhere — the
+  // tray, a relaunch — shows in them; a refused value is put back by the
+  // field itself.
   const key = `${shift.start}-${shift.end}-${shift.idleMinutes}-${shift.digestsPerNight}-${shift.guidesPerNight}`;
   return (
     <Section
