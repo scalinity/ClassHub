@@ -506,9 +506,15 @@ function AlwaysThereSection({
       <div className="mt-4 space-y-1">
         <Switch
           label="Open ClassHub at login"
-          note={settings.loginItem ? "Registered as a login item." : "Not registered."}
+          note={
+            settings.loginItem
+              ? "Registered as a login item."
+              : settings.devBuild
+                ? "Not registered. A dev build cannot register itself — switch this on in the installed app."
+                : "Not registered."
+          }
           on={settings.loginItem}
-          disabled={pending}
+          disabled={pending || (settings.devBuild && !settings.loginItem)}
           onChange={(on) => apply(setLoginItem(on))}
         />
         <Switch

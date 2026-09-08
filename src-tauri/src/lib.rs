@@ -706,6 +706,14 @@ fn set_notify_setting(app: tauri::AppHandle, key: String, on: bool) -> Result<()
 #[tauri::command]
 fn set_login_item(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
+    // The plist names this process's own executable, and a dev build's is
+    // `target/debug/classhub`: registering it would open the wrong binary
+    // at login, so only the installed app registers itself.
+    if on && cfg!(debug_assertions) {
+        return Err(
+            "a dev build cannot be the login item — switch this on in the installed app".into(),
+        );
+    }
     let launcher = app.autolaunch();
     let result = if on { launcher.enable() } else { launcher.disable() };
     result.map_err(|e| format!("{e}"))?;
