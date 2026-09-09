@@ -36,12 +36,17 @@ struct Posted {
 }
 
 /// Reads the panel's message — `{exam, results: [{question, topic, correct}]}`,
-/// every answer with a question and a topic — into the exam it names and its
-/// answers. Model output, so the shape is checked and the strings capped;
-/// anything else is refused by name rather than recorded as a score.
+/// the exam named and every answer with a question and a topic — into the
+/// exam it names and its answers. Model output, so the shape is checked and
+/// the strings capped; anything else is refused by name rather than
+/// recorded as a score. The name is required so the backend's own check
+/// against the row's file stands without the frame match in front of it.
 pub(crate) fn parse_posted(value: &serde_json::Value) -> Result<(String, Vec<PostedAnswer>)> {
     let posted: Posted = serde_json::from_value(value.clone())
         .context("not {exam, results: [{question, topic, correct}]}")?;
+    if posted.exam.trim().is_empty() {
+        bail!("the message names no exam");
+    }
     if posted.results.is_empty() {
         bail!("the message carries no results");
     }
@@ -86,42 +91,53 @@ pub fn record_results(
     scope: &str,
     posted: serde_json::Value,
 ) -> Result<ExamScore> {
+    let (exam, results) = parse_posted(&posted)?;
+    let score = with_conn(app, |conn| record(conn, class_id, scope, &exam, &results, now()))?;
+    emit_hub_change(app, "practice");
+    Ok(score)
+}
+
+/// The write behind `record_results`: the exam's row found by its scope, the
+/// message's name checked against the row's file, the rows replaced in one
+/// transaction under the scope the exam was written for.
+pub(crate) fn record(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    exam: &str,
+    results: &[PostedAnswer],
+    at: i64,
+) -> Result<ExamScore> {
     if !crate::db::is_practice_scope(scope) {
         bail!("{scope} is not a practice exam");
     }
-    let (exam, results) = parse_posted(&posted)?;
-    let score = with_conn(app, |conn| {
-        let row: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT id, rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
-                params![class_id, scope],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let (guide_id, rel_path) =
-            row.context("that exam has no row — one written before rows existed keeps no score")?;
-        // The message names the file it came from; a name that is not this
-        // exam's is another frame's message.
-        let file_name = rel_path.rsplit('/').next().unwrap_or(&rel_path);
-        if !exam.is_empty() && exam != file_name {
-            bail!("the message is for {exam}, not {file_name}");
-        }
-        let origin = origin_scope(conn, class_id, &rel_path)?;
-        let at = now();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM practice_results WHERE guide_id = ?1", [guide_id])?;
-        for a in &results {
-            tx.execute(
-                "INSERT INTO practice_results (guide_id, scope, question, topic, correct, recorded_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![guide_id, origin, a.question, a.topic, i64::from(a.correct), at],
-            )?;
-        }
-        tx.commit()?;
-        Ok(score_of(&results, at))
-    })?;
-    emit_hub_change(app, "practice");
-    Ok(score)
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
+            params![class_id, scope],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (guide_id, rel_path) =
+        row.context("that exam has no row — one written before rows existed keeps no score")?;
+    // The message names the file it came from; a name that is not this
+    // exam's is another frame's message.
+    let file_name = rel_path.rsplit('/').next().unwrap_or(&rel_path);
+    if exam != file_name {
+        bail!("the message is for {exam}, not {file_name}");
+    }
+    let origin = origin_scope(conn, class_id, &rel_path)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM practice_results WHERE guide_id = ?1", [guide_id])?;
+    for a in results {
+        tx.execute(
+            "INSERT INTO practice_results (guide_id, scope, question, topic, correct, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![guide_id, origin, a.question, a.topic, i64::from(a.correct), at],
+        )?;
+    }
+    tx.commit()?;
+    Ok(score_of(results, at))
 }
 
 fn score_of(results: &[PostedAnswer], at: i64) -> ExamScore {
@@ -265,20 +281,24 @@ mod tests {
         assert_eq!(answers[1].topic, "MCAR recognition");
         assert!(!answers[1].correct);
         for wrong in [
-            json!({"results": []}),
+            json!({"exam": "x.html", "results": []}),
             json!({"exam": "x.html"}),
-            json!({"results": [{"question": "Q01", "correct": true}]}),
-            json!({"results": [{"question": "Q01", "topic": "", "correct": true}]}),
-            json!({"results": [{"question": "Q01", "topic": "t", "correct": "yes"}]}),
+            json!({"results": [{"question": "Q01", "topic": "t", "correct": true}]}),
+            json!({"exam": " ", "results": [{"question": "Q01", "topic": "t", "correct": true}]}),
+            json!({"exam": "x.html", "results": [{"question": "Q01", "correct": true}]}),
+            json!({"exam": "x.html", "results": [{"question": "Q01", "topic": "", "correct": true}]}),
+            json!({"exam": "x.html", "results": [{"question": "Q01", "topic": "t", "correct": "yes"}]}),
             json!("done"),
-            json!({"results": (0..201).map(|i| json!({"question": format!("Q{i}"), "topic": "t", "correct": true})).collect::<Vec<_>>()}),
+            json!({"exam": "x.html", "results": (0..201).map(|i| json!({"question": format!("Q{i}"), "topic": "t", "correct": true})).collect::<Vec<_>>()}),
         ] {
             assert!(parse_posted(&wrong).is_err(), "{wrong}");
         }
     }
 
     /// A score replaces the exam's earlier rows, carries the scope its job
-    /// named, and the scope's weak topics are the latest score's alone.
+    /// named, and the scope's weak topics are the latest score's alone; a
+    /// message for another exam's file, for a scope that is no exam, or for
+    /// an exam with no row is refused and writes nothing.
     #[test]
     fn a_score_replaces_the_exams_rows_and_names_the_scope_it_was_written_for() {
         let conn = memory_db();
@@ -296,37 +316,56 @@ mod tests {
         }
         let first = "practice:Study Guides/Practice/Week 3 — 2026-09-08.html";
         let second = "practice:Study Guides/Practice/Week 3 — 2026-09-15.html";
-        let guide_id = |scope: &str| -> i64 {
-            conn.query_row("SELECT id FROM guides WHERE scope = ?1", [scope], |r| r.get(0)).unwrap()
+        let answers = |list: &[(&str, &str, bool)]| -> Vec<PostedAnswer> {
+            list.iter()
+                .map(|(q, t, c)| PostedAnswer { question: q.to_string(), topic: t.to_string(), correct: *c })
+                .collect()
         };
-        let record = |scope: &str, answers: &[(&str, &str, bool)], at: i64| {
-            let id = guide_id(scope);
-            let rel: String = conn.query_row("SELECT rel_path FROM guides WHERE id = ?1", [id], |r| r.get(0)).unwrap();
-            let origin = origin_scope(&conn, 3, &rel).unwrap();
-            conn.execute("DELETE FROM practice_results WHERE guide_id = ?1", [id]).unwrap();
-            for (q, t, c) in answers {
-                conn.execute(
-                    "INSERT INTO practice_results (guide_id, scope, question, topic, correct, recorded_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![id, origin, q, t, i64::from(*c), at],
-                )
-                .unwrap();
-            }
-        };
-        record(first, &[("Q01", "missing data", false), ("Q02", "outliers", true), ("Q03", "missing data", false)], 100);
-        let score = last_score(&conn, 3, first).unwrap().expect("scored");
+        let score = record(
+            &conn,
+            3,
+            first,
+            "Week 3 — 2026-09-08.html",
+            &answers(&[("Q01", "missing data", false), ("Q02", "outliers", true), ("Q03", "missing data", false)]),
+            100,
+        )
+        .unwrap();
         assert_eq!((score.correct, score.total, score.recorded_at), (1, 3, 100));
         assert_eq!(score.weak_topics, vec!["missing data".to_string()], "a topic once");
+        assert_eq!(last_score(&conn, 3, first).unwrap(), Some(score));
         assert_eq!(weak_topics_of_scope(&conn, 3, "unit:8").unwrap(), vec!["missing data".to_string()]);
 
         // Scored again: the earlier rows are gone.
-        record(first, &[("Q01", "missing data", true), ("Q02", "outliers", false)], 200);
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM practice_results", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 2);
+        record(
+            &conn,
+            3,
+            first,
+            "Week 3 — 2026-09-08.html",
+            &answers(&[("Q01", "missing data", true), ("Q02", "outliers", false)]),
+            200,
+        )
+        .unwrap();
+        let count = || -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM practice_results", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count(), 2);
         assert_eq!(weak_topics_of_scope(&conn, 3, "unit:8").unwrap(), vec!["outliers".to_string()]);
 
+        // Another frame's message — named for another file — is refused
+        // and the rows stand; so is a scope that is no exam, and an exam
+        // with no row.
+        let one = answers(&[("Q01", "EDA in R", false)]);
+        let refused = record(&conn, 3, first, "Week 3 — 2026-09-15.html", &one, 250).unwrap_err();
+        assert!(refused.to_string().contains("is for Week 3 — 2026-09-15.html"), "{refused:#}");
+        assert_eq!(count(), 2);
+        let refused = record(&conn, 3, "unit:8", "Week 3 — 2026-09-08.html", &one, 250).unwrap_err();
+        assert!(refused.to_string().contains("not a practice exam"), "{refused:#}");
+        let refused = record(&conn, 3, "practice:Study Guides/Practice/Module 1 — 2026-08-22.html", "Module 1 — 2026-08-22.html", &one, 250).unwrap_err();
+        assert!(refused.to_string().contains("has no row"), "{refused:#}");
+        assert_eq!(count(), 2);
+
         // A later exam of the same scope: its score is the scope's now.
-        record(second, &[("Q01", "EDA in R", false)], 300);
+        record(&conn, 3, second, "Week 3 — 2026-09-15.html", &one, 300).unwrap();
         assert_eq!(weak_topics_of_scope(&conn, 3, "unit:8").unwrap(), vec!["EDA in R".to_string()]);
         assert!(last_score(&conn, 3, "practice:nothing").unwrap().is_none());
         assert!(weak_topics_of_scope(&conn, 3, "unit:9").unwrap().is_empty());
