@@ -219,6 +219,9 @@ export function ClassWorkspace({
   // week is the form's to pick (SPEC §7.1).
   const [addingLecture, setAddingLecture] = useState<LectureFormOpen | null>(null);
   const [findError, setFindError] = useState<string | null>(null);
+  // A waiting recording's form that could not open: its own line, so it
+  // never reads as a digest's failure.
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   // Recordings found behind the Zoom tool that still wait for a capture.
   const { data: recordings } = useQuery({
     queryKey: ["recordings", info.id],
@@ -545,6 +548,9 @@ export function ClassWorkspace({
               <p className={errorLine}>No session document: {digestError}</p>
             )}
             {findError && <p className={errorLine}>Not started: {findError}</p>}
+            {recordingError && (
+              <p className={errorLine}>The form could not open: {recordingError}</p>
+            )}
             {finding?.done && (
               <p className={finding.error ? errorLine : `mt-3 ${meta}`}>
                 {finding.error ? `Recordings not found: ${finding.error}` : finding.summary}
@@ -582,11 +588,11 @@ export function ClassWorkspace({
                   type="button"
                   title="Open the Add lecture form with this recording filled in"
                   onClick={() => {
-                    setDigestError(null);
+                    setRecordingError(null);
                     recordingPlayUrl(recording.id)
                       .then((source) => {
                         if (source === null) {
-                          setDigestError("this recording lists no playable file");
+                          setRecordingError("this recording lists no playable file");
                           return;
                         }
                         setAddingLecture({
@@ -595,7 +601,7 @@ export function ClassWorkspace({
                           recordingId: recording.id,
                         });
                       })
-                      .catch((e) => setDigestError(String(e)));
+                      .catch((e) => setRecordingError(String(e)));
                   }}
                   className={buttonText}
                 >
