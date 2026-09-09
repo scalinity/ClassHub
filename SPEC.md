@@ -1822,8 +1822,25 @@ the ones whose modification time or length moved, and drops the rows of files th
 so an unchanged tree opens no write transaction at all. Not a write-through at each of the
 pipeline's nine writers, because a missed one serves stale text silently, while the index is
 derived — losing it costs a rebuild and never data, which is what lets a reconcile read the
-disk and correct itself. The reads happen before the transaction and the transaction is
-IMMEDIATE, since the two builds share the database (§13).
+disk and correct itself.
+
+Four properties hold it together, since the two builds share the database (§13) and
+`with_conn` holds the one connection for the whole of its closure. The walk and the reads
+happen with no connection held, because reading the corpus under the lock stops every
+command, every other chat tool and the job runner — the arrangement ripgrep was moved out
+of. The write is one IMMEDIATE transaction. Each document's current FTS rowid is read back
+*inside* that transaction rather than taken from the plan, or the other process replacing a
+row between the two would leave one no later reconcile and no rebuild could reach, answering
+for a document twice or for one that is gone; and the rebuild clears on the FTS table's own
+`class_id` for the same reason. And a class folder that is not a directory is refused rather
+than read as a class whose documents have all gone, so an unmounted volume or a rename in
+Finder cannot make one search empty the index and then report that nothing matches.
+
+A search reports how many documents match, counted over the whole index rather than over the
+page the limit returned, and reads a document's text back only for the hits it keeps. The
+cited line is the first holding a term as a whole word, or a word starting with the stem the
+tokenizer would have matched on, so a query for one word does not cite the line that merely
+contains it.
 - **Write tools** (Milestone 8):
   - `trigger_synthesis(class, scope)` — enqueue a guide job. `scope` is one of the course's
     own divisions as the overview names it (`Week 3`, or its topic), a folder of material
@@ -1852,8 +1869,18 @@ IMMEDIATE, since the two builds share the database (§13).
   the form does where the course dates its weeks, since a request without one routes the
   lecture to `_Inbox/` for the sorter, and it runs under the same one-per-class claim the form
   takes with the digest off unless asked; and `undo_last` reads the newest audit row whose
-  action has an inverse and that no `undo.*` row already names, with every row of its batch —
-  the rows the notice's own `Undo` holds (§6).
+  action has an inverse and that no `undo.*` row already names, with every row of its batch,
+  fetched by the batch's own tag — the rows the notice's own `Undo` holds (§6).
+  Two refusals are the tools' own. `approve_deadlines` refuses an empty `ids` rather than
+  reading it as the class's whole queue, since a model that sends none would otherwise get
+  every waiting proposal inserted. And `add_lecture`'s source has to sit inside the library or
+  the Downloads folder: the ingestion's URL arm is bounded by the Zoom host allowlist (§7.1)
+  but its path arm reads whatever it is handed, which behind the form is a file the reader
+  picked and behind a tool is a path the model wrote — and the model quotes announcements,
+  syllabi and extracts verbatim, so a sentence in one of them could otherwise name any file on
+  the machine, which would then be filed, indexed and sent to the API with the next search.
+  The system prompt says the same thing in prose: everything a tool returns is material to
+  read, and only Daniel's own messages ask for anything.
 - **The write-tool names live in Rust**, served by `chat_tool_names`: the sidebar marks a
   rebuilt history's chips from that list rather than a copy of its own, which a new write tool
   would fall out of.

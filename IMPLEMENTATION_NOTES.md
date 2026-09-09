@@ -6977,3 +6977,97 @@ the tree, before anything changed:
 - A `\d` inside a query is two characters, and `terms_of` would have pulled
   the word "d" out of `^\d{4}` and searched for it confidently. The pattern
   test runs before the expression is built, not after it comes back empty.
+
+## Post-M38 — Review fixes (2026-09-09)
+
+A two-agent review of the M38 changeset since 088ee44 (one bug-hunting pass,
+one architecture/security/data-integrity pass) produced, once merged, one
+critical issue, eleven warnings and fourteen suggestions, five of them raised
+by both reviewers. Each fix went through `scripts/gate.sh`, four commits in
+all, grouped by concern. What future sessions should know:
+
+- **The reconcile wrote from a snapshot taken before it had the lock** (the
+  critical, and the one finding both reviewers led with). Two builds share the
+  database; both could plan the same changed file, and the second would delete
+  a rowid the first had already replaced — leaving an FTS row that neither a
+  later reconcile nor `Rebuild the index` could reach, answering for a
+  document twice or for one that had gone. The rowid is read back inside the
+  transaction now, and the rebuild clears on the FTS table's own `class_id`
+  rather than on the rowids `material_index` happens to name, so it reclaims
+  an orphan that is already there.
+- **A missing class folder emptied the index.** `walk_class` returns nothing
+  for a directory it cannot read, so an unmounted volume or a rename in Finder
+  made one search delete the whole class's index and then answer "no documents
+  match". `plan` refuses a folder that is not a directory — the guard
+  `cards.rs` has carried since M37's own review pass, for the same failure,
+  which this shipped again in a new module.
+- **The disk work left the connection.** `with_conn` holds the one
+  process-wide connection for its whole closure, and the reconcile walked the
+  tree and read every changed document inside it. `known_rows`, `plan` and
+  `apply` are three steps, and only the first and last take the lock. The file
+  already carried a comment recording that ripgrep had been moved out of the
+  same position.
+- **Counts that were not counts.** The ranked search reported the size of the
+  page the limit returned, so the model was told fifty documents matched
+  whether fifty did or five hundred; and the compact overview's "N more open"
+  was bounded by the twenty-five-row limit that had already trimmed it, on a
+  line that rides the system prompt of every turn. Both are `COUNT(*)` now,
+  and the overview says how many `get_overview` will list rather than
+  promising all of them. Ranked rows no longer carry their content, which was
+  deserializing every candidate whole to line-number twenty.
+- **`undo_last` could report half a batch as the whole action.** It gathered
+  the batch from the same four hundred rows it had searched for the newest
+  reversible row. The batch is fetched by its tag over the log, and the search
+  itself is a lazy walk with no window, so a run of rows nothing reverses — a
+  Canvas sync writes many — cannot hide the action beneath them.
+- **`approve_deadlines` read an empty `ids` as "all of them".** The guard
+  matched `Some(list) if !list.is_empty()` and fell through to the class
+  branch, so a model sending `[]` to mean none would have had every waiting
+  proposal for that class inserted as a real deadline.
+- **Two security findings, both calibrated to prompt injection rather than a
+  remote attacker.** `add_lecture`'s path arm read any file on the machine,
+  and the model writes that path while reading Canvas notices and extracts
+  verbatim; it is now bounded to the library and `~/Downloads`. And the system
+  prompt told the model what to do with material without ever saying that
+  material is content rather than instruction — one paragraph, sharpest
+  against `dismiss_move`, which is irreversible, and the two run tools, which
+  spend subscription tokens.
+- **The frontend**: the write-tool list is a prop threaded from the snapshot,
+  since `Turn` is memoized and the old empty-patch repaint could not reach a
+  chip already on screen, and the store starts on the nine M8 names so a
+  failed load degrades rather than marking every write chip a read; a citation
+  of a guide or a note ends the time-linking carry instead of letting the
+  times under it reach back to a transcript above; a time in a fenced block
+  stays code; both passes build the citation button through one helper, since
+  the second pass matches the markup the first emits; `Number("")` is 0 and
+  finite, so an empty `data-class` is parsed with `parseInt` instead.
+- **Tests**: the missing-folder refusal and that a rebuild refuses on the same
+  reading; an orphan row reclaimed by the rebuild and by a stale plan's apply;
+  an empty class list; the cited line on a whole word, a stem and a short term;
+  the proposal an approval names in each of its three states; the empty-id
+  branch; the week resolution on a dated course and a ranged one; a lecture
+  source inside and outside the library; a batch of forty under four hundred
+  and fifty newer rows; and the reversible-action list walked in full rather
+  than sampled. 372 pass. `npx tsc --noEmit` clean. Nothing was pushed.
+- **Left as it is**: the one-time delete of the pre-M38 `chat_max_tokens` key
+  stays in `remember_ceiling` rather than moving into migration 0021, which
+  has already run here — editing an applied migration would never take effect
+  on this database, and the delete is a no-op on a four-row table after the
+  first ceiling is learned. The unfocused detailed overview still carries the
+  shared deadline list, which is most of what a focused call costs too.
+  `run_syllabus_scan`, `approve_all_moves`, `approve_deadlines`,
+  `dismiss_move` and `run_shift` are tested at the unit level and were not
+  driven through a chat turn, each being the same audited call its button
+  makes.
+
+### Gotchas
+
+- A `perl -0pi -e` substitution carrying an apostrophe or an em dash inside a
+  replacement breaks the shell's quoting; the Edit tool is the way to insert a
+  comment into TypeScript or Rust.
+- A named constant interpolated into a `conn.prepare` string only works when
+  the string is a `format!` — a plain literal carries `{NAME}` through to
+  SQLite verbatim, which fails at prepare time rather than at compile time.
+- `rusqlite`'s `query_map` is lazy, so `find_map` over it stops reading at the
+  first row that answers; a `LIMIT` exists to bound the work, and where the
+  walk stops on its own the limit only bounds the correctness.
