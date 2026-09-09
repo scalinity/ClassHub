@@ -744,7 +744,7 @@ fn lectures_block(
     let filed = stmt
         .query_map([class_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let sessions = guides.iter().filter(|g| g.session).count();
+    let sessions = guides.iter().filter(|g| g.family == "session").count();
     let mapped = |rel_path: &str| contributions.iter().any(|c| c.rel_path == rel_path);
     if filed.is_empty() && contributions.is_empty() && sessions == 0 {
         return Ok("Lectures: none filed\n".to_string());
@@ -833,7 +833,7 @@ fn material_line(conn: &Connection, class_id: i64) -> Result<String> {
 /// about, which its scope (the transcript's path) is not.
 fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
     // An exam's row is not a guide (SPEC §8.3); the exams are listed nowhere here.
-    let guides: Vec<&crate::guides::GuideInfo> = guides.iter().filter(|g| !g.practice).collect();
+    let guides: Vec<&crate::guides::GuideInfo> = guides.iter().filter(|g| g.family != "practice").collect();
     if guides.is_empty() {
         return "Guides: none generated yet\n".to_string();
     }
@@ -841,7 +841,7 @@ fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
     let described = guides
         .iter()
         .map(|g| {
-            let scope = if g.session {
+            let scope = if g.family == "session" {
                 format!("session {}", document_stem(&g.rel_path))
             } else {
                 g.label.clone()

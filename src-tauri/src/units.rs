@@ -49,7 +49,7 @@ pub const UNIT_KINDS: &[&str] = &["module", "week", "part"];
 /// workspace, so they are capped at something a heading can hold.
 pub const MAX_UNIT_NAME: usize = 120;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct UnitInfo {
     pub id: i64,

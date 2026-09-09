@@ -5,6 +5,7 @@ import { withDocumentCsp } from "@/lib/document";
 import {
   deltaLabel,
   deltaTitle,
+  FAMILY_LABELS,
   formatGeneratedAt,
   readGuide,
   type GuideInfo,
@@ -52,7 +53,7 @@ export function GuideViewer({
         onMouseDown={dragWindow}
         className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border/70 bg-surface pl-24 pr-3"
       >
-        <p className={`pointer-events-none shrink-0 ${meta}`}>Study guide</p>
+        <p className={`pointer-events-none shrink-0 ${meta}`}>{FAMILY_LABELS[guide.family]}</p>
         <p className="pointer-events-none min-w-0 truncate text-[15px] font-medium">
           {guide.label}
         </p>

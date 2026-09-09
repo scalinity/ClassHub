@@ -1915,6 +1915,21 @@ fn record_session(
         }
     }
 
+    // A pre-read written for this division is superseded by the session
+    // document (SPEC §8.6): its row goes with this transaction, its files
+    // after the commit.
+    let mapped_unit: Option<i64> = tx
+        .query_row(
+            "SELECT unit_id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+            rusqlite::params![class_id, &payload.transcript_rel_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let superseded_preread = match mapped_unit {
+        Some(unit_id) => crate::preread::supersede(&tx, class_id, unit_id)?,
+        None => Vec::new(),
+    };
+
     // The row's summary was a placeholder from filing time. Now that the
     // session has been read, it carries what the session was about — which is
     // what the Lectures listing shows beside the division it feeds.
@@ -1939,6 +1954,11 @@ fn record_session(
             if let Some(abs) = session_path(class_dir, &rel) {
                 let _ = fs::remove_file(abs);
             }
+        }
+    }
+    for rel in superseded_preread {
+        if let Some(abs) = session_path(class_dir, &rel) {
+            let _ = fs::remove_file(abs);
         }
     }
     Ok(format!("{} · {}", result.title, payload.date))

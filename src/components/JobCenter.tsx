@@ -428,7 +428,7 @@ function tonightLine(shift: ShiftStatus): string {
   if (paused) return "Paused tonight";
   if (ranTonight) return "Ran tonight · next window tomorrow";
   const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-  return `Tonight from ${formatTime(settings.start)} once the Mac has been idle ${settings.idleMinutes} min · up to ${count(settings.digestsPerNight, "digest", "digests")}, ${count(settings.guidesPerNight, "guide", "guides")}`;
+  return `Tonight from ${formatTime(settings.start)} once the Mac has been idle ${settings.idleMinutes} min · up to ${count(settings.digestsPerNight, "digest", "digests")}, ${count(settings.guidesPerNight, "guide", "guides")}, ${count(settings.briefsPerNight, "brief", "briefs")}`;
 }
 
 function StepMark({ state }: { state: ShiftStep["state"] }) {
@@ -481,7 +481,11 @@ function ShiftPanel({
         </p>
         <p className={`shrink-0 ${meta}`}>
           This week · {meter.digests} {meter.digests === 1 ? "digest" : "digests"} ·{" "}
-          {meter.guides} {meter.guides === 1 ? "guide" : "guides"} · {formatMinutes(meter.minutes)}
+          {meter.guides} {meter.guides === 1 ? "guide" : "guides"}
+          {meter.documents > 0 &&
+            ` · ${meter.documents} ${meter.documents === 1 ? "document" : "documents"}`}
+          {" · "}
+          {formatMinutes(meter.minutes)}
         </p>
       </div>
       {run?.summary && (

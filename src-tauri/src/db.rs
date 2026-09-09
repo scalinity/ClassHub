@@ -54,6 +54,55 @@ pub fn is_practice_scope(scope: &str) -> bool {
     scope.starts_with(PRACTICE_SCOPE_PREFIX)
 }
 
+/// SPEC §8.6 — the small documents. A homework brief is scoped by the
+/// deadline it maps, `brief:<deadline id>`, so a retitled assignment keeps
+/// its brief; the project workbook is one per class, `project`; a pre-read
+/// is scoped by the division it precedes, `preread:<unit id>`; a
+/// presentation kit by the paper it reads, `kit:<pdf rel path>`.
+pub const BRIEF_SCOPE_PREFIX: &str = "brief:";
+pub const PROJECT_SCOPE: &str = "project";
+pub const PREREAD_SCOPE_PREFIX: &str = "preread:";
+pub const KIT_SCOPE_PREFIX: &str = "kit:";
+/// Where the small documents land (SPEC §8.6), all under `Study Guides/` so
+/// the write contract and chat's search need no widening.
+pub const BRIEFS_DIR: &str = "Study Guides/Briefs";
+pub const PRESENTATIONS_DIR: &str = "Study Guides/Presentations";
+pub const PROJECT_OUTPUT: &str = "Study Guides/Project Workbook.html";
+/// The owner's own project drafts (SPEC §4): source material like any folder.
+pub const PROJECT_DIR: &str = "Project";
+
+/// The deadline id a brief scope names — `brief:12` → 12.
+pub fn brief_scope_id(scope: &str) -> Option<i64> {
+    scope.strip_prefix(BRIEF_SCOPE_PREFIX)?.parse().ok()
+}
+
+/// The unit id a pre-read scope names — `preread:9` → 9.
+pub fn preread_scope_id(scope: &str) -> Option<i64> {
+    scope.strip_prefix(PREREAD_SCOPE_PREFIX)?.parse().ok()
+}
+
+/// Which family of document a `guides` scope is, so a listing can tell the
+/// guides from the rest without every reader spelling the prefixes: `guide`
+/// (a division, a folder, the master), `session`, `practice`, `brief`,
+/// `project`, `preread` or `kit`.
+pub fn scope_family(scope: &str) -> &'static str {
+    if is_session_scope(scope) {
+        "session"
+    } else if is_practice_scope(scope) {
+        "practice"
+    } else if scope.starts_with(BRIEF_SCOPE_PREFIX) {
+        "brief"
+    } else if scope == PROJECT_SCOPE {
+        "project"
+    } else if scope.starts_with(PREREAD_SCOPE_PREFIX) {
+        "preread"
+    } else if scope.starts_with(KIT_SCOPE_PREFIX) {
+        "kit"
+    } else {
+        "guide"
+    }
+}
+
 /// The scope of one of the course's divisions.
 pub fn unit_scope(unit_id: i64) -> String {
     format!("{UNIT_SCOPE_PREFIX}{unit_id}")

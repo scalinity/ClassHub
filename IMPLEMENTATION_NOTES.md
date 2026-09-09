@@ -6222,3 +6222,189 @@ sessions should know:
 - The reviewers' final answers truncate near 4,000 characters; asking each
   to send every remaining batch as its own `SendMessage`, one per piece, is
   what delivers a whole report.
+
+## M36 — Briefs and workbooks (2026-09-08)
+
+### Phase 0 — measured
+
+Read off the live database and the tree on Sept 8 at 22:40, before anything
+changed:
+
+- **Open assignments and project items.** Fundamentals: Homework 2–7 (Sept 21
+  to Nov 30, syllabus rows, notes only) and the Final Capstone Project (Dec 2);
+  Design Studio: the Sept 9 `Problem Statement and AI Sketch` (Canvas, a 779-
+  character description), ten `project` rows and seven the scan typed
+  `assignment` (`Draft: Introduction`, `AI Teaming Log`, `Scaling Plan & Cost
+  Estimates` …) from Sept 16 to Dec 2 — seventeen items, the sixteen syllabus
+  rows plus the Canvas one that absorbed the syllabus's Sept 9 reading;
+  Biostatistics: `Homework Assignment 1` (Sept 14, Canvas, a 497-character
+  description naming "Modules 1, 2, and 3" and two attached PDFs the tree does
+  not hold), Homework 2–5 (Oct 4 to Nov 15), the Project Report (Dec 3) and the
+  Oral Presentation (Dec 7); Applied: none. The nearest open homework is
+  Biostatistics' on Sept 14, not the Fundamentals Homework 2 the brief named.
+- **The window.** Keyed on any earlier assignment-kind row, Biostatistics'
+  Homework 1 would open after the `Conceptual Quiz 1` row the Canvas sync
+  typed `assignment` (Sept 6) and read Week 4 alone, against its own
+  description; keyed on the previous homework of the same family it is the
+  first of its kind and reads Weeks 1–4 (Aug 20 to Sept 10). Fundamentals'
+  Homework 2 after Homework #1 (Sept 7) reads Weeks 3 and 4, as expected.
+  Notes and hints in those windows: Biostatistics Week 3 distilled with 39
+  flagged items; Fundamentals Week 3 filed, not distilled.
+- **The project.** Weights 30 / 60 / 30 / 80 (Applied's four project
+  categories summed) — every class qualifies. Design Studio's `AI Design
+  Project Guidelines.pdf` is filed under `AI Design Project/` by M33's rule
+  (68 KB, an 8.6 KB extract) beside the milestone's template
+  `Problem Statement and AI Sketch.docx` (3.7 KB extract); three Design Studio
+  announcements and Applied's HiPerGator notice mention the project. No
+  `Project/` folder exists yet in any class.
+- **Pre-read candidates.** Biostatistics Week 4 (Sept 10) holds the Reinhold
+  reading and no transcript — its extract was refused by the model's filter on
+  Sept 8, so the job reads the PDF itself. Design Studio Week 1 holds
+  `Introduction.pdf` with no transcript but met Aug 26. Nothing else.
+- **Notes.** Two on record (`Before the first class`, `Central tendency —
+  quick reference`); none opens with a date.
+- **The light tier.** The four announcement scans of Sept 8 ran 3–12 s for
+  $0.08–0.13 each on Sonnet at medium; the Aug 25 digest $4.16 on Opus.
+
+### What was built
+
+- **`db.rs`.** The scopes `brief:<deadline id>`, `project`, `preread:<unit
+  id>`, `kit:<pdf rel path>`, the folders `Study Guides/Briefs`, `Study
+  Guides/Presentations`, `Project/`, the workbook's path, and `scope_family`,
+  which names every `guides` row's family.
+- **`guides.rs`.** `GuideInfo.family` in place of the two booleans;
+  `scope_label` for the new scopes, with `label_joins` (units for a pre-read,
+  deadlines for a brief) shared by the listing and `list_jobs`;
+  `guides_of_family`; `DocumentPayload`, `finalize_document` (the HTML and the
+  markdown twin checked, the row upserted with the union manifest), `md_twin`,
+  `forget_document`; `files_block` marks `Project/` as learner work; the
+  synthesis context and its blocks opened to the crate.
+- **`extract.rs`.** `current_manifest` answers the four scopes: a brief's
+  window, the project's files, a pre-read's division, a kit's paper.
+- **`briefs.rs`.** `title_family`, `due_datetime`, `window_units` (pure),
+  `window_for`, `window_manifest`, `write_brief` and `prompts/assignment_brief.md`,
+  `candidates` for the shift (due within five days, no fresh brief).
+- **`workbook.rs`.** `is_project_item`, `is_guideline_file`, `project_items`,
+  the `project_material.<class>` setting with `set_material`,
+  `project_manifest`, `status`, `write_workbook` and
+  `prompts/project_workbook.md`, `candidates`; the kit — `kit_output_rel`,
+  `write_kit`, `prompts/presentation_kit.md`.
+- **`preread.rs`.** `coming_weeks` (pure), `list` (candidates and written
+  rows), `write_preread` and `prompts/pre_read.md`, `candidates` (one per
+  course), `supersede`, called by `record_session` inside its transaction,
+  the files removed after the commit.
+- **`notes_review.rs`.** `note_date`, `has_section`, `list_targets`,
+  `review_note` and `prompts/notes_review.md` (read-only), `section_text`,
+  `appended`, `finalize_job` — the answer parsed, the heading checked again,
+  the section appended through `notes::overwrite_note` under
+  `review.write_note` with a notice — and `candidates`. `undo.rs` reverses
+  the action as a save's; `jobs.rs` clears it in the guard as an app write.
+- **`jobs.rs`.** The five kinds' tools (the four writers as a guide, the review
+  read-only), `writes_to_disk`, the finalize dispatch, `enqueue_document`,
+  `enqueue_notes_review`. **`settings.rs`**: thirteen job kinds.
+- **`shift.rs`.** `STEPS` is ten: `Briefs`, `Workbook`, `Pre-reads`, `Notes`
+  after the guides, with `shift_briefs_per_night` (default 2) and fixed caps
+  of one workbook, one pre-read per course and one review; the tally and the
+  meter count the documents.
+- **`lib.rs`.** Commands `write_brief`, `write_workbook`, `project_status`,
+  `set_project_material`, `write_presentation_kit`, `list_prereads`,
+  `write_preread`, `list_note_reviews`, `review_note`.
+- **The frontend.** `Deadlines.tsx` offers the brief on a row;
+  `Project.tsx` is the section with the picker; `FileTree.tsx` the kit on a
+  PDF's row; `ClassWorkspace.tsx` the pre-read rows in Lectures, the review on
+  a note's row and the Project link; `NoteEditor.tsx` opens a new note on
+  today's date; `GuideViewer.tsx` names the family; `JobCenter.tsx` and
+  `Settings.tsx` the briefs cap and the documents count; `lib/guides.ts`,
+  `lib/jobs.ts`, `lib/query.ts` (the `project` area) carry the plumbing.
+- SPEC §4, §5, §6, §8.6, §11, §12, §13 and §14 state the design; the brief was
+  revised where the database and the code contradicted it (the nearest
+  homework, the window keyed on the family, seventeen items, the project-item
+  reading, the candidate rule for a pre-read, the review appended by the app).
+
+### Verified
+
+- `cargo test`: 334 pass, eight new — a title's family and the window (the
+  divisions between two homeworks, a first homework's from the start, a
+  window nothing met in, a quiz row that is no marker, the shift's list of
+  briefs); the project-item reading and the guidelines match with the
+  workbook's manifest, status and list; the pre-read's candidate rule with
+  its listing, the shift's list and the supersede; the note-date convention
+  and the section appended once with the review's targets and list; the
+  plan's ten indices; the meter's documents. `npx tsc --noEmit` clean.
+- **Live on the dev build**, `pre_read` and `notes_review` set to Sonnet at
+  Medium through the settings table, the digest, guide and brief caps at 0,
+  a fixture note `Notes/2026-09-03 — In class.md` on Biostatistics carrying
+  a swapped MCAR/MAR and a listwise-deletion claim:
+  - **The shift** (`Run the shift now`, the dev switch on, the installed
+    app's own Sept 8 run deleted once it had claimed the row the moment it
+    was freed — the machine had been idle by HID for an hour — and the idle
+    threshold raised to 180 while the dev build claimed it): ten steps —
+    `Sync Canvas · synced 4 classes`, `File · nothing to file`,
+    `Recordings · 5 past the cap`, `Extract · nothing stale`, `Distill · 3
+    sessions waiting, the cap is 0`, `Rebuild guides · 4 guides waiting, the
+    cap is 0`, `Briefs · 1 brief waiting, the cap is 0` (Design Studio's Sept
+    9 item), `Workbook · 1 of 1 workbook`, `Pre-reads · 1 of 1 pre-read`,
+    `Notes · 1 of 1 note` — `budget`, `1 workbook refreshed, 1 pre-read
+    written, 1 note reviewed · 13 more for tomorrow`; the panel's meter reads
+    `3 documents` and its tonight line the three caps.
+  - **The workbook** (job 335, Opus, 4.3 min, 8 turns, $1.35): read the
+    guidelines extract, the milestone template and the Canvas project page
+    (the manifest widened by the page); its table holds the seventeen items
+    with the Sept 9 one marked next, the rubric cited to the guidelines'
+    headings, the next item part by part with `HAVE — Nothing` under each
+    since no `Project/` exists, and a checklist of steps, no content. The
+    section reads `17 items · 60% of the grade`, the next row `Problem
+    Statement and AI Sketch · from Canvas · tomorrow`, `Writing the
+    workbook…` while it ran and `Read the workbook` after.
+  - **The pre-read** (job 336, Sonnet, 82 s, 4 turns, $0.40) for
+    Biostatistics Week 4: read the Reinhold PDF itself — its extract was
+    refused on Sept 8 — and wrote both files with page citations; the
+    Lectures row reads `Before class · Thu, Sep 10 · Week 4 — Probability
+    and Sampling Distributions · Read`.
+  - **The review** (job 337, Sonnet, 2.1 min, 11 turns, $0.51): the section
+    named the MCAR/MAR swap, the deletion rule, the domain names, the
+    quiz/homework conflation and the uncorroborated winsorizing, each with
+    the document's anchor; audit row 272 `review.write_note` with the
+    previous content; the notice's `Undo` in the Job Center restored the
+    seven-line note (audit 273 `undo.review.write_note`) and the row offered
+    `Against the room` again. The fixture was removed after.
+  - **The brief** (job 338, `Write the brief for Homework Assignment 1`,
+    Opus, 7.4 min, 22 turns, $2.99): the header names the window (Weeks 1–4,
+    the first of its family) and the three attachments the folder lacks;
+    four parts, each mapped to anchors in the Week 3 note and to slides of
+    the Module 1, 2 and 3 decks, the Module 1 and 2 material marked as
+    carrying no lecture anchor; formulas with their conditions and R
+    patterns with their notebook cells, none applied; the room's hints; a
+    checklist. The manifest widened by the two Module decks and the Canvas
+    page it found. The row reads `Read the brief`, and the viewer's eyebrow
+    `Homework brief`. A press on Homework 2's row was refused with `nothing
+    to map Homework 2 to yet — no file is filed under its window's weeks and
+    no lecture there has been distilled`, shown under the heading.
+  - The kit's action sits on every PDF row; not run.
+- Settings put back: caps 4 / 2 / 2, idle 20, the dev switch off. The light
+  tier stays set for `pre_read` and `notes_review`.
+
+### Left as it is
+
+- The presentation kit ran on no paper: Applied's paper presentation has no
+  date, and the kit is manual by design.
+- Biostatistics Week 4's reading has no extract (the model's filter refused
+  it); the pre-read read the PDF itself, and a brief for a later homework
+  will too.
+- `sorter::week_filing` stays a test-only function at the baseline.
+
+### Gotchas
+
+- Deleting the night's `shift_runs` row while the machine has been idle by
+  HID for the threshold hands the run to the installed app on its next
+  minute tick; raise `shift_idle_minutes` first when the dev build is to run
+  it.
+- `AX_NTH=1` on a name shared by every deadline row landed on the second
+  row; the brief's buttons carry `aria-label`s naming the deadline, so a
+  press names the row.
+- A lib file's HMR (`schedule.ts`) reloaded the page and emptied the notices
+  store; the toast's `Undo` was gone, and the Job Center's list carried it
+  only once a fresh notice arrived. Undo from the panel before editing
+  `src/lib/`.
+- `deadlines::due_instant` is `#[cfg(test)]`; `briefs::due_datetime` carries
+  its own end-of-day rule.

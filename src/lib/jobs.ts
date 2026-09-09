@@ -85,6 +85,8 @@ export interface Meter {
   guides: number;
   exams: number;
   extracts: number;
+  /** The small documents (SPEC §8.6) together. */
+  documents: number;
   minutes: number;
 }
 
@@ -95,6 +97,7 @@ export interface ShiftSettings {
   idleMinutes: number;
   guidesPerNight: number;
   digestsPerNight: number;
+  briefsPerNight: number;
   inDevBuild: boolean;
 }
 
@@ -310,6 +313,20 @@ async function refreshJobs() {
       }
     } else if (job.kind === "practice") {
       void queryClient.invalidateQueries({ queryKey: ["practice"] });
+    } else if (
+      job.kind === "assignment_brief" ||
+      job.kind === "project_workbook" ||
+      job.kind === "presentation_kit" ||
+      job.kind === "pre_read"
+    ) {
+      // A small document's row lands before its job settles (SPEC §8.6).
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      void queryClient.invalidateQueries({ queryKey: ["prereads"] });
+    } else if (job.kind === "notes_review") {
+      // The section was appended through the note write path; the
+      // `notes` hub change refetches the listing and the cached text, and
+      // the targets say the note is reviewed now.
+      void queryClient.invalidateQueries({ queryKey: ["noteReviews"] });
     }
   }
   updateTicker(jobs);
@@ -430,6 +447,11 @@ const JOB_KIND_LABELS: Record<string, string> = {
   master_guide: "Semester master",
   practice: "Practice exam",
   lecture_digest: "Lecture digest",
+  assignment_brief: "Homework brief",
+  project_workbook: "Project workbook",
+  presentation_kit: "Presentation kit",
+  pre_read: "Pre-read",
+  notes_review: "Notes review",
   sort_proposal: "Sort",
   syllabus_scan: "Syllabus scan",
   announcement_scan: "Announcement scan",

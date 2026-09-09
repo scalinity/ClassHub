@@ -91,13 +91,12 @@ pub struct GuideInfo {
     /// What changed since the guide was written (SPEC §7 step 5): the names
     /// behind `stale`, for the row's `Rewrite · 2 files added, 1 changed`.
     pub diff: ManifestDiff,
-    /// Session digests share this table to inherit the viewer and staleness,
-    /// but they are per-lecture rather than per-module, so the Study Guides tab
-    /// lists them separately instead of interleaving them with the guides.
-    pub session: bool,
-    /// A practice exam's row (SPEC §8.3): listed with the exams, never among
-    /// the guides, and never counted as one worth regenerating.
-    pub practice: bool,
+    /// Which family of document the row is (`db::scope_family`): a `guide`
+    /// — a division's, a folder's or the master — or one of the documents
+    /// that share this table to inherit the viewer and staleness and are
+    /// listed apart: a `session` document, a `practice` exam, a homework
+    /// `brief`, the `project` workbook, a `preread`, a presentation `kit`.
+    pub family: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,18 +107,18 @@ pub struct GuideInfo {
 /// from it, and what changed since the guide on record. Each caller then owns
 /// only its own output path, template and payload shape — which is the part
 /// that actually differs between them.
-struct SynthesisContext {
-    class_name: String,
-    accent_light: &'static str,
-    accent_dark: &'static str,
-    manifest: Vec<ManifestEntry>,
-    manifest_block: String,
-    files_block: String,
-    changes_block: String,
-    class_dir: PathBuf,
+pub(crate) struct SynthesisContext {
+    pub class_name: String,
+    pub accent_light: &'static str,
+    pub accent_dark: &'static str,
+    pub manifest: Vec<ManifestEntry>,
+    pub manifest_block: String,
+    pub files_block: String,
+    pub changes_block: String,
+    pub class_dir: PathBuf,
 }
 
-fn synthesis_context(
+pub(crate) fn synthesis_context(
     conn: &Connection,
     class_id: i64,
     scope: &str,
@@ -361,8 +360,26 @@ pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
     if scope == MASTER_SCOPE {
         return "Semester Master".into();
     }
+    if scope == crate::db::PROJECT_SCOPE {
+        return "Project workbook".into();
+    }
     if let Some(rest) = scope.strip_prefix(UNIT_SCOPE_PREFIX) {
         return unit_name.map(str::to_string).unwrap_or_else(|| rest.to_string());
+    }
+    // A pre-read is named for the division it precedes, a brief for the
+    // deadline it maps — both ride in as `unit_name`, the label the caller
+    // looked up for the scope's id (SPEC §8.6).
+    if scope.starts_with(crate::db::PREREAD_SCOPE_PREFIX) {
+        return match unit_name {
+            Some(name) => format!("Before class · {name}"),
+            None => "Pre-read".into(),
+        };
+    }
+    if scope.starts_with(crate::db::BRIEF_SCOPE_PREFIX) {
+        return match unit_name {
+            Some(title) => format!("Brief · {title}"),
+            None => "Homework brief".into(),
+        };
     }
     let file_stem = |path: &str, ext: &str| {
         path.rsplit('/')
@@ -374,10 +391,25 @@ pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
     if let Some(path) = scope.strip_prefix(crate::db::SESSION_SCOPE_PREFIX) {
         return file_stem(path, ".md");
     }
+    if let Some(path) = scope.strip_prefix(crate::db::KIT_SCOPE_PREFIX) {
+        return format!("Kit · {}", file_stem(path, ".pdf"));
+    }
     match scope.strip_prefix(PRACTICE_SCOPE_PREFIX) {
         Some(path) => file_stem(path, ".html"),
         None => scope.to_string(),
     }
+}
+
+/// The SQL that finds a scope's label beside a `guides` or `jobs` row: the
+/// division's name for a unit or pre-read scope, the deadline's title for a
+/// brief. `{table}` is the alias of the scoped row.
+pub(crate) const LABEL_JOINS: &str =
+    "LEFT JOIN units u ON u.class_id = {t}.class_id
+       AND ({t}.scope = 'unit:' || u.id OR {t}.scope = 'preread:' || u.id)
+     LEFT JOIN deadlines d ON d.class_id = {t}.class_id AND {t}.scope = 'brief:' || d.id";
+
+pub(crate) fn label_joins(alias: &str) -> String {
+    LABEL_JOINS.replace("{t}", alias)
 }
 
 /// The blocks a guide prompt takes beside its context.
@@ -463,12 +495,12 @@ fn render_practice_prompt(ctx: &SynthesisContext, blocks: &PracticeBlocks<'_>) -
 
 /// The `{hints}` block for a scope (SPEC §8.1): a division's rows, or every
 /// row of the class for the master and the semester exam.
-fn hints_for(conn: &Connection, class_id: i64, units: Option<&[i64]>) -> Result<String> {
+pub(crate) fn hints_for(conn: &Connection, class_id: i64, units: Option<&[i64]>) -> Result<String> {
     Ok(crate::lectures::hints_block(&crate::lectures::list_hints(conn, class_id)?, units))
 }
 
 /// A division's stated objectives, off its row (SPEC §11).
-fn unit_objectives(conn: &Connection, unit_id: i64) -> Result<Vec<String>> {
+pub(crate) fn unit_objectives(conn: &Connection, unit_id: i64) -> Result<Vec<String>> {
     let stored: Option<String> = conn
         .query_row("SELECT objectives FROM units WHERE id = ?1", [unit_id], |row| row.get(0))
         .optional()?
@@ -478,7 +510,7 @@ fn unit_objectives(conn: &Connection, unit_id: i64) -> Result<Vec<String>> {
 
 /// The `{objectives}` block for one division: the syllabus's list, or the
 /// line saying it states none.
-fn objectives_block(objectives: &[String]) -> String {
+pub(crate) fn objectives_block(objectives: &[String]) -> String {
     if objectives.is_empty() {
         return "(the syllabus states none for this division)".to_string();
     }
@@ -1052,9 +1084,12 @@ fn files_block(
         if !in_scope.contains(rel_path.as_str()) || listed_apart.contains(&rel_path) {
             continue;
         }
+        // The `Edited Files` convention of SPEC §4's tree, and the owner's
+        // own project drafts under `Project/` (SPEC §8.6).
         let learner = Path::new(&rel_path)
             .components()
-            .any(|c| c.as_os_str() == "Edited Files");
+            .any(|c| c.as_os_str() == "Edited Files")
+            || rel_path.starts_with(&format!("{}/", crate::db::PROJECT_DIR));
         let mut entry = format!("- source: {rel_path}");
         if learner {
             entry.push_str(" (learner work)");
@@ -1164,7 +1199,7 @@ pub fn finalize_job(
     Ok(())
 }
 
-fn upsert_guide(
+pub(crate) fn upsert_guide(
     conn: &Connection,
     class_id: i64,
     scope: &str,
@@ -1199,13 +1234,15 @@ fn guides_where(
     class_id: i64,
     keep: impl Fn(&str) -> bool,
 ) -> Result<Vec<GuideInfo>> {
-    // The division's name rides along for the label: a unit scope is its id.
-    let mut stmt = conn.prepare(
-        "SELECT g.scope, g.rel_path, g.generated_at, g.source_manifest, u.name
+    // The division's name, or the deadline's title, rides along for the
+    // label: a unit, pre-read or brief scope is a row id.
+    let mut stmt = conn.prepare(&format!(
+        "SELECT g.scope, g.rel_path, g.generated_at, g.source_manifest, COALESCE(u.name, d.title)
          FROM guides g
-         LEFT JOIN units u ON u.class_id = g.class_id AND g.scope = 'unit:' || u.id
+         {}
          WHERE g.class_id = ?1 ORDER BY g.scope",
-    )?;
+        label_joins("g")
+    ))?;
     let rows = stmt
         .query_map([class_id], |row| {
             Ok((
@@ -1246,8 +1283,7 @@ fn guides_where(
         guides.push(GuideInfo {
             stale: diff.is_stale(),
             diff,
-            session: crate::db::is_session_scope(&scope),
-            practice: crate::db::is_practice_scope(&scope),
+            family: crate::db::scope_family(&scope).to_string(),
             label: scope_label(&scope, unit_name.as_deref()),
             scope,
             rel_path,
@@ -1269,14 +1305,100 @@ pub fn unit_guides(conn: &Connection, class_id: i64) -> Result<Vec<GuideInfo>> {
 /// Study guides only. A session digest also lives in this table and also goes
 /// stale, but the badge means "guides worth regenerating" and the Lectures
 /// listing carries its own affordance for a stale session; an exam is not
-/// regenerated either.
+/// regenerated either, and the small documents (SPEC §8.6) carry their own
+/// rows and the shift's own steps.
 pub fn stale_guide_count(conn: &Connection, class_id: i64) -> Result<i64> {
-    Ok(guides_where(conn, class_id, |scope| {
-        !crate::db::is_session_scope(scope) && !crate::db::is_practice_scope(scope)
-    })?
-    .iter()
-    .filter(|g| g.stale)
-    .count() as i64)
+    Ok(guides_where(conn, class_id, |scope| crate::db::scope_family(scope) == "guide")?
+        .iter()
+        .filter(|g| g.stale)
+        .count() as i64)
+}
+
+/// The rows of one family — the briefs, the pre-reads — with their staleness,
+/// for the listings and the shift's steps (SPEC §8.6).
+pub fn guides_of_family(conn: &Connection, class_id: i64, family: &str) -> Result<Vec<GuideInfo>> {
+    guides_where(conn, class_id, |scope| crate::db::scope_family(scope) == family)
+}
+
+// ---------------------------------------------------------------------------
+// The small documents (SPEC §8.6): one payload and one finalizer for the
+// brief, the workbook, the pre-read and the kit
+
+/// Rides `QueuedJob.payload` for the small documents: the row to upsert and
+/// the files the run must have written — the HTML, and the markdown twin
+/// where the kind writes one for search.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DocumentPayload {
+    pub scope: String,
+    pub rel_path: String,
+    #[serde(default)]
+    pub md_rel_path: Option<String>,
+    /// JSON `[{relPath, sha256}]` captured at enqueue, widened at finalize by
+    /// what the log shows the job read (SPEC §7 step 5).
+    pub source_manifest: String,
+}
+
+/// Completion for a small document (job runner, before the row leaves
+/// `running`): every contracted file has to be there and non-empty — the
+/// markdown twin included, since "wrote the HTML, skipped the markdown" would
+/// otherwise pass and leave the document out of chat's reach — and the row is
+/// upserted with the honest manifest.
+pub fn finalize_document(
+    app: &AppHandle,
+    class_id: i64,
+    payload: &str,
+    read: &BTreeSet<String>,
+) -> Result<()> {
+    let payload: DocumentPayload =
+        serde_json::from_str(payload).context("parsing document payload")?;
+    let db = app.state::<crate::Db>();
+    let conn = lock(&db.0);
+    let class_dir = crate::scanner::class_dir(&conn, class_id)?;
+    for rel in std::iter::once(&payload.rel_path).chain(payload.md_rel_path.iter()) {
+        let written = fs::metadata(class_dir.join(rel))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false);
+        if !written {
+            bail!("no document written at {rel}");
+        }
+    }
+    let listed = serde_json::from_str::<Vec<ManifestEntry>>(&payload.source_manifest)
+        .unwrap_or_default();
+    let manifest = union_manifest(&conn, class_id, &class_dir, listed, read)?;
+    upsert_guide(
+        &conn,
+        class_id,
+        &payload.scope,
+        &payload.rel_path,
+        &serde_json::to_string(&manifest)?,
+    )
+}
+
+/// The markdown twin a small document writes beside its HTML, for search.
+pub(crate) fn md_twin(rel_path: &str) -> String {
+    format!("{}.md", rel_path.strip_suffix(".html").unwrap_or(rel_path))
+}
+
+/// Removes a document's row and its files — a pre-read the session document
+/// superseded (SPEC §8.6). The row goes inside the caller's transaction; the
+/// files are returned for the caller to remove once it has committed.
+pub(crate) fn forget_document(conn: &Connection, class_id: i64, scope: &str) -> Result<Vec<String>> {
+    let rel_path: Option<String> = conn
+        .query_row(
+            "SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
+            params![class_id, scope],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(rel_path) = rel_path else {
+        return Ok(Vec::new());
+    };
+    conn.execute(
+        "DELETE FROM guides WHERE class_id = ?1 AND scope = ?2",
+        params![class_id, scope],
+    )?;
+    Ok(vec![md_twin(&rel_path), rel_path])
 }
 
 /// Guide HTML for the in-app sandboxed viewer.
@@ -1689,7 +1811,7 @@ mod tests {
         assert_eq!(week3.stale, Some(true));
         assert_eq!(week3.diff.as_ref().map(|d| d.changed.clone()), Some(vec!["Weeks/Week 03/deck.pdf".to_string()]));
         assert_eq!(stale_guide_count(&conn, 3).unwrap(), 0);
-        assert!(list_guides(&conn, 3).unwrap().iter().all(|g| g.practice));
+        assert!(list_guides(&conn, 3).unwrap().iter().all(|g| g.family == "practice"));
         let _ = fs::remove_dir_all(&root);
     }
 }

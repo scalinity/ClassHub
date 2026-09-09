@@ -34,12 +34,17 @@ pub const MAX_JOB_CONCURRENCY: usize = 4;
 /// Every kind a model and effort can be set for, with what it is called on
 /// screen (SPEC §6). The self-check is not one: it spends nothing worth
 /// tuning, and its verdict is about auth, not a model.
-pub const JOB_KINDS: [(&str, &str); 8] = [
+pub const JOB_KINDS: [(&str, &str); 13] = [
     ("extract", "Extract"),
     ("module_guide", "Study guide"),
     ("master_guide", "Semester master"),
     ("practice", "Practice exam"),
     ("lecture_digest", "Lecture digest"),
+    ("assignment_brief", "Homework brief"),
+    ("project_workbook", "Project workbook"),
+    ("presentation_kit", "Presentation kit"),
+    ("pre_read", "Pre-read"),
+    ("notes_review", "Notes review"),
     ("sort_proposal", "Sort"),
     ("syllabus_scan", "Syllabus scan"),
     ("announcement_scan", "Announcement scan"),
@@ -278,7 +283,7 @@ pub(crate) fn set_audited(app: &AppHandle, key: &str, value: &str) -> Result<()>
 
 /// Removes a setting row, its before value on the audit row; a no-op without
 /// a row, since there is nothing to record.
-fn clear_audited(app: &AppHandle, key: &str) -> Result<()> {
+pub(crate) fn clear_audited(app: &AppHandle, key: &str) -> Result<()> {
     with_conn(app, |conn| {
         let Some(before) = setting(conn, key)? else {
             return Ok(());

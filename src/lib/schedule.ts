@@ -160,6 +160,12 @@ export function dueDayLabel(dueAt: string): string {
   return `${weekday}, ${formatDueDate(dueAt)}`;
 }
 
+/** `Thu, Sep 10` for a bare date — a meeting's day, as the pre-read row names it. */
+export function formatMeetingDay(iso: string): string {
+  const weekday = localMidnight(iso).toLocaleDateString("en-US", { weekday: "short" });
+  return `${weekday}, ${formatDueDate(iso.slice(0, 10))}`;
+}
+
 /** Today as YYYY-MM-DD in local time (backend stamps and date-input defaults). */
 export function todayIso(now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");

@@ -8,6 +8,40 @@ export const MASTER_OUTPUT_PATH = "Study Guides/Semester Master.html";
 export const SESSION_SCOPE_PREFIX = "session:";
 /** Mirrors `db.rs::UNIT_SCOPE_PREFIX` — a unit scope names the division by its row id. */
 export const UNIT_SCOPE_PREFIX = "unit:";
+/** The small documents' scopes (SPEC §8.6), mirroring `db.rs`. */
+export const BRIEF_SCOPE_PREFIX = "brief:";
+export const PROJECT_SCOPE = "project";
+export const PREREAD_SCOPE_PREFIX = "preread:";
+export const KIT_SCOPE_PREFIX = "kit:";
+
+export function briefScope(deadlineId: number): string {
+  return `${BRIEF_SCOPE_PREFIX}${deadlineId}`;
+}
+
+export function kitScope(relPath: string): string {
+  return `${KIT_SCOPE_PREFIX}${relPath}`;
+}
+
+/** Which family of document a `guides` row is (`db.rs::scope_family`). */
+export type GuideFamily =
+  | "guide"
+  | "session"
+  | "practice"
+  | "brief"
+  | "project"
+  | "preread"
+  | "kit";
+
+/** What the viewer's eyebrow calls a document of each family. */
+export const FAMILY_LABELS: Record<GuideFamily, string> = {
+  guide: "Study guide",
+  session: "Session",
+  practice: "Practice exam",
+  brief: "Homework brief",
+  project: "Project workbook",
+  preread: "Pre-read",
+  kit: "Presentation kit",
+};
 
 /**
  * The `guides.scope` for one of the course's own divisions (SPEC §8.1): its
@@ -28,11 +62,9 @@ export interface GuideInfo {
   stale: boolean; // source manifest no longer matches the files on disk
   /** What changed since it was written (SPEC §7 step 5): the names behind `stale`. */
   diff: ManifestDiff;
-  /** A lecture's session document rather than a module or semester guide.
-   *  Shares the table to inherit the viewer and staleness; listed separately. */
-  session: boolean;
-  /** A practice exam's row (SPEC §8.3): listed with the exams, never among the guides. */
-  practice: boolean;
+  /** A guide, or one of the documents that share the table to inherit the
+   *  viewer and staleness and are listed apart (SPEC §8.4, §8.3, §8.6). */
+  family: GuideFamily;
 }
 
 /** Mirrors `extract.rs::ManifestDiff`. */
@@ -169,4 +201,112 @@ export function resumeMasterGuide(jobId: number): Promise<number> {
 
 export function formatGeneratedAt(unixSec: number): string {
   return formatStamp(new Date(unixSec * 1000));
+}
+
+// --- The small documents (SPEC §8.6) ------------------------------------------
+
+/** `Write the brief` on a deadline row: maps the assignment to its window. */
+export function writeBrief(classId: number, deadlineId: number): Promise<number> {
+  return invoke<number>("write_brief", {
+    classId,
+    deadlineId,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/** `Write the workbook` in the Project section. */
+export function writeWorkbook(classId: number): Promise<number> {
+  return invoke<number>("write_workbook", {
+    classId,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/** `Presentation kit` on a paper's row. */
+export function writePresentationKit(classId: number, relPath: string): Promise<number> {
+  return invoke<number>("write_presentation_kit", {
+    classId,
+    relPath,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/** `Write the pre-read` on a coming week's row in Lectures. */
+export function writePreread(classId: number, unitId: number): Promise<number> {
+  return invoke<number>("write_preread", {
+    classId,
+    unitId,
+    generatedAtLabel: generatedAtLabel(),
+  });
+}
+
+/** One of the project's items, as the section reads it. */
+export interface ProjectItem {
+  id: number;
+  title: string;
+  kind: string;
+  dueAt: string;
+  status: "open" | "done";
+  notes: string | null;
+  description: string | null;
+  fromCanvas: boolean;
+}
+
+/** What the Project section shows; null for a class with no project item. */
+export interface ProjectStatus {
+  items: ProjectItem[];
+  next: ProjectItem | null;
+  /** The file the `Project material` picker points at. */
+  material: string | null;
+  /** The project category's weight, summed over the categories named for it. */
+  weight: number;
+}
+
+export function projectStatus(classId: number): Promise<ProjectStatus | null> {
+  return invoke<ProjectStatus | null>("project_status", { classId, today: todayIso() });
+}
+
+/** Points the picker at a class file, or clears it with null. */
+export function setProjectMaterial(classId: number, relPath: string | null): Promise<void> {
+  return invoke("set_project_material", { classId, relPath });
+}
+
+/** A coming week a pre-read can be written for, or one already written. */
+export interface PrereadInfo {
+  unitId: number;
+  unitName: string;
+  week: number;
+  /** The meeting's date, `YYYY-MM-DD`. */
+  meetsOn: string;
+  scope: string;
+  files: number;
+  /** Whether the week still qualifies: material filed, no transcript, the meeting coming. */
+  candidate: boolean;
+  relPath: string | null;
+  generatedAt: number | null;
+  stale: boolean;
+}
+
+export function listPrereads(classId: number): Promise<PrereadInfo[]> {
+  return invoke<PrereadInfo[]>("list_prereads", { classId, today: todayIso() });
+}
+
+/** A note dated for a distilled session, and whether it carries `Against the room`. */
+export interface ReviewTarget {
+  relPath: string;
+  name: string;
+  date: string;
+  sessionRelPath: string;
+  transcriptRelPath: string;
+  unitName: string;
+  reviewed: boolean;
+}
+
+export function listNoteReviews(classId: number): Promise<ReviewTarget[]> {
+  return invoke<ReviewTarget[]>("list_note_reviews", { classId });
+}
+
+/** `Against the room` on a note's row: the read-only review, appended by the app. */
+export function reviewNote(classId: number, relPath: string): Promise<number> {
+  return invoke<number>("review_note", { classId, relPath });
 }

@@ -5,6 +5,7 @@
 pub(crate) const KEYCHAIN_SERVICE: &str = "classhub";
 
 mod announcements;
+mod briefs;
 mod canvas;
 mod canvas_sync;
 mod chat;
@@ -17,7 +18,9 @@ mod jobs;
 mod lectures;
 mod notebook;
 mod notes;
+mod notes_review;
 mod notifications;
+mod preread;
 mod recordings;
 mod remote;
 mod scanner;
@@ -30,6 +33,7 @@ mod transcripts;
 mod tray;
 mod undo;
 mod units;
+mod workbook;
 mod zoom;
 
 use std::sync::Mutex;
@@ -206,6 +210,100 @@ fn generate_practice(
 #[tauri::command]
 fn resume_master_guide(app: tauri::AppHandle, job_id: i64) -> Result<i64, String> {
     guides::resume_master(&app, job_id).map_err(|e| format!("{e:#}"))
+}
+
+// --- The small documents (SPEC §8.6) ------------------------------------------
+
+/// `Write the brief` on a deadline row: maps the assignment to its window.
+#[tauri::command]
+fn write_brief(
+    app: tauri::AppHandle,
+    class_id: i64,
+    deadline_id: i64,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    briefs::write_brief(&app, class_id, deadline_id, &generated_at_label).map_err(|e| format!("{e:#}"))
+}
+
+/// `Write the workbook` in the Project section.
+#[tauri::command]
+fn write_workbook(
+    app: tauri::AppHandle,
+    class_id: i64,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    workbook::write_workbook(&app, class_id, &generated_at_label).map_err(|e| format!("{e:#}"))
+}
+
+/// What the Project section shows: the items, the next one, the pick.
+#[tauri::command(async)]
+fn project_status(
+    state: tauri::State<Db>,
+    class_id: i64,
+    today: String,
+) -> Result<Option<workbook::ProjectStatus>, String> {
+    let conn = db::lock(&state.0);
+    workbook::status(&conn, class_id, &today).map_err(|e| format!("{e:#}"))
+}
+
+/// The `Project material` pick: a class file the workbook reads as the
+/// guidelines, or none.
+#[tauri::command(async)]
+fn set_project_material(
+    app: tauri::AppHandle,
+    class_id: i64,
+    rel_path: Option<String>,
+) -> Result<(), String> {
+    workbook::set_material(&app, class_id, rel_path.as_deref()).map_err(|e| format!("{e:#}"))
+}
+
+/// `Presentation kit` on a paper's row.
+#[tauri::command]
+fn write_presentation_kit(
+    app: tauri::AppHandle,
+    class_id: i64,
+    rel_path: String,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    workbook::write_kit(&app, class_id, &rel_path, &generated_at_label).map_err(|e| format!("{e:#}"))
+}
+
+/// The coming weeks a pre-read can be written for, and the ones written.
+#[tauri::command(async)]
+fn list_prereads(
+    state: tauri::State<Db>,
+    class_id: i64,
+    today: String,
+) -> Result<Vec<preread::PrereadInfo>, String> {
+    let conn = db::lock(&state.0);
+    preread::list(&conn, class_id, &today).map_err(|e| format!("{e:#}"))
+}
+
+/// `Write the pre-read` on a coming week's row.
+#[tauri::command]
+fn write_preread(
+    app: tauri::AppHandle,
+    class_id: i64,
+    unit_id: i64,
+    generated_at_label: String,
+) -> Result<i64, String> {
+    preread::write_preread(&app, class_id, unit_id, &generated_at_label).map_err(|e| format!("{e:#}"))
+}
+
+/// The notes dated for a distilled session, and whether each is reviewed.
+#[tauri::command(async)]
+fn list_note_reviews(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<notes_review::ReviewTarget>, String> {
+    let conn = db::lock(&state.0);
+    notes_review::list_targets(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// `Against the room` on a note's row.
+#[tauri::command]
+fn review_note(app: tauri::AppHandle, class_id: i64, rel_path: String) -> Result<i64, String> {
+    notes_review::review_note(&app, class_id, &rel_path).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
@@ -954,6 +1052,15 @@ pub fn run() {
             synthesize_master,
             generate_practice,
             resume_master_guide,
+            write_brief,
+            write_workbook,
+            project_status,
+            set_project_material,
+            write_presentation_kit,
+            list_prereads,
+            write_preread,
+            list_note_reviews,
+            review_note,
             add_lecture,
             digest_lecture,
             lecture_weeks,

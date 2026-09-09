@@ -17,6 +17,7 @@ interface HubChange {
     | "announcements"
     | "canvasSyllabus"
     | "recordings"
+    | "project"
     | "index";
 }
 
@@ -30,6 +31,15 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The dashboard strip and class lists, plus the card's deadline line.
       void queryClient.invalidateQueries({ queryKey: ["deadlines"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      // The project's items are deadlines (SPEC §8.6), and a brief's row is
+      // labelled by its deadline's title.
+      void queryClient.invalidateQueries({ queryKey: ["project"] });
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
+      break;
+    case "project":
+      // The `Project material` pick changed.
+      void queryClient.invalidateQueries({ queryKey: ["project"] });
+      void queryClient.invalidateQueries({ queryKey: ["guides"] });
       break;
     case "grades":
       // The workspace Grades section and the card's computed grade. The
@@ -51,6 +61,8 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       void queryClient.invalidateQueries({ queryKey: ["notes"] });
       // A chat rewrite of a note the viewer or editor has cached.
       void queryClient.invalidateQueries({ queryKey: ["classFile"] });
+      // Whether a note carries `Against the room` is read off its text.
+      void queryClient.invalidateQueries({ queryKey: ["noteReviews"] });
       break;
     case "proposals":
       // The workspace inbox queue and the card badges.

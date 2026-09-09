@@ -118,7 +118,16 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   Measured 2026-09-08 on Fundamentals' Aug 25 recording, captured off the Zoom tool (3 h 14 m,
   839 named cues), Opus at `xhigh`: the digest ran 16.1 min over 9 turns for $4.16 (92k output
   tokens, 44 flagged items and a 71 KB session document); the four announcement scans the same
-  day, Sonnet at `medium`, ran 3–12 s each for $0.08–0.13.
+  day, Sonnet at `medium`, ran 3–12 s each for $0.08–0.13. The four small documents (§8.6),
+  measured the same night: the Design Studio project workbook, Opus at `xhigh`, over the
+  guidelines extract, the milestone template and the Canvas project page, ran 4.3 min over 8
+  turns for $1.35 (a 39 KB page and its 24 KB twin, seventeen items); the Biostatistics
+  Homework 1 brief, Opus at `xhigh`, over Weeks 1–4 with one distilled session, ran 7.4 min
+  over 22 turns for $2.99 (45 KB and 31 KB, the Module 1 and 2 decks found through
+  `--add-dir`); the Week 4 pre-read, Sonnet at `medium`, reading the Reinhold PDF itself
+  since its extract had been refused, ran 82 s over 4 turns for $0.40; and the notes review
+  of a fixture note against the Sept 3 session, Sonnet at `medium`, ran 2.1 min over 11
+  turns for $0.51, reading the session document once and the transcript three times.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
@@ -347,14 +356,21 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   │   └── R Files/
 │   │       ├── Class Files/               ← provided .Rmd / .html
 │   │       └── Edited Files/              ← Daniel's classwork (.R)
+│   ├── Project/                           ← the owner's own project drafts (§8.6): source
+│   │   └── proposal_v1.docx                  material like any folder, never written by a job
 │   ├── Study Guides/                      ← APP-MANAGED: generated artifacts
 │   │   ├── Module 1.html
 │   │   ├── Semester Master.html
+│   │   ├── Project Workbook.html          ← the project workbook and its .md twin (§8.6)
+│   │   ├── Briefs/                        ← homework briefs, <due date> — <title>.html + .md
+│   │   ├── Presentations/                 ← presentation kits, <paper>.html
 │   │   ├── Practice/                      ← generated practice exams
-│   │   └── Sessions/                      ← generated per-lecture session documents
-│   │       ├── 2026-08-20 — Central Tendency.html
-│   │       └── 2026-08-20 — Central Tendency.md
-│   ├── Notes/                             ← APP-MANAGED: per-class markdown notes
+│   │   └── Sessions/                      ← generated per-lecture session documents,
+│   │       ├── 2026-08-20 — Central Tendency.html   and the pre-reads before a lecture
+│   │       ├── 2026-08-20 — Central Tendency.md     (`<date> — Before class.html` + .md)
+│   ├── Notes/                             ← APP-MANAGED: per-class markdown notes; one
+│   │                                         titled for a meeting's date is that meeting's
+│   │                                         note, and gains `## Against the room` (§8.6)
 │   ├── _Inbox/                            ← APP-MANAGED: drop-to-sort staging
 │   └── .classhub/
 │       ├── extracts/                      ← APP-MANAGED: hidden extraction cache,
@@ -387,6 +403,10 @@ Rules:
 - `Weeks/` is **not** app-managed. A transcript is source material like a slide deck: the
   scanner indexes it, extraction routes it through the zero-token text path, and chat searches
   it. Filing it in the tree is what joins it to the pipeline rather than parking it beside.
+- `Project/` is not app-managed either: it is where the owner keeps the project's drafts, a
+  user-owned folder like any other — indexed by the scan, extracted as any file is (a `.docx`
+  through LibreOffice), protected by the write guard, and listed to the project workbook's
+  prompt as learner work (§8.6). No job ever writes into it.
 - The app never deletes source files. Every move is audit-logged and reversible from the notice
   that follows it (§6): a file moves through an approved card, a click on its own row, or the
   sync's placement (§10), and `Undo` puts it back.
@@ -416,7 +436,8 @@ files(id INTEGER PK, class_id INTEGER FK, rel_path TEXT, sha256 TEXT, size INTEG
                                            -- content another row of the class holds (§7)
       UNIQUE(class_id, rel_path));
 
-jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice|lecture_digest
+jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice|lecture_digest|
+                                           -- announcement_scan|assignment_brief|project_workbook|presentation_kit|pre_read|notes_review
      class_id INTEGER NULL, scope TEXT NULL,  -- e.g. module rel path, or 'master'
      status TEXT,                          -- queued|running|succeeded|failed|cancelled
      session_id TEXT NULL,                 -- claude session id (for --resume)
@@ -475,9 +496,12 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
 -- rescan that renames the division (§7.2) leaves its guide keyed; the guide file
 -- and the corpus folder, both named for the division, follow the name instead.
 -- A practice exam's row is scoped by its file, `practice:<rel path>` (§8.3), so
--- several exams of one scope each keep a row. The manifest is what the job was
--- told about, widened by what its own log shows it read (§7 step 5).
-guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>' | 'practice:<path>'
+-- several exams of one scope each keep a row. The small documents (§8.6) share
+-- the table too: a homework brief `brief:<deadline id>`, the project workbook
+-- `project`, a pre-read `preread:<unit id>`, a presentation kit `kit:<pdf rel
+-- path>`. The manifest is what the job was told about, widened by what its own
+-- log shows it read (§7 step 5).
+guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>' | 'practice:<path>' | 'brief:<id>' | 'project' | 'preread:<id>' | 'kit:<path>'
        rel_path TEXT, generated_at INTEGER,
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
@@ -623,10 +647,14 @@ claude -p <prompt>
   boundary and both are passed:
   - Never allowed, any kind: `Bash,WebFetch,WebSearch,Task` — `Task` because a spawned
     sub-agent is a path around the parent's tool scoping.
-  - `extract`, `module_guide`, `master_guide`, `practice`, `lecture_digest`: allow
-    `Read,Glob,Grep,Write`.
-  - `sort_proposal`, `syllabus_scan`: allow `Read,Glob,Grep`, and additionally deny
-    `Write,Edit,MultiEdit,NotebookEdit` (read-only is only real if the writes are denied).
+  - `extract`, `module_guide`, `master_guide`, `practice`, `lecture_digest`, and the small
+    documents `assignment_brief`, `project_workbook`, `presentation_kit`, `pre_read` (§8.6):
+    allow `Read,Glob,Grep,Write`.
+  - `sort_proposal`, `syllabus_scan`, `announcement_scan`, `notes_review`: allow
+    `Read,Glob,Grep`, and additionally deny `Write,Edit,MultiEdit,NotebookEdit` (read-only is
+    only real if the writes are denied). The notes review answers with its section and the
+    app appends it (§8.6): the guard fingerprints `Notes/`, and only the app can park the
+    note's previous content in the audit row an undo needs.
 - **Write scope is verified, not trusted**: `--add-dir` grants read and write together, so a
   write-capable job can physically reach every source file in the class folder. Sources are
   fingerprinted by (size, mtime) before the spawn and compared after; a run that changed
@@ -715,8 +743,15 @@ claude -p <prompt>
   guide is stale or absent and whose meeting has passed — the class's first meeting on or
   after a dated division's start, this calendar week's for an undated Part — oldest
   meeting first, up to `shift_guides_per_night`; never the master, never a folder guide.
-  A lecture or a division whose last job failed within three days waits, so one that
-  fails for a stable reason cannot hold a cap night after night. Each job goes through
+  Then the small documents (§8.6), four steps: write a brief for each open assignment or
+  project item due within five days with no brief or a stale one, soonest first, up to
+  `shift_briefs_per_night`; refresh the workbook of one class whose project has an item
+  due within seven days and whose workbook is stale or absent; write a pre-read per course
+  for the first coming week whose folder holds material and no transcript and has no
+  fresh pre-read; and read one note against its session — the oldest unreviewed note dated
+  for a distilled session. A lecture, a division, an assignment, a workbook, a week or a
+  note whose last job failed within three days waits, so one that fails for a stable
+  reason cannot hold a cap night after night. Each job goes through
   the ordinary enqueue and its guards, and the run waits for it to settle before the
   next — three hours at most, after which the job is left to the runner's own watchdog
   and counted as failed — so the caps are real and the concurrency setting stays in
@@ -731,9 +766,9 @@ claude -p <prompt>
   window the coming run covers the same backlog. One run a night is a unique index on the
   night as well as the insert's check. A run whose process is gone is settled at launch
   as a job's is, and quitting mid-run settles it on the way out. The meter beside it counts
-  this week's digests, guides and exams and their minutes from the `jobs` table, never
-  dollars. Two notifications, each a setting: `Shift finished` with the summary, and `A
-  job failed` naming the kind and scope of any failed job.
+  this week's digests, guides, exams and small documents and their minutes from the `jobs`
+  table, never dollars. Two notifications, each a setting: `Shift finished` with the
+  summary, and `A job failed` naming the kind and scope of any failed job.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
   use, result). Persist raw lines to `log_path`; forward condensed progress events to the
   frontend via Tauri events (`job://{id}/progress`).
@@ -1556,6 +1591,81 @@ even though a lecture currently contributes its whole length to a single unit. T
 nothing, and they are what the table would need if a course ever declared divisions finer than
 its meetings.
 
+### 8.6 The small documents — briefs, the workbook, the pre-read, a note against the room
+
+No course has a midterm: averaged over the four, half the grade is projects and presentations
+and a quarter is homework. Four small documents serve the work that is not an exam, each
+written by a row action and by the idle shift around the calendar (§6), each a `guides` row
+with §7 step 5's honest manifest so it reads stale when its sources change, each opened in the
+same viewer. The line every one holds: **map the assignment to the material; never solve it**
+— the app automates the student's own reading, not the student's work, and the prompts carry
+that as a hard rule.
+
+**The homework brief** (`assignment_brief`, scoped `brief:<deadline id>`) maps one assignment
+to where it was taught. Its window is the divisions whose meetings fall after the previous
+deadline of the same family — the title with its numbers and dates dropped, so `Homework 2`
+follows `Homework #1` and Canvas's `Homework Assignment 1` — and on or before the due date; a
+first of its family draws on every division that met by the due date, and a window nothing met
+in takes the last division that met. The family rather than any earlier row, because the Canvas
+sync types a quiz `assignment`, and a homework's window is what was taught since the last
+homework. The prompt carries the assignment's title, kind, due date, Canvas description (§7.2)
+and notes — or says the description is missing rather than inventing parts — the window's
+divisions with their objectives, their files with extracts listed as a guide's are, their corpus
+notes, and their flagged items as `{hints}`. The document: what the assignment asks, part by
+part; where each part was taught, with `HH:MM` anchors and slide citations; the formulas and
+the R or Python patterns that apply, with the professor's corrections; the hints and pitfalls
+named in the room; what the objectives say it is for; a checklist — and never a worked answer.
+Written to `Study Guides/Briefs/<due date> — <title>.html` with a markdown twin. `Write the
+brief` on an open deadline row of kind `assignment` or `project`, `Read the brief` once it
+exists, `Rewrite · …` when stale; the shift writes one for each such row due within five days,
+up to `shift_briefs_per_night`.
+
+**The project workbook** (`project_workbook`, scoped `project`), one per class at `Study
+Guides/Project Workbook.html` with a markdown twin. A project item is a deadline of kind
+`project`, or one of kind `assignment` whose title speaks the project's vocabulary — project,
+draft, proposal, milestone, demo, prototype, presentation, sketch, teaming, scaling, capstone,
+poster — with no homework word in it, since the syllabus scan typed Design Studio's `Draft:
+Introduction` an assignment and it is the project's. Its sources: every file whose name carries
+`project`, `guideline`, `rubric` or `proposal`, the file the `Project material` picker points at
+(a class file, kept as a setting per class), and everything under `Project/` (§4), listed to the
+prompt as learner work. Beside them the items in due order with their states and descriptions,
+the announcements that mention the project, the flagged items of kind `action` that do, and the
+grade weights. The document: the milestones with dates and status; the rubric as the guidelines
+state it; what the next item needs and what the drafts already have toward it; open questions
+for the professor; this week's checklist — never a draft written for the reader. The `Project`
+section (§12) is present while the class has a project item; the shift refreshes one class's
+workbook a night when an item is due within seven days and the workbook is stale or absent.
+
+**The presentation kit** (`presentation_kit`, scoped `kit:<pdf rel path>`), from a PDF's row
+in Materials, manual only, at `Study Guides/Presentations/<paper>.html`: the paper's claim in
+one paragraph, talking points per figure with what it shows and does not, the methods a
+questioner would probe, likely questions with the answers the paper supports, and a one-slide
+summary. Its manifest is the one paper.
+
+**The pre-read** (`pre_read`, scoped `preread:<unit id>`, the light tier), one page before a
+lecture whose deck or reading posted early, at `Study Guides/Sessions/<meeting date> — Before
+class.html` with a markdown twin. A candidate is a week the course dates from today through
+seven days on whose folder holds an indexed file and no transcript; a course that publishes no
+dates has none. Inputs: the week folder's files with their extracts, the division that met last
+with its notes and flagged items, and the objectives. Output: five things to know walking in,
+the terms, how it follows from last week, three questions to listen for. The Lectures section
+lists each candidate as `Before class · Thu, Sep 10` with `Write the pre-read`, and `Read` once
+written; the shift writes one per course a night. The session document's landing for a lecture
+of that division removes the pre-read's row and both files, since it is superseded; one written
+for a week that passed with no transcript stays readable until then.
+
+**A note against the room** (`notes_review`, the light tier, read-only). A note whose title
+opens with a meeting's date — `2026-09-03 — In class`; the editor offers today's date on a new
+note — is that meeting's note. Once the session of that date has its document and the note
+carries no `## Against the room` heading, the row offers `Against the room`: the job reads the
+note, the session document's markdown twin and, where the wording matters, the transcript, and
+answers as strict JSON with the section — what the note has that the room did, what the room
+had that the note missed with anchors, where the two disagree with the session document's
+reading. The app appends it under the heading through the note write path (`review.write_note`,
+the previous content in the audit row), with a notice whose `Undo` restores the note; a second
+review of a note that carries the heading is refused by name, at the row and at the finalize
+alike. The shift reviews the oldest unreviewed such note, one a night.
+
 ## 9. Agent chat (direct Anthropic API)
 
 - **Transport**: Rust `reqwest` streaming SSE to `POST /v1/messages`, `stream: true`.
@@ -1741,9 +1851,11 @@ its meetings.
   stays individually addable. A deadline that is a Canvas assignment is closed by the sync
   once Canvas holds a submission for it, with an audit row naming the submission (§7.2), and
   its badge reads `from Canvas` however it was first added; the row's checkbox still reopens
-  it, and the sync never does.
+  it, and the sync never does. An open row of kind `assignment` or `project` offers `Write the
+  brief`, and `Read the brief` once one exists (§8.6).
 - **Notes**: markdown files in `<Class>/Notes/`. Lightweight editor (textarea + live preview,
-  no heavy editor dependency). Notes are included in `search_material` scope.
+  no heavy editor dependency); a new note opens titled with today's date, the convention that
+  makes it a meeting's note (§8.6). Notes are included in `search_material` scope.
 - **Grades**: weighted categories per class (weights should sum to 100%; show a warning
   otherwise). Items with score/max. Computed: current weighted grade over graded items,
   displayed on the class card and Grades tab. A Canvas sync fills the section without anyone
@@ -1816,8 +1928,8 @@ and apply it. Non-negotiable per project owner.
   · Class Workspace (a full-width band in the class wash holding the back link, the class
   name in the display role, the current division in the headline role and one meta row —
   meeting, room, credits, instructors — then a sticky row of section links in the page's own
-  order, Semester master · Inbox · Notices · Structure · Deadlines · Grades · Materials ·
-  Lectures · Flagged · Practice exams · Notes, each present only while its section has
+  order, Semester master · Inbox · Notices · Structure · Deadlines · Project · Grades ·
+  Materials · Lectures · Flagged · Practice exams · Notes, each present only while its section has
   content, read off the query the section renders; the sections follow in that order, each
   a headline with its count in meta and its text actions on the right, rows separated by
   hairlines because they are a list, every row's actions visible at low emphasis — the muted
@@ -1828,15 +1940,30 @@ and apply it. Non-negotiable per project owner.
   deadline row's ring, which ticks it done and back, each change as a line behind a `change`
   chip, in view whether or not the text is opened — absent while there are none; the
   `Deadlines` row carries a chevron when the deadline has notes or Canvas's description,
-  opening both beneath it; the `Lectures` section offers `Find recordings` beside `Add
-  lecture`, its progress in the heading and its summary under it, and lists the recordings
-  found behind the Zoom tool that still wait (§7.1) ahead of the transcripts — each its date
-  and length, why it waits or why its capture failed, and `Add lecture`, which opens the
-  form pre-filled with its link and date; the `Flagged` section lists what the professor flagged
+  opening both beneath it, and its brief's action (§8.6) — `Write the brief`, `Writing the
+  brief…`, `Rewrite · …` beside `Read the brief`; the `Project` section (§8.6), present while
+  the class has a project item, carries the count and the project's share of the grade, the
+  next open item with its due day, one line naming the guidelines it reads, and its actions —
+  `Project material`, which opens the class's file list to point the workbook at a file or
+  back at the named files alone, and `Write the workbook` / `Writing the workbook…` /
+  `Refresh · …` beside `Read the workbook`; a PDF's row in Materials carries the presentation
+  kit's action beside Show in Finder — a quiet icon until one is written, `Writing the
+  kit…`, `Read the kit` with `Rewrite · …` when the paper changed; the `Lectures` section
+  offers `Find recordings` beside `Add lecture`, its progress in the heading and its summary
+  under it, lists the recordings found behind the Zoom tool that still wait (§7.1) ahead of
+  the transcripts — each its date and length, why it waits or why its capture failed, and
+  `Add lecture`, which opens the form pre-filled with its link and date — and, before them,
+  each coming week whose folder holds material and no transcript as `Before class · Thu, Sep
+  10` with the division it precedes and `Write the pre-read`, `Writing the pre-read…`, or
+  `Read` with `Rewrite` when the folder changed; a note's row offers `Against the room` while
+  the note is dated for a distilled session and carries no such section, `Reading against the
+  room…` while it is read, and a quiet `against the room` once it has been; the `Flagged` section lists what the professor flagged
   (§8.4) newest session first under the session's title and date, each item its kind as a
   chip, its text, and its `HH:MM` as a mono link that opens the transcript at that heading,
   absent until a session has been distilled for it)
-  · Guide viewer (sandboxed iframe rendering the HTML file + Open in browser / Show in Finder)
+  · Guide viewer (sandboxed iframe rendering the HTML file + Open in browser / Show in Finder;
+  its eyebrow names the document's family — Study guide, Session, Practice exam, Homework
+  brief, Project workbook, Pre-read, Presentation kit)
   · Material viewer (the same reading room for a class file: markdown, R and Python
   scripts and CSVs in the document register, HTML notebooks sandboxed with their scripts,
   a Jupyter notebook as its extract, and a PDF — or a slide deck, through its converted
@@ -1851,7 +1978,7 @@ and apply it. Non-negotiable per project owner.
   each step's mark and outcome, tonight in one line — when it runs, or why it will not —
   and `Run the shift now` and `Pause tonight` (§6); then the recent actions and the jobs
   with live logs) · Settings (the library, transcription, the synthesis pair and a row per
-  kind, `The idle shift` — on or off, the window, the idle threshold, the two caps, and in
+  kind, `The idle shift` — on or off, the window, the idle threshold, the three caps, and in
   a dev build whether that build runs shifts — `Always there` — the login item and the two
   notifications — Canvas and chat).
   The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
@@ -2031,8 +2158,16 @@ and apply it. Non-negotiable per project owner.
   unread, a division with sources and no guide listed while one whose meeting is ahead,
   one with a fresh guide and the master are not — the rate-limit stop and the per-kind
   fallback half by half (§6 — a shift that runs twice, spends past its cap or stops on a
-  limit that lifted is silent until the morning). UI and job plumbing are exercised by
-  running the app.
+  limit that lifted is silent until the morning), and the small documents (§8.6): a title's
+  family and the brief's window — the divisions between two homeworks, a first homework's
+  from the semester's start, a window nothing met in, a quiz row that is no marker — and
+  the shift's list of briefs, the project-item reading and the guidelines file match with
+  the workbook's manifest, status and list, the pre-read's candidate rule — a coming week
+  with material and no transcript, a past or undated week ruled out — with its listing,
+  the shift's list and the supersede, the note-date convention, the section's append once
+  and the review's targets and list (a brief mapped to the wrong weeks, a homework listed as
+  a milestone, a pre-read for last week and a section appended twice are each silent). UI
+  and job plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -2382,7 +2517,7 @@ Mark the checkbox when the acceptance criteria pass.
   milestone assignment as proposals with to-do lines under their notices; and the homework rows
   carry Canvas's descriptions.
 
-- [ ] **M36 — Briefs and workbooks.** (`milestones/M36-briefs-and-workbooks.md`)
+- [x] **M36 — Briefs and workbooks.** (`milestones/M36-briefs-and-workbooks.md`)
   Four small document kinds for the three quarters of the grade that are not exams, each
   written by the shift around the calendar and by a row action: a homework brief that maps an
   assignment to where it was taught, with anchors and the professor's hints, and never solves
@@ -2391,7 +2526,7 @@ Mark the checkbox when the acceptance criteria pass.
   whose deck posted early; and a note's `Against the room` section once its session is
   distilled.
   *Accepted when:* one brief for the next open homework maps every part to a source and works
-  no answer, the Design Studio workbook lists its sixteen items with the next one's needs, a
+  no answer, the Design Studio workbook lists its seventeen items with the next one's needs, a
   pre-read exists for the week that qualifies, a fixture note gains its section once and undoes,
   and the shift's plan lists the four steps with their caps.
 

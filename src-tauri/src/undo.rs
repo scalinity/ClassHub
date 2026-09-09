@@ -154,7 +154,9 @@ fn undo_with(
             crate::deadlines::undo_insert(&tx, &payload)?,
             &["deadlines", "deadlineProposals"],
         ),
-        "ui.write_note" | "chat.write_note" => (crate::notes::undo_write(&tx, &payload)?, &["notes"]),
+        "ui.write_note" | "chat.write_note" | "review.write_note" => {
+            (crate::notes::undo_write(&tx, &payload)?, &["notes"])
+        }
         "ui.save_grade_category" | "chat.upsert_grade_category" => {
             (crate::grades::undo_save_category(&tx, &payload)?, &["grades"])
         }

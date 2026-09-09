@@ -421,17 +421,20 @@ function ShiftSection({
   // Fields remount on the stored values, so a change made elsewhere — the
   // tray, a relaunch — shows in them; a refused value is put back by the
   // field itself.
-  const key = `${shift.start}-${shift.end}-${shift.idleMinutes}-${shift.digestsPerNight}-${shift.guidesPerNight}`;
+  const key = `${shift.start}-${shift.end}-${shift.idleMinutes}-${shift.digestsPerNight}-${shift.guidesPerNight}-${shift.briefsPerNight}`;
   return (
     <Section
       title="The idle shift"
       lead={`Once the evening's window opens and the Mac has sat untouched for a
         while, ClassHub syncs Canvas, files what it placed, extracts, distills
         the lectures that have no note or were never read for what was flagged,
-        and rebuilds the guides of divisions whose meeting has passed — up to
-        the caps, stopping at the first rate-limit event, and holding the Mac
-        awake while it works. The semester master never runs on its own. A
-        night the Mac sleeps through is caught up at the next launch.`}
+        rebuilds the guides of divisions whose meeting has passed, writes the
+        briefs of the homework due within days, refreshes a project workbook
+        with an item due this week, writes a pre-read where a deck posted
+        early, and reads one note against its session — up to the caps,
+        stopping at the first rate-limit event, and holding the Mac awake
+        while it works. The semester master never runs on its own. A night
+        the Mac sleeps through is caught up at the next launch.`}
     >
       <div className="mt-4">
         <Switch
@@ -478,6 +481,16 @@ function ShiftSection({
           max={20}
           pending={pending}
           onApply={(v) => set("shift_guides_per_night", v)}
+        />
+        <ValueField
+          label="Briefs a night"
+          type="number"
+          current={String(shift.briefsPerNight)}
+          unit="at most · a workbook, a pre-read per course and a note review besides"
+          min={0}
+          max={20}
+          pending={pending}
+          onApply={(v) => set("shift_briefs_per_night", v)}
         />
       </div>
       {settings.devBuild && (

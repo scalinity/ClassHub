@@ -921,10 +921,30 @@ pub fn current_manifest(
         return Ok(Vec::new());
     }
 
-    if scope.starts_with(crate::db::UNIT_SCOPE_PREFIX) {
+    // The small documents (SPEC §8.6): a brief's set is its window's
+    // divisions, the workbook's the project's files, a pre-read's the
+    // division it precedes, a kit's the one paper.
+    if let Some(deadline_id) = crate::db::brief_scope_id(scope) {
+        return crate::briefs::window_manifest(conn, class_id, deadline_id);
+    }
+    if scope == crate::db::PROJECT_SCOPE {
+        return crate::workbook::project_manifest(conn, class_id);
+    }
+    if let Some(paper) = scope.strip_prefix(crate::db::KIT_SCOPE_PREFIX) {
+        let mut stmt = conn.prepare(
+            "SELECT rel_path, sha256 FROM files WHERE class_id = ?1 AND rel_path = ?2",
+        )?;
+        let rows = stmt.query(rusqlite::params![class_id, paper])?;
+        return Ok(read(rows)?);
+    }
+
+    if scope.starts_with(crate::db::UNIT_SCOPE_PREFIX)
+        || scope.starts_with(crate::db::PREREAD_SCOPE_PREFIX)
+    {
         // A unit scope from before ids names no row, and neither does one
         // whose division is gone: no sources, rather than the whole class.
-        let unit: Option<(i64, Option<String>)> = match crate::db::unit_scope_id(scope) {
+        let id = crate::db::unit_scope_id(scope).or_else(|| crate::db::preread_scope_id(scope));
+        let unit: Option<(i64, Option<String>)> = match id {
             Some(unit_id) => conn
                 .query_row(
                     "SELECT id, rel_path FROM units WHERE class_id = ?1 AND id = ?2",

@@ -1,6 +1,7 @@
 import { useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  BookOpen,
   ChevronLeft,
   CirclePlay,
   FileQuestion,
@@ -22,6 +23,7 @@ import { InboxQueue, inboxShown } from "@/components/InboxQueue";
 import { MasterGuideStrip } from "@/components/MasterGuide";
 import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { announcementsQuery, NoticesSection } from "@/components/Notices";
+import { ProjectSection, projectQuery } from "@/components/Project";
 import { SectionHeading } from "@/components/SectionHeading";
 import { StructureSection } from "@/components/Structure";
 import { listUnits } from "@/lib/canvas";
@@ -33,10 +35,16 @@ import {
   formatGeneratedAt,
   generatePractice,
   listGuides,
+  listNoteReviews,
+  listPrereads,
   MASTER_OUTPUT_PATH,
+  PROJECT_SCOPE,
+  reviewNote,
   SESSION_SCOPE_PREFIX,
   synthesizeModule,
   synthesizeUnit,
+  writePresentationKit,
+  writePreread,
 } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import {
@@ -62,9 +70,10 @@ import {
   type ManagedFile,
   type TreeNode,
 } from "@/lib/materials";
-import { formatClock, formatDueDate, formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
+import { formatClock, formatDueDate, formatMeetingDay, formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { getSortState, useDragState } from "@/lib/sorter";
 import {
+  buttonChip,
   buttonText,
   buttonTextMuted,
   chipAmber,
@@ -140,8 +149,27 @@ export function ClassWorkspace({
   // their own listing. Rel paths open with the session date, which is the order
   // they belong in — newest first.
   const sessions = (guides ?? [])
-    .filter((g) => g.session)
+    .filter((g) => g.family === "session")
     .sort((a, b) => b.relPath.localeCompare(a.relPath));
+  // The small documents' jobs (SPEC §8.6), each keyed by the scope its row
+  // will carry — a brief by its deadline, a kit by its paper, a pre-read by
+  // its division, the workbook by the class — and the review by its note.
+  const activeScopesOf = (kind: string) =>
+    new Set(
+      jobs
+        .filter(
+          (j) =>
+            j.kind === kind &&
+            j.classId === info.id &&
+            (j.status === "running" || j.status === "queued"),
+        )
+        .map((j) => j.scope ?? ""),
+    );
+  const activeBriefScopes = activeScopesOf("assignment_brief");
+  const activeKitScopes = activeScopesOf("presentation_kit");
+  const activePrereadScopes = activeScopesOf("pre_read");
+  const activeReviewPaths = activeScopesOf("notes_review");
+  const workbookActive = activeScopesOf("project_workbook").has(PROJECT_SCOPE);
   const activeDigests = jobs.filter(
     (j) =>
       j.kind === "lecture_digest" &&
@@ -249,6 +277,30 @@ export function ClassWorkspace({
       setMaterialsError(`The practice exam didn't start: ${String(e)}`),
     );
   };
+  const handleKit = (relPath: string) => {
+    setMaterialsError(null);
+    writePresentationKit(info.id, relPath).catch((e) =>
+      setMaterialsError(`The presentation kit didn't start: ${String(e)}`),
+    );
+  };
+  // The coming weeks a pre-read can be written for, and the ones written
+  // (SPEC §8.6); a landed session document removes its week's row.
+  const { data: prereads } = useQuery({
+    queryKey: ["prereads", info.id, todayIso()],
+    queryFn: () => listPrereads(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const [prereadError, setPrereadError] = useState<string | null>(null);
+  // The notes dated for a distilled session, and whether each has been read
+  // against the room.
+  const { data: noteReviews } = useQuery({
+    queryKey: ["noteReviews", info.id],
+    queryFn: () => listNoteReviews(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const reviewFor = new Map((noteReviews ?? []).map((t) => [t.relPath, t]));
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const { data: project } = useQuery(projectQuery(info.id));
   // What the professor flagged (SPEC §8.4): the section and its nav link.
   // Which sessions have been read for it is the contribution row's stamp,
   // never the row count — a session the professor flagged nothing in has an
@@ -344,7 +396,8 @@ export function ClassWorkspace({
     (deadlineQueue?.proposals.length ?? 0) > 0;
   const hasLectures =
     sessions.length + activeDigests.length + pendingTranscripts.length > 0 ||
-    (recordings?.length ?? 0) > 0;
+    (recordings?.length ?? 0) > 0 ||
+    (prereads?.length ?? 0) > 0;
   const hasPractice = activePractice.length > 0 || (practice?.length ?? 0) > 0;
   const links = [
     hasMaterials && { id: "master", label: "Semester master" },
@@ -355,6 +408,7 @@ export function ClassWorkspace({
     (announcements?.length ?? 0) > 0 && { id: "notices", label: "Notices" },
     (units?.length ?? 0) > 0 && { id: "structure", label: "Structure" },
     hasDeadlines && { id: "deadlines", label: "Deadlines" },
+    project !== undefined && project !== null && { id: "project", label: "Project" },
     (grades?.categories.length ?? 0) > 0 && { id: "grades", label: "Grades" },
     hasMaterials && { id: "materials", label: "Materials" },
     hasLectures && { id: "lectures", label: "Lectures" },
@@ -444,7 +498,23 @@ export function ClassWorkspace({
           }}
         />
 
-        <DeadlinesSection classId={info.id} tree={tree} />
+        <DeadlinesSection
+          classId={info.id}
+          tree={tree}
+          briefs={{
+            guides: guideMap,
+            activeScopes: activeBriefScopes,
+            onView: setViewScope,
+          }}
+        />
+
+        <ProjectSection
+          classId={info.id}
+          guide={guideMap.get(PROJECT_SCOPE)}
+          active={workbookActive}
+          tree={tree}
+          onView={() => setViewScope(PROJECT_SCOPE)}
+        />
 
         <GradesSection classId={info.id} />
 
@@ -494,8 +564,10 @@ export function ClassWorkspace({
                   guides: guideMap,
                   activeScopes,
                   activePracticeScopes,
+                  activeKitScopes,
                   onSynthesize: handleSynthesize,
                   onPractice: handlePractice,
+                  onKit: handleKit,
                   onView: setViewScope,
                 }}
               />
@@ -551,6 +623,7 @@ export function ClassWorkspace({
             {recordingError && (
               <p className={errorLine}>The form could not open: {recordingError}</p>
             )}
+            {prereadError && <p className={errorLine}>No pre-read: {prereadError}</p>}
             {finding?.done && (
               <p className={finding.error ? errorLine : `mt-3 ${meta}`}>
                 {finding.error ? `Recordings not found: ${finding.error}` : finding.summary}
@@ -561,7 +634,8 @@ export function ClassWorkspace({
             {sessions.length === 0 &&
               activeDigests.length === 0 &&
               pendingTranscripts.length === 0 &&
-              (recordings?.length ?? 0) === 0 && (
+              (recordings?.length ?? 0) === 0 &&
+              (prereads?.length ?? 0) === 0 && (
                 <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
                   Nothing recorded yet. Find the course's Zoom recordings, or add a
                   Zoom link or a recording, and ClassHub transcribes it, files it
@@ -609,6 +683,76 @@ export function ClassWorkspace({
                 </button>
               </div>
             ))}
+            {(prereads ?? []).map((preread) => {
+              // The page before a coming lecture (SPEC §8.6): offered while
+              // the week's folder holds material and no transcript, read
+              // once written, and gone once the session document lands.
+              const writing = activePrereadScopes.has(preread.scope);
+              const start = () => {
+                setPrereadError(null);
+                writePreread(info.id, preread.unitId).catch((e) => setPrereadError(String(e)));
+              };
+              return (
+                <div key={preread.scope} className={row}>
+                  <BookOpen size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                  {preread.relPath !== null ? (
+                    <button
+                      type="button"
+                      title="Read the page before class"
+                      onClick={() => setViewScope(preread.scope)}
+                      className={rowTitle}
+                    >
+                      Before class · {formatMeetingDay(preread.meetsOn)}
+                    </button>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-title">
+                      Before class · {formatMeetingDay(preread.meetsOn)}
+                    </span>
+                  )}
+                  <FeedsUnit unitName={preread.unitName} />
+                  {writing ? (
+                    <span className={`shrink-0 px-2 ${statusLine}`}>
+                      <span aria-hidden className={pulseDot} />
+                      Writing the pre-read…
+                    </span>
+                  ) : preread.relPath === null ? (
+                    <button
+                      type="button"
+                      title={`One page from the ${preread.files === 1 ? "file" : `${preread.files} files`} filed for the week — what to know walking in`}
+                      onClick={start}
+                      className={buttonText}
+                    >
+                      Write the pre-read
+                    </button>
+                  ) : (
+                    <>
+                      {preread.stale && preread.candidate && (
+                        <button
+                          type="button"
+                          title="The week's folder changed since"
+                          onClick={start}
+                          className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+                        >
+                          Rewrite
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setViewScope(preread.scope)}
+                        className={buttonText}
+                      >
+                        Read
+                      </button>
+                    </>
+                  )}
+                  <span className={`shrink-0 ${meta}`}>
+                    {preread.generatedAt !== null
+                      ? formatGeneratedAt(preread.generatedAt)
+                      : `${preread.files} ${preread.files === 1 ? "file" : "files"} posted`}
+                  </span>
+                </div>
+              );
+            })}
             {pendingTranscripts.map((transcript) => (
               <div key={transcript.relPath} className={row}>
                 <Mic size={14} aria-hidden className="shrink-0 text-muted-foreground" />
@@ -780,7 +924,9 @@ export function ClassWorkspace({
                 New note
               </button>
             }
-          />
+          >
+            {noteError && <p className={errorLine}>Not read against the room: {noteError}</p>}
+          </SectionHeading>
           <div className="mt-3">
             {notes !== undefined && notes.length === 0 && (
               <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
@@ -788,18 +934,52 @@ export function ClassWorkspace({
                 material. They live as Markdown in the class's Notes folder.
               </p>
             )}
-            {(notes ?? []).map((note) => (
-              <ManagedRow
-                key={note.relPath}
-                icon={NotepadText}
-                file={note}
-                strippedExt=".md"
-                stamp={formatGeneratedAt(note.modifiedAt)}
-                onView={(name) =>
-                  setEditingNote({ title: name, relPath: note.relPath })
-                }
-              />
-            ))}
+            {(notes ?? []).map((note) => {
+              // A note dated for a distilled session (SPEC §8.6): read
+              // against the room once, the section appended one Undo away.
+              const target = reviewFor.get(note.relPath);
+              const reviewing = activeReviewPaths.has(note.relPath);
+              return (
+                <ManagedRow
+                  key={note.relPath}
+                  icon={NotepadText}
+                  file={note}
+                  strippedExt=".md"
+                  stamp={formatGeneratedAt(note.modifiedAt)}
+                  badge={
+                    reviewing ? (
+                      <span className={`shrink-0 px-2 ${statusLine}`}>
+                        <span aria-hidden className={pulseDot} />
+                        Reading against the room…
+                      </span>
+                    ) : target?.reviewed ? (
+                      <span
+                        title={`Read against the ${target.date} session`}
+                        className="hidden shrink-0 text-fine text-muted-foreground sm:block"
+                      >
+                        against the room
+                      </span>
+                    ) : undefined
+                  }
+                  action={
+                    target !== undefined && !target.reviewed && !reviewing
+                      ? {
+                          label: "Against the room",
+                          onSelect: () => {
+                            setNoteError(null);
+                            reviewNote(info.id, note.relPath).catch((e) =>
+                              setNoteError(String(e)),
+                            );
+                          },
+                        }
+                      : undefined
+                  }
+                  onView={(name) =>
+                    setEditingNote({ title: name, relPath: note.relPath })
+                  }
+                />
+              );
+            })}
           </div>
         </section>
       </div>

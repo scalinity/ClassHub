@@ -22,10 +22,12 @@ import {
   type DeadlineProposal,
   type DeadlineSeries,
 } from "@/lib/deadlines";
+import { briefScope, deltaLabel, deltaTitle, writeBrief, type GuideInfo } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
 import { daysUntil, dueDayLabel, formatDueDate, isOverdue } from "@/lib/schedule";
 import {
+  buttonChip,
   buttonFilled,
   buttonIcon,
   buttonText,
@@ -41,6 +43,14 @@ import {
   row,
   statusLine,
 } from "@/lib/styles";
+
+/** What a deadline row needs to offer its homework brief (SPEC §8.6). */
+export interface BriefControls {
+  guides: ReadonlyMap<string, GuideInfo>;
+  /** Brief scopes with a queued or running job. */
+  activeScopes: ReadonlySet<string>;
+  onView: (scope: string) => void;
+}
 
 /** One item of the scan picker: a text action laid out as a menu row. */
 const pickerItem =
@@ -66,10 +76,12 @@ function collectFiles(
 export function DeadlinesSection({
   classId,
   tree,
+  briefs,
 }: {
   classId: number;
   /** undefined while the classTree query is in flight (the scan picker waits). */
   tree: readonly TreeNode[] | undefined;
+  briefs: BriefControls;
 }) {
   const { data: all } = useQuery({
     queryKey: ["deadlines"],
@@ -348,6 +360,7 @@ export function DeadlinesSection({
           <DeadlineRow
             key={deadline.id}
             deadline={deadline}
+            briefs={briefs}
             onEdit={() => setEditing(deadline)}
             onError={setActionError}
           />
@@ -378,6 +391,7 @@ export function DeadlinesSection({
                 <DeadlineRow
                   key={deadline.id}
                   deadline={deadline}
+                  briefs={briefs}
                   onEdit={() => setEditing(deadline)}
                   onError={setActionError}
                 />
@@ -392,10 +406,12 @@ export function DeadlinesSection({
 
 function DeadlineRow({
   deadline,
+  briefs,
   onEdit,
   onError,
 }: {
   deadline: Deadline;
+  briefs: BriefControls;
   onEdit: () => void;
   onError: (message: string) => void;
 }) {
@@ -407,6 +423,15 @@ function DeadlineRow({
   const overdue = !isDone && isOverdue(deadline.dueAt);
   const badge = deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId);
   const hasMore = deadline.description !== null || deadline.notes !== null;
+  // The homework brief (SPEC §8.6): offered on an open assignment or project
+  // item, and readable once written whatever the row's state.
+  const scope = briefScope(deadline.id);
+  const brief = briefs.guides.get(scope);
+  const writingBrief = briefs.activeScopes.has(scope);
+  const briefable =
+    !isDone && (deadline.kind === "assignment" || deadline.kind === "project");
+  const startBrief = () =>
+    run(writeBrief(deadline.classId, deadline.id).then(() => undefined));
 
   const run = (action: Promise<void>) => {
     setBusy(true);
@@ -468,6 +493,49 @@ function DeadlineRow({
         <span title={badge.title} className="shrink-0 text-fine text-muted-foreground">
           {badge.label}
         </span>
+      )}
+      {writingBrief ? (
+        <span className={`shrink-0 px-2 ${statusLine}`}>
+          <span aria-hidden className={pulseDot} />
+          Writing the brief…
+        </span>
+      ) : brief ? (
+        <span className="flex shrink-0 items-center gap-0.5">
+          {brief.stale && briefable && (
+            <button
+              type="button"
+              title={deltaTitle(brief.diff)}
+              aria-label={`Rewrite the brief for ${deadline.title}`}
+              disabled={busy}
+              onClick={startBrief}
+              className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+            >
+              Rewrite · {deltaLabel(brief.diff)}
+            </button>
+          )}
+          <button
+            type="button"
+            title="Where the assignment was taught — never its answers"
+            aria-label={`Read the brief for ${deadline.title}`}
+            onClick={() => briefs.onView(scope)}
+            className={buttonText}
+          >
+            Read the brief
+          </button>
+        </span>
+      ) : (
+        briefable && (
+          <button
+            type="button"
+            title="Map this assignment to where it was taught — anchors, slides and the professor's hints, never the answers"
+            aria-label={`Write the brief for ${deadline.title}`}
+            disabled={busy}
+            onClick={startBrief}
+            className={buttonTextMuted}
+          >
+            Write the brief
+          </button>
+        )
       )}
       <span className="flex shrink-0 items-center gap-0.5">
         <button

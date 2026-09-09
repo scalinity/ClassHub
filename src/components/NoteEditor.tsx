@@ -5,7 +5,7 @@ import { X } from "lucide-react";
 import { docShell, renderMarkdown } from "@/lib/document";
 import { readClassFile, revealInFinder, saveNote } from "@/lib/materials";
 import { queryClient } from "@/lib/query";
-import { formatClock } from "@/lib/schedule";
+import { formatClock, todayIso } from "@/lib/schedule";
 import { dragWindow } from "@/lib/window";
 import { buttonIcon, buttonTextMuted, meta } from "@/lib/styles";
 
@@ -76,7 +76,10 @@ function EditorBody({
   initialContent: string;
   onClose: () => void;
 }) {
-  const [title, setTitle] = useState(initialTitle ?? "");
+  // A new note opens on today's date (SPEC §8.6): a title that opens with a
+  // meeting's date is that meeting's note, which the review reads against
+  // the room once the session is distilled.
+  const [title, setTitle] = useState(initialTitle ?? `${todayIso()} \u{2014} `);
   // A first save fixes the title — the file name comes from it.
   const [titleFixed, setTitleFixed] = useState(initialTitle !== null);
   // The canonical file this editor writes: the backend's sanitizer names the

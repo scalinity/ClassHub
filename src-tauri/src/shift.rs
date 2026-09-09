@@ -32,6 +32,7 @@ const END: &str = "shift_end";
 const IDLE_MINUTES: &str = "shift_idle_minutes";
 const GUIDES_PER_NIGHT: &str = "shift_guides_per_night";
 const DIGESTS_PER_NIGHT: &str = "shift_digests_per_night";
+const BRIEFS_PER_NIGHT: &str = "shift_briefs_per_night";
 /// The night the pause was pressed for; a new night clears it on its own.
 const PAUSED_ON: &str = "shift_paused_on";
 const IN_DEV_BUILD: &str = "shift_in_dev_build";
@@ -41,6 +42,11 @@ const DEFAULT_END: &str = "06:00";
 const DEFAULT_IDLE_MINUTES: u32 = 20;
 const DEFAULT_GUIDES: u32 = 2;
 const DEFAULT_DIGESTS: u32 = 4;
+const DEFAULT_BRIEFS: u32 = 2;
+/// The small documents' fixed caps (SPEC §6): one workbook, one pre-read
+/// per course, one notes review a night.
+const WORKBOOKS_PER_NIGHT: usize = 1;
+const REVIEWS_PER_NIGHT: usize = 1;
 const MAX_CAP: u32 = 20;
 const MAX_IDLE_MINUTES: u32 = 180;
 
@@ -50,13 +56,17 @@ const TICK: Duration = Duration::from_secs(60);
 const JOB_POLL: Duration = Duration::from_secs(5);
 
 /// The plan's steps, in order (SPEC §6).
-pub const STEPS: [&str; 6] = [
+pub const STEPS: [&str; 10] = [
     "Sync Canvas",
     "File",
     "Recordings",
     "Extract",
     "Distill",
     "Rebuild guides",
+    "Briefs",
+    "Workbook",
+    "Pre-reads",
+    "Notes",
 ];
 const SYNC: usize = 0;
 const FILE: usize = 1;
@@ -64,6 +74,10 @@ const RECORDINGS: usize = 2;
 const EXTRACT: usize = 3;
 const DISTILL: usize = 4;
 const REBUILD: usize = 5;
+const BRIEFS: usize = 6;
+const WORKBOOK: usize = 7;
+const PREREADS: usize = 8;
+const NOTES: usize = 9;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -78,6 +92,9 @@ pub struct ShiftSettings {
     pub idle_minutes: u32,
     pub guides_per_night: u32,
     pub digests_per_night: u32,
+    /// Homework briefs a night (SPEC §8.6); the workbook, the pre-reads and
+    /// the notes review carry fixed caps.
+    pub briefs_per_night: u32,
     /// Whether a dev build runs shifts; the installed app always does.
     pub in_dev_build: bool,
 }
@@ -126,6 +143,7 @@ pub fn settings(conn: &Connection) -> ShiftSettings {
         idle_minutes: number(conn, IDLE_MINUTES, DEFAULT_IDLE_MINUTES, MAX_IDLE_MINUTES),
         guides_per_night: number(conn, GUIDES_PER_NIGHT, DEFAULT_GUIDES, MAX_CAP),
         digests_per_night: number(conn, DIGESTS_PER_NIGHT, DEFAULT_DIGESTS, MAX_CAP),
+        briefs_per_night: number(conn, BRIEFS_PER_NIGHT, DEFAULT_BRIEFS, MAX_CAP),
         in_dev_build: flag(conn, IN_DEV_BUILD, false),
     }
 }
@@ -166,7 +184,7 @@ pub(crate) fn validate_shift_setting(key: &str, value: &str) -> Result<String> {
             .filter(|n| *n <= MAX_IDLE_MINUTES)
             .map(|n| n.to_string())
             .with_context(|| format!("idle minutes is 0–{MAX_IDLE_MINUTES}"))?,
-        GUIDES_PER_NIGHT | DIGESTS_PER_NIGHT => value
+        GUIDES_PER_NIGHT | DIGESTS_PER_NIGHT | BRIEFS_PER_NIGHT => value
             .parse::<u32>()
             .ok()
             .filter(|n| *n <= MAX_CAP)
@@ -674,6 +692,11 @@ struct Progress<'a> {
     extracts: usize,
     distilled: usize,
     rebuilt: usize,
+    /// The small documents written (SPEC §8.6).
+    briefs: usize,
+    workbooks: usize,
+    prereads: usize,
+    reviews: usize,
     failed: usize,
     /// Work the caps left for tomorrow.
     left: usize,
@@ -786,6 +809,18 @@ impl Progress<'_> {
         if self.extracts > 0 {
             parts.push(plural(self.extracts, "extract", "extracts"));
         }
+        if self.briefs > 0 {
+            parts.push(plural(self.briefs, "brief written", "briefs written"));
+        }
+        if self.workbooks > 0 {
+            parts.push(plural(self.workbooks, "workbook refreshed", "workbooks refreshed"));
+        }
+        if self.prereads > 0 {
+            parts.push(plural(self.prereads, "pre-read written", "pre-reads written"));
+        }
+        if self.reviews > 0 {
+            parts.push(plural(self.reviews, "note reviewed", "notes reviewed"));
+        }
         if self.failed > 0 {
             parts.push(plural(self.failed, "job failed", "jobs failed"));
         }
@@ -863,6 +898,10 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         extracts: 0,
         distilled: 0,
         rebuilt: 0,
+        briefs: 0,
+        workbooks: 0,
+        prereads: 0,
+        reviews: 0,
         failed: 0,
         left: 0,
     };
@@ -1045,6 +1084,109 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
     }
     p.done(REBUILD, step_outcome(p.rebuilt, todo.len(), left, "guide", "guides", &guide_notes));
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
+
+    // 7. Briefs for the assignments due within days (SPEC §8.6), soonest
+    // first, under the briefs cap.
+    p.begin(BRIEFS);
+    let label = || Local::now().format("%B %-d, %Y at %-I:%M %p").to_string();
+    let candidates = with_conn(app, |conn| crate::briefs::candidates(conn, Local::now().date_naive(), now()))?;
+    let (todo, left) = capped(candidates, s.briefs_per_night);
+    p.left += left;
+    let mut brief_notes = Vec::new();
+    for c in &todo {
+        match crate::briefs::write_brief(app, c.class_id, c.deadline_id, &label()) {
+            Ok(job_id) => {
+                let status = p.wait(job_id);
+                if status == "succeeded" {
+                    p.briefs += 1;
+                } else {
+                    brief_notes.push(format!("{} {status}", c.title));
+                }
+            }
+            Err(e) => brief_notes.push(format!("{}: {e:#}", c.title)),
+        }
+        if let Some(end) = p.stop_reason() {
+            p.done(BRIEFS, format!("stopped after {}", c.title));
+            return Ok(p.finish_early(end));
+        }
+    }
+    p.done(BRIEFS, step_outcome(p.briefs, todo.len(), left, "brief", "briefs", &brief_notes));
+
+    // 8. The workbook of a class with an item due within the week, one a night.
+    p.begin(WORKBOOK);
+    let candidates = with_conn(app, |conn| crate::workbook::candidates(conn, Local::now().date_naive(), now()))?;
+    let (todo, left) = capped(candidates, WORKBOOKS_PER_NIGHT as u32);
+    p.left += left;
+    let mut workbook_notes = Vec::new();
+    for (class_id, name) in &todo {
+        match crate::workbook::write_workbook(app, *class_id, &label()) {
+            Ok(job_id) => {
+                let status = p.wait(job_id);
+                if status == "succeeded" {
+                    p.workbooks += 1;
+                } else {
+                    workbook_notes.push(format!("{name} {status}"));
+                }
+            }
+            Err(e) => workbook_notes.push(format!("{name}: {e:#}")),
+        }
+        if let Some(end) = p.stop_reason() {
+            p.done(WORKBOOK, format!("stopped after {name}"));
+            return Ok(p.finish_early(end));
+        }
+    }
+    p.done(WORKBOOK, step_outcome(p.workbooks, todo.len(), left, "workbook", "workbooks", &workbook_notes));
+
+    // 9. A pre-read per course for the coming week whose deck posted early.
+    p.begin(PREREADS);
+    let todo = with_conn(app, |conn| crate::preread::candidates(conn, Local::now().date_naive(), now()))?;
+    let mut preread_notes = Vec::new();
+    for (class_id, unit_id, unit_name) in &todo {
+        match crate::preread::write_preread(app, *class_id, *unit_id, &label()) {
+            Ok(job_id) => {
+                let status = p.wait(job_id);
+                if status == "succeeded" {
+                    p.prereads += 1;
+                } else {
+                    preread_notes.push(format!("{unit_name} {status}"));
+                }
+            }
+            Err(e) => preread_notes.push(format!("{unit_name}: {e:#}")),
+        }
+        if let Some(end) = p.stop_reason() {
+            p.done(PREREADS, format!("stopped after {unit_name}"));
+            return Ok(p.finish_early(end));
+        }
+    }
+    p.done(PREREADS, step_outcome(p.prereads, todo.len(), 0, "pre-read", "pre-reads", &preread_notes));
+
+    // 10. A note read against its session, one a night.
+    p.begin(NOTES);
+    let candidates = with_conn(app, |conn| crate::notes_review::candidates(conn, now()))?;
+    let (todo, left) = capped(candidates, REVIEWS_PER_NIGHT as u32);
+    p.left += left;
+    let mut review_notes = Vec::new();
+    for (class_id, target) in &todo {
+        match crate::notes_review::review_note(app, *class_id, &target.rel_path) {
+            Ok(job_id) => {
+                let status = p.wait(job_id);
+                if status == "succeeded" {
+                    p.reviews += 1;
+                } else {
+                    review_notes.push(format!("{} {status}", target.name));
+                }
+            }
+            Err(e) => review_notes.push(format!("{}: {e:#}", target.name)),
+        }
+        if let Some(end) = p.stop_reason() {
+            p.done(NOTES, format!("stopped after {}", target.name));
+            return Ok(p.finish_early(end));
+        }
+    }
+    p.done(NOTES, step_outcome(p.reviews, todo.len(), left, "note", "notes", &review_notes));
 
     let summary = p.tally();
     Ok(if p.left > 0 {
@@ -1112,7 +1254,7 @@ const FAILED_REST: i64 = 3 * 24 * 60 * 60;
 
 /// Whether the newest job of this kind and scope failed within `FAILED_REST`
 /// of `now`.
-fn recently_failed(conn: &Connection, kind: &str, class_id: i64, scope: &str, now: i64) -> Result<bool> {
+pub(crate) fn recently_failed(conn: &Connection, kind: &str, class_id: i64, scope: &str, now: i64) -> Result<bool> {
     let latest: Option<(String, Option<i64>)> = conn
         .query_row(
             "SELECT status, finished_at FROM jobs
@@ -1175,7 +1317,7 @@ pub(crate) struct GuideCandidate {
 }
 
 /// A class's meetings as `(weekday 1=Mon..7=Sun, end time)`.
-fn meeting_ends(conn: &Connection, class_id: i64) -> Result<Vec<(u32, NaiveTime)>> {
+pub(crate) fn meeting_ends(conn: &Connection, class_id: i64) -> Result<Vec<(u32, NaiveTime)>> {
     let mut stmt =
         conn.prepare("SELECT weekday, end_time FROM meetings WHERE class_id = ?1 ORDER BY weekday")?;
     let rows = stmt
@@ -1277,6 +1419,9 @@ pub struct Meter {
     pub guides: i64,
     pub exams: i64,
     pub extracts: i64,
+    /// The small documents (SPEC §8.6): briefs, workbooks, kits, pre-reads
+    /// and notes reviews together.
+    pub documents: i64,
     pub minutes: i64,
 }
 
@@ -1284,7 +1429,9 @@ pub fn meter(conn: &Connection, since: i64) -> Result<Meter> {
     let mut stmt = conn.prepare(
         "SELECT kind, COUNT(*), COALESCE(SUM(finished_at - started_at), 0) FROM jobs
          WHERE started_at >= ?1 AND finished_at IS NOT NULL AND status = 'succeeded'
-           AND kind IN ('lecture_digest', 'module_guide', 'master_guide', 'practice', 'extract')
+           AND kind IN ('lecture_digest', 'module_guide', 'master_guide', 'practice', 'extract',
+                        'assignment_brief', 'project_workbook', 'presentation_kit', 'pre_read',
+                        'notes_review')
          GROUP BY kind",
     )?;
     let mut meter = Meter::default();
@@ -1297,6 +1444,8 @@ pub fn meter(conn: &Connection, since: i64) -> Result<Meter> {
             "module_guide" | "master_guide" => meter.guides += count,
             "practice" => meter.exams += count,
             "extract" => meter.extracts += count,
+            "assignment_brief" | "project_workbook" | "presentation_kit" | "pre_read"
+            | "notes_review" => meter.documents += count,
             _ => {}
         }
         meter.minutes += seconds / 60;
@@ -1473,7 +1622,8 @@ mod tests {
         capped, digest_candidates, finish_run, fresh_steps, guide_candidates, in_window,
         insert_run, last_closed_night, meeting_end, meter, next_meeting, night_key,
         parse_idle, should_start, startup_recovery, step_outcome, validate_shift_setting,
-        Conditions, DISTILL, EXTRACT, FILE, REBUILD, RECORDINGS, STEPS, SYNC,
+        Conditions, BRIEFS, DISTILL, EXTRACT, FILE, NOTES, PREREADS, REBUILD, RECORDINGS,
+        STEPS, SYNC, WORKBOOK,
     };
     use crate::db::{memory_db, set_setting};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -1511,6 +1661,8 @@ mod tests {
             ("extract", "succeeded", since + 50, since + 50 + 2 * 60),
             ("module_guide", "failed", since + 60, since + 60 + 5 * 60),
             ("lecture_digest", "succeeded", since - 100, since - 100 + 12 * 60),
+            ("assignment_brief", "succeeded", since + 70, since + 70 + 4 * 60),
+            ("notes_review", "succeeded", since + 80, since + 80 + 60),
         ] {
             conn.execute(
                 "INSERT INTO jobs (kind, class_id, status, created_at, started_at, finished_at)
@@ -1520,7 +1672,7 @@ mod tests {
             .unwrap();
         }
         let m = meter(&conn, since).unwrap();
-        assert_eq!((m.digests, m.guides, m.exams, m.extracts, m.minutes), (1, 2, 1, 1, 80));
+        assert_eq!((m.digests, m.guides, m.exams, m.extracts, m.documents, m.minutes), (1, 2, 1, 1, 2, 85));
     }
 
     /// The plan's indices name the steps they run: a step slotted in moves
@@ -1534,6 +1686,10 @@ mod tests {
         assert_eq!(STEPS[EXTRACT], "Extract");
         assert_eq!(STEPS[DISTILL], "Distill");
         assert_eq!(STEPS[REBUILD], "Rebuild guides");
+        assert_eq!(STEPS[BRIEFS], "Briefs");
+        assert_eq!(STEPS[WORKBOOK], "Workbook");
+        assert_eq!(STEPS[PREREADS], "Pre-reads");
+        assert_eq!(STEPS[NOTES], "Notes");
         assert_eq!(fresh_steps().len(), STEPS.len());
     }
 
@@ -1720,6 +1876,7 @@ mod tests {
         assert_eq!(validate_shift_setting("shift_idle_minutes", "0").unwrap(), "0");
         assert!(validate_shift_setting("shift_idle_minutes", "181").is_err());
         assert_eq!(validate_shift_setting("shift_digests_per_night", "20").unwrap(), "20");
+        assert_eq!(validate_shift_setting("shift_briefs_per_night", "3").unwrap(), "3");
         assert!(validate_shift_setting("shift_guides_per_night", "-1").is_err());
         assert!(validate_shift_setting("job_model", "haiku").is_err(), "not the shift's key");
         assert!(validate_shift_setting("aibhs_root", "/").is_err());

@@ -114,6 +114,7 @@ export type ShiftSettingKey =
   | "shift_idle_minutes"
   | "shift_guides_per_night"
   | "shift_digests_per_night"
+  | "shift_briefs_per_night"
   | "shift_in_dev_build";
 
 export function setShiftSetting(key: ShiftSettingKey, value: string): Promise<void> {

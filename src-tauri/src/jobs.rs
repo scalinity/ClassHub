@@ -43,7 +43,9 @@ const READ_ONLY_DISALLOWED: &str =
 
 fn disallowed_tools(kind: &str) -> &'static str {
     match kind {
-        "sort_proposal" | "syllabus_scan" | "announcement_scan" => READ_ONLY_DISALLOWED,
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review" => {
+            READ_ONLY_DISALLOWED
+        }
         _ => DISALLOWED_TOOLS,
     }
 }
@@ -362,10 +364,15 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         "lecture_digest" => Some(
             "Read,Glob,Grep,Edit(**/Sessions/**),Edit(**/corpus/**),Edit(.classhub/corpus/**)",
         ),
-        "extract" | "module_guide" | "master_guide" | "practice" => {
-            Some("Read,Glob,Grep,Write")
+        // The small documents (SPEC §8.6) write under `Study Guides/` as a
+        // guide does, and the guard reads their runs the same way.
+        "extract" | "module_guide" | "master_guide" | "practice" | "assignment_brief"
+        | "project_workbook" | "presentation_kit" | "pre_read" => Some("Read,Glob,Grep,Write"),
+        // The notes review never writes: its section is appended by the app
+        // through the note write path, with the audit row a job cannot write.
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review" => {
+            Some("Read,Glob,Grep")
         }
-        "sort_proposal" | "syllabus_scan" | "announcement_scan" => Some("Read,Glob,Grep"),
         _ => None, // self_check needs no tools
     }
 }
@@ -374,7 +381,15 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
 fn writes_to_disk(kind: &str) -> bool {
     matches!(
         kind,
-        "extract" | "module_guide" | "master_guide" | "practice" | "lecture_digest"
+        "extract"
+            | "module_guide"
+            | "master_guide"
+            | "practice"
+            | "lecture_digest"
+            | "assignment_brief"
+            | "project_workbook"
+            | "presentation_kit"
+            | "pre_read"
     )
 }
 
@@ -418,8 +433,10 @@ const APP_WRITES: &[(&str, &[&str])] = &[
     ("lecture.added", &["relPath"]),
     ("chat.write_note", &["relPath"]),
     ("ui.write_note", &["relPath"]),
+    ("review.write_note", &["relPath"]),
     ("undo.chat.write_note", &["relPath"]),
     ("undo.ui.write_note", &["relPath"]),
+    ("undo.review.write_note", &["relPath"]),
 ];
 
 /// What the app recorded doing to a path inside the guard's window.
@@ -961,6 +978,40 @@ pub fn enqueue_syllabus(
     enqueue(app, "syllabus_scan", Some(class_id), scope, prompt, None, None)
 }
 
+/// SPEC §8.6: one of the small documents — a brief, the workbook, a kit, a
+/// pre-read — one active per class and scope, its `DocumentPayload` recorded
+/// by guides::finalize_document on success.
+pub fn enqueue_document(
+    app: &AppHandle,
+    kind: &str,
+    class_id: i64,
+    scope: &str,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue_unique_scoped(app, kind, class_id, scope, prompt, Some(payload), None)
+}
+
+/// SPEC §8.6: the notes review over one note (read-only tools), the section
+/// it answers with appended by notes_review::finalize_job.
+pub fn enqueue_notes_review(
+    app: &AppHandle,
+    class_id: i64,
+    note_rel_path: &str,
+    prompt: &str,
+    payload: String,
+) -> Result<i64> {
+    enqueue_unique_scoped(
+        app,
+        crate::notes_review::KIND,
+        class_id,
+        note_rel_path,
+        prompt,
+        Some(payload),
+        None,
+    )
+}
+
 /// SPEC §7.2: the announcement scan over a class's unread notices, one per
 /// class at a time (read-only tools).
 pub fn enqueue_announcement_scan(
@@ -1099,16 +1150,18 @@ pub fn cancel_job(app: &AppHandle, job_id: i64) -> Result<()> {
 }
 
 pub fn list_jobs(conn: &Connection) -> Result<Vec<JobInfo>> {
-    // A unit scope is a row id; the division's name rides along for the label.
-    let mut stmt = conn.prepare(
+    // A unit, pre-read or brief scope is a row id; the division's name or
+    // the deadline's title rides along for the label.
+    let mut stmt = conn.prepare(&format!(
         "SELECT j.id, j.kind, j.class_id, c.display_name, c.color, j.scope, j.status,
                 j.created_at, j.started_at, j.finished_at, j.error, j.summary,
-                j.log_path, j.session_id, u.name
+                j.log_path, j.session_id, COALESCE(u.name, d.title)
          FROM jobs j
          LEFT JOIN classes c ON c.id = j.class_id
-         LEFT JOIN units u ON u.class_id = j.class_id AND j.scope = 'unit:' || u.id
+         {}
          ORDER BY j.id DESC LIMIT 50",
-    )?;
+        crate::guides::label_joins("j")
+    ))?;
     let jobs = stmt
         .query_map([], |row| {
             let scope: Option<String> = row.get(5)?;
@@ -1643,6 +1696,29 @@ fn run_job(
                     ) {
                         Ok(recorded) => summary = Some(recorded),
                         Err(e) => demote("announcement scan finished but read no notice", e),
+                    }
+                }
+            }
+            "assignment_brief" | "project_workbook" | "presentation_kit" | "pre_read" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    if let Err(e) = crate::guides::finalize_document(&app, class_id, payload, read_paths) {
+                        demote(
+                            &format!("{} finished but no document was recorded", kind_label(&job.kind)),
+                            e,
+                        );
+                    }
+                }
+            }
+            "notes_review" => {
+                if let Some(class_id) = job.class_id {
+                    match crate::notes_review::finalize_job(
+                        &app,
+                        class_id,
+                        job.payload.as_deref(),
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("notes review finished but appended nothing", e),
                     }
                 }
             }

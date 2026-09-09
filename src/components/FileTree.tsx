@@ -17,11 +17,12 @@ import {
   RefreshCw,
   ScrollText,
   Sheet,
+  Speech,
   type LucideIcon,
 } from "lucide-react";
 
 import { PracticeAction } from "@/components/PracticeAction";
-import { deltaLabel, deltaTitle, type GuideInfo } from "@/lib/guides";
+import { deltaLabel, deltaTitle, kitScope, type GuideInfo } from "@/lib/guides";
 import { WEEKS_DIR, type WeekSlot } from "@/lib/lectures";
 import {
   countFiles,
@@ -140,9 +141,13 @@ export interface ModuleGuideControls {
   activeScopes: ReadonlySet<string>;
   /** Scopes with a queued/running practice job (SPEC §8.3). */
   activePracticeScopes: ReadonlySet<string>;
+  /** Kit scopes with a queued/running presentation_kit job (SPEC §8.6). */
+  activeKitScopes: ReadonlySet<string>;
   onSynthesize: (scope: string) => void;
   /** Write an exam for the scope, focused on the typed topics when any. */
   onPractice: (scope: string, focus: string | null) => void;
+  /** Write the presentation kit for a paper (SPEC §8.6). */
+  onKit: (relPath: string) => void;
   onView: (scope: string) => void;
 }
 
@@ -426,6 +431,60 @@ function GuideCluster({
   );
 }
 
+/**
+ * SPEC §8.6 — the presentation kit on a paper's row, beside Show in Finder:
+ * a quiet icon until one is written, the pulse while it is, `Read the kit`
+ * once it exists, and the amber rewrite once the paper changed.
+ */
+function KitAction({
+  relPath,
+  controls,
+}: {
+  relPath: string;
+  controls: ModuleGuideControls;
+}) {
+  const scope = kitScope(relPath);
+  const kit = controls.guides.get(scope);
+  if (controls.activeKitScopes.has(scope)) {
+    return (
+      <span className={`shrink-0 px-2 ${statusLine}`}>
+        <span aria-hidden className={pulseDot} />
+        Writing the kit…
+      </span>
+    );
+  }
+  if (kit) {
+    return (
+      <span className="flex shrink-0 items-center gap-0.5">
+        {kit.stale && (
+          <button
+            type="button"
+            title={deltaTitle(kit.diff)}
+            onClick={() => controls.onKit(relPath)}
+            className={`${buttonChip} bg-class-amber/12 text-class-amber hover:bg-class-amber/20`}
+          >
+            Rewrite · {deltaLabel(kit.diff)}
+          </button>
+        )}
+        <button type="button" onClick={() => controls.onView(scope)} className={buttonText}>
+          Read the kit
+        </button>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title="Presentation kit — the paper's claim, its figures, the questions to expect"
+      aria-label={`Write a presentation kit for ${relPath.split("/").pop() ?? relPath}`}
+      onClick={() => controls.onKit(relPath)}
+      className={buttonIcon}
+    >
+      <Speech size={13} aria-hidden />
+    </button>
+  );
+}
+
 function FileRow({
   node,
   classId,
@@ -433,6 +492,7 @@ function FileRow({
   onViewFile,
   weekSlots,
   pendingSources,
+  guideControls,
 }: NodeProps) {
   const Icon = KIND_ICONS[node.kind ?? ""] ?? File;
   const viewable = VIEWABLE_KINDS.has(node.kind ?? "");
@@ -497,6 +557,9 @@ function FileRow({
           )
         )}
         <span className="flex shrink-0 items-center gap-0.5">
+          {node.kind === "pdf" && duplicate === undefined && guideControls && (
+            <KitAction relPath={node.relPath} controls={guideControls} />
+          )}
           <button
             type="button"
             title="Show in Finder"
