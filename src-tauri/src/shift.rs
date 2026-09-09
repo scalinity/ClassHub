@@ -49,13 +49,21 @@ const MAX_IDLE_MINUTES: u32 = 180;
 const TICK: Duration = Duration::from_secs(60);
 const JOB_POLL: Duration = Duration::from_secs(5);
 
-/// The plan's steps, in order (SPEC §6). Later milestones add to the end.
-pub const STEPS: [&str; 5] = ["Sync Canvas", "File", "Extract", "Distill", "Rebuild guides"];
+/// The plan's steps, in order (SPEC §6).
+pub const STEPS: [&str; 6] = [
+    "Sync Canvas",
+    "File",
+    "Recordings",
+    "Extract",
+    "Distill",
+    "Rebuild guides",
+];
 const SYNC: usize = 0;
 const FILE: usize = 1;
-const EXTRACT: usize = 2;
-const DISTILL: usize = 3;
-const REBUILD: usize = 4;
+const RECORDINGS: usize = 2;
+const EXTRACT: usize = 3;
+const DISTILL: usize = 4;
+const REBUILD: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -661,6 +669,8 @@ struct Progress<'a> {
     steps: Vec<Step>,
     jobs: Vec<i64>,
     filed: usize,
+    /// Recordings captured off the Zoom tool.
+    captured: usize,
     extracts: usize,
     distilled: usize,
     rebuilt: usize,
@@ -776,6 +786,9 @@ impl Progress<'_> {
         if self.filed > 0 {
             parts.push(plural(self.filed, "file filed", "files filed"));
         }
+        if self.captured > 0 {
+            parts.push(plural(self.captured, "recording captured", "recordings captured"));
+        }
         if self.extracts > 0 {
             parts.push(plural(self.extracts, "extract", "extracts"));
         }
@@ -840,6 +853,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         steps: fresh_steps(),
         jobs: Vec::new(),
         filed: 0,
+        captured: 0,
         extracts: 0,
         distilled: 0,
         rebuilt: 0,
@@ -905,7 +919,31 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         return Ok(p.finish_early(end));
     }
 
-    // 3. Extract, class by class, waiting for each run.
+    // 3. Capture the recordings the sync listed (SPEC §7.1), hidden, up to
+    // the digest cap — a night captures what it can distill — and never
+    // with a digest of its own: the Distill step below lists a filed
+    // lecture without its note under the same cap.
+    p.begin(RECORDINGS);
+    let captured = crate::recordings::capture_waiting(
+        app,
+        None,
+        s.digests_per_night as usize,
+        crate::zoom::Reveal::Never,
+        &|_| {},
+    );
+    p.captured = captured.captured;
+    p.failed += captured.failed;
+    p.left += captured.left;
+    let mut outcome = captured.summary();
+    if !captured.notes.is_empty() {
+        outcome.push_str(&format!(" · {}", captured.notes.join(", ")));
+    }
+    p.done(RECORDINGS, outcome);
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
+
+    // 4. Extract, class by class, waiting for each run.
     p.begin(EXTRACT);
     let class_ids: Vec<i64> = with_conn(app, |conn| {
         let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
@@ -946,7 +984,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         },
     );
 
-    // 4. Distill, oldest session first, under the cap.
+    // 5. Distill, oldest session first, under the cap.
     p.begin(DISTILL);
     let candidates = with_conn(app, |conn| digest_candidates(conn, now()))?;
     let (todo, left) = capped(candidates, s.digests_per_night);
@@ -971,7 +1009,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     }
     p.done(DISTILL, step_outcome(p.distilled, todo.len(), left, "session", "sessions", &digest_notes));
 
-    // 5. Rebuild the division guides whose meeting has passed, oldest first.
+    // 6. Rebuild the division guides whose meeting has passed, oldest first.
     p.begin(REBUILD);
     let candidates = with_conn(app, |conn| guide_candidates(conn, Local::now().naive_local(), now()))?;
     let (todo, left) = capped(candidates, s.guides_per_night);

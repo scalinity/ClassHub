@@ -10,7 +10,9 @@ import {
   clearLectureProgress,
   dateFromFileName,
   lectureWeeks,
+  noteRecordingForForm,
   useLectureProgress,
+  type LectureFormOpen,
   type LectureProgress,
   type SourceKind,
   type WeekSlot,
@@ -67,13 +69,16 @@ const SOURCE_HINT: Record<SourceKind, { icon: typeof Link2; text: string }> = {
  */
 export function AddLecture({
   classId,
+  initial,
   onClose,
 }: {
   classId: number;
+  /** What the form opens with: a recording the sync found, or nothing. */
+  initial?: LectureFormOpen;
   onClose: () => void;
 }) {
-  const [source, setSource] = useState("");
-  const [date, setDate] = useState<string | null>(null);
+  const [source, setSource] = useState(initial?.source ?? "");
+  const [date, setDate] = useState<string | null>(initial?.date ?? null);
   // null until touched, so resolving the week from the date never fights an
   // edit; "" is the deliberate "let the sorter decide", which is a different
   // answer from not having answered.
@@ -145,6 +150,10 @@ export function AddLecture({
   const submit = () => {
     setError(null);
     setSubmitted(true);
+    // A found recording's row leaves the listing once this run files it.
+    if (initial?.recordingId !== undefined) {
+      noteRecordingForForm(classId, initial.recordingId);
+    }
     addLecture({
       classId,
       source: source.trim(),

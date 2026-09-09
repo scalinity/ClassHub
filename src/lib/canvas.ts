@@ -64,6 +64,8 @@ export interface ClassOutcome {
   gradesRecorded: number;
   /** Announcements recorded or updated — what NOTICES gained. */
   announcementsRecorded: number;
+  /** Recordings newly found behind the Zoom tool, waiting for a capture (SPEC §7.1). */
+  recordingsFound: number;
   /** Canvas Pages and the syllabus page written into the extract cache. */
   pagesWritten: number;
   notes: string[];
@@ -91,6 +93,23 @@ export interface Announcement {
   body: string;
   /** Local ISO, YYYY-MM-DDTHH:MM — the deadline shape, so the same labels apply. */
   postedAt: string;
+  /** What the announcement scan read out of it (SPEC §7.2): to-dos, each
+   *  with a checkbox, and changes. Empty until a scan has read the notice. */
+  actions: AnnouncementAction[];
+}
+
+/** One line the announcement scan read out of a notice. */
+export interface AnnouncementAction {
+  id: number;
+  announcementId: number;
+  kind: "todo" | "change";
+  text: string;
+  done: boolean;
+}
+
+/** The checkbox on a to-do — its own way back, so no notice follows. */
+export function setAnnouncementActionDone(id: number, done: boolean): Promise<void> {
+  return invoke("set_announcement_action_done", { id, done });
 }
 
 export function listUnits(classId: number): Promise<Unit[]> {
@@ -238,6 +257,11 @@ export function outcomeSummary(outcome: ClassOutcome): string {
   if (outcome.announcementsRecorded > 0) {
     parts.push(
       `${outcome.announcementsRecorded} notice${outcome.announcementsRecorded === 1 ? "" : "s"}`,
+    );
+  }
+  if (outcome.recordingsFound > 0) {
+    parts.push(
+      `${outcome.recordingsFound} recording${outcome.recordingsFound === 1 ? "" : "s"} found`,
     );
   }
   if (outcome.pagesWritten > 0) {

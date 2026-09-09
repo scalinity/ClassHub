@@ -16,6 +16,7 @@ interface HubChange {
     | "units"
     | "announcements"
     | "canvasSyllabus"
+    | "recordings"
     | "index";
 }
 
@@ -81,6 +82,11 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // A Canvas sync recorded or updated what the professor said; the
       // workspace's NOTICES section reads it.
       void queryClient.invalidateQueries({ queryKey: ["announcements"] });
+      break;
+    case "recordings":
+      // A sync listed recordings behind the Zoom tool, or a capture filed
+      // one; the Lectures section lists what still waits.
+      void queryClient.invalidateQueries({ queryKey: ["recordings"] });
       break;
     case "canvasSyllabus":
       // A Canvas sync mirrored the syllabus page; the scan picker offers it.

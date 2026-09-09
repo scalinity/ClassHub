@@ -1,11 +1,23 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Megaphone } from "lucide-react";
+import { Check, Megaphone } from "lucide-react";
 
 import { SectionHeading } from "@/components/SectionHeading";
-import { listAnnouncements, type Announcement } from "@/lib/canvas";
+import {
+  listAnnouncements,
+  setAnnouncementActionDone,
+  type Announcement,
+  type AnnouncementAction,
+} from "@/lib/canvas";
 import { formatDueDate } from "@/lib/schedule";
-import { meta, readingText } from "@/lib/styles";
+import {
+  checkCircle,
+  checkCircleDone,
+  chipMuted,
+  errorLine,
+  meta,
+  readingText,
+} from "@/lib/styles";
 
 /** The one query the section and the workspace's nav share — TanStack dedupes
  *  it, so the nav's link costs no second request. */
@@ -80,6 +92,64 @@ function NoticeRow({ notice }: { notice: Announcement }) {
           {notice.body}
         </p>
       )}
+      {notice.actions.length > 0 && (
+        <ul className="mt-2 space-y-1 pl-6.5" aria-label={`What ${notice.title} asks`}>
+          {notice.actions.map((action) => (
+            <ActionLine key={action.id} action={action} />
+          ))}
+        </ul>
+      )}
     </div>
+  );
+}
+
+/**
+ * One line the announcement scan read out of the notice (SPEC §7.2): a
+ * to-do with the deadline row's ring, which is its own way back, or a
+ * change, which is said and needs nothing. Always in view, clamped body or
+ * not, since the point of the line is to be acted on.
+ */
+function ActionLine({ action }: { action: AnnouncementAction }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (action.kind === "change") {
+    return (
+      <li className="flex items-baseline gap-2 text-body">
+        <span className={chipMuted}>change</span>
+        <span className="min-w-0 text-muted-foreground">{action.text}</span>
+      </li>
+    );
+  }
+  const toggle = () => {
+    setBusy(true);
+    setError(null);
+    setAnnouncementActionDone(action.id, !action.done)
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <li className="flex items-baseline gap-2 text-body">
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={action.done}
+        aria-label={action.done ? `Reopen ${action.text}` : `Mark ${action.text} done`}
+        title={action.done ? "Reopen this to-do" : "Mark done"}
+        disabled={busy}
+        onClick={toggle}
+        className={
+          `${checkCircle} translate-y-0.5 cursor-pointer focus-visible:outline-2 focus-visible:outline-(--accent) disabled:pointer-events-none ` +
+          (action.done ? checkCircleDone : "border-muted-foreground/40 hover:border-(--accent)")
+        }
+      >
+        {action.done && <Check size={10} strokeWidth={3} aria-hidden />}
+      </button>
+      <span
+        className={`min-w-0 ${action.done ? "text-muted-foreground line-through" : ""}`}
+      >
+        {action.text}
+      </span>
+      {error && <span className={`${errorLine} mt-0`}>{error}</span>}
+    </li>
   );
 }

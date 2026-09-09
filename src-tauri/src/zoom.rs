@@ -42,11 +42,33 @@ const WINDOW_LABEL: &str = "zoom-capture";
 /// so this is sized for a slow one rather than a fast one.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
+/// When the capture window is put on screen (SPEC §7.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    /// From the start — the Add lecture form's link, where the reader pasted
+    /// it and expects to sign in there.
+    Always,
+    /// Hidden until Zoom asks for a sign-in or a passcode, or the page has
+    /// stalled long enough that hiding it would hide the stall — a find
+    /// run by hand, with the reader at the machine.
+    OnAsk,
+    /// Never: the shift's capture, with nobody there to answer. A sign-in
+    /// or a passcode ends the capture, naming the form as the way through.
+    Never,
+}
+
+/// How long a hidden capture waits with no progress before `OnAsk` shows
+/// the window anyway. A UF cloud recording's player reaches its store in
+/// under five seconds (SPEC §1); a minute of nothing is a stall worth
+/// looking at.
+const HIDDEN_STALL: Duration = Duration::from_secs(60);
+
 /// Reads the transcript for a Zoom recording link, returning the caption text
 /// and a display name for where it came from.
 pub fn fetch_caption(
     app: &AppHandle,
     url: &str,
+    reveal: Reveal,
     on_stage: &dyn Fn(&str),
 ) -> Result<(String, String)> {
     let parsed = tauri::Url::parse(url).ok();
@@ -59,8 +81,20 @@ pub fn fetch_caption(
         bail!("{url} is not a Zoom recording link");
     }
 
-    on_stage("Opening Zoom — sign in if prompted…");
-    let window = open_window(app, url)?;
+    on_stage(if reveal == Reveal::Always {
+        "Opening Zoom — sign in if prompted…"
+    } else {
+        "Reading the recording…"
+    });
+    let window = open_window(app, url, reveal == Reveal::Always)?;
+    let mut shown = reveal == Reveal::Always;
+    let show = |window: &WebviewWindow, shown: &mut bool| {
+        if !*shown {
+            *shown = true;
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    };
 
     let started = Instant::now();
     let deadline = started + CAPTURE_TIMEOUT;
@@ -102,6 +136,25 @@ pub fn fetch_caption(
         };
 
         let state = probe["state"].as_str().unwrap_or("waiting").to_string();
+        // A hidden capture with a question on the page: shown to whoever ran
+        // it, or ended for the shift, which has nobody to answer it.
+        if state == "login" || state == "passcode" {
+            match reveal {
+                Reveal::Always => {}
+                Reveal::OnAsk => show(&window, &mut shown),
+                Reveal::Never => {
+                    let _ = window.close();
+                    bail!(
+                        "Zoom asked for a {} — add the recording from the Add lecture form, \
+                         where you can answer it",
+                        if state == "login" { "sign-in" } else { "passcode" }
+                    );
+                }
+            }
+        }
+        if reveal == Reveal::OnAsk && started.elapsed() >= HIDDEN_STALL && state != "fetching" {
+            show(&window, &mut shown);
+        }
         if let Some(found) = probe["found"].as_array() {
             if !found.is_empty() {
                 last_found = found
@@ -233,7 +286,7 @@ fn stage_label(state: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 // Webview
 
-fn open_window(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
+fn open_window(app: &AppHandle, url: &str, visible: bool) -> Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
         // `close` posts to the event loop and returns; the label is only freed
         // once the main thread has processed it. Building immediately fails
@@ -252,6 +305,7 @@ fn open_window(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(parsed))
         .title("Sign in to Zoom — ClassHub is reading the transcript")
         .inner_size(1100.0, 820.0)
+        .visible(visible)
         .build()
         .context("opening the Zoom window")
 }

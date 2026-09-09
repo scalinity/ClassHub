@@ -225,7 +225,7 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
             <p className="mt-6 text-[15px] font-semibold">By kind</p>
             <p className="mt-1 max-w-xl text-body text-muted-foreground">
               A kind can run on its own model and effort instead of the pair
-              above. A sort or a syllabus scan reads a listing and answers in
+              above. A sort, a syllabus scan or an announcement scan reads a listing and answers in
               seconds; Sonnet at medium is plenty for those, and lighter on the
               subscription window the guides draw on.
             </p>

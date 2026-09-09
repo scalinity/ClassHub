@@ -78,6 +78,8 @@ pub struct ClassOutcome {
     pub grades_recorded: usize,
     /// Announcements recorded or updated — what the workspace's NOTICES gained.
     pub announcements_recorded: usize,
+    /// Recordings newly found behind the Zoom tool, waiting for a capture.
+    pub recordings_found: usize,
     /// Canvas Pages and the syllabus page written or rewritten into the
     /// extract cache.
     pub pages_written: usize,
@@ -329,6 +331,7 @@ fn run(
             files_filed: 0,
             grades_recorded: 0,
             announcements_recorded: 0,
+            recordings_found: 0,
             pages_written: 0,
             notes: Vec::new(),
             error: None,
@@ -425,8 +428,34 @@ fn sync_class(
     if let Err(e) = sync_announcements(app, session, class, course_id, outcome, on_stage) {
         note_or_carry_on(outcome, e, "announcements")?;
     }
+    // What the notices commit to, ask for and change (SPEC §7.2): a light
+    // read-only job over the ones nothing has read yet, as the sorter runs
+    // over loose files.
+    match crate::announcements::enqueue_scan(app, class.id) {
+        Ok(Some(job_id)) => outcome.notes.push(format!("announcement scan enqueued as job {job_id}")),
+        Ok(None) => {}
+        Err(e) => outcome.notes.push(format!("the announcement scan did not start: {e:#}")),
+    }
     if let Err(e) = sync_pages(app, session, class, course, outcome, on_stage) {
         note_or_carry_on(outcome, e, "pages")?;
+    }
+    // The Zoom tool's recordings (SPEC §7.1): listed here, captured by the
+    // shift's step or by hand. One more window's worth of reads, and not
+    // worth the class either.
+    match crate::recordings::sync_for_course(app, session, class.id, course_id, on_stage) {
+        Ok(listing) => {
+            outcome.recordings_found = listing.new;
+            if listing.found > 0 && listing.new == 0 && listing.skipped == 0 {
+                // Nothing to say: every recording is accounted for.
+            } else if listing.skipped > 0 {
+                outcome.notes.push(format!(
+                    "{} listed on Zoom · {} not a lecture (a test, a non-meeting day, or a date already filed)",
+                    plural(listing.found, "recording"),
+                    listing.skipped
+                ));
+            }
+        }
+        Err(e) => note_or_carry_on(outcome, e, "recordings")?,
     }
     if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
         note_or_fail(outcome, e, "files")?;
@@ -681,6 +710,7 @@ fn sync_assignments(
             };
             let due_at = assignment["due_at"].as_str().and_then(local_iso);
             let canvas_id = assignment["id"].as_i64().map(|id| id.to_string());
+            let description = description_text(assignment);
             // Settled before the due-date guard below: a deadline the list
             // already holds is tracked by its id whether or not Canvas dates
             // the assignment, and its submission closes it either way.
@@ -693,6 +723,7 @@ fn sync_assignments(
                     title,
                     due_at: due_at.as_deref(),
                     submitted_at: submitted_at.as_deref(),
+                    description: description.as_deref(),
                 };
                 match crate::deadlines::settle_canvas_deadline(conn, class.id, &tracked) {
                     Ok(Some(settled)) => {
@@ -759,6 +790,7 @@ fn sync_assignments(
                 title,
                 due_at: Some(&due_at),
                 submitted_at: submitted_at.as_deref(),
+                description: description.as_deref(),
             };
             match crate::deadlines::insert_canvas_deadline(conn, class.id, &tracked, kind, &notes) {
                 Ok(DirectWrite::Recorded { completed: done }) => {
@@ -824,6 +856,28 @@ fn sync_assignments(
     }
     Ok(())
 }
+
+/// Canvas's description of an assignment as text (SPEC §7.2): its HTML
+/// stripped through the extractor's stripper, whitespace folded, capped —
+/// the longest on record is under 800 characters, and a brief reads it,
+/// not the reader. `None` where Canvas holds none.
+pub(crate) fn description_text(assignment: &Value) -> Option<String> {
+    let raw = assignment["description"].as_str()?;
+    let text = strip_html(raw);
+    let folded = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if folded.is_empty() {
+        return None;
+    }
+    Some(crate::db::truncate(&folded, MAX_DESCRIPTION_CHARS))
+}
+
+/// The description as stored: enough for any assignment seen (SPEC §1).
+pub(crate) const MAX_DESCRIPTION_CHARS: usize = 2000;
 
 /// `100` rather than `100.0`, since points are almost always whole.
 fn trim_number(value: f64) -> String {
@@ -1780,8 +1834,10 @@ pub(crate) fn record_announcement(
             Ok(false)
         }
         Some((id, ..)) => {
+            // An edited notice is read again by the scan (SPEC §7.2).
             conn.execute(
-                "UPDATE announcements SET title = ?1, body = ?2, posted_at = ?3 WHERE id = ?4",
+                "UPDATE announcements SET title = ?1, body = ?2, posted_at = ?3, scanned_at = NULL
+                 WHERE id = ?4",
                 params![announcement.title, announcement.body, announcement.posted_at, id],
             )?;
             Ok(true)
@@ -1812,11 +1868,24 @@ pub struct AnnouncementInfo {
     pub title: String,
     pub body: String,
     pub posted_at: String,
+    /// What the announcement scan read out of it (SPEC §7.2): the to-dos
+    /// and changes under the notice. Filled for the workspace's listing.
+    pub actions: Vec<crate::announcements::ActionInfo>,
 }
 
-/// The class's announcements, newest first.
+/// The class's announcements, newest first, each with its to-dos and
+/// changes.
 pub fn list_announcements(conn: &Connection, class_id: i64) -> Result<Vec<AnnouncementInfo>> {
-    announcements_newest_first(conn, class_id, -1)
+    let mut rows = announcements_newest_first(conn, class_id, -1)?;
+    let actions = crate::announcements::list_actions(conn, class_id)?;
+    for row in &mut rows {
+        row.actions = actions
+            .iter()
+            .filter(|a| a.announcement_id == row.id)
+            .cloned()
+            .collect();
+    }
+    Ok(rows)
 }
 
 /// The class's `limit` newest announcements and how many it has in all —
@@ -1854,6 +1923,7 @@ fn announcements_newest_first(
                 title: row.get(2)?,
                 body: row.get(3)?,
                 posted_at: row.get(4)?,
+                actions: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

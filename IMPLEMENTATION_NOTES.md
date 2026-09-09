@@ -5939,3 +5939,207 @@ sessions should know:
   launch cannot own rows — so a test for a live owner uses pid 1.
 - The reviewers' reports arrive three findings at a time on request;
   asking for every remaining batch in one message keeps them flowing.
+
+## M35 — What Canvas knows (2026-09-08)
+
+### Phase 0 — measured
+
+The probe ran live, with the owner at the sign-in window once (the stored
+session had lapsed at 16:25; the sign-in at 17:56 stored a new one, and the
+five later passes ran hidden on it). An env-guarded module (`probe.rs`,
+removed before the commit) ran inside `sync_class` and dumped six passes to
+the scratchpad; the findings are in SPEC §1:
+
+- **The Zoom tool.** Every course carries `Zoom Conferences`
+  (`context_external_tool_166364`, LTI 1.1, `applications.zoom.us/lti/rich`);
+  a `Zoom Conferences 1.3` tool on LTI Advantage sits in no navigation.
+  `/tabs` in under a second; `sessionless_launch?…&launch_type=course_navigation`
+  in 1.3–2.1 s, a Canvas URL with a 128-character verifier; the hidden window
+  lands on `applications.zoom.us/lti/rich` in 1.1–2.1 s with no sign-in — a
+  React page (`#root`, an `ant-table`), tabs Upcoming Meetings · Previous
+  Meetings · Cloud Recordings · Meeting Summary.
+- **The API.** Same origin, `lti_scid` in `window.appConf.page.scid`, the
+  headers in `appConf.ajaxHeaders` (`X-XSRF-TOKEN`, `x-zm-aid`, `x-zm-haid`,
+  `x-zm-cluster-id`, `x-zm-region`); a bare fetch answers 403 `Sorry, your
+  session was expired`. `/api/v1/lti/rich/recording/COURSE?startTime=&endTime=<today>&keyWord=&searchType=1&status=&page=1&total=0`
+  answers in 0.3 s — `pageSize` 12, `total`, `list[]` of `meetingId`,
+  `topic`, UTC `startTime`, `duration` (minutes), `totalSize`,
+  `recordingCount`, `recordingFiles` null; `/api/v1/lti/rich/recording/file?meetingId=…`
+  in 0.3 s with `recordingFiles[]` of `fileType` MP4 · M4A · CC · TIMELINE,
+  the MP4 and M4A carrying `playUrl` on `ufl.zoom.us/rec/play/…`. The
+  `meeting/upComing/COURSE/all` and `meeting/history/COURSE/all` endpoints
+  feed the other tabs. The topic cell is a `span[role=button]` navigating to
+  `/lti/rich/home/recording/detail`, which requests the files endpoint.
+- **The lists on Sept 8** (22 rows in all): Fundamentals 9 (Aug 25 194 min,
+  Sept 1 279, Sept 8 209 — up by 21:00, from 15:52 to 19:21 — and six of a
+  minute or less), Design Studio 4 (Aug 26 64, Sept 2 72, two tests),
+  Biostatistics 5 (Aug 20 145, Aug 27 123, Sept 3 126, a test, a Saturday
+  5-minute one), Applied 4 (Aug 25 176, Sept 1 197, Sept 8 153, a 6-minute
+  one).
+- **Assignments.** `description` on every assignment but Biostatistics'
+  Conceptual Quiz 1: Fundamentals' are attachment names (32–129 B stripped),
+  Design Studio's prose (591, 788 B), Biostatistics' 196 and 500 B; Applied
+  publishes none. Ten announcements (1 / 4 / 3 / 2) — Biostatistics' third,
+  Sept 3, names Programming Quiz 1 open till "9/5/2027", Conceptual Quiz 1
+  till "9/6/2027" and Homework 1 till 9/13/2026, the two years typos.
+- **An M34 regression the probe surfaced.** The close handler hid every
+  window on `CloseRequested`, the Canvas and Zoom windows included, so
+  their labels stayed taken and the second sync or capture in one process
+  was refused as "still open" — the first pass got one course's window and
+  three refusals. Fixed before the second pass (main window only).
+
+### What was built
+
+- **Migration 0019** (`user_version` 19): `recordings`, `announcement_actions`,
+  `announcements.scanned_at`, `deadlines.description`.
+- **`recordings.rs`.** `sync_for_course` — the launch URL off the tabs
+  (`Session::zoom_launch_url`), a hidden `zoom-recordings` window polled
+  until the page is on a Zoom host with `appConf.page.scid`, the list
+  paged through `REQUEST_JS` with the page's own headers, each new meeting
+  judged (`verdict`: under `MIN_MINUTES` = 10 a test, a non-meeting weekday,
+  a date filed by hand — the transcripts under `Weeks/` no `recordings` row
+  produced) and inserted `new` with the MP4's `playUrl` (else the M4A's) or
+  `skipped` with the reason; `week_for` — `nearest_week` for a dated
+  course, `week_by_meetings` (the one-meeting rule) off `last_filed` for an
+  undated one; `capture_waiting` — `new` and `failed` rows oldest first up
+  to a cap, each through `lectures::add_with` under `claim_ingest`, no
+  digest, `filed` with a notice or `failed` with the reason; `list_waiting`,
+  `play_url_of`, `mark_filed` for the workspace; `spawn_find` — the
+  hand-run find on its own thread over a non-quiet `Session`, reporting on
+  `recordings://progress`.
+- **`zoom.rs`.** `Reveal { Always, OnAsk, Never }` on `fetch_caption`: the
+  window built hidden unless `Always`; a `login`/`passcode` state shows it
+  for `OnAsk` and ends the capture for `Never`, naming the form; `OnAsk`
+  also shows it after `HIDDEN_STALL` (60 s) with no progress.
+  `lectures::add_with`/`fetch` carry the policy; `IngestClaim`/`claim_ingest`
+  share the per-class ingestion claim with the capture.
+- **`canvas.rs`.** `get_one` for a single-object endpoint; `zoom_launch_url`;
+  `retire` — after a sign-in the window hides, `shown` resets and the main
+  window comes forward (asked for mid-session).
+- **`shift.rs`.** `STEPS` is six: `Recordings` third, `capture_waiting`
+  over every class with `Reveal::Never`, capped at the digest cap; the
+  tally counts `recordings captured`.
+- **`announcements.rs`** and `prompts/announcements.md`: `enqueue_scan`
+  (one per class, over `scanned_at IS NULL` rows, `KIND` =
+  `announcement_scan`), `build_prompt` (the class's deadlines and each
+  unread notice with its Canvas id), `finalize_job` → `record_entries`: per
+  entry `record_proposal(…, "announcement", None)` for each plausible
+  dated item (`MAX_DAYS_FROM_TODAY` = 200 — the 2027 typo sits 362 days
+  out), `record_actions` (`INSERT OR IGNORE`, 300 chars, eight a kind),
+  the read stamp in one transaction; `list_actions`, `set_action_done`
+  (audit `announcement.action_done`). `jobs.rs` scopes the kind read-only
+  with the syllabus scan's deny list, `enqueue_announcement_scan` is unique
+  per class, and finalize dispatches to it; `settings::JOB_KINDS` has eight
+  rows. `record_announcement` clears `scanned_at` on an update;
+  `sync_class` enqueues the scan after the announcements and lists the
+  recordings after the Pages (`ClassOutcome.recordings_found`).
+  `names_assignment` treats `announcement` as `syllabus`.
+- **Descriptions.** `canvas_sync::description_text` (stripped, blank lines
+  folded, `MAX_DESCRIPTION_CHARS` = 2000) on `CanvasAssignment.description`;
+  `insert_canvas_deadline` writes it and `settle_canvas_deadline` refreshes
+  it unaudited; `DeadlineInfo.description`.
+- **The frontend.** `Notices.tsx` renders `ActionLine`s under each notice
+  (a `change` chip, or the deadline ring as a checkbox); `Deadlines.tsx`
+  gives a row with notes or a description a chevron opening both;
+  `ClassWorkspace.tsx` adds `Find recordings` with its progress and
+  summary, the waiting recordings ahead of the transcripts with
+  `Add lecture` opening the form pre-filled (`LectureFormOpen`);
+  `AddLecture.tsx` takes `initial` and notes the recording for
+  `lib/lectures.ts`, whose progress listener marks the row filed;
+  `lib/deadlines.ts` admits `announcement` (`from a notice`);
+  `lib/query.ts` a `recordings` area; `lib/jobs.ts` the kind's label.
+- **`lib.rs`.** The close handler hides the main window only. Commands
+  `list_recordings`, `find_recordings`, `recording_play_url`,
+  `mark_recording_filed`, `set_announcement_action_done`.
+- SPEC §1, §5, §6, §7.1, §7.2, §11, §12, §13 and §14 state the design; the
+  brief was revised where the probe and the notes contradicted it (the
+  migration number, ten notices, play links not share links, the sync
+  lists and the shift captures under the digest cap, no digest on a
+  capture, the announcement scan's fold rule, no description column on
+  the proposals, the office hour read as a change six days on).
+
+### Verified
+
+- `cargo test`: 319 pass, seven new — the one-meeting rule; a recording's
+  verdicts; the list and files answers as Zoom serves them; a meeting
+  recorded once and a hand filing told from a capture; a found recording's
+  week by dates and by meetings; the scan's record and its read stamp; a
+  malformed entry, an unknown notice and an implausible year costing their
+  own items; the answer wrapped or bare; the prompt over unread notices.
+  `npx tsc --noEmit` clean.
+- **Live on the dev build** (migration 0019 at launch, `user_version` 19),
+  the announcement scan's pair set to Sonnet at Medium through Settings
+  (audit 256–257):
+  - **Sync 1** (from Settings, 25 s, the stored session, no window): every
+    course listed — `9 recordings listed on Zoom · 7 not a lecture`, 4 · 2,
+    5 · 3, 4 · 3 — 22 rows, 7 `new` (Fundamentals Aug 25 and Sept 8, Design
+    Studio Aug 26 and Sept 2, Biostatistics Aug 20 and Aug 27, Applied
+    Sept 8), the rest `skipped` as a test (0–6 minutes), a Saturday, or a
+    date already filed (Fundamentals Sept 1, Biostatistics Sept 3, Applied
+    Aug 25 and Sept 1); four announcement scans enqueued (330–333).
+  - **The scans**, `claude-sonnet-5`, 3–12 s, $0.13 / $0.09 / $0.10 / $0.08:
+    Fundamentals `1 notice read · 2 deadline proposals awaiting review · 1
+    change` (Live coding session #1 Aug 25 and the Sept 1 guest lecturer,
+    both past); Design Studio `4 notices read · 2 already on the list · 2
+    to-dos · 3 changes` (both readings of the milestone assignment answer
+    for Canvas's row; the office hour reads `Office hours moved to 6 PM
+    today` as a change); Biostatistics `3 notices read · 3 already on the
+    list · 5 to-dos · 1 change` (the quizzes and the homework match
+    Canvas's rows once the semester's year is taken); Applied `2 notices
+    read · 3 to-dos · 2 changes`. Every notice stamped read.
+  - **Descriptions** on all seven tracked rows (32–788 characters; none
+    for the LockDown quiz). The Design Studio workspace: the milestone
+    row's chevron opens `From Canvas · 5 points · …` and the description;
+    a to-do's ring marks it done (audit 258) and back (`Reopen …`).
+  - **`Find recordings`** on Fundamentals, 12 s: `9 listed · 0 new · 2
+    captured`, both with only `ClassHub` in the window list throughout —
+    Aug 25 via `transcriptList` (839 cues, every one named, 143 KB) into
+    a new `Weeks/Week 01 — Introduction to AI in Medicine/`, Sept 8 via
+    `ccUrl` (204 cues, 33 KB) into `Weeks/Week 03 — …/`, each 3.1 s from
+    open to caption, contribution rows 5 and 6 recorded, `lecture.added`
+    rows 260–261, one notice each.
+  - **The digest** of the Aug 25 transcript (job 334, `Distill` on its
+    row — the first of the two `Distill` controls, which was Week 01's):
+    16.1 min over 9 turns for $4.16, 92k output tokens — `Medical AI
+    Taxonomy and Four Eras`, a 71 KB session document with its markdown
+    twin, the corpus note under `Week 1 — Introduction to AI in Medicine/`,
+    44 flagged items recorded on contribution 5 and its `hints_read_at`
+    set, the cards sidecar beside the note.
+  - **The shift's plan**: the installed app's Sept 8 verification row
+    was deleted and the dev build claimed the night at once (`Run the
+    shift now` with `shift_in_dev_build` on and both caps at 0): 25 s,
+    `Sync Canvas · synced 4 classes — 0 deadlines recorded, 0
+    announcements` (the second sync: recordings still 22, nothing
+    unread, no scan), `File · nothing to file`, `Recordings · 5 past the
+    cap`, `Extract · nothing stale`, `Distill · 4 sessions waiting, the
+    cap is 0`, `Rebuild guides · 3 guides waiting, the cap is 0`,
+    `budget`. Caps and the dev switch put back (4, 2, off). The row is
+    the dev build's, so the installed app runs nothing on Sept 8; Sept
+    9's shift captures the five waiting recordings under its digest cap
+    of four and distills them.
+
+### Left as it is
+
+- Sept 8's Fundamentals caption is partial (204 cues of a 209-minute
+  lecture, opening mid-way): what Zoom published. Its digest is the
+  shift's or a click.
+- The `Recordings` step captures at most the digest cap a night; the
+  five waiting lectures take two nights to capture and distill.
+- The office hour postponed on Sept 2 reads as a change: the prompt says a
+  moved hour still ahead of today is a dated proposal, and no notice on
+  record exercised that path.
+- `sorter::week_filing` stays a test-only function at the baseline.
+
+### Gotchas
+
+- Both tabs' tables stay in the DOM on the Zoom page; a row must be picked
+  by its recording date, not the first `tr`.
+- An in-page `fetch` of Zoom's API without `appConf.ajaxHeaders` is a 403
+  that reads like an expired session.
+- Deleting a `shift_runs` row by hand emits nothing: the panel's `Run the
+  shift now` stays disabled and the tray's summary stale until a
+  `shift-changed` (Pause tonight, Resume tonight).
+- The Lectures rows' `Distill` controls share a name; `AX_NTH=1` is the
+  first pending transcript in path order, which was Week 01's.
+- A `cd` in one Bash call carried into the next several times; absolute
+  paths throughout.

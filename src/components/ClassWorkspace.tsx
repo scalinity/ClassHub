@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   ChevronLeft,
+  CirclePlay,
   FileQuestion,
   FolderOpen,
   Mic,
@@ -39,11 +40,18 @@ import {
 } from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import {
+  clearFindProgress,
   collectTranscripts,
   dateFromFileName,
   digestLecture,
+  findRecordings,
+  formatDuration,
   lectureWeeks,
   listLectureContributions,
+  listRecordings,
+  recordingPlayUrl,
+  useFindProgress,
+  type LectureFormOpen,
 } from "@/lib/lectures";
 import {
   listNotes,
@@ -54,7 +62,7 @@ import {
   type ManagedFile,
   type TreeNode,
 } from "@/lib/materials";
-import { formatClock, formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
+import { formatClock, formatDueDate, formatTimeRange, todayIso, weekdayLabel } from "@/lib/schedule";
 import { getSortState, useDragState } from "@/lib/sorter";
 import {
   buttonText,
@@ -207,7 +215,17 @@ export function ClassWorkspace({
   const [viewScope, setViewScope] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
-  const [addingLecture, setAddingLecture] = useState(false);
+  // Open with nothing, or pre-filled from a recording the sync found whose
+  // week is the form's to pick (SPEC §7.1).
+  const [addingLecture, setAddingLecture] = useState<LectureFormOpen | null>(null);
+  const [findError, setFindError] = useState<string | null>(null);
+  // Recordings found behind the Zoom tool that still wait for a capture.
+  const { data: recordings } = useQuery({
+    queryKey: ["recordings", info.id],
+    queryFn: () => listRecordings(info.id),
+    placeholderData: (prev) => prev,
+  });
+  const finding = useFindProgress(info.id);
   // Something the Materials tree asked for and the backend turned down — a
   // folder guide, a practice exam, or a file to frame — as the line to show
   // under that heading.
@@ -322,7 +340,8 @@ export function ClassWorkspace({
     (allDeadlines ?? []).some((d) => d.classId === info.id && d.status === "open") ||
     (deadlineQueue?.proposals.length ?? 0) > 0;
   const hasLectures =
-    sessions.length + activeDigests.length + pendingTranscripts.length > 0;
+    sessions.length + activeDigests.length + pendingTranscripts.length > 0 ||
+    (recordings?.length ?? 0) > 0;
   const hasPractice = activePractice.length > 0 || (practice?.length ?? 0) > 0;
   const links = [
     hasMaterials && { id: "master", label: "Semester master" },
@@ -492,30 +511,98 @@ export function ClassWorkspace({
                   : `${sessions.length} sessions`
             }
             actions={
-              <button
-                type="button"
-                onClick={() => setAddingLecture(true)}
-                className={buttonText}
-              >
-                Add lecture
-              </button>
+              <>
+                {finding && !finding.done ? (
+                  <span className={statusLine}>
+                    <span aria-hidden className={pulseDot} />
+                    {finding.stage}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    title="Read the course's Zoom recordings through Canvas and capture the new ones"
+                    onClick={() => {
+                      setFindError(null);
+                      clearFindProgress(info.id);
+                      findRecordings(info.id).catch((e) => setFindError(String(e)));
+                    }}
+                    className={buttonTextMuted}
+                  >
+                    Find recordings
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAddingLecture({})}
+                  className={buttonText}
+                >
+                  Add lecture
+                </button>
+              </>
             }
           >
             {digestError && (
               <p className={errorLine}>No session document: {digestError}</p>
             )}
+            {findError && <p className={errorLine}>Not started: {findError}</p>}
+            {finding?.done && (
+              <p className={finding.error ? errorLine : `mt-3 ${meta}`}>
+                {finding.error ? `Recordings not found: ${finding.error}` : finding.summary}
+              </p>
+            )}
           </SectionHeading>
           <div className="mt-3">
             {sessions.length === 0 &&
               activeDigests.length === 0 &&
-              pendingTranscripts.length === 0 && (
+              pendingTranscripts.length === 0 &&
+              (recordings?.length ?? 0) === 0 && (
                 <p className={`max-w-xl py-2 ${readingText} text-muted-foreground`}>
-                  Nothing recorded yet. Add a Zoom link or a recording and
-                  ClassHub transcribes it, files it under the week it belongs to,
-                  and writes both a summary of the session and the note that
-                  week's study guide is built from.
+                  Nothing recorded yet. Find the course's Zoom recordings, or add a
+                  Zoom link or a recording, and ClassHub transcribes it, files it
+                  under the week it belongs to, and writes both a summary of the
+                  session and the note that week's study guide is built from.
                 </p>
               )}
+            {(recordings ?? []).map((recording) => (
+              <div key={recording.id} className={row}>
+                <CirclePlay size={14} aria-hidden className="shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-title">
+                  {formatDueDate(recording.recordedAt)}
+                  <span className={`ml-2 ${meta}`}>{formatDuration(recording.durationMinutes)}</span>
+                </span>
+                <span
+                  className="hidden min-w-0 shrink truncate text-fine text-muted-foreground sm:block sm:max-w-[22rem]"
+                  title={recording.note ?? recording.title}
+                >
+                  {recording.status === "failed"
+                    ? `Not captured — ${recording.note ?? "no reason recorded"}`
+                    : (recording.note ?? "Found on Zoom, waiting to be captured")}
+                </span>
+                <button
+                  type="button"
+                  title="Open the Add lecture form with this recording filled in"
+                  onClick={() => {
+                    setDigestError(null);
+                    recordingPlayUrl(recording.id)
+                      .then((source) => {
+                        if (source === null) {
+                          setDigestError("this recording lists no playable file");
+                          return;
+                        }
+                        setAddingLecture({
+                          source,
+                          date: recording.recordedAt.slice(0, 10),
+                          recordingId: recording.id,
+                        });
+                      })
+                      .catch((e) => setDigestError(String(e)));
+                  }}
+                  className={buttonText}
+                >
+                  Add lecture
+                </button>
+              </div>
+            ))}
             {pendingTranscripts.map((transcript) => (
               <div key={transcript.relPath} className={row}>
                 <Mic size={14} aria-hidden className="shrink-0 text-muted-foreground" />
@@ -750,7 +837,8 @@ export function ClassWorkspace({
       {addingLecture && (
         <AddLecture
           classId={info.id}
-          onClose={() => setAddingLecture(false)}
+          initial={addingLecture}
+          onClose={() => setAddingLecture(null)}
         />
       )}
     </main>

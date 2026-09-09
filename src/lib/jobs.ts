@@ -432,6 +432,7 @@ const JOB_KIND_LABELS: Record<string, string> = {
   lecture_digest: "Lecture digest",
   sort_proposal: "Sort",
   syllabus_scan: "Syllabus scan",
+  announcement_scan: "Announcement scan",
 };
 
 export function jobKindLabel(kind: string): string {

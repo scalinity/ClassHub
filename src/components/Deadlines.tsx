@@ -400,9 +400,13 @@ function DeadlineRow({
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // What Canvas says the assignment is (SPEC §7.2), and the notes, opened
+  // beneath the row on the chevron; a row with neither has no chevron.
+  const [open, setOpen] = useState(false);
   const isDone = deadline.status === "done";
   const overdue = !isDone && isOverdue(deadline.dueAt);
   const badge = deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId);
+  const hasMore = deadline.description !== null || deadline.notes !== null;
 
   const run = (action: Promise<void>) => {
     setBusy(true);
@@ -415,7 +419,8 @@ function DeadlineRow({
   };
 
   return (
-    <div className={`${row} ${isDone ? "opacity-60" : ""}`}>
+    <div className="border-b border-border/70 last:border-b-0">
+    <div className={`${row} border-b-0 ${isDone ? "opacity-60" : ""}`}>
       <button
         type="button"
         title={isDone ? "Reopen this deadline" : "Mark done"}
@@ -440,6 +445,22 @@ function DeadlineRow({
       >
         {deadline.title}
       </span>
+      {hasMore && (
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={open ? `Hide what ${deadline.title} asks` : `Show what ${deadline.title} asks`}
+          title={open ? "Hide the details" : "What the assignment says"}
+          onClick={() => setOpen((prev) => !prev)}
+          className={buttonIcon}
+        >
+          <ChevronRight
+            size={12}
+            aria-hidden
+            className={`transition-transform motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
+          />
+        </button>
+      )}
       {deadline.kind !== "other" && (
         <span className={chipMuted}>{deadline.kind}</span>
       )}
@@ -482,6 +503,22 @@ function DeadlineRow({
       >
         {isDone ? formatDueDate(deadline.dueAt) : dueDayLabel(deadline.dueAt)}
       </span>
+    </div>
+    {open && hasMore && (
+      <div className="space-y-2 pb-3 pl-[25px] pr-1">
+        {deadline.notes && (
+          <p className="text-body text-muted-foreground">{deadline.notes}</p>
+        )}
+        {deadline.description && (
+          <p
+            className={`max-w-2xl whitespace-pre-line ${readingText} text-muted-foreground`}
+            title="The assignment's description on Canvas, as text"
+          >
+            {deadline.description}
+          </p>
+        )}
+      </div>
+    )}
     </div>
   );
 }

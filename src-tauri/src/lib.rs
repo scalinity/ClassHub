@@ -16,6 +16,8 @@ mod jobs;
 mod lectures;
 mod notebook;
 mod notifications;
+mod announcements;
+mod recordings;
 mod notes;
 mod scanner;
 mod settings;
@@ -361,6 +363,47 @@ fn lecture_weeks(
 }
 
 /// Which division each filed lecture feeds (SPEC §8.5), for the Lectures list.
+/// SPEC §7.1: the recordings found behind the course's Zoom tool that still
+/// wait for a capture, for the Lectures section.
+#[tauri::command(async)]
+fn list_recordings(
+    state: tauri::State<Db>,
+    class_id: i64,
+) -> Result<Vec<recordings::RecordingInfo>, String> {
+    let conn = db::lock(&state.0);
+    recordings::list_waiting(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// SPEC §7.1: `Find recordings` — lists the course's recordings through a
+/// Canvas session and captures what waits, reporting on
+/// `recordings::PROGRESS_EVENT`.
+#[tauri::command]
+fn find_recordings(app: tauri::AppHandle, class_id: i64) -> Result<(), String> {
+    recordings::spawn_find(&app, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// The player link of a waiting recording, for the Add lecture form to open
+/// pre-filled when its week is the form's to pick.
+#[tauri::command(async)]
+fn recording_play_url(state: tauri::State<Db>, id: i64) -> Result<Option<String>, String> {
+    let conn = db::lock(&state.0);
+    recordings::play_url_of(&conn, id).map_err(|e| format!("{e:#}"))
+}
+
+/// The form filed a waiting recording: its row leaves the listing.
+#[tauri::command]
+fn mark_recording_filed(app: tauri::AppHandle, id: i64, rel_path: String) -> Result<(), String> {
+    db::with_conn(&app, |conn| recordings::mark_filed(conn, id, &rel_path)).map_err(|e| format!("{e:#}"))?;
+    db::emit_hub_change(&app, "recordings");
+    Ok(())
+}
+
+/// SPEC §7.2: the checkbox on a to-do under a notice.
+#[tauri::command]
+fn set_announcement_action_done(app: tauri::AppHandle, id: i64, done: bool) -> Result<(), String> {
+    announcements::set_action_done(&app, id, done).map_err(|e| format!("{e:#}"))
+}
+
 /// SPEC §8.4: what the professor flagged, for the workspace's Flagged section.
 #[tauri::command(async)]
 fn list_hints(
@@ -895,7 +938,15 @@ pub fn run() {
         })
         // Closing the window hides it (SPEC §12): the shift's thread survives
         // the window, and the tray, the dock and ⌘Q are the ways back and out.
+        // Only the main window: the Canvas session and the Zoom capture
+        // windows close when their reads end (`Session`'s drop, the
+        // capture's `close`), and a hide in their place leaves the label
+        // taken, so the next sync or capture in the same process is refused
+        // as "still open".
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -946,6 +997,11 @@ pub fn run() {
             canvas_status,
             sync_canvas,
             list_announcements,
+            list_recordings,
+            find_recordings,
+            recording_play_url,
+            mark_recording_filed,
+            set_announcement_action_done,
             canvas_syllabus,
             stage_inbox_files,
             get_sort_state,

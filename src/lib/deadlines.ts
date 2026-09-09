@@ -27,12 +27,20 @@ export interface Deadline {
   /** Set when the Canvas sync tracks this row: its due date follows Canvas
    *  and a submission marks it done, whoever first put it on the list. */
   canvasAssignmentId: string | null;
+  /** The assignment's own description from Canvas, as text; refreshed by
+   *  every sync on a tracked row (SPEC §7.2). */
+  description: string | null;
 }
 
 /** Who put this on the list: added by hand, by chat, by a syllabus scan, or
  *  read from Canvas. Approval stamps a proposal's own source onto the
  *  deadline, so a due date that turns out wrong can be traced back. */
-export type DeadlineSource = "manual" | "agent" | "syllabus" | "canvas";
+export type DeadlineSource =
+  | "manual"
+  | "agent"
+  | "syllabus"
+  | "canvas"
+  | "announcement";
 
 /** The badge a non-manual deadline or proposal carries. */
 const DEADLINE_SOURCE_COPY: Record<
@@ -42,6 +50,10 @@ const DEADLINE_SOURCE_COPY: Record<
   syllabus: { label: "from the syllabus", title: "Read from a syllabus scan" },
   canvas: { label: "from Canvas", title: "Read from Canvas, with its own due date" },
   agent: { label: "from chat", title: "Added in chat" },
+  announcement: {
+    label: "from a notice",
+    title: "Read out of a Canvas announcement by the announcement scan",
+  },
 };
 
 /** The badge for a deadline the Canvas sync tracks — the same words as the
@@ -116,7 +128,7 @@ export interface DeadlineProposal {
   createdAt: number;
   /** Which reader proposed it — the card says so, because "Canvas says this is
    *  due then" and "a PDF seemed to say so" deserve different scrutiny. */
-  source: "syllabus" | "canvas";
+  source: "syllabus" | "canvas" | "announcement";
 }
 
 /** A recurring proposal read as one card (SPEC §11): pending cards sharing a
@@ -125,7 +137,7 @@ export interface DeadlineProposal {
 export interface DeadlineSeries {
   stem: string;
   kind: DeadlineKind;
-  source: "syllabus" | "canvas";
+  source: "syllabus" | "canvas" | "announcement";
   /** `Tuesday`. */
   weekday: string;
   /** The member cards, by date. */

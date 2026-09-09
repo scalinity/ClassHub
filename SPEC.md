@@ -54,6 +54,37 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   Sept 1 session went the `ccUrl` route in 4.5 s with 629 unnamed cues, the first at 01:23 of
   a 3 h 17 m recording, because the caption opens where the captioning did and the transcript
   says nothing before it.
+- **The Zoom tool in Canvas's course navigation lists every recording, and the signed-in
+  window can read it.** Probed 2026-09-08 from inside the Canvas session on all four courses:
+  each carries a `Zoom Conferences` tab (`context_external_tool_166364`, an LTI 1.1 launch of
+  `applications.zoom.us/lti/rich`; a `Zoom Conferences 1.3` tool on LTI Advantage is
+  installed too and sits in no course's navigation). `/api/v1/courses/:id/tabs` names it in
+  under a second, `/external_tools/sessionless_launch?id=166364&launch_type=course_navigation`
+  answers a Canvas URL carrying a 128-character one-shot verifier in 1.3–2.1 s, and a hidden
+  window opened on it — Canvas serves a page whose form posts the launch to Zoom — lands on
+  `applications.zoom.us/lti/rich` in 1.1–2.1 s with no sign-in of its own, since the launch
+  carries the identity: a React page with four tabs (Upcoming Meetings, Previous Meetings,
+  Cloud Recordings, Meeting Summary). Its API is the same origin, keyed by an `lti_scid` the
+  page holds in `window.appConf.page.scid`, and it wants the headers `appConf.ajaxHeaders`
+  lists (`X-XSRF-TOKEN`, `x-zm-aid`, `x-zm-haid`, `x-zm-cluster-id`, `x-zm-region`): a fetch
+  without them answers 403 `session was expired`; with them
+  `/api/v1/lti/rich/recording/COURSE?startTime=&endTime=<today>&keyWord=&searchType=1&status=&page=N&total=0`
+  answers in 0.3 s with a page of twelve — per recorded meeting `meetingId`, `topic`, a UTC
+  `startTime`, `duration` in minutes, `totalSize`, `recordingCount`, `recordingFiles` null —
+  and `/api/v1/lti/rich/recording/file?meetingId=…` in 0.3 s with the files: `MP4` and `M4A`
+  each carrying a `playUrl` on `ufl.zoom.us/rec/play/…`, a `CC` file with none, a
+  `TIMELINE`. That play page is the Vue player the capture already reads: Fundamentals' Aug 25
+  recording captured through `transcriptList` (839 cues, every one named) in 3.1 s and its
+  Sept 8 one through `ccUrl` (204 cues, 33 KB — the caption opening where the captioning did,
+  as Applied's Sept 1 did) in 3.1 s, both with the window hidden. What the lists held on
+  Sept 8: Fundamentals 9 (lectures of 194, 279 and 209 minutes, six of a minute or less —
+  the room's tests), Design Studio 4 (64 and 72 minutes, two tests), Biostatistics 5 (145,
+  123 and 126 minutes, a test, a Saturday one of 5), Applied Generative AI 4 (176, 197 and
+  153 minutes, one of 6); a course's list is read in about 6 s all told, the launch included.
+  Nothing on the page is scraped: the rendered table is an `ant-table` whose topic cell is a
+  `span[role=button]` that navigates to a detail page, and the list API is what it renders.
+  Undocumented twice over — Canvas's launch and Zoom's page — and written to fail legibly
+  for it (§7.1).
 - **What one real session costs.** Measured 2026-09-02 on that 2 h 36 m recording, Opus at
   `xhigh`, list-price equivalents from the CLI's own accounting: the digest (§8.4) ran
   12.4 min over 5 turns for $3.06, writing 69k output tokens — the 75 KB session HTML fit in
@@ -84,6 +115,10 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   rubric, ran 10.3 min over 18 turns for $3.64 (55k, 19 questions each carrying its
   `data-topic`). The manifests widened by what each log showed was read: the corpus note
   in all three guides' and the exam's, the deck and the notebook in the session's.
+  Measured 2026-09-08 on Fundamentals' Aug 25 recording, captured off the Zoom tool (3 h 14 m,
+  839 named cues), Opus at `xhigh`: the digest ran 16.1 min over 9 turns for $4.16 (92k output
+  tokens, 44 flagged items and a 71 KB session document); the four announcement scans the same
+  day, Sonnet at `medium`, ran 3–12 s each for $0.08–0.13.
 - **Parakeet is on the machine, but not reusable in place.** `mlx-community/parakeet-tdt-0.6b-v3`
   and `parakeet_mlx` ship inside LocalFlow's bundled venv, with `ffmpeg` on PATH. The resident
   LocalFlow process keeps the model loaded but exposes no socket or port, so it cannot be
@@ -207,6 +242,14 @@ These were verified on 2026-08-22. Do not re-litigate them in milestone sessions
   - **Every `syllabus_body` is a one-line stub** linking the syllabus PDF the tree already holds
     — Applied Generative AI's included, so its missing dates are on no Canvas surface either.
     Read off the course listing with `include[]=syllabus_body`, which costs no request.
+  - **Read again 2026-09-08:** ten announcements (1 / 4 / 3 / 2) — Biostatistics posted a
+    third on Sept 3 naming two quizzes and a homework, two of the dates written as 2027 —
+    and every assignment but one carries a `description`, 32 to 788 characters once
+    stripped: Fundamentals' are the attachment names, Design Studio's and Biostatistics'
+    prose; Applied Generative AI publishes no assignments. Read by the announcement scan
+    (§7.2) on Sonnet at medium the same day: four scans of 3–12 s at $0.08–0.13 each, which
+    read the ten notices into two dated proposals, twelve to-dos and eight changes, both
+    readings of the milestone assignment answering as already on the list.
 
   Canvas also exposes **GraphQL** at `POST /api/graphql`, whose permissions mirror REST. It
   would collapse a whole sync into one round trip, but being a POST it needs the `X-CSRF-Token`
@@ -506,7 +549,33 @@ deadline_proposals(id INTEGER PK, class_id INTEGER FK, title TEXT, kind TEXT,
 -- re-sync updates an edited announcement in place.
 announcements(id INTEGER PK, class_id INTEGER FK, canvas_id TEXT UNIQUE,
               title TEXT, body TEXT,
-              posted_at TEXT);             -- local wall-clock ISO, YYYY-MM-DDTHH:MM
+              posted_at TEXT,              -- local wall-clock ISO, YYYY-MM-DDTHH:MM
+              scanned_at INTEGER NULL);    -- when the announcement scan read it (§7.2);
+                                           -- cleared when a sync updates an edited notice
+
+-- What the announcement scan read out of a notice (§7.2): a to-do the reader
+-- ticks, or a change the professor announced. Unique per notice and text, so
+-- a rescan of an edited notice adds what is new and repeats nothing. The
+-- checkbox is its own way back, so a tick writes an audit row and no notice.
+announcement_actions(id INTEGER PK, announcement_id INTEGER FK,  -- cascading
+                     kind TEXT,          -- todo|change
+                     text TEXT, done INTEGER, created_at INTEGER,
+                     UNIQUE(announcement_id, kind, text));
+
+-- The recordings behind the Zoom tool in Canvas's course navigation (§7.1),
+-- one row per recorded Zoom meeting under Zoom's own id, so nothing is
+-- captured twice. `new` waits for a capture — or for the form, where the
+-- one-meeting rule settles no week; `filed` names the transcript; `skipped`
+-- says why it is not a lecture; `failed` says why the capture could not
+-- read it, and is tried again.
+recordings(id INTEGER PK, class_id INTEGER FK,
+           meeting_id TEXT UNIQUE,       -- Zoom's id for the recorded meeting
+           play_url TEXT NULL,           -- the video's player link, where one is listed
+           recorded_at TEXT,             -- local wall-clock ISO, YYYY-MM-DDTHH:MM
+           duration_minutes INTEGER, title TEXT,
+           rel_path TEXT NULL,           -- the filed transcript, once captured
+           status TEXT,                  -- new|filed|skipped|failed
+           note TEXT NULL, seen_at INTEGER);
 
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
 chat_messages(id INTEGER PK, session_id INTEGER FK, role TEXT,
@@ -636,7 +705,10 @@ claude -p <prompt>
   shift now`), each step's outcome, the jobs it ran, why it stopped (`done`, `budget`,
   `rate_limit`, `paused`, `error`) and its summary. The plan, in order: sync Canvas
   through the launch's quiet path (a stored session it lacks, or a sign-in Canvas wants,
-  ends the step and not the run); file what the sync placed (§7.2); run the extract
+  ends the step and not the run); file what the sync placed (§7.2); capture the recordings
+  the sync listed behind the Zoom tool (§7.1), hidden, oldest first and up to
+  `shift_digests_per_night` — a night captures what it can distill — filing each with no
+  digest of its own, since the next step lists a filed lecture without its note; run the extract
   pipeline for every class, waiting on each job; distill every applied contribution
   without its note, then every one never read for its ledger (§8.4), oldest session
   first, up to `shift_digests_per_night`; rebuild the division guides with sources whose
@@ -836,6 +908,34 @@ A transcript whose week cannot be resolved lands in `_Inbox/` and the §10 sorte
 A transcript's *name* carries no routing signal — they are all a date and "Lecture" — so the
 inbox listing carries a line of its subject matter and the sorter routes it by content.
 
+**A recording the app found** (`recordings.rs`) is the fourth way in, and it converges on the
+third: every sync lists the course's recordings behind the Zoom tool in Canvas's course
+navigation (§1, §7.2) and records each under Zoom's id for the meeting (`recordings`, §5),
+so nothing is captured twice; a capture then reads the recording's play link through the
+same window the pasted link takes, with the window hidden. What the list holds is judged
+before anything is captured: a recording under ten minutes is a test of the room, one on a
+day the course does not meet is not a lecture, and one on a date the owner already filed a
+transcript for by hand is that lecture — each recorded as `skipped` with the reason, so the
+listing says why. The rest are `new`. A capture files a `new` (or `failed`) row through the
+ordinary ingestion — date the recording's, title the default — into the week its date
+resolves to: for a course whose weeks carry dates the nearest meeting date, the form's own
+default; for one whose divisions name week ranges and no days — Applied Generative AI — the
+**one-meeting rule**: each of these courses meets once a week and divides itself no finer, so
+counting the course's meeting days after the latest filed lecture up to the recording's
+date, none passed is the same meeting again (a second part of one session, filed into the
+same week under the never-overwrite suffix), exactly one is the next week, and more is a
+gap nothing here bridges by arithmetic — the row stays `new`, reads `pick its week in the
+Add lecture form`, and the form opens pre-filled from it. A recording older than the latest
+filing, or on a course with nothing filed, waits the same way. The capture window's reveal
+is a policy: the form's pasted link shows it from the start; `Find recordings` in the Lectures
+section, run by hand, keeps it hidden and shows it only when Zoom asks for a sign-in or a
+passcode, or after a minute with no progress; the shift's capture never shows it, and a
+sign-in or a passcode ends that capture naming the form as the way through. No capture
+enqueues a digest: the first find of a term meets a backlog of every lecture ever recorded,
+and a digest a piece is the shift's to spend under its cap (§6) or a `Distill` click's. A
+captured row is `filed` with its transcript, said in a notice; a capture that fails is
+`failed` with the reason and tried again next time.
+
 Ingestion never overwrites: a second lecture on one date, or re-adding the same one, gets a
 ` (2)` suffix rather than replacing a file.
 
@@ -855,6 +955,7 @@ passes through a human loses something. This section removes that hop.
 | `/courses/:id/assignments?include[]=submission` | deadlines with real due dates — no syllabus guesswork — and, per assignment, the reader's own submission: whether it was handed in, and the score once it is graded and posted |
 | `/courses/:id/assignment_groups` | the course's grading scheme → `grade_categories` (§11), with each group's weight where the course applies them |
 | `/courses/:id/discussion_topics?only_announcements=true` | what the professor said between lectures → `announcements` (§5); the same objects `/announcements` serves, without its fourteen-day window (§1) |
+| `/courses/:id/tabs`, `/external_tools/sessionless_launch?id=…&launch_type=course_navigation` | the Zoom tool's launch (§1), opened in a hidden window whose page then lists the course's recordings → `recordings` (§5, §7.1) |
 | `/courses/:id/pages?include[]=body` | the course's Pages, where a course with empty Modules keeps its weekly content → `.classhub/extracts/Canvas/<Page title>.md` |
 | `/courses?…&include[]=syllabus_body` | the syllabus page, on the course listing itself → `.classhub/extracts/Canvas/Syllabus.md` |
 
@@ -1050,6 +1151,26 @@ directly with audit rows, because a grade is reversible in the Grades section an
 app's rule for skipping a confirm step; a second sync of an unchanged course writes nothing
 and leaves no row. The sync report counts grades recorded and deadlines completed beside what
 it proposed, and a failed grades read is a line in it rather than the class's failure.
+
+**A dated assignment carries its description.** Canvas's `description` rides on every
+assignment the sync reads (§1); stripped to text through the extractor's stripper, blank
+lines folded and capped at two thousand characters, it is written on the deadline the
+assignment becomes and refreshed on every sync for a tracked row, unaudited — it is a mirror
+of the assignment, not the reader's data. The Deadlines row opens it beneath the notes on a
+chevron (§12), and a homework brief is written from it.
+
+**The Zoom tool's recordings are listed on every sync.** After the announcements and the
+Pages, the sync reads the course's navigation for the Zoom tool, launches it into a hidden
+window and lists its recordings the way the page does (§1), recording each new one with its
+verdict (§7.1). One more window's worth of reads, about six seconds a course, and not worth
+the class either: a course without the tool, or a page that will not land, is a line in the
+report. The sync only lists; the shift's step and `Find recordings` capture.
+
+**The signed-in window steps aside once the sign-in lands.** A sync that had to ask shows
+the Canvas window for the sign-in, and the moment Canvas answers `users/self` it hides the
+window again and brings the app back in front, so the rest of the sync is watched from the
+Settings report rather than behind Canvas; the reads go on through the hidden window as a
+stored session's do, and a read that stalls reveals it again under the same grace rule.
 
 **Announcements are a record, not a queue.** Every sync reads the course's announcements and
 upserts them on the Canvas id, the body stripped to text through the extractor's stripper —
@@ -1535,7 +1656,11 @@ its meetings.
 - **Schedule**: weekly grid (Mon–Fri) built from `meetings`; today highlighted; "next class"
   chip on the dashboard; exam countdown chips (days until each `final_exam_start`).
 - **Deadlines**: per-class list + dashboard aggregation (next 7 days strip). CRUD via UI and
-  chat tools, every write followed by a notice with `Undo` (§6, §12). A strip chip is the
+  chat tools, every write followed by a notice with `Undo` (§6, §12). Three readers propose:
+  the syllabus scan, the Canvas sync's card for what it cannot write directly, and the
+  announcement scan (§7.2), whose cards carry `announcement` and read `from a notice`; an
+  announcement's reading is a model's reading of prose like the syllabus's, so its rows are
+  folded into Canvas's by the same looser rule (§7.2). A strip chip is the
   tab's checkbox at chip scale: its click marks the deadline done through the same command,
   with the same audit row, and the chip stays in the strip as done — a second click reopens
   it, the way back in place of a confirm — until the dashboard is next opened; the strip and
@@ -1661,7 +1786,15 @@ and apply it. Non-negotiable per project owner.
   text and icon controls, never revealed on hover — and decisions — proposals, forms — as
   cards on `--surface`; the `Notices` section lists the professor's Canvas announcements
   newest first, each a title and posting time with the text clamped beneath it until opened,
-  absent while there are none; the `Flagged` section lists what the professor flagged
+  and under the text what the announcement scan read out of it (§7.2) — each to-do with the
+  deadline row's ring, which ticks it done and back, each change as a line behind a `change`
+  chip, in view whether or not the text is opened — absent while there are none; the
+  `Deadlines` row carries a chevron when the deadline has notes or Canvas's description,
+  opening both beneath it; the `Lectures` section offers `Find recordings` beside `Add
+  lecture`, its progress in the heading and its summary under it, and lists the recordings
+  found behind the Zoom tool that still wait (§7.1) ahead of the transcripts — each its date
+  and length, why it waits or why its capture failed, and `Add lecture`, which opens the
+  form pre-filled with its link and date; the `Flagged` section lists what the professor flagged
   (§8.4) newest session first under the session's title and date, each item its kind as a
   chip, its text, and its `HH:MM` as a mono link that opens the transcript at that heading,
   absent until a session has been distilled for it)
@@ -1685,8 +1818,10 @@ and apply it. Non-negotiable per project owner.
   notifications — Canvas and chat).
   The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
   previews on the page it will be read on; generated guides keep their own design (§8.1).
-- **The window closes into the tray.** Closing the window hides it — the shift's thread
-  survives the window — and the dock icon or the tray's `Open ClassHub` brings it back;
+- **The window closes into the tray.** Closing the main window hides it — the shift's thread
+  survives the window — and the dock icon or the tray's `Open ClassHub` brings it back; only
+  the main window, since the Canvas, Zoom and recordings windows close when their reads end
+  and a hide in their place would keep their labels taken for the next read;
   `Quit ClassHub` in the tray and ⌘Q are the ways out. The tray's glyph is a template ring
   open on the right, and its menu reads the next meeting across the classes (`Next class ·
   Thu 11:45 am · Biostatistics for AI`) and the shift's state (`Shift tonight at 9:00 pm`,
@@ -1839,7 +1974,14 @@ and apply it. Non-negotiable per project owner.
   (§10), and every undo inverse on fixture rows — a move returned and refused over a taken
   source, a note refused over a later edit or a row without its hash, a created category
   refused while it holds scores, a Canvas row refused, a row reversed once (§6 — an undo
-  that overwrote is silent until the file is opened), the shift's window and night across
+  that overwrote is silent until the file is opened), the one-meeting rule and a found
+  recording's verdicts — a test, a non-meeting day, a date filed by hand — with the list and
+  files answers as Zoom serves them and a meeting recorded once (§7.1 — a recording
+  captured twice, or into the wrong week, is silent until a guide reads it), the
+  announcement scan's record — a card carrying `announcement`, a known deadline counted, the
+  to-dos and changes under the notice, the read stamp, a malformed entry and an implausible
+  year each costing their own item, the prompt over unread notices alone (§7.2 — a notice
+  read twice is a duplicate card, quietly), the description's strip and cap, the shift's window and night across
   midnight, its decision condition by condition, a night's one run across two inserts, the
   idle read, the caps, a division's meeting, its two lists — a note missing before a ledger
   unread, a division with sources and no guide listed while one whose meeting is ahead,
@@ -2183,7 +2325,7 @@ Mark the checkbox when the acceptance criteria pass.
   pauses between jobs; `caffeinate` lives and dies with the run; only one process runs shifts;
   and a per-kind override reaches a job's init event.
 
-- [ ] **M35 — What Canvas knows.** (`milestones/M35-what-canvas-knows.md`)
+- [x] **M35 — What Canvas knows.** (`milestones/M35-what-canvas-knows.md`)
   A probe of the Zoom tool in Canvas's course navigation, recorded in §1; where its recordings
   list is readable from the signed-in window, recordings are found and captured hidden after
   each meeting and filed into its week — an undated course's by the one-meeting rule — and

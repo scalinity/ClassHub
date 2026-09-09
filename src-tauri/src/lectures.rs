@@ -82,6 +82,18 @@ pub struct AddResult {
 /// Turns a recording or caption track into a filed transcript. Long-running
 /// when it has to transcribe, so callers run it off the UI thread.
 pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result<AddResult> {
+    add_with(app, req, crate::zoom::Reveal::Always, on_stage)
+}
+
+/// `add` with a say over the capture window (SPEC §7.1): the form shows it
+/// from the start; a recording the app found is read hidden, shown only
+/// when Zoom asks, or never for the shift.
+pub fn add_with(
+    app: &AppHandle,
+    req: &AddRequest,
+    reveal: crate::zoom::Reveal,
+    on_stage: &dyn Fn(&str),
+) -> Result<AddResult> {
     if !crate::deadlines::valid_due_at(&req.date) || req.date.len() != 10 {
         bail!("the session date must be YYYY-MM-DD");
     }
@@ -97,7 +109,7 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
         with_conn(app, |conn| resolve_filing(conn, req.class_id, req.week, &file_name))?;
     let routed_to_inbox = slot.is_none();
 
-    let (caption, source_name) = fetch(app, &req.source, on_stage)?;
+    let (caption, source_name) = fetch(app, &req.source, reveal, on_stage)?;
     let cues = crate::transcripts::parse(&caption);
     if cues.is_empty() {
         bail!("{source_name} holds no readable speech");
@@ -210,10 +222,15 @@ pub fn add(app: &AppHandle, req: &AddRequest, on_stage: &dyn Fn(&str)) -> Result
 
 /// Resolves whatever the user pointed at into caption text plus a display name
 /// for where it came from.
-fn fetch(app: &AppHandle, source: &str, on_stage: &dyn Fn(&str)) -> Result<(String, String)> {
+fn fetch(
+    app: &AppHandle,
+    source: &str,
+    reveal: crate::zoom::Reveal,
+    on_stage: &dyn Fn(&str),
+) -> Result<(String, String)> {
     let source = source.trim();
     if source.starts_with("http://") || source.starts_with("https://") {
-        return crate::zoom::fetch_caption(app, source, on_stage);
+        return crate::zoom::fetch_caption(app, source, reveal, on_stage);
     }
 
     let path = Path::new(source);
@@ -1340,6 +1357,28 @@ struct Progress<'a> {
 /// destination name and on the Zoom capture window.
 static INGESTING: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
 
+/// The class's place in the ingestion queue, released on drop however the
+/// run ends. Shared with the recordings capture (SPEC §7.1), which files
+/// through `add` off its own thread and must not race the form.
+pub(crate) struct IngestClaim(i64);
+
+impl Drop for IngestClaim {
+    fn drop(&mut self) {
+        crate::db::lock(&INGESTING).retain(|id| *id != self.0);
+    }
+}
+
+/// Claims the class for one ingestion, or says a lecture is already being
+/// added for it.
+pub(crate) fn claim_ingest(class_id: i64) -> Result<IngestClaim> {
+    let mut busy = crate::db::lock(&INGESTING);
+    if busy.contains(&class_id) {
+        bail!("a lecture is already being added for this class");
+    }
+    busy.push(class_id);
+    Ok(IngestClaim(class_id))
+}
+
 pub fn spawn_add(app: &AppHandle, req: AddRequest) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -1353,27 +1392,14 @@ pub fn spawn_add(app: &AppHandle, req: AddRequest) {
         };
         let on_stage = |stage: &str| emit(stage, false, None, None);
 
-        {
-            let mut busy = crate::db::lock(&INGESTING);
-            if busy.contains(&class_id) {
-                emit(
-                    "Failed",
-                    true,
-                    None,
-                    Some("a lecture is already being added for this class".into()),
-                );
+        // Released however the run ends, panic included.
+        let _claim = match claim_ingest(class_id) {
+            Ok(claim) => claim,
+            Err(e) => {
+                emit("Failed", true, None, Some(format!("{e:#}")));
                 return;
             }
-            busy.push(class_id);
-        }
-        // Released however the run ends, panic included.
-        struct Claim(i64);
-        impl Drop for Claim {
-            fn drop(&mut self) {
-                crate::db::lock(&INGESTING).retain(|id| *id != self.0);
-            }
-        }
-        let _claim = Claim(class_id);
+        };
 
         // Caught, because the terminal event is the only thing that tells the
         // dialog the run is over. A panic here would otherwise leave the last

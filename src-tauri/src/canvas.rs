@@ -364,6 +364,18 @@ impl Session {
         bail!("{path} kept paginating past {MAX_PAGES} pages — stopping rather than looping")
     }
 
+    /// One object — an endpoint that answers a record rather than a
+    /// collection, such as a tool's sessionless launch. A list is refused,
+    /// since a caller reading `[0]` off one would take the first of a
+    /// collection for the whole answer.
+    pub fn get_one(&self, path: &str, on_stage: &dyn Fn(&str)) -> Result<Value> {
+        let (value, _) = self.get_page(path, on_stage)?;
+        match value {
+            Value::Object(_) => Ok(value),
+            other => bail!("{path} returned {} rather than an object", kind_of(&other)),
+        }
+    }
+
     fn get_page(&self, path: &str, on_stage: &dyn Fn(&str)) -> Result<(Value, NextPage)> {
         match self.request(path, Mode::Json)? {
             Outcome::Json { value, next } => Ok((value, next)),
@@ -413,6 +425,7 @@ impl Session {
                 Outcome::Json { .. } => {
                     if asked {
                         on_stage("Signed in — reading your courses…");
+                        self.retire();
                     }
                     // Here rather than in `open`, so a session that lapses
                     // mid-sync is re-remembered too — and so the stored copy's
@@ -620,6 +633,65 @@ impl Session {
         }
         let _ = self.window.show();
         let _ = self.window.set_focus();
+    }
+
+    /// Puts the window away once the sign-in has landed and brings the app
+    /// back in front, so the rest of the sync is watched from the Settings
+    /// report rather than behind Canvas. The reads still run through the
+    /// hidden window, the way a stored session's do; `shown` is reset so a
+    /// read that stalls can reveal it again under the same grace rule.
+    fn retire(&self) {
+        let _ = self.window.hide();
+        self.shown.store(false, Ordering::Relaxed);
+        if let Some(main) = self.app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    }
+
+    /// The launch URL of the course's Zoom tool (SPEC §7.1), read off the
+    /// course navigation: the tab whose label names Zoom carries the tool's
+    /// id, and a sessionless launch turns it into a URL a window can open
+    /// without Canvas chrome — Canvas answers with a page whose form posts
+    /// the LTI launch to Zoom on its own. `None` when the course shows no
+    /// such tab.
+    pub fn zoom_launch_url(&self, course_id: i64, on_stage: &dyn Fn(&str)) -> Result<Option<String>> {
+        let tabs = self.get_all(&format!("/api/v1/courses/{course_id}/tabs"), on_stage)?;
+        let tool_id = tabs.iter().find_map(|tab| {
+            let label = tab["label"].as_str()?;
+            if !label.to_ascii_lowercase().contains("zoom") {
+                return None;
+            }
+            tab["id"]
+                .as_str()?
+                .strip_prefix("context_external_tool_")?
+                .parse::<i64>()
+                .ok()
+        });
+        let Some(tool_id) = tool_id else {
+            return Ok(None);
+        };
+        let launch = self.get_one(
+            &format!(
+                "/api/v1/courses/{course_id}/external_tools/sessionless_launch?id={tool_id}\
+                 &launch_type=course_navigation"
+            ),
+            on_stage,
+        )?;
+        let url = launch["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .context("the sessionless launch answered without a url")?;
+        // Same origin by construction: the launch page is Canvas's own, and
+        // it is the page that posts to Zoom.
+        let host = tauri::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
+        if host != CANVAS_HOST {
+            bail!("the Zoom launch points at {host} rather than {CANVAS_HOST}");
+        }
+        Ok(Some(url.to_string()))
     }
 
     /// Puts the sign-in in front of the user, once.

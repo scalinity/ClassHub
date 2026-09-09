@@ -227,3 +227,124 @@ export function collectTranscripts(
   walk(nodes ?? []);
   return found.sort((a, b) => b.relPath.localeCompare(a.relPath));
 }
+
+// --- Recordings found behind the Zoom tool (SPEC §7.1) -----------------------
+
+/** One recording the sync listed and nothing has captured yet. */
+export interface RecordingInfo {
+  id: number;
+  classId: number;
+  title: string;
+  /** Local ISO, YYYY-MM-DDTHH:MM. */
+  recordedAt: string;
+  durationMinutes: number;
+  /** `new` waits for a capture or the form; `failed` says why in `note`. */
+  status: "new" | "failed";
+  note: string | null;
+}
+
+export function listRecordings(classId: number): Promise<RecordingInfo[]> {
+  return invoke<RecordingInfo[]>("list_recordings", { classId });
+}
+
+/** `Find recordings`: lists the course's recordings through Canvas and
+ *  captures what waits, hidden. The outcome arrives on the progress event. */
+export function findRecordings(classId: number): Promise<void> {
+  return invoke("find_recordings", { classId });
+}
+
+/** The player link of a waiting recording, for the form to open pre-filled. */
+export function recordingPlayUrl(id: number): Promise<string | null> {
+  return invoke<string | null>("recording_play_url", { id });
+}
+
+function markRecordingFiled(id: number, relPath: string): Promise<void> {
+  return invoke("mark_recording_filed", { id, relPath });
+}
+
+/** `3 h 29 m`, `45 m`. */
+export function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} m`;
+  return m === 0 ? `${h} h` : `${h} h ${m} m`;
+}
+
+export interface FindProgress {
+  classId: number;
+  stage: string;
+  done: boolean;
+  summary?: string;
+  error?: string;
+}
+
+let findSnapshot: ReadonlyMap<number, FindProgress> = new Map();
+const findListeners = new Set<() => void>();
+
+function emitFind(next: ReadonlyMap<number, FindProgress>) {
+  findSnapshot = next;
+  for (const notify of findListeners) notify();
+}
+
+// The waiting recording the form was opened for, per class: when the form's
+// own run files it, the row leaves the listing. Set by the form on submit and
+// consumed by the progress listener, so nothing needs an effect.
+const pendingRecording = new Map<number, number>();
+
+export function noteRecordingForForm(classId: number, recordingId: number) {
+  pendingRecording.set(classId, recordingId);
+}
+
+let findInitialized = false;
+function initFind() {
+  if (findInitialized) return;
+  findInitialized = true;
+  void listen<FindProgress>("recordings://progress", (e) => {
+    const next = new Map(findSnapshot);
+    next.set(e.payload.classId, e.payload);
+    emitFind(next);
+    if (e.payload.done) {
+      void queryClient.invalidateQueries({ queryKey: ["recordings"] });
+      void queryClient.invalidateQueries({ queryKey: ["classTree"] });
+      void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+    }
+  });
+  void listen<LectureProgress>("lecture://progress", (e) => {
+    if (!e.payload.done) return;
+    const recordingId = pendingRecording.get(e.payload.classId);
+    if (recordingId === undefined) return;
+    pendingRecording.delete(e.payload.classId);
+    if (e.payload.result && !e.payload.result.routedToInbox) {
+      void markRecordingFiled(recordingId, e.payload.result.relPath).then(() =>
+        queryClient.invalidateQueries({ queryKey: ["recordings"] }),
+      );
+    }
+  });
+}
+initFind();
+
+export function useFindProgress(classId: number): FindProgress | null {
+  return useSyncExternalStore(
+    (cb) => {
+      findListeners.add(cb);
+      return () => findListeners.delete(cb);
+    },
+    () => findSnapshot.get(classId) ?? null,
+  );
+}
+
+/** Clears a finished find so the section's line goes with it. */
+export function clearFindProgress(classId: number) {
+  if (!findSnapshot.has(classId)) return;
+  const next = new Map(findSnapshot);
+  next.delete(classId);
+  emitFind(next);
+}
+
+/** How the Add lecture form opens: empty, or pre-filled from a recording
+ *  the sync found whose week is the form's to pick. */
+export interface LectureFormOpen {
+  source?: string;
+  date?: string;
+  recordingId?: number;
+}

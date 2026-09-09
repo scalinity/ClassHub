@@ -43,7 +43,7 @@ const READ_ONLY_DISALLOWED: &str =
 
 fn disallowed_tools(kind: &str) -> &'static str {
     match kind {
-        "sort_proposal" | "syllabus_scan" => READ_ONLY_DISALLOWED,
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" => READ_ONLY_DISALLOWED,
         _ => DISALLOWED_TOOLS,
     }
 }
@@ -365,7 +365,7 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         "extract" | "module_guide" | "master_guide" | "practice" => {
             Some("Read,Glob,Grep,Write")
         }
-        "sort_proposal" | "syllabus_scan" => Some("Read,Glob,Grep"),
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" => Some("Read,Glob,Grep"),
         _ => None, // self_check needs no tools
     }
 }
@@ -959,6 +959,12 @@ pub fn enqueue_syllabus(
     prompt: &str,
 ) -> Result<i64> {
     enqueue(app, "syllabus_scan", Some(class_id), scope, prompt, None, None)
+}
+
+/// SPEC §7.2: the announcement scan over a class's unread notices, one per
+/// class at a time (read-only tools).
+pub fn enqueue_announcement_scan(app: &AppHandle, class_id: i64, prompt: &str) -> Result<Option<i64>> {
+    enqueue_unique(app, "announcement_scan", Some(class_id), None, prompt, None)
 }
 
 /// SPEC §6: self-check asserting the active auth is the subscription. This is
@@ -1619,6 +1625,18 @@ fn run_job(
                     ) {
                         Ok(recorded) => summary = Some(recorded),
                         Err(e) => demote("syllabus scan finished but recorded no proposals", e),
+                    }
+                }
+            }
+            "announcement_scan" => {
+                if let Some(class_id) = job.class_id {
+                    match crate::announcements::finalize_job(
+                        &app,
+                        class_id,
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("announcement scan finished but read no notice", e),
                     }
                 }
             }

@@ -133,6 +133,9 @@ pub struct DeadlineInfo {
     /// follows Canvas and a submission closes it, whatever `source` says
     /// about who first put it on the list.
     pub canvas_assignment_id: Option<String>,
+    /// The assignment's own description from Canvas, as text (SPEC §7.2);
+    /// refreshed by every sync on a tracked row.
+    pub description: Option<String>,
 }
 
 /// Every deadline across every class, due-soonest first — the dashboard strip,
@@ -142,7 +145,7 @@ pub fn list_deadlines(conn: &Connection) -> Result<Vec<DeadlineInfo>> {
     // of its day, so it follows a timed row on the same day.
     let mut stmt = conn.prepare(&format!(
         "SELECT d.id, d.class_id, c.display_name, c.color, d.title, d.kind,
-                d.due_at, d.notes, d.status, d.source, d.canvas_assignment_id
+                d.due_at, d.notes, d.status, d.source, d.canvas_assignment_id, d.description
          FROM deadlines d JOIN classes c ON c.id = d.class_id
          ORDER BY {DUE_INSTANT_SQL}, d.id"
     ))?;
@@ -160,6 +163,7 @@ pub fn list_deadlines(conn: &Connection) -> Result<Vec<DeadlineInfo>> {
                 status: row.get(8)?,
                 source: row.get(9)?,
                 canvas_assignment_id: row.get(10)?,
+                description: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -838,7 +842,7 @@ fn categories_block(conn: &Connection, class_id: i64) -> Result<String> {
 /// "Fall 2026" from a YYYY-MM-DD. Month-level precision is all the prompt
 /// needs — it anchors how the model resolves partial dates like "Sept 3",
 /// which is stored data, not a display label.
-fn semester_label(today_iso: &str) -> String {
+pub(crate) fn semester_label(today_iso: &str) -> String {
     let year = today_iso.get(0..4).unwrap_or("");
     let month: u32 = today_iso
         .get(5..7)
@@ -1540,12 +1544,12 @@ fn similar_keys(key_a: &str, key_b: &str) -> bool {
 }
 
 /// Whether an untracked row of `source` is the Canvas assignment: the
-/// syllabus's rows by the looser reading above, since they are a model's
-/// reading of prose about it; a row the owner typed or asked chat for only
+/// syllabus's and the announcement scan's rows by the looser reading above,
+/// since both are a model's reading of prose about it; a row the owner typed or asked chat for only
 /// on the same key and the same calendar day, so a personal marker two days
 /// before an assignment is never folded into it.
 fn names_assignment(source: &str, canvas_title: &str, canvas_due: &str, title: &str, due: &str) -> bool {
-    if source == "syllabus" {
+    if source == "syllabus" || source == "announcement" {
         return same_assignment(canvas_title, canvas_due, title, due);
     }
     assignment_key(canvas_title) == assignment_key(title)
@@ -1766,6 +1770,9 @@ pub(crate) struct CanvasAssignment<'a> {
     pub due_at: Option<&'a str>,
     /// When the reader handed it in, local wall-clock ISO.
     pub submitted_at: Option<&'a str>,
+    /// Canvas's description, already stripped to text and capped
+    /// (`canvas_sync::description_text`); `None` where Canvas holds none.
+    pub description: Option<&'a str>,
 }
 
 /// What settling a Canvas-tracked deadline changed.
@@ -1894,6 +1901,12 @@ pub(crate) fn settle_canvas_deadline(
                     "title": title, "before": before, "after": after }),
         )?;
     }
+    // Canvas's own text follows Canvas, unaudited: it is a mirror of the
+    // assignment, not the reader's data, and a brief reads the current one.
+    tx.execute(
+        "UPDATE deadlines SET description = ?1 WHERE id = ?2 AND description IS NOT ?1",
+        params![assignment.description, id],
+    )?;
     if let Some(submitted_at) = assignment.submitted_at.filter(|_| status == "open") {
         tx.execute("UPDATE deadlines SET status = 'done' WHERE id = ?1", [id])?;
         audit(
@@ -2283,9 +2296,9 @@ pub(crate) fn insert_canvas_deadline(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO deadlines
-         (class_id, title, kind, due_at, notes, status, source, canvas_assignment_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'canvas', ?6)",
-        params![class_id, title, kind, due_at, notes, assignment.id],
+         (class_id, title, kind, due_at, notes, status, source, canvas_assignment_id, description)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', 'canvas', ?6, ?7)",
+        params![class_id, title, kind, due_at, notes, assignment.id, assignment.description],
     )?;
     let id = tx.last_insert_rowid();
     audit(
@@ -2409,6 +2422,7 @@ mod tests {
             title: "Homework Assignment 1",
             due_at: Some("2026-09-14T23:59"),
             submitted_at: None,
+            description: None,
         };
         let settled = settle_canvas_deadline(&conn, 1, &assignment).unwrap().expect("linked");
         assert!(settled.due_moved);
@@ -2450,6 +2464,7 @@ mod tests {
             title: "Homework Assignment 1",
             due_at: Some("2026-09-14T23:59"),
             submitted_at: None,
+            description: None,
         };
         let settled = settle_canvas_deadline(&conn, 1, &assignment).unwrap().expect("tracked");
         assert_eq!(settled.merged, vec!["Homework 1".to_string()]);
@@ -2482,6 +2497,7 @@ mod tests {
             title: "Assignment 3",
             due_at: Some("2026-09-16T23:59"),
             submitted_at: None,
+            description: None,
         };
         assert!(settle_canvas_deadline(&conn, 1, &assignment).unwrap().is_none(), "not linked");
         let canvas = deadline(&conn, 1, "Assignment 3", "2026-09-16T23:59", "canvas", None);
@@ -2496,6 +2512,7 @@ mod tests {
             title: "Homework #4",
             due_at: Some("2026-09-23T23:59"),
             submitted_at: None,
+            description: None,
         };
         settle_canvas_deadline(&conn, 1, &four).unwrap().expect("linked on the same key and day");
         let linked: Option<String> = conn
@@ -2937,6 +2954,7 @@ mod tests {
             title: "quiz 1",
             due_at: Some("2026-09-03T23:59"),
             submitted_at: None,
+            description: None,
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &unsubmitted).expect("settle"),
@@ -3006,6 +3024,7 @@ mod tests {
             title: "Quiz 2",
             due_at: Some("2026-09-24T23:59"),
             submitted_at: None,
+            description: None,
         };
         assert_eq!(settle_canvas_deadline(&conn, 3, &unknown).expect("none"), None);
     }
@@ -3066,6 +3085,7 @@ mod tests {
             title: "Quiz 1",
             due_at: Some("2026-09-03T23:59"),
             submitted_at: Some("2026-09-03T12:30"),
+            description: None,
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("settle"),
@@ -3099,6 +3119,7 @@ mod tests {
             title: "Survey",
             due_at: None,
             submitted_at: Some("2026-09-05T09:00"),
+            description: None,
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &tracked).expect("settle"),
@@ -3118,6 +3139,7 @@ mod tests {
             title: "Reflection",
             due_at: None,
             submitted_at: Some("2026-09-05T09:00"),
+            description: None,
         };
         assert_eq!(settle_canvas_deadline(&conn, 3, &untracked).expect("settle"), None);
         let linked: Option<String> = conn
@@ -3351,6 +3373,7 @@ mod tracked_card_tests {
                 title: "Homework #1",
                 due_at: Some("2026-09-07T23:59"),
                 submitted_at: Some("2026-09-07T20:00"),
+                description: None,
             },
         )
         .expect("settle")
@@ -3393,6 +3416,7 @@ mod declined_delete_tests {
             title: "Homework Assignment 1",
             due_at: Some("2026-09-14T23:59"),
             submitted_at: None,
+            description: None,
         };
         assert_eq!(
             insert_canvas_deadline(&conn, 3, &assignment, "assignment", "From Canvas").unwrap(),
