@@ -1429,14 +1429,24 @@ fn ranked(
         return Ok(None);
     }
     let ids: Vec<i64> = classes.iter().map(|c| c.id).collect();
-    // One lock per class rather than one across all four: the reconcile reads
-    // whatever moved off disk, and a first build reads every document — no
-    // reason to hold the connection through the next class's reads too.
+    // The walk and the reads happen with no connection held. `with_conn` takes
+    // the one process-wide connection for the whole of its closure, so doing
+    // the disk work inside it would block every other command, every other
+    // chat tool and the job runner for as long as it took — which is what
+    // spawning ripgrep under the lock used to do, and why it stopped.
     for class in classes {
-        let synced = with_conn(app, |conn| {
-            let dir = crate::scanner::class_dir(conn, class.id)?;
-            crate::search::sync_class(conn, class.id, &dir)
-        });
+        let synced = (|| {
+            let (dir, known) = with_conn(app, |conn| {
+                let dir = crate::scanner::class_dir(conn, class.id)?;
+                let known = crate::search::known_rows(conn, class.id)?;
+                Ok((dir, known))
+            })?;
+            let work = crate::search::plan(&dir, &known)?;
+            if work.is_empty() {
+                return Ok((0, 0));
+            }
+            with_conn(app, |conn| crate::search::apply(conn, class.id, &work))
+        })();
         if let Err(e) = synced {
             eprintln!(
                 "search index: {} could not be reconciled: {e:#}",
@@ -1444,7 +1454,17 @@ fn ranked(
             );
         }
     }
-    let (hits, total) = with_conn(app, |conn| crate::search::run(conn, &ids, query, dropped))?;
+    // A query FTS refuses — an alternation past the expression-depth ceiling,
+    // a phrase that tokenizes to nothing — is not worth failing the tool over
+    // when there is a pattern search behind it that would answer.
+    let ranked = with_conn(app, |conn| crate::search::run(conn, &ids, query, dropped));
+    let (hits, total) = match ranked {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("search index: the ranked query failed, falling back to ripgrep: {e:#}");
+            return Ok(None);
+        }
+    };
 
     let scope = if classes.len() == 1 {
         format!(" in {}", classes[0].display_name)
@@ -1663,10 +1683,13 @@ fn run_rg(query: &str, dirs: &[PathBuf], fixed: bool) -> Result<std::process::Ou
     let child = cmd
         .spawn()
         .context("running ripgrep (install it with `brew install ripgrep`)")?;
+    // `wait_bounded` answers `None` for a timeout and for a child shutdown
+    // took, so the message names both rather than telling the model to rewrite
+    // a query that was fine.
     crate::jobs::wait_bounded(child, RG_TIMEOUT).with_context(|| {
         format!(
-            "the pattern search did not finish within {} seconds — narrow the pattern, or \
-             search for words instead",
+            "the pattern search did not finish within {} seconds, or was stopped — narrow \
+             the pattern, or search for words instead",
             RG_TIMEOUT.as_secs()
         )
     })

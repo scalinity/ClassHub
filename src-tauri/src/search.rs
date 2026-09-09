@@ -22,13 +22,16 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::db::{CORPUS_DIR, EXTRACTS_DIR, GUIDES_DIR, NOTES_DIR};
 
 /// How many ranked documents a search reports.
 pub const MAX_HITS: usize = 20;
+/// Extra ranked rows fetched beyond `MAX_HITS`, so the duplicate drop (SPEC §7
+/// step 1) has something to fall back on rather than shortening the page.
+const DROP_HEADROOM: usize = 30;
 /// Characters of context around the match, as `snippet()` counts tokens.
 const SNIPPET_TOKENS: i64 = 18;
 /// Longest document the index reads whole. The largest thing the pipeline
@@ -189,7 +192,18 @@ fn text_of(found: &Found) -> Result<String> {
 }
 
 /// What the index already holds for a class: path → (kind, mtime, size, rowid).
-type Indexed = BTreeMap<String, (String, i64, i64, i64)>;
+pub type Indexed = BTreeMap<String, (String, i64, i64, i64)>;
+
+/// The reconcile in three steps, so the disk work happens with no connection
+/// held: `known_rows` reads the index, `plan` walks and reads the tree, and
+/// `apply` writes. `db::with_conn` holds the one process-wide connection for
+/// the whole of its closure, and doing the walk and the reads inside it blocks
+/// every other command, every other chat tool and the job runner for as long
+/// as it takes — the arrangement `search_material` was restructured away from
+/// when ripgrep was spawned under the lock.
+pub fn known_rows(conn: &Connection, class_id: i64) -> Result<Indexed> {
+    indexed_rows(conn, class_id)
+}
 
 fn indexed_rows(conn: &Connection, class_id: i64) -> Result<Indexed> {
     let mut stmt = conn.prepare(
@@ -219,12 +233,44 @@ fn indexed_rows(conn: &Connection, class_id: i64) -> Result<Indexed> {
 /// derived, and a search over a stale index is worse than a fresh one but
 /// better than no answer.
 pub fn sync_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<(usize, usize)> {
-    let known = indexed_rows(conn, class_id)?;
-    let disk = walk_class(class_dir);
+    let known = known_rows(conn, class_id)?;
+    let work = plan(class_dir, &known)?;
+    apply(conn, class_id, &work)
+}
 
+/// What one reconcile has to write and drop. The texts of the changed
+/// documents are held whole until the transaction opens, which is what keeps
+/// the reads out of it; the ceiling is `MAX_DOC_BYTES` times the number of
+/// files that moved, and at this corpus's size — about two megabytes across
+/// four classes — that is a deliberate trade rather than an oversight.
+pub struct Work {
+    writes: Vec<(Found, String)>,
+    gone: Vec<String>,
+}
+
+impl Work {
+    pub fn is_empty(&self) -> bool {
+        self.writes.is_empty() && self.gone.is_empty()
+    }
+}
+
+/// The disk half of the reconcile: no connection, so nothing else waits on it.
+///
+/// A class folder that is not a directory is refused rather than read as a
+/// class whose documents are all gone. An unmounted volume, an eviction or a
+/// rename in Finder would otherwise make one search delete the whole class's
+/// index and answer "no documents match" — the failure M37's cards index
+/// shipped and its review pass fixed, in the same shape.
+pub fn plan(class_dir: &Path, known: &Indexed) -> Result<Work> {
+    if !class_dir.is_dir() {
+        bail!(
+            "{} is not there — the search index is left as it is",
+            class_dir.display()
+        );
+    }
     let mut writes: Vec<(Found, String)> = Vec::new();
     let mut seen = HashSet::new();
-    for found in disk {
+    for found in walk_class(class_dir) {
         seen.insert(found.rel_path.clone());
         if let Some((kind, mtime, size, _)) = known.get(&found.rel_path) {
             if *mtime == found.mtime && *size == found.size && kind == found.kind {
@@ -239,28 +285,34 @@ pub fn sync_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<
             Err(e) => eprintln!("search index: {e:#}"),
         }
     }
-    let gone: Vec<(String, i64)> = known
-        .iter()
-        .filter(|(path, _)| !seen.contains(*path))
-        .map(|(path, (_, _, _, rowid))| (path.clone(), *rowid))
+    let gone = known
+        .keys()
+        .filter(|path| !seen.contains(*path))
+        .cloned()
         .collect();
+    Ok(Work { writes, gone })
+}
 
-    if writes.is_empty() && gone.is_empty() {
+/// The write half: one IMMEDIATE transaction, and nothing read from disk.
+///
+/// Each document's current FTS rowid is read back **inside** the transaction
+/// rather than taken from the plan's snapshot. The two builds share the
+/// database, so between the plan and the write the other process may have
+/// replaced the row: deleting the rowid the snapshot named would then delete
+/// nothing, the insert would add a second row for the same document, and the
+/// index would name only the newer one — leaving an FTS row that no later
+/// reconcile and no rebuild could reach, answering searches for a document
+/// twice, or for a document that is gone.
+pub fn apply(conn: &Connection, class_id: i64, work: &Work) -> Result<(usize, usize)> {
+    if work.is_empty() {
         return Ok((0, 0));
     }
-
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    for (path, rowid) in &gone {
-        tx.execute("DELETE FROM material_fts WHERE rowid = ?1", [rowid])?;
-        tx.execute(
-            "DELETE FROM material_index WHERE class_id = ?1 AND rel_path = ?2",
-            params![class_id, path],
-        )?;
+    for path in &work.gone {
+        drop_document(&tx, class_id, path)?;
     }
-    for (found, text) in &writes {
-        if let Some((_, _, _, rowid)) = known.get(&found.rel_path) {
-            tx.execute("DELETE FROM material_fts WHERE rowid = ?1", [rowid])?;
-        }
+    for (found, text) in &work.writes {
+        drop_document(&tx, class_id, &found.rel_path)?;
         tx.execute(
             "INSERT INTO material_fts (class_id, rel_path, kind, content)
              VALUES (?1, ?2, ?3, ?4)",
@@ -284,24 +336,54 @@ pub fn sync_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<
         )?;
     }
     tx.commit()?;
-    Ok((writes.len(), gone.len()))
+    Ok((work.writes.len(), work.gone.len()))
+}
+
+/// Removes a document from both tables, reading the rowid it holds now.
+fn drop_document(tx: &Transaction<'_>, class_id: i64, rel_path: &str) -> Result<()> {
+    let rowid: Option<i64> = tx
+        .query_row(
+            "SELECT fts_rowid FROM material_index WHERE class_id = ?1 AND rel_path = ?2",
+            params![class_id, rel_path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rowid) = rowid {
+        tx.execute("DELETE FROM material_fts WHERE rowid = ?1", [rowid])?;
+    }
+    tx.execute(
+        "DELETE FROM material_index WHERE class_id = ?1 AND rel_path = ?2",
+        params![class_id, rel_path],
+    )?;
+    Ok(())
 }
 
 /// Throws one class's index away and builds it again, for the Settings
 /// rebuild — the way back from an index that a crash mid-write, or a tree
 /// edited under a build that was not running, left disagreeing with the disk.
+///
+/// The clear is keyed on the FTS table's own `class_id`, not on the rowids
+/// `material_index` happens to name: a rebuild that could only reach the rows
+/// the index still points at would leave behind exactly the orphans it exists
+/// to clear.
 pub fn rebuild_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<usize> {
+    // Planned before anything is deleted, so a class whose folder is missing
+    // keeps the index it has rather than losing it to a rebuild that then
+    // finds nothing to put back.
+    let work = plan(class_dir, &Indexed::new())?;
+    rebuild_with(conn, class_id, &work)
+}
+
+/// The write half of a rebuild, for a caller that planned the tree with no
+/// connection held.
+pub fn rebuild_with(conn: &Connection, class_id: i64, work: &Work) -> Result<usize> {
     {
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "DELETE FROM material_fts WHERE rowid IN
-               (SELECT fts_rowid FROM material_index WHERE class_id = ?1)",
-            [class_id],
-        )?;
+        tx.execute("DELETE FROM material_fts WHERE class_id = ?1", [class_id])?;
         tx.execute("DELETE FROM material_index WHERE class_id = ?1", [class_id])?;
         tx.commit()?;
     }
-    let (written, _) = sync_class(conn, class_id, class_dir)?;
+    let (written, _) = apply(conn, class_id, work)?;
     Ok(written)
 }
 
@@ -393,17 +475,38 @@ pub fn looks_like_regex(raw: &str) -> bool {
 /// holding any of the query's terms. `snippet()` returns a stretch of text
 /// and not a position, and a citation the reader can open at the right place
 /// is worth one scan of a document already in memory.
+///
+/// Matched on whole words rather than on substrings, and on a word that
+/// *starts with* the term as well as one that equals it. Both matter: the
+/// index tokenizes with `porter`, so a document can rank on the stem alone —
+/// "imputation" matching a file that only ever writes "imputed" — and a
+/// substring test would cite the first line holding "meaning" for a query of
+/// "mean". A term no line carries gives no number rather than a wrong one.
 fn line_of(content: &str, terms: &[String]) -> Option<usize> {
     if terms.is_empty() {
         return None;
     }
     let lowered: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    // The stem a `porter` match could have come from, for a term long enough
+    // that suffix stripping is what happened: "imputation" and "imputed"
+    // share five characters. A short term is matched whole instead, so "mode"
+    // does not cite the line that says "model".
+    let stems: Vec<&str> = lowered
+        .iter()
+        .filter(|t| t.chars().count() >= 6)
+        .map(|t| &t[..t.char_indices().nth(5).map_or(t.len(), |(i, _)| i)])
+        .collect();
     content
         .lines()
         .enumerate()
         .find(|(_, line)| {
             let line = line.to_lowercase();
-            lowered.iter().any(|t| line.contains(t.as_str()))
+            line.split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+                .filter(|word| !word.is_empty())
+                .any(|word| {
+                    lowered.iter().any(|t| word == t)
+                        || stems.iter().any(|s| word.starts_with(s))
+                })
         })
         .map(|(i, _)| i + 1)
 }
@@ -426,10 +529,16 @@ pub fn run(
     raw: &str,
     dropped: &HashSet<String>,
 ) -> Result<(Vec<Hit>, usize)> {
+    // An empty scope is no rows, not `IN ()`, which SQLite rejects as a
+    // syntax error rather than matching nothing.
+    if class_ids.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
     let Some(expression) = fts_query(raw) else {
         return Ok((Vec::new(), 0));
     };
     let terms = all_terms(raw);
+    let folders = folder_names(conn)?;
     let placeholders = class_ids
         .iter()
         .map(|id| id.to_string())
@@ -438,56 +547,87 @@ pub fn run(
     // The class list is built from ids read out of the database, never from
     // the model's text, so it is inlined rather than bound — `IN (?)` cannot
     // take a list, and a bound array would need a temp table for four rows.
+    let scope = format!("material_fts MATCH ?1 AND class_id IN ({placeholders})");
+
+    // Counted separately, so the header states how many documents match
+    // rather than how many rows the limit let through. The model is told to
+    // narrow a query on this number, and a count that saturates at the limit
+    // would tell it the same thing whether fifty documents matched or five
+    // hundred.
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM material_fts WHERE {scope}"),
+        params![expression],
+        |row| row.get(0),
+    )?;
+
+    // Ranked rows carry no content: a document's whole text is read back only
+    // for the hits that survive the duplicate drop, at most `MAX_HITS` of
+    // them, where selecting it here would deserialize every candidate whole.
+    // The headroom above `MAX_HITS` is what the drop may consume.
     let sql = format!(
-        "SELECT class_id, rel_path, kind,
-                snippet(material_fts, 3, '', '', '…', {SNIPPET_TOKENS}), content
-         FROM material_fts
-         WHERE material_fts MATCH ?1 AND class_id IN ({placeholders})
+        "SELECT rowid, class_id, rel_path, kind,
+                snippet(material_fts, 3, '', '', '…', {SNIPPET_TOKENS})
+         FROM material_fts WHERE {scope}
          ORDER BY bm25(material_fts) LIMIT ?2"
     );
     let mut stmt = conn.prepare(&sql)?;
-    // One over the reported count, so the header can say there are more.
-    let rows = stmt.query_map(params![expression, (MAX_HITS as i64) + 30], |row| {
+    let rows = stmt.query_map(params![expression, (MAX_HITS + DROP_HEADROOM) as i64], |row| {
         Ok((
             row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
         ))
     })?;
 
-    let mut hits = Vec::new();
-    let mut total = 0usize;
+    let mut kept = Vec::new();
+    let mut skipped = 0usize;
     for row in rows {
-        let (class_id, rel_path, kind, snippet, content) = row?;
-        let folder = folder_name(conn, class_id)?;
+        let (rowid, class_id, rel_path, kind, snippet) = row?;
+        // A class the row names and `classes` does not is a row nothing can
+        // open; it is left out rather than emitted under an empty folder.
+        let Some(folder) = folders.get(&class_id) else {
+            eprintln!("search index: row {rowid} names class {class_id}, which is not there");
+            skipped += 1;
+            continue;
+        };
         let full = format!("{folder}/{rel_path}");
         if dropped.contains(&full) {
+            skipped += 1;
             continue;
         }
-        total += 1;
-        if hits.len() < MAX_HITS {
-            hits.push(Hit {
-                rel_path: full,
-                kind,
-                snippet: snippet.split_whitespace().collect::<Vec<_>>().join(" "),
-                line: line_of(&content, &terms),
-            });
+        if kept.len() == MAX_HITS {
+            break;
         }
+        kept.push((rowid, full, kind, snippet));
     }
+
+    let mut hits = Vec::with_capacity(kept.len());
+    for (rowid, full, kind, snippet) in kept {
+        let content: String = conn.query_row(
+            "SELECT content FROM material_fts WHERE rowid = ?1",
+            [rowid],
+            |row| row.get(0),
+        )?;
+        hits.push(Hit {
+            rel_path: full,
+            kind,
+            snippet: snippet.split_whitespace().collect::<Vec<_>>().join(" "),
+            line: line_of(&content, &terms),
+        });
+    }
+    // The count is over every matching row; what the duplicate drop removed
+    // from the ranked page is taken off it so the two agree.
+    let total = (total as usize).saturating_sub(skipped);
     Ok((hits, total))
 }
 
-fn folder_name(conn: &Connection, class_id: i64) -> Result<String> {
-    Ok(conn
-        .query_row(
-            "SELECT folder_name FROM classes WHERE id = ?1",
-            [class_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or_default())
+/// Every class's folder, read once per search rather than once per hit.
+fn folder_names(conn: &Connection) -> Result<BTreeMap<i64, String>> {
+    let mut stmt = conn.prepare("SELECT id, folder_name FROM classes")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
 }
 
 #[cfg(test)]
@@ -548,8 +688,10 @@ mod tests {
         assert!(!looks_like_regex("the set {a, b}"));
     }
 
-    /// The reported line is the first one carrying any term, so a citation
-    /// opens where the match is rather than at the top of the file.
+    /// The reported line is the first one carrying any term as a whole word,
+    /// so a citation opens where the match is. A substring would cite
+    /// "meaning" for "mean"; the index stems, so a document can rank on
+    /// "imputed" for a query of "imputation" and still needs a line.
     #[test]
     fn the_line_is_the_first_one_a_term_is_on() {
         let doc = "# Title\n\nIntro paragraph.\nThe median is the middle value.\nMore.";
@@ -557,6 +699,97 @@ mod tests {
         assert_eq!(line_of(doc, &["Median".into()]), Some(4));
         assert_eq!(line_of(doc, &["nowhere".into()]), None);
         assert_eq!(line_of(doc, &[]), None);
+
+        // A whole word, not a substring.
+        let meaning = "The meaning of it.\nThe mean is 4.\n";
+        assert_eq!(line_of(meaning, &["mean".into()]), Some(2));
+
+        // The stem the tokenizer would have matched on.
+        let stemmed = "Nothing here.\nThe values were imputed twice.\n";
+        assert_eq!(line_of(stemmed, &["imputation".into()]), Some(2));
+
+        // A short term is matched whole, so "mode" does not cite "model".
+        let short = "The model is fitted.\nThe mode is 7.\n";
+        assert_eq!(line_of(short, &["mode".into()]), Some(2));
+    }
+
+    /// A class folder that is not there is refused, so one search cannot
+    /// empty the class's index and then answer that nothing matches — the
+    /// failure M37's cards index shipped, in the same shape.
+    #[test]
+    fn a_missing_class_folder_is_refused_rather_than_read_as_empty() {
+        let conn = crate::db::memory_db();
+        let dir = std::env::temp_dir().join(format!("classhub-fts-gone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(NOTES_DIR)).expect("notes dir");
+        fs::write(dir.join(NOTES_DIR).join("Kept.md"), "winsorization\n").expect("note");
+        assert_eq!(sync_class(&conn, 3, &dir).expect("sync").0, 1);
+
+        // The folder goes; the index must not follow it.
+        let _ = fs::remove_dir_all(&dir);
+        let refused = sync_class(&conn, 3, &dir).expect_err("refused");
+        assert!(refused.to_string().contains("is not there"), "{refused}");
+        assert_eq!(indexed_count(&conn).expect("count"), 1);
+        let none = HashSet::new();
+        assert_eq!(run(&conn, &[3], "winsorization", &none).expect("search").1, 1);
+
+        // A rebuild refuses on the same reading rather than clearing first.
+        assert!(rebuild_class(&conn, 3, &dir).is_err());
+        assert_eq!(indexed_count(&conn).expect("count"), 1);
+    }
+
+    /// The reconcile and the rebuild leave no FTS row that nothing points at.
+    /// A row written by the other build between the plan and the write is the
+    /// real case: the rowid the plan saw is stale, and deleting it would
+    /// leave the newer row behind for every later search.
+    #[test]
+    fn a_row_the_index_no_longer_names_is_still_reclaimed() {
+        let conn = crate::db::memory_db();
+        let dir = std::env::temp_dir().join(format!("classhub-fts-orphan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(NOTES_DIR)).expect("notes dir");
+        fs::write(dir.join(NOTES_DIR).join("A.md"), "winsorization\n").expect("note");
+        sync_class(&conn, 3, &dir).expect("sync");
+
+        // What the other build's commit leaves behind: a second FTS row for
+        // the same document, with the index naming only the newer one.
+        conn.execute(
+            "INSERT INTO material_fts (class_id, rel_path, kind, content)
+             VALUES (3, 'Notes/A.md', 'note', 'winsorization')",
+            [],
+        )
+        .expect("orphan");
+        let none = HashSet::new();
+        assert_eq!(
+            run(&conn, &[3], "winsorization", &none).expect("search").1,
+            2,
+            "the orphan answers alongside the row the index names"
+        );
+
+        // The rebuild clears by class, so it reaches the orphan.
+        assert_eq!(rebuild_class(&conn, 3, &dir).expect("rebuild"), 1);
+        assert_eq!(run(&conn, &[3], "winsorization", &none).expect("search").1, 1);
+
+        // And the reconcile reads the rowid it is replacing under the lock,
+        // so a stale plan cannot leave one behind.
+        let known = known_rows(&conn, 3).expect("known");
+        fs::write(dir.join(NOTES_DIR).join("A.md"), "winsorization again\n").expect("rewrite");
+        let work = plan(&dir, &known).expect("plan");
+        // The other build gets there first, moving the rowid the plan saw.
+        rebuild_class(&conn, 3, &dir).expect("other build");
+        apply(&conn, 3, &work).expect("apply");
+        assert_eq!(run(&conn, &[3], "winsorization", &none).expect("search").1, 1);
+        assert_eq!(indexed_count(&conn).expect("count"), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An empty scope is no rows rather than `IN ()`, which SQLite rejects.
+    #[test]
+    fn an_empty_class_list_matches_nothing() {
+        let conn = crate::db::memory_db();
+        let none = HashSet::new();
+        assert_eq!(run(&conn, &[], "anything", &none).expect("search").1, 0);
     }
 
     /// Markdown everywhere; under `Study Guides/` the HTML only of the

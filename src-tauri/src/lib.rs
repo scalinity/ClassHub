@@ -691,10 +691,14 @@ fn rebuild_search_index(app: tauri::AppHandle) -> Result<String, String> {
     let mut written = 0usize;
     let mut failed = Vec::new();
     for class_id in classes {
-        let outcome = db::with_conn(&app, |conn| {
-            let dir = scanner::class_dir(conn, class_id)?;
-            search::rebuild_class(conn, class_id, &dir)
-        });
+        // The tree is read with no connection held, as a search's reconcile
+        // reads it: `with_conn` holds the one process-wide connection for the
+        // whole of its closure, and a rebuild reads every indexed document.
+        let outcome = (|| {
+            let dir = db::with_conn(&app, |conn| scanner::class_dir(conn, class_id))?;
+            let work = search::plan(&dir, &search::Indexed::new())?;
+            db::with_conn(&app, |conn| search::rebuild_with(conn, class_id, &work))
+        })();
         match outcome {
             Ok(count) => written += count,
             // One class's folder missing is not the whole index's failure.
