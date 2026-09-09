@@ -15,11 +15,13 @@ CREATE TABLE practice_results (
 CREATE INDEX idx_practice_results_guide ON practice_results(guide_id);
 
 -- SPEC §12 — the cards every guide and digest writes beside itself (§8.1,
--- §8.4), indexed on read: upserted on (class, scope, front) so the box and
--- the due date survive a rewrite, and dropped when the sidecar is gone.
--- Three boxes, due in one, three, then seven days; a card answered wrong
--- goes back to box one for tomorrow and its topic counts among the class's
--- weak topics until it is answered right.
+-- §8.4), indexed on read: upserted on (class, scope, front) — the front as
+-- stored, capped at two thousand characters — so the box and the due date
+-- survive a rewrite, and dropped when the sidecar is gone. Three boxes, due
+-- in one, three, then seven days; a card answered wrong goes back to box
+-- one for tomorrow and its topic counts among the class's weak topics until
+-- it is answered right. No cascade from `classes`: the four classes are
+-- seeded and never deleted, and a row here is meant to say so if one were.
 CREATE TABLE cards (
     id INTEGER PRIMARY KEY,
     class_id INTEGER NOT NULL REFERENCES classes(id),
