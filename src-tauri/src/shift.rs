@@ -44,9 +44,11 @@ const DEFAULT_GUIDES: u32 = 2;
 const DEFAULT_DIGESTS: u32 = 4;
 const DEFAULT_BRIEFS: u32 = 2;
 /// The small documents' fixed caps (SPEC §6): one workbook, one pre-read
-/// per course, one notes review a night.
+/// per course, one notes review a night — and two practice exams ahead of
+/// quizzes, the one generating step that would otherwise spend uncapped.
 const WORKBOOKS_PER_NIGHT: usize = 1;
 const REVIEWS_PER_NIGHT: usize = 1;
+const EXAMS_PER_NIGHT: usize = 2;
 const MAX_CAP: u32 = 20;
 const MAX_IDLE_MINUTES: u32 = 180;
 
@@ -563,16 +565,25 @@ fn tick(app: &AppHandle) {
     }
 }
 
+/// How long after its time the morning's notification may still be shown:
+/// a Mac asleep through the hour says it on waking, while an app launched
+/// late in the evening does not say tomorrow's list at bedtime.
+const REMINDER_WINDOW_HOURS: i64 = 6;
+
 /// Whether the morning's notification is due: the set time has passed today
-/// and it has not been shown today.
+/// by less than the window, and it has not been shown today.
 pub(crate) fn reminder_fires(now: NaiveDateTime, at: NaiveTime, reminded_on: Option<&str>) -> bool {
-    now.time() >= at && reminded_on != Some(now.date().to_string().as_str())
+    let since = now.time().signed_duration_since(at);
+    since >= chrono::Duration::zero()
+        && since < chrono::Duration::hours(REMINDER_WINDOW_HOURS)
+        && reminded_on != Some(now.date().to_string().as_str())
 }
 
 /// The deadlines due tomorrow (SPEC §12), shown once a day at the set time
 /// from the build that runs shifts, so two builds on one database never
-/// both say it. The day is stamped whether or not anything is due, so a
-/// quiet morning costs one read.
+/// both say it. The read comes first and the stamp after, in one
+/// transaction: a read that fails leaves the day unstamped for the next
+/// tick, and a quiet morning is stamped on its empty answer.
 fn remind_due_tomorrow(app: &AppHandle) {
     let now_local = Local::now().naive_local();
     let due = with_conn(app, |conn| {
@@ -583,13 +594,16 @@ fn remind_due_tomorrow(app: &AppHandle) {
         if !reminder_fires(now_local, crate::settings::notify_due_time(conn), reminded_on.as_deref()) {
             return Ok(None);
         }
-        crate::db::set_setting(conn, REMINDED_ON, &now_local.date().to_string())?;
         let tomorrow = now_local
             .date()
             .checked_add_days(Days::new(1))
             .unwrap_or(now_local.date())
             .to_string();
-        Ok(Some(due_on(conn, &tomorrow)?))
+        let tx = conn.unchecked_transaction()?;
+        let lines = due_on(&tx, &tomorrow)?;
+        crate::db::set_setting(&tx, REMINDED_ON, &now_local.date().to_string())?;
+        tx.commit()?;
+        Ok(Some(lines))
     });
     match due {
         Ok(Some(lines)) if !lines.is_empty() => crate::notifications::notify(
@@ -1159,11 +1173,13 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
 
     // 7. A practice exam two days before a quiz (SPEC §8.3), for the
     // division its date sits in, focused on what was missed — once per
-    // deadline, and a quiz is at most one a week a class, so no cap.
+    // deadline, soonest first, two a night.
     p.begin(QUIZZES);
     let candidates = with_conn(app, |conn| quiz_candidates(conn, Local::now().date_naive(), now()))?;
+    let (todo, left) = capped(candidates, EXAMS_PER_NIGHT as u32);
+    p.left += left;
     let mut quiz_notes = Vec::new();
-    for c in &candidates {
+    for c in &todo {
         let scope = crate::db::unit_scope(c.unit_id);
         let date_label = Local::now().format("%Y-%m-%d").to_string();
         match crate::guides::generate_practice(app, c.class_id, &scope, None, &label(), &date_label, Some(c.deadline_id)) {
@@ -1182,7 +1198,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
             return Ok(p.finish_early(end));
         }
     }
-    p.done(QUIZZES, step_outcome(p.exams, candidates.len(), 0, "exam", "exams", &quiz_notes));
+    p.done(QUIZZES, step_outcome(p.exams, todo.len(), left, "exam", "exams", &quiz_notes));
     if let Some(end) = p.stop_reason() {
         return Ok(p.finish_early(end));
     }
@@ -1959,7 +1975,8 @@ mod tests {
     }
 
     /// The morning's notification (SPEC §12): once the set time has passed
-    /// and not yet today; the lines name what is due on the day.
+    /// by less than the window and not yet today — a launch at bedtime does
+    /// not say it; the lines name what is due on the day.
     #[test]
     fn the_due_tomorrow_reminder_fires_once_a_day_after_its_time() {
         let nine = t("09:00");
@@ -1967,6 +1984,8 @@ mod tests {
         assert!(reminder_fires(at("2026-09-09 09:00"), nine, None));
         assert!(reminder_fires(at("2026-09-09 14:00"), nine, Some("2026-09-08")));
         assert!(!reminder_fires(at("2026-09-09 14:00"), nine, Some("2026-09-09")));
+        assert!(!reminder_fires(at("2026-09-09 15:00"), nine, None), "past the window");
+        assert!(!reminder_fires(at("2026-09-09 23:40"), nine, None), "a launch at bedtime");
         let conn = memory_db();
         conn.execute(
             "INSERT INTO deadlines (class_id, title, kind, due_at, status, source) VALUES
