@@ -22,6 +22,7 @@
 //! lecture is recorded as skipped with the reason, so the listing says why.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -98,10 +99,11 @@ pub(crate) fn sync_for_course(
 
     let opened = Instant::now();
     loop {
-        if opened.elapsed() >= LAND_TIMEOUT {
+        let left = LAND_TIMEOUT.saturating_sub(opened.elapsed());
+        if left.is_zero() {
             bail!("the Zoom tool's page did not load within {}s", LAND_TIMEOUT.as_secs());
         }
-        if let Ok(v) = eval(window, LAND_JS) {
+        if let Ok(v) = eval_within(window, LAND_JS, left) {
             let host = v["host"].as_str().unwrap_or_default();
             if is_zoom_host(host) && v["scid"].as_bool().unwrap_or(false) {
                 eprintln!(
@@ -114,17 +116,18 @@ pub(crate) fn sync_for_course(
         std::thread::sleep(LAND_POLL);
     }
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = chrono::Local::now().date_naive();
     let mut found: Vec<Found> = Vec::new();
     let mut total: Option<usize> = None;
     for page in 1..=MAX_PAGES {
         let path = format!(
-            "/api/v1/lti/rich/recording/COURSE?startTime=&endTime={today}&keyWord=&searchType=1\
+            "/api/v1/lti/rich/recording/COURSE?startTime=&endTime={}&keyWord=&searchType=1\
              &status=&page={page}&total={}",
+            today.format("%Y-%m-%d"),
             total.unwrap_or(0)
         );
         let started = Instant::now();
-        let body = request(window, &format!("list{page}"), &path)?;
+        let body = request(window, &path)?;
         let (rows, page_size, listed_total) = parse_list(&body)?;
         eprintln!(
             "recordings: list page {page} · {} of {listed_total} in {:.1}s",
@@ -139,69 +142,125 @@ pub(crate) fn sync_for_course(
         }
     }
 
-    let listing = with_conn(app, |conn| {
-        let known: HashSet<String> = {
-            let mut stmt = conn.prepare("SELECT meeting_id FROM recordings WHERE class_id = ?1")?;
-            let ids = stmt
-                .query_map([class_id], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids.into_iter().collect()
-        };
-        let meetings = meeting_weekdays(conn, class_id)?;
-        let filed_by_hand = dates_filed_by_hand(conn, class_id)?;
-        let mut listing = Listing {
-            found: found.len(),
-            ..Listing::default()
-        };
-        for recording in &found {
-            if known.contains(&recording.meeting_id) {
-                continue;
-            }
-            let verdict = verdict(recording, &meetings, &filed_by_hand);
-            let (status, note, play_url) = match verdict {
-                Verdict::Lecture => {
-                    // One more read, for the video's player link.
-                    match play_url(window, &recording.meeting_id) {
-                        Ok(Some(url)) => ("new", None, Some(url)),
-                        Ok(None) => (
-                            "skipped",
-                            Some("no playable recording file is listed".to_string()),
-                            None,
-                        ),
-                        Err(e) => ("failed", Some(format!("its files could not be read: {e:#}")), None),
-                    }
-                }
-                Verdict::Skip(why) => ("skipped", Some(why), None),
-            };
-            conn.execute(
-                "INSERT INTO recordings
-                 (class_id, meeting_id, play_url, recorded_at, duration_minutes, title,
-                  status, note, seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    class_id,
-                    recording.meeting_id,
-                    play_url,
-                    recording.recorded_at,
-                    recording.duration_minutes,
-                    recording.topic,
-                    status,
-                    note,
-                    now()
-                ],
-            )?;
-            match status {
-                "new" => listing.new += 1,
-                "skipped" => listing.skipped += 1,
-                _ => {}
-            }
-        }
-        Ok(listing)
+    // The lookups under one lock, the reads under none, the writes under
+    // one: a files read needs the main thread to dispatch its eval, and a
+    // command that takes the connection parks that thread, so a read issued
+    // with the lock held would wait on itself.
+    let (known, meetings, filed_by_hand) = with_conn(app, |conn| {
+        Ok((
+            known_ids(conn)?,
+            meeting_weekdays(conn, class_id)?,
+            dates_filed_by_hand(conn, class_id)?,
+        ))
     })?;
+    let found_count = found.len();
+    let rows = decide(found, &known, &meetings, &filed_by_hand, today, &|meeting_id| {
+        play_url(window, meeting_id)
+    });
+    let mut listing = with_conn(app, |conn| record_rows(conn, class_id, &rows))?;
+    listing.found = found_count;
     if listing.new > 0 || listing.skipped > 0 {
         emit_hub_change(app, "recordings");
     }
     Ok(listing)
+}
+
+/// One listed recording with its verdict, ready to record.
+#[derive(Debug, Clone, PartialEq)]
+struct Decided {
+    found: Found,
+    status: &'static str,
+    note: Option<String>,
+    play_url: Option<String>,
+}
+
+/// Judges every listed recording the table does not already hold — the
+/// pure half of the listing, with the one read it needs (the files of a
+/// lecture, for its player link) handed in. A meeting listed twice, as a
+/// page boundary that moved can list one, is judged once.
+fn decide(
+    found: Vec<Found>,
+    known: &HashSet<String>,
+    meetings: &[u32],
+    filed_by_hand: &HashSet<String>,
+    today: NaiveDate,
+    play_url_of: &dyn Fn(&str) -> Result<Option<String>>,
+) -> Vec<Decided> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut rows = Vec::new();
+    for recording in found {
+        if known.contains(&recording.meeting_id) || !seen.insert(recording.meeting_id.clone()) {
+            continue;
+        }
+        let (status, note, play_url) = match verdict(&recording, meetings, filed_by_hand, today) {
+            Verdict::Lecture => match play_url_of(&recording.meeting_id) {
+                Ok(Some(url)) => ("new", None, Some(url)),
+                Ok(None) => ("skipped", Some("no playable recording file is listed".to_string()), None),
+                Err(e) => (
+                    "failed",
+                    Some(crate::db::truncate(&format!("its files could not be read: {e:#}"), MAX_NOTE_CHARS)),
+                    None,
+                ),
+            },
+            Verdict::Skip(why) => ("skipped", Some(why), None),
+        };
+        rows.push(Decided { found: recording, status, note, play_url });
+    }
+    rows
+}
+
+/// Records the judged rows: a new meeting inserted, and a meeting whose
+/// files read failed before — a `failed` row with no player link, which
+/// `known_ids` leaves out so the next listing judges it again — refreshed in
+/// place. Any other row the id already names is left as it is, so a listing
+/// that overlaps what another class recorded writes nothing over it.
+fn record_rows(conn: &Connection, class_id: i64, rows: &[Decided]) -> Result<Listing> {
+    let mut listing = Listing::default();
+    for row in rows {
+        let written = conn.execute(
+            "INSERT INTO recordings
+             (class_id, meeting_id, play_url, recorded_at, duration_minutes, title,
+              status, note, seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(meeting_id) DO UPDATE SET
+               play_url = excluded.play_url, status = excluded.status,
+               note = excluded.note, seen_at = excluded.seen_at
+             WHERE recordings.status = 'failed' AND recordings.play_url IS NULL",
+            params![
+                class_id,
+                row.found.meeting_id,
+                row.play_url,
+                row.found.recorded_at,
+                row.found.duration_minutes,
+                row.found.topic,
+                row.status,
+                row.note,
+                now()
+            ],
+        )?;
+        if written == 0 {
+            continue;
+        }
+        match row.status {
+            "new" => listing.new += 1,
+            "skipped" => listing.skipped += 1,
+            _ => {}
+        }
+    }
+    Ok(listing)
+}
+
+/// The meetings the table already answers for, across every class since the
+/// id is global: all but a `failed` row with no player link, whose files
+/// read is worth another try.
+fn known_ids(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT meeting_id FROM recordings WHERE NOT (status = 'failed' AND play_url IS NULL)",
+    )?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids.into_iter().collect())
 }
 
 enum Verdict {
@@ -209,10 +268,21 @@ enum Verdict {
     Skip(String),
 }
 
+/// A recording dated this far from today is a listing error, not a lecture
+/// of the term — the window the announcement scan holds a proposed date to.
+const MAX_DAYS_FROM_TODAY: i64 = 200;
+/// A skip or failure note as stored: a line, whatever the error carried.
+const MAX_NOTE_CHARS: usize = 500;
+
 /// Whether a listed recording is a lecture to capture, or why not: too short
-/// to be one, on a day the course does not meet, or on a date a lecture was
-/// already filed by hand.
-fn verdict(recording: &Found, meetings: &[u32], filed_by_hand: &HashSet<String>) -> Verdict {
+/// to be one, dated outside the term, on a day the course does not meet, or
+/// on a date a lecture was already filed by hand.
+fn verdict(
+    recording: &Found,
+    meetings: &[u32],
+    filed_by_hand: &HashSet<String>,
+    today: NaiveDate,
+) -> Verdict {
     if recording.duration_minutes < MIN_MINUTES {
         return Verdict::Skip(format!(
             "{} — a test of the room, not a lecture",
@@ -223,6 +293,9 @@ fn verdict(recording: &Found, meetings: &[u32], filed_by_hand: &HashSet<String>)
     let Some(day) = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok() else {
         return Verdict::Skip("its start time could not be read".to_string());
     };
+    if (day - today).num_days().abs() > MAX_DAYS_FROM_TODAY {
+        return Verdict::Skip(format!("dated {}, outside the term", day.format("%b %-d, %Y")));
+    }
     if !meetings.contains(&day.weekday().number_from_monday()) {
         return Verdict::Skip(format!(
             "recorded on a {}, when the course does not meet",
@@ -255,30 +328,22 @@ fn meeting_weekdays(conn: &Connection, class_id: i64) -> Result<Vec<u32>> {
         .collect())
 }
 
-/// The dates of the transcripts under `Weeks/` that no capture of this
-/// module filed — the owner's own filings, which a found recording of the
-/// same day must not sit beside as a second copy.
+/// The dates of the lectures filed in this class that no row of this table
+/// claims — the owner's own filings, and a capture whose mark was lost —
+/// which a found recording of the same day must not sit beside as a second
+/// copy. Read off the contributions, which is what filing a transcript
+/// writes, so a note or a deck carrying a date under `Weeks/` counts for
+/// nothing.
 fn dates_filed_by_hand(conn: &Connection, class_id: i64) -> Result<HashSet<String>> {
-    let captured: HashSet<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT rel_path FROM recordings WHERE class_id = ?1 AND rel_path IS NOT NULL",
-        )?;
-        let paths = stmt
-            .query_map([class_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        paths.into_iter().collect()
-    };
     let mut stmt = conn.prepare(
-        "SELECT rel_path FROM files WHERE class_id = ?1 AND rel_path LIKE ?2",
+        "SELECT rel_path FROM lecture_contributions
+         WHERE class_id = ?1 AND status = 'applied'
+           AND rel_path NOT IN (SELECT rel_path FROM recordings WHERE rel_path IS NOT NULL)",
     )?;
     let paths = stmt
-        .query_map(params![class_id, format!("{WEEKS_DIR}/%.md")], |row| row.get::<_, String>(0))?
+        .query_map([class_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(paths
-        .into_iter()
-        .filter(|p| !captured.contains(p))
-        .filter_map(|p| date_of_transcript(&p))
-        .collect())
+    Ok(paths.iter().filter_map(|p| date_of_transcript(p)).collect())
 }
 
 /// The date a filed transcript's name opens with: `Weeks/Week 03 — …/2026-09-08 — Lecture.md`.
@@ -711,7 +776,9 @@ fn open_hidden(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
         .context("opening the recordings window")
 }
 
-fn eval(window: &WebviewWindow, js: &str) -> Result<Value> {
+/// One eval round-trip within `budget`, so a caller's own deadline is the
+/// bound and not the deadline plus a whole eval.
+fn eval_within(window: &WebviewWindow, js: &str, budget: Duration) -> Result<Value> {
     let (tx, rx) = mpsc::channel();
     window
         .eval_with_callback(js, move |result| {
@@ -719,22 +786,37 @@ fn eval(window: &WebviewWindow, js: &str) -> Result<Value> {
         })
         .context("evaluating in the recordings window")?;
     let raw = rx
-        .recv_timeout(EVAL_TIMEOUT)
+        .recv_timeout(budget.min(EVAL_TIMEOUT))
         .context("the recordings page did not answer")?;
     serde_json::from_str(&raw).with_context(|| format!("the page returned {raw:?}"))
 }
 
+/// Request slots on the page, one per read; unique for the window's life,
+/// which is one listing.
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
 /// One read the way the page issues its own, polled to completion; the
-/// answer's body as text.
-fn request(window: &WebviewWindow, id: &str, path: &str) -> Result<String> {
+/// answer's body as text. A page that has left Zoom — a lapsed launch, a
+/// bounce to a sign-in — is named as such rather than as an answer that
+/// would not parse.
+fn request(window: &WebviewWindow, path: &str) -> Result<String> {
+    let id = format!("r{}", REQUESTS.fetch_add(1, Ordering::Relaxed));
     let js = REQUEST_JS
-        .replace("__ID__", &js_string(id))
+        .replace("__ID__", &js_string(&id))
         .replace("__PATH__", &js_string(path));
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let started = Instant::now();
     loop {
-        let v = eval(window, &js)?;
+        let left = REQUEST_TIMEOUT.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            bail!("Zoom did not answer {path} within {}s", REQUEST_TIMEOUT.as_secs());
+        }
+        let v = eval_within(window, &js, left)?;
         match v["state"].as_str().unwrap_or_default() {
             "pending" => {}
+            "offsite" => {
+                let host = v["host"].as_str().unwrap_or("nowhere");
+                bail!("the Zoom tool's page left Zoom for {host} before {path} could be read");
+            }
             "error" => bail!(
                 "the Zoom page could not request {path}: {}",
                 v["message"].as_str().unwrap_or("no reason given")
@@ -750,9 +832,6 @@ fn request(window: &WebviewWindow, id: &str, path: &str) -> Result<String> {
                 return Ok(v["body"].as_str().unwrap_or_default().to_string());
             }
             other => bail!("the Zoom page reported an unknown state: {other}"),
-        }
-        if Instant::now() >= deadline {
-            bail!("Zoom did not answer {path} within {}s", REQUEST_TIMEOUT.as_secs());
         }
         std::thread::sleep(REQUEST_POLL);
     }
@@ -771,11 +850,7 @@ fn play_url(window: &WebviewWindow, meeting_id: &str) -> Result<Option<String>> 
             }
         })
         .collect();
-    let body = request(
-        window,
-        &format!("files{}", encoded.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect::<String>()),
-        &format!("/api/v1/lti/rich/recording/file?meetingId={encoded}"),
-    )?;
+    let body = request(window, &format!("/api/v1/lti/rich/recording/file?meetingId={encoded}"))?;
     let value: Value = serde_json::from_str(&body).context("the files answer is not JSON")?;
     Ok(play_url_in(&value))
 }
@@ -852,12 +927,18 @@ const LAND_JS: &str = r#"
 /// The start-then-poll read `canvas.rs` uses, with the page's own headers:
 /// `appConf.ajaxHeaders` is the list Zoom's app sends on every call, and the
 /// launch id rides the query string as it does on the page's own requests.
+/// The host check comes first, as it does there: a page that has navigated
+/// away reports where it is rather than issuing the request from there.
 const REQUEST_JS: &str = r#"
 (function () {
   var S = (window.__classhub_recordings = window.__classhub_recordings || {});
   var id = __ID__;
   if (S[id]) return S[id];
   if (S["p:" + id]) return { state: "pending" };
+  var host = location.host;
+  if (!(host === "zoom.us" || host === "zoom.com" || /\.zoom\.(us|com)$/.test(host))) {
+    return { state: "offsite", host: host };
+  }
   S["p:" + id] = 1;
   var conf = window.appConf || {};
   var scid = conf.page && conf.page.scid;
@@ -897,31 +978,67 @@ mod tests {
         assert_eq!(week_by_meetings(Some((d("2026-12-08"), 16)), d("2026-12-15"), &tue, &declared), None);
     }
 
-    /// A recording on a day the course does not meet, or too short to be a
-    /// lecture, or on a date already filed by hand, is skipped and says why.
-    #[test]
-    fn a_recording_is_a_lecture_only_on_a_meeting_day_and_long_enough() {
-        let found = |at: &str, minutes: i64| Found {
-            meeting_id: "m".into(),
+    fn found(id: &str, at: &str, minutes: i64) -> Found {
+        Found {
+            meeting_id: id.into(),
             topic: "CAI5720".into(),
             recorded_at: at.into(),
             duration_minutes: minutes,
-        };
+        }
+    }
+
+    /// A recording on a day the course does not meet, or too short to be a
+    /// lecture, or dated outside the term, or on a date already filed by
+    /// hand, is skipped and says why.
+    #[test]
+    fn a_recording_is_a_lecture_only_on_a_meeting_day_and_long_enough() {
         let tue = [2];
+        let today = d("2026-09-08");
         let filed: HashSet<String> = ["2026-09-01".to_string()].into_iter().collect();
-        assert!(matches!(verdict(&found("2026-09-08T15:52", 209), &tue, &filed), Verdict::Lecture));
-        match verdict(&found("2026-09-08T15:49", 1), &tue, &filed) {
-            Verdict::Skip(why) => assert!(why.contains("1 minute"), "{why}"),
-            Verdict::Lecture => panic!("a one-minute test read as a lecture"),
-        }
-        match verdict(&found("2026-09-05T15:32", 45), &tue, &filed) {
-            Verdict::Skip(why) => assert!(why.contains("Saturday"), "{why}"),
-            Verdict::Lecture => panic!("a Saturday read as a meeting day"),
-        }
-        match verdict(&found("2026-09-01T15:26", 197), &tue, &filed) {
-            Verdict::Skip(why) => assert!(why.contains("already filed"), "{why}"),
-            Verdict::Lecture => panic!("a date filed by hand read as new"),
-        }
+        let skip = |at: &str, minutes: i64| match verdict(&found("m", at, minutes), &tue, &filed, today) {
+            Verdict::Skip(why) => why,
+            Verdict::Lecture => panic!("{at} for {minutes} minutes read as a lecture"),
+        };
+        assert!(matches!(
+            verdict(&found("m", "2026-09-08T15:52", 209), &tue, &filed, today),
+            Verdict::Lecture
+        ));
+        assert!(skip("2026-09-08T15:49", 1).contains("1 minute"));
+        assert!(skip("2026-09-05T15:32", 45).contains("Saturday"));
+        assert!(skip("2026-09-01T15:26", 197).contains("already filed"));
+        assert!(skip("2027-09-07T15:52", 209).contains("outside the term"));
+    }
+
+    /// The listing's pure half: a meeting the table holds is passed over, a
+    /// meeting listed twice is judged once, and the files read's three
+    /// outcomes become `new`, `skipped` and `failed` with their notes.
+    #[test]
+    fn decide_judges_each_meeting_once_with_the_files_reads_outcome() {
+        let tue = [2];
+        let today = d("2026-09-08");
+        let known: HashSet<String> = ["held".to_string()].into_iter().collect();
+        let listed = vec![
+            found("held", "2026-09-08T15:52", 209),
+            found("ok", "2026-09-01T15:50", 279),
+            found("ok", "2026-09-01T15:50", 279),
+            found("nofile", "2026-08-25T15:54", 194),
+            found("broken", "2026-08-18T15:54", 190),
+            found("test", "2026-09-08T15:49", 1),
+        ];
+        let rows = decide(listed, &known, &tue, &HashSet::new(), today, &|id| match id {
+            "ok" => Ok(Some("https://ufl.zoom.us/rec/play/x".into())),
+            "nofile" => Ok(None),
+            _ => Err(anyhow::anyhow!("500")),
+        });
+        let shape: Vec<(&str, &str, bool)> = rows
+            .iter()
+            .map(|r| (r.found.meeting_id.as_str(), r.status, r.play_url.is_some()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![("ok", "new", true), ("nofile", "skipped", false), ("broken", "failed", false), ("test", "skipped", false)]
+        );
+        assert!(rows[2].note.as_deref().unwrap().contains("could not be read"));
     }
 
     /// The list answer as Zoom serves it (SPEC §1), and the files answer:
@@ -957,36 +1074,93 @@ mod tests {
         assert_eq!(play_url_in(&elsewhere), None);
     }
 
-    /// The table takes a meeting once: a second read of the same list
-    /// records nothing, and the listing counts only what it wrote.
+    /// The table takes a meeting once: a second listing of the same rows
+    /// writes nothing and counts nothing, a `failed` row with no player link
+    /// is the one exception — left out of the known ids and refreshed in
+    /// place by the next listing — and a row another class holds is never
+    /// written over.
     #[test]
-    fn a_meeting_is_recorded_once() {
+    fn a_meeting_is_recorded_once_and_a_failed_files_read_is_tried_again() {
         let conn = crate::db::memory_db();
-        let insert = |conn: &Connection| {
-            conn.execute(
-                "INSERT INTO recordings (class_id, meeting_id, play_url, recorded_at, duration_minutes,
-                 title, status, seen_at) VALUES (1, 'm1', 'https://ufl.zoom.us/rec/play/x',
-                 '2026-09-08T15:52', 209, 'CAI5720', 'new', 1)",
-                [],
-            )
+        let row = |id: &str, status: &'static str, url: Option<&str>| Decided {
+            found: found(id, "2026-09-08T15:52", 209),
+            status,
+            note: None,
+            play_url: url.map(str::to_string),
         };
-        insert(&conn).unwrap();
-        assert!(insert(&conn).is_err());
+        let first = record_rows(
+            &conn,
+            1,
+            &[row("m1", "new", Some("https://ufl.zoom.us/rec/play/x")), row("m2", "failed", None)],
+        )
+        .unwrap();
+        assert_eq!((first.new, first.skipped), (1, 0));
+        // The same list again: nothing written, nothing counted.
+        let again = record_rows(&conn, 1, &[row("m1", "new", Some("https://ufl.zoom.us/rec/play/x"))]).unwrap();
+        assert_eq!((again.new, again.skipped), (0, 0));
+        // m1 is known; m2's files read failed, so it is judged again.
+        let known = known_ids(&conn).unwrap();
+        assert!(known.contains("m1") && !known.contains("m2"));
+        let retried = record_rows(&conn, 1, &[row("m2", "new", Some("https://ufl.zoom.us/rec/play/y"))]).unwrap();
+        assert_eq!(retried.new, 1);
+        let (status, url): (String, Option<String>) = conn
+            .query_row("SELECT status, play_url FROM recordings WHERE meeting_id = 'm2'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((status.as_str(), url.as_deref()), ("new", Some("https://ufl.zoom.us/rec/play/y")));
+        // Another class listing m1 — one Canvas course matched twice — leaves it.
+        let other = record_rows(&conn, 2, &[row("m1", "skipped", None)]).unwrap();
+        assert_eq!((other.new, other.skipped), (0, 0));
+        let class: i64 = conn
+            .query_row("SELECT class_id FROM recordings WHERE meeting_id = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(class, 1);
+
         let waiting = list_waiting(&conn, 1).unwrap();
-        assert_eq!(waiting.len(), 1);
-        assert_eq!(waiting[0].status, "new");
-        mark_filed(&conn, waiting[0].id, "Weeks/Week 03 — X/2026-09-08 — Lecture.md").unwrap();
-        assert!(list_waiting(&conn, 1).unwrap().is_empty());
-        // The filed row's transcript is the capture's own, not a hand filing.
+        assert_eq!(waiting.len(), 2);
+        let m1 = waiting.iter().find(|w| w.title == "CAI5720" && w.status == "new").unwrap();
+        mark_filed(&conn, m1.id, "Weeks/Week 03 — X/2026-09-08 — Lecture.md").unwrap();
+        assert_eq!(list_waiting(&conn, 1).unwrap().len(), 1);
+    }
+
+    /// A lecture is filed by hand when its contribution row names a path no
+    /// recordings row claims; a date-named note under `Weeks/` is nothing.
+    #[test]
+    fn a_hand_filing_is_a_contribution_no_capture_claims() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, source)
+             VALUES (1, 1, 'week', 'Week 1 — Intro', 1, 'syllabus')",
+            [],
+        )
+        .unwrap();
+        let contribution = |rel: &str| {
+            conn.execute(
+                "INSERT INTO lecture_contributions (class_id, unit_id, rel_path, start_ms, end_ms,
+                 start_line, end_line, corpus_rel_path, summary, confidence, status, created_at)
+                 VALUES (1, (SELECT id FROM units WHERE class_id = 1), ?1, 0, 1, 0, 1, ?2, 's', 'high', 'applied', 1)",
+                params![rel, format!(".classhub/corpus/Week 1 — Intro/{}", rel.rsplit('/').next().unwrap())],
+            )
+            .unwrap();
+        };
+        contribution("Weeks/Week 01 — Intro/2026-08-25 — Lecture.md");
+        contribution("Weeks/Week 03 — X/2026-09-08 — Lecture.md");
         conn.execute(
             "INSERT INTO files (class_id, rel_path, sha256, size, mtime, kind)
-             VALUES (1, 'Weeks/Week 03 — X/2026-09-08 — Lecture.md', 'a', 1, 1, 'md'),
-                    (1, 'Weeks/Week 02 — Y/2026-09-01 — Lecture.md', 'b', 1, 1, 'md')",
+             VALUES (1, 'Weeks/Week 02 — Y/2026-09-01 — Notes.md', 'b', 1, 1, 'md')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO recordings (class_id, meeting_id, recorded_at, duration_minutes, title,
+             rel_path, status, seen_at)
+             VALUES (1, 'm', '2026-09-08T15:52', 209, 'T', 'Weeks/Week 03 — X/2026-09-08 — Lecture.md', 'filed', 1)",
             [],
         )
         .unwrap();
         let by_hand = dates_filed_by_hand(&conn, 1).unwrap();
-        assert_eq!(by_hand, ["2026-09-01".to_string()].into_iter().collect());
+        assert_eq!(by_hand, ["2026-08-25".to_string()].into_iter().collect());
     }
 
     /// A dated course files by the nearest meeting date; an undated one by
