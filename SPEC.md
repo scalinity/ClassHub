@@ -776,8 +776,8 @@ claude -p <prompt>
   meeting first, up to `shift_guides_per_night`; never the master, never a folder guide.
   Then a practice exam for each open quiz or exam due within two days (§8.3), for the
   division its date sits in and focused on what that scope's last self-score missed,
-  once per deadline — the job's payload names the deadline, and a quiz is at most one a
-  week a class, so the step carries no cap. Then the small documents (§8.6), four steps: write a brief for each open assignment or
+  soonest first, two a night and once per deadline — the job's payload names the
+  deadline. Then the small documents (§8.6), four steps: write a brief for each open assignment or
   project item due within five days with no brief or a stale one, soonest first, up to
   `shift_briefs_per_night`; refresh the workbook of one class whose project has an item
   due within seven days and whose workbook is stale or absent; write a pre-read per course
@@ -804,9 +804,12 @@ claude -p <prompt>
   table, never dollars. Four notifications, each a setting: `Shift finished` with the
   summary, `A job failed` naming the kind and scope of any failed job, `Due tomorrow`
   naming the open deadlines due the next day — once a day at a time of day that is a
-  setting (nine in the morning by default), on the scheduler's minute tick and from the
-  build that runs shifts, so two builds on one database never both say it, the day
-  stamped whether or not anything was due — and a notice that asks for something, the
+  setting (nine in the morning by default), on the scheduler's minute tick within six
+  hours of that time, so a Mac asleep through the hour hears it on waking and an app
+  launched at bedtime does not, and from the build that runs shifts, so two builds on
+  one database never both say it; the read comes before the stamp and both commit
+  together, so a read that fails leaves the day for the next tick and a quiet morning is
+  stamped on its empty answer — and a notice that asks for something, the
   moment the announcement scan reads a to-do out of it (§7.2), naming the class and the
   notice.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
@@ -1456,8 +1459,8 @@ that predate them, which carry no freshness.
 frame the self-score listener matches: a message is taken only from the frame the viewer
 framed, by `event.source` — an opaque-origin frame's `event.origin` reads `null` and proves
 nothing — and only for the exam it opened, and the payload goes to the backend as model
-output, refused by name unless it is the settled shape with a question and a topic on every
-answer, capped at two hundred, and naming this exam's file where it names one. The rows
+output, refused by name unless it is the settled shape naming its exam's file with a
+question and a topic on every answer, capped at two hundred. The rows
 replace the exam's earlier ones in `practice_results` (§5), each carrying the scope the
 exam was written for, read off the practice job whose payload names the file. The viewer
 says `Scored 12 of 19 · recorded`; the Practice exams row shows the score and the topics
@@ -1997,23 +2000,28 @@ and apply it. Non-negotiable per project owner.
   margin, the lines separated by hairlines, absent lines absent: each meeting today as its
   time, the class in its ink opening the workspace, its division with the week where the
   reading is a lecture's, and `Before class` where a pre-read exists for it; `Due`, what is
-  due within three days as the strip's own chips; `Overnight` (`Last shift` once a day has
-  passed), what the last shift did in its summary's words with an `Undo` on each batch it
-  wrote that nothing has reversed — the files the sync filed, a note the review appended to
-  — read off the audit rows of the run's window; `Notices`, the announcements posted since
-  the app was last opened, each with its class, title and posting time and its to-dos with
-  the ring the workspace's section uses, the previous open being the stamp before this one
-  (a launch and every focus of the window stamp it, a focus within half an hour of the last
+  due within three days as the strip's own chips, a chip marked done here staying on the
+  docket struck through; `Overnight` (`Last shift` once a day has passed, `Shift` while
+  one runs), what the last shift did in its summary's words with, once the run has
+  finished, an `Undo` on each batch it wrote that nothing has reversed — the files the
+  sync filed, a note the review appended to — read off the audit rows of the run's window;
+  `Notices`, the newest twelve announcements posted since the app was last opened with a
+  count of the rest, each with its class, title and posting time and its to-dos with the
+  ring the workspace's section uses, the previous open being the stamp before this one (a
+  launch and every focus of the window stamp it, a focus within half an hour of the last
   counting as the same open); and `Waiting`, every decision nothing has made — files to
   sort, proposed deadlines with a series as one line, recordings found on Zoom and not
   captured or whose capture failed, a meeting of the past week with no transcript filed and
   no recording waiting for it, and a Canvas sign-in the shift cannot sync without. When
-  nothing is on the docket, one sentence and `Sync Canvas`. Then **Ten cards**: the ten
-  cards due soonest across the classes, one at a time on a card in its class's wash — the
-  class and the document it came from in meta, the front in the reading role, `Show the
-  back`, then the back with its citation and `Right` / `Wrong` — the count (`3 of 10`)
-  counting the day's answers, the day's ten holding still while they are worked through,
-  `No cards due today` or `Done for today · 7 right, 3 wrong` when the face is empty; the
+  nothing is on the docket — the chips' own call, so a chip marked done stays — one
+  sentence and `Sync Canvas`. Then **Ten cards**: the ten cards due soonest across the
+  classes — the ones scheduled and due first, so a card missed yesterday comes back ahead
+  of the never-shown backlog — one at a time on a card in its class's wash: the class and
+  the document it came from in meta, the front in the reading role, `Show the back`, then
+  the back with its citation and `Right` / `Wrong`; the count (`3 of 10`) counting the
+  day's answers, the day's ten holding still while they are worked through (a focus of the
+  window does not refetch them), `No cards due today` or `Done for today · 7 right, 3
+  wrong` when the face is empty; the
   This week schedule grid with the next class beside its heading; Due in the next 7 days as
   class-washed chips, each a button with a ring at its edge that fills with a check when
   clicked, the title struck and `done` in place of the due day, clickable back to open
@@ -2065,8 +2073,11 @@ and apply it. Non-negotiable per project owner.
   (§8.4) newest session first under the session's title and date, each item its kind as a
   chip, its text, and its `HH:MM` as a mono link that opens the transcript at that heading,
   absent until a session has been distilled for it; the `Cards` section, present once a
-  guide or a distilled lecture has written cards, lists one row per document with its
-  count and offers `Export for Anki`, which writes `Study Guides/Cards/<class>.tsv` — front,
+  guide or a distilled lecture has written cards — indexed on read from the guide rows'
+  files and the corpus notes' sidecars, a file no row claims left out, a class whose
+  folder is not there refused rather than read as one whose sidecars are all gone, and a
+  read that finds every sidecar as it was writing nothing — lists one row per document
+  with its count and offers `Export for Anki`, which writes `Study Guides/Cards/<class>.tsv` — front,
   back, tags (ClassHub, the class, the document), opening with Anki's own header lines
   (`#separator:tab`, `#html:true`, `#tags column:3`) so the import needs no dialog settings,
   a field holding a tab, a line break or a quote quoted with its quotes doubled — says where
@@ -2286,12 +2297,14 @@ and apply it. Non-negotiable per project owner.
   a score is silent), a score replacing an exam's rows and the scope's weak topics being
   the latest score's, the default focus's words, the boxes' schedule and the TSV's escaping
   (§12 — a card that never comes back, or a line Anki splits on a tab, is silent), the
-  index's upsert, drop and keep across a rewrite and a sidecar gone, the projection on a
-  worked example with the open share and the next letter (§11), the quiz list within its
-  lead and once per deadline, the reminder's once-a-day rule and its lines (§6), the open
-  stamps' rotation, a run's reversible rows grouped with the undone left out, and the past
-  week's meeting with no transcript (§12). UI and job plumbing are exercised by running the
-  app.
+  index's upsert, drop and keep across a rewrite and a sidecar gone, its refusal of a
+  missing class folder and its skip on an unchanged read, the scheduled-first due order,
+  the answer's and the export's refusals, the projection on a worked example with the open
+  share and the next letter (§11), the quiz list within its lead and once per deadline, the
+  reminder's once-a-day rule inside its window and its lines (§6), the open stamps'
+  rotation, a run's reversible rows grouped with the undone left out, the assembled Today
+  block, and the past week's meeting with no transcript (§12). UI and job plumbing are
+  exercised by running the app.
 
 ## 14. Milestones
 

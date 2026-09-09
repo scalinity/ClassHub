@@ -6690,3 +6690,81 @@ the tree, before anything changed:
 - The exam's option buttons and `Total my exam` are reachable through the
   sandboxed frame's accessibility tree by their text, the latter in the
   capitals its CSS renders.
+
+## Post-M37 — Review fixes (2026-09-09)
+
+A two-agent review of the M37 changeset since c71c28b (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced one critical
+issue, ten warnings and twelve suggestions once the two reports were
+merged, three of them raised by both reviewers. Each fix went through
+`scripts/gate.sh`, five commits in all, grouped by concern. What future
+sessions should know:
+
+- **The cards index deleted real state on a read** (the critical). A class
+  folder that is momentarily not there — a volume unmounted, a folder
+  renamed in Finder — read as a class whose sidecars were all gone, and the
+  next dashboard read deleted every card's box, due date and wrong mark.
+  `cards::index` now refuses a class whose folder is not a directory;
+  `due_cards` logs and serves the rows as they are.
+- **The index no longer writes on every read.** The sidecars are read
+  before the transaction opens, the transaction is immediate — a deferred
+  one that had read first is refused outright, past the busy handler, when
+  the other build commits between — and a per-process map of each
+  sidecar's modification time and length lets a read whose files have not
+  moved return the labels with no transaction at all. A file under
+  `.classhub/cards/` that no guide row claims is not indexed: a renamed
+  guide's file left behind read as a second scope holding the same
+  questions, and a copy is worse than a gap.
+- **An answer is one transaction.** The box move and the read back commit
+  together, the label looked up for the one card, with no index between
+  that could fail after the move landed. The due list serves scheduled
+  cards ahead of the never-shown backlog, so a card missed yesterday comes
+  back today rather than after every card the guides ever wrote; a front
+  folded into an earlier one is said on stderr; `answer_in` and `export_in`
+  are the testable inner halves.
+- **The exam's message must name its exam**, so the backend's check
+  against the row's file stands without the frame match in front of it;
+  `practice::record` is the testable inner half and its refusals — another
+  exam's name, a scope that is no exam, a row that is not there — are
+  exercised.
+- **Today's block**: a previous-open stamp chrono cannot represent listed
+  every announcement; it lists none. The notices are the newest twelve
+  with a count of the rest. A run under way offers no `Undo` — its window
+  had no end, and a move or a note the reader made while it worked fell
+  inside it. The sort queue's waiting line is kinded `sort`, not `cards`.
+  Whether anything is due is the chips' own call, so a chip marked done on
+  Today stays struck through instead of the whole block turning into the
+  empty sentence. `summary_with` takes the Keychain read as a parameter
+  and is tested on a seeded database.
+- **The shift**: the Quizzes step takes two a night and counts the rest for
+  tomorrow, where it had run every candidate; the reminder reads the
+  deadlines before it stamps the day and both commit together, where a
+  read that failed had already cost the day; and it fires within six hours
+  of its time, so an app launched at bedtime does not say tomorrow's list
+  at once.
+- **The frontend**: the day's ten cards do not refetch on window focus, so
+  an answered card is not replaced by the next due one and the count
+  cannot grow past ten; the exam frame's ref is a stable callback, so a
+  score landing does not clear and re-register it; the guide viewer is
+  keyed on its document, so a score never carries into another; a shift
+  change invalidates Today; the Cards section says when its read failed.
+- **Tests**: the index's refusal of a missing folder, its skip on an
+  unchanged read, an unclaimed file left out, the scheduled-first order,
+  the answer's refusal of a card that is gone, the export's file and its
+  refusal with no cards, a folded front; the exam record's three refusals
+  and the name required; the assembled Today block; the reminder's window.
+  350 pass. `npx tsc --noEmit` clean. Nothing was pushed.
+- **Left as it is**: the cascade from `classes` the `cards` table lacks is
+  said in the migration's comment — the four classes are seeded and never
+  deleted; two cards whose fronts agree for their first two thousand
+  characters fold into one row, said on stderr; the exam viewer's frame
+  registers through a ref rather than the frame's `onLoad`, since the
+  listener needs the frame before the page has loaded nothing.
+
+### Gotchas
+
+- A review agent's final answer can fail to reach the lead while its
+  batches do; asking it for the verdict and the index again by name gets
+  the rest.
+- `LazyLock` around a `Mutex<HashMap>` is the shape for a per-process
+  cache in a `static`; `HashMap::new()` is not `const`.
