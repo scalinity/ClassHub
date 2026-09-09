@@ -109,7 +109,7 @@ function NoticeRow({ notice }: { notice: Announcement }) {
  * change, which is said and needs nothing. Always in view, clamped body or
  * not, since the point of the line is to be acted on.
  */
-function ActionLine({ action }: { action: AnnouncementAction }) {
+export function ActionLine({ action }: { action: AnnouncementAction }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (action.kind === "change") {

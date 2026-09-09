@@ -8,6 +8,7 @@ mod announcements;
 mod briefs;
 mod canvas;
 mod canvas_sync;
+mod cards;
 mod chat;
 mod db;
 mod deadlines;
@@ -20,6 +21,7 @@ mod notebook;
 mod notes;
 mod notes_review;
 mod notifications;
+mod practice;
 mod preread;
 mod recordings;
 mod remote;
@@ -27,6 +29,7 @@ mod scanner;
 mod settings;
 mod shift;
 mod sorter;
+mod today;
 mod tools;
 mod transcribe;
 mod transcripts;
@@ -201,15 +204,76 @@ fn generate_practice(
     date_label: String,
     focus: Option<String>,
 ) -> Result<i64, String> {
-    guides::generate_practice(&app, class_id, &scope, focus.as_deref(), &generated_at_label, &date_label)
-        .map(|(job_id, _)| job_id)
-        .map_err(|e| format!("{e:#}"))
+    guides::generate_practice(
+        &app,
+        class_id,
+        &scope,
+        focus.as_deref(),
+        &generated_at_label,
+        &date_label,
+        None,
+    )
+    .map(|(job_id, _)| job_id)
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// SPEC §6: resume a failed master run with `--resume <session_id>`.
 #[tauri::command]
 fn resume_master_guide(app: tauri::AppHandle, job_id: i64) -> Result<i64, String> {
     guides::resume_master(&app, job_id).map_err(|e| format!("{e:#}"))
+}
+
+/// SPEC §8.3: the self-score the exam's panel posted, for the exam the
+/// viewer opened — model output, checked for its shape.
+#[tauri::command]
+fn record_practice_results(
+    app: tauri::AppHandle,
+    class_id: i64,
+    scope: String,
+    posted: serde_json::Value,
+) -> Result<practice::ExamScore, String> {
+    practice::record_results(&app, class_id, &scope, posted).map_err(|e| format!("{e:#}"))
+}
+
+// --- Today and the cards (SPEC §12) --------------------------------------------
+
+/// The Today block, from the tables and nothing else.
+#[tauri::command(async)]
+fn today_summary(state: tauri::State<Db>, today: String) -> Result<today::TodaySummary, String> {
+    let conn = db::lock(&state.0);
+    today::summary(&conn, &today, db::now()).map_err(|e| format!("{e:#}"))
+}
+
+/// The ten cards due soonest across the classes.
+#[tauri::command(async)]
+fn due_cards(state: tauri::State<Db>, today: String) -> Result<Vec<cards::CardInfo>, String> {
+    let conn = db::lock(&state.0);
+    cards::due_cards(&conn, &today, 10).map_err(|e| format!("{e:#}"))
+}
+
+/// `Right` or `Wrong` on a card.
+#[tauri::command]
+fn answer_card(
+    app: tauri::AppHandle,
+    id: i64,
+    right: bool,
+    today: String,
+) -> Result<cards::CardInfo, String> {
+    cards::answer(&app, id, right, &today).map_err(|e| format!("{e:#}"))
+}
+
+/// A class's cards, indexed from its sidecars on the way.
+#[tauri::command(async)]
+fn list_cards(state: tauri::State<Db>, class_id: i64) -> Result<Vec<cards::CardInfo>, String> {
+    let conn = db::lock(&state.0);
+    cards::list_cards(&conn, class_id).map_err(|e| format!("{e:#}"))
+}
+
+/// `Export for Anki`: the class's cards as one tab-separated file; answers
+/// its class-relative path.
+#[tauri::command(async)]
+fn export_cards(app: tauri::AppHandle, class_id: i64) -> Result<String, String> {
+    cards::export_anki(&app, class_id).map_err(|e| format!("{e:#}"))
 }
 
 // --- The small documents (SPEC §8.6) ------------------------------------------
@@ -829,10 +893,16 @@ fn set_job_kind_effort(
     settings::set_job_kind_effort(&app, &kind, effort.as_deref()).map_err(|e| format!("{e:#}"))
 }
 
-/// One of the two notifications, on or off (SPEC §12).
+/// One of the notifications, on or off (SPEC §12).
 #[tauri::command]
 fn set_notify_setting(app: tauri::AppHandle, key: String, on: bool) -> Result<(), String> {
     settings::set_notify(&app, &key, on).map_err(|e| format!("{e:#}"))
+}
+
+/// When the due-tomorrow notification is shown, `HH:MM`.
+#[tauri::command]
+fn set_notify_due_time(app: tauri::AppHandle, time: String) -> Result<(), String> {
+    settings::set_notify_due_time(&app, &time).map_err(|e| format!("{e:#}"))
 }
 
 /// The login item (SPEC §12): a LaunchAgent naming this build's executable,
@@ -996,6 +1066,11 @@ pub fn run() {
             };
             jobs::startup_recovery(&conn)?;
             shift::startup_recovery(&conn)?;
+            // A launch is an open (SPEC §12): the last stamp becomes the
+            // previous open, which Today reads the notices since.
+            if let Err(e) = today::note_opened(&conn, db::now(), true) {
+                eprintln!("today: the launch was not stamped — {e:#}");
+            }
             jobs::prune_logs(&data_dir);
             match db::aibhs_root(&conn) {
                 Ok(root) => allow_asset_root(app.handle(), &root),
@@ -1038,9 +1113,24 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // A focus is an open too; one within half an hour of the
+                // last is the same open (today.rs).
+                tauri::WindowEvent::Focused(true) => {
+                    let handle = window.app_handle().clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = db::with_conn(&handle, |conn| {
+                            today::note_opened(conn, db::now(), false)
+                        }) {
+                            eprintln!("today: the focus was not stamped — {e:#}");
+                        }
+                    });
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1053,6 +1143,12 @@ pub fn run() {
             synthesize_master,
             generate_practice,
             resume_master_guide,
+            record_practice_results,
+            today_summary,
+            due_cards,
+            answer_card,
+            list_cards,
+            export_cards,
             write_brief,
             write_workbook,
             project_status,
@@ -1124,6 +1220,7 @@ pub fn run() {
             set_job_kind_model,
             set_job_kind_effort,
             set_notify_setting,
+            set_notify_due_time,
             set_login_item,
             chat_settings,
             save_chat_key,

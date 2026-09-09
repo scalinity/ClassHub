@@ -56,13 +56,14 @@ const TICK: Duration = Duration::from_secs(60);
 const JOB_POLL: Duration = Duration::from_secs(5);
 
 /// The plan's steps, in order (SPEC §6).
-pub const STEPS: [&str; 10] = [
+pub const STEPS: [&str; 11] = [
     "Sync Canvas",
     "File",
     "Recordings",
     "Extract",
     "Distill",
     "Rebuild guides",
+    "Quizzes",
     "Briefs",
     "Workbook",
     "Pre-reads",
@@ -74,10 +75,15 @@ const RECORDINGS: usize = 2;
 const EXTRACT: usize = 3;
 const DISTILL: usize = 4;
 const REBUILD: usize = 5;
-const BRIEFS: usize = 6;
-const WORKBOOK: usize = 7;
-const PREREADS: usize = 8;
-const NOTES: usize = 9;
+const QUIZZES: usize = 6;
+const BRIEFS: usize = 7;
+const WORKBOOK: usize = 8;
+const PREREADS: usize = 9;
+const NOTES: usize = 10;
+
+/// The morning's notification (SPEC §12): the day it was last shown, so it
+/// is shown once.
+const REMINDED_ON: &str = "due_reminder_sent_on";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -349,7 +355,7 @@ fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunInfo> {
     })
 }
 
-fn latest_run(conn: &Connection) -> Result<Option<RunInfo>> {
+pub(crate) fn latest_run(conn: &Connection) -> Result<Option<RunInfo>> {
     Ok(conn
         .query_row(
             &format!("SELECT {RUN_COLUMNS} FROM shift_runs ORDER BY id DESC LIMIT 1"),
@@ -494,6 +500,8 @@ fn catch_up(app: &AppHandle) {
 }
 
 fn tick(app: &AppHandle) {
+    // The morning's word about tomorrow rides the same minute, run or not.
+    remind_due_tomorrow(app);
     let state = app.state::<ShiftState>();
     if state.running.load(Ordering::SeqCst) {
         return;
@@ -553,6 +561,60 @@ fn tick(app: &AppHandle) {
             Err(e) => eprintln!("shift: not started — {e:#}"),
         }
     }
+}
+
+/// Whether the morning's notification is due: the set time has passed today
+/// and it has not been shown today.
+pub(crate) fn reminder_fires(now: NaiveDateTime, at: NaiveTime, reminded_on: Option<&str>) -> bool {
+    now.time() >= at && reminded_on != Some(now.date().to_string().as_str())
+}
+
+/// The deadlines due tomorrow (SPEC §12), shown once a day at the set time
+/// from the build that runs shifts, so two builds on one database never
+/// both say it. The day is stamped whether or not anything is due, so a
+/// quiet morning costs one read.
+fn remind_due_tomorrow(app: &AppHandle) {
+    let now_local = Local::now().naive_local();
+    let due = with_conn(app, |conn| {
+        if !runs_here(conn) || !flag(conn, crate::settings::NOTIFY_DUE_TOMORROW, true) {
+            return Ok(None);
+        }
+        let reminded_on = setting(conn, REMINDED_ON)?;
+        if !reminder_fires(now_local, crate::settings::notify_due_time(conn), reminded_on.as_deref()) {
+            return Ok(None);
+        }
+        crate::db::set_setting(conn, REMINDED_ON, &now_local.date().to_string())?;
+        let tomorrow = now_local
+            .date()
+            .checked_add_days(Days::new(1))
+            .unwrap_or(now_local.date())
+            .to_string();
+        Ok(Some(due_on(conn, &tomorrow)?))
+    });
+    match due {
+        Ok(Some(lines)) if !lines.is_empty() => crate::notifications::notify(
+            app,
+            crate::settings::NOTIFY_DUE_TOMORROW,
+            &format!("Due tomorrow · {}", plural(lines.len(), "deadline", "deadlines")),
+            &lines.join("\n"),
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("shift: the due-tomorrow check failed — {e:#}"),
+    }
+}
+
+/// `Homework 1 · Biostatistics for AI` for each open deadline due on `day`.
+pub(crate) fn due_on(conn: &Connection, day: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT d.title, c.display_name FROM deadlines d JOIN classes c ON c.id = d.class_id
+         WHERE d.status = 'open' AND substr(d.due_at, 1, 10) = ?1
+         ORDER BY {}, d.id",
+        crate::deadlines::DUE_INSTANT_SQL
+    ))?;
+    let lines = stmt
+        .query_map([day], |r| Ok(format!("{} · {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(lines)
 }
 
 /// `Run the shift now` (SPEC §6): trigger `manual`, once a night like the rest.
@@ -692,6 +754,8 @@ struct Progress<'a> {
     extracts: usize,
     distilled: usize,
     rebuilt: usize,
+    /// Practice exams written ahead of a quiz (SPEC §8.3).
+    exams: usize,
     /// The small documents written (SPEC §8.6).
     briefs: usize,
     workbooks: usize,
@@ -809,6 +873,9 @@ impl Progress<'_> {
         if self.extracts > 0 {
             parts.push(plural(self.extracts, "extract", "extracts"));
         }
+        if self.exams > 0 {
+            parts.push(plural(self.exams, "practice exam written", "practice exams written"));
+        }
         if self.briefs > 0 {
             parts.push(plural(self.briefs, "brief written", "briefs written"));
         }
@@ -898,6 +965,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         extracts: 0,
         distilled: 0,
         rebuilt: 0,
+        exams: 0,
         briefs: 0,
         workbooks: 0,
         prereads: 0,
@@ -1087,11 +1155,41 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     if let Some(end) = p.stop_reason() {
         return Ok(p.finish_early(end));
     }
+    let label = || Local::now().format("%B %-d, %Y at %-I:%M %p").to_string();
 
-    // 7. Briefs for the assignments due within days (SPEC §8.6), soonest
+    // 7. A practice exam two days before a quiz (SPEC §8.3), for the
+    // division its date sits in, focused on what was missed — once per
+    // deadline, and a quiz is at most one a week a class, so no cap.
+    p.begin(QUIZZES);
+    let candidates = with_conn(app, |conn| quiz_candidates(conn, Local::now().date_naive(), now()))?;
+    let mut quiz_notes = Vec::new();
+    for c in &candidates {
+        let scope = crate::db::unit_scope(c.unit_id);
+        let date_label = Local::now().format("%Y-%m-%d").to_string();
+        match crate::guides::generate_practice(app, c.class_id, &scope, None, &label(), &date_label, Some(c.deadline_id)) {
+            Ok((job_id, _)) => {
+                let status = p.wait(job_id);
+                if status == "succeeded" {
+                    p.exams += 1;
+                } else {
+                    quiz_notes.push(format!("{} {status}", c.title));
+                }
+            }
+            Err(e) => quiz_notes.push(format!("{}: {e:#}", c.title)),
+        }
+        if let Some(end) = p.stop_reason() {
+            p.done(QUIZZES, format!("stopped after {}", c.title));
+            return Ok(p.finish_early(end));
+        }
+    }
+    p.done(QUIZZES, step_outcome(p.exams, candidates.len(), 0, "exam", "exams", &quiz_notes));
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
+
+    // 8. Briefs for the assignments due within days (SPEC §8.6), soonest
     // first, under the briefs cap.
     p.begin(BRIEFS);
-    let label = || Local::now().format("%B %-d, %Y at %-I:%M %p").to_string();
     let candidates = with_conn(app, |conn| crate::briefs::candidates(conn, Local::now().date_naive(), now()))?;
     let (todo, left) = capped(candidates, s.briefs_per_night);
     p.left += left;
@@ -1118,7 +1216,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         return Ok(p.finish_early(end));
     }
 
-    // 8. The workbook of a class with an item due within the week, one a
+    // 9. The workbook of a class with an item due within the week, one a
     // night. A fixed cap is the night's measure, not a shortfall: what it
     // leaves is said on the step and not counted as more for tomorrow.
     p.begin(WORKBOOK);
@@ -1147,7 +1245,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         return Ok(p.finish_early(end));
     }
 
-    // 9. A pre-read per course for the coming week whose deck posted early.
+    // 10. A pre-read per course for the coming week whose deck posted early.
     p.begin(PREREADS);
     let todo = with_conn(app, |conn| crate::preread::candidates(conn, Local::now().date_naive(), now()))?;
     let mut preread_notes = Vec::new();
@@ -1174,7 +1272,7 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         return Ok(p.finish_early(end));
     }
 
-    // 10. A note read against its session, one a night — a fixed cap, as
+    // 11. A note read against its session, one a night — a fixed cap, as
     // the workbook's.
     p.begin(NOTES);
     let candidates = with_conn(app, |conn| crate::notes_review::candidates(conn, now()))?;
@@ -1325,6 +1423,81 @@ pub(crate) fn digest_candidates(conn: &Connection, now: i64) -> Result<Vec<Diges
     unread.sort_by(|a, b| a.date.cmp(&b.date).then(a.rel_path.cmp(&b.rel_path)));
     no_note.extend(unread);
     Ok(no_note)
+}
+
+/// A quiz or exam the shift would write a practice exam for (SPEC §8.3): an
+/// open deadline of kind `quiz` or `exam` due within `QUIZ_LEAD_DAYS`, with
+/// the division its date sits in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuizCandidate {
+    pub class_id: i64,
+    pub deadline_id: i64,
+    pub title: String,
+    pub unit_id: i64,
+    pub unit_name: String,
+}
+
+/// How far ahead of a quiz its exam is written.
+const QUIZ_LEAD_DAYS: u64 = 2;
+
+/// The quizzes due within the lead, soonest first, each once: one whose
+/// exam is written, being written, or failed within the rest waits. The
+/// division is the one the quiz's date sits in — dated, or read off the
+/// filed lectures for a course with no dates (SPEC §8.5); a quiz whose date
+/// no division claims is left out, since an exam needs a scope.
+pub(crate) fn quiz_candidates(conn: &Connection, today: NaiveDate, now_secs: i64) -> Result<Vec<QuizCandidate>> {
+    let until = today.checked_add_days(Days::new(QUIZ_LEAD_DAYS)).unwrap_or(today);
+    let mut stmt = conn.prepare(
+        "SELECT id, class_id, title, substr(due_at, 1, 10) FROM deadlines
+         WHERE status = 'open' AND kind IN ('quiz', 'exam')
+           AND substr(due_at, 1, 10) BETWEEN ?1 AND ?2
+         ORDER BY due_at, id",
+    )?;
+    let rows = stmt
+        .query_map(params![today.to_string(), until.to_string()], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::new();
+    for (deadline_id, class_id, title, due) in rows {
+        if quiz_written(conn, class_id, deadline_id, now_secs)? {
+            continue;
+        }
+        let Some(position) = crate::units::current_position(conn, class_id, &due)? else {
+            continue;
+        };
+        out.push(QuizCandidate {
+            class_id,
+            deadline_id,
+            title,
+            unit_id: position.unit.id,
+            unit_name: position.unit.name,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether a practice exam for the deadline is written, in flight, or
+/// failed within `FAILED_REST` — read off the practice jobs' payloads.
+fn quiz_written(conn: &Connection, class_id: i64, deadline_id: i64, now: i64) -> Result<bool> {
+    let latest: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT status, finished_at FROM jobs
+             WHERE kind = 'practice' AND class_id = ?1
+               AND json_valid(payload) AND json_extract(payload, '$.deadlineId') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![class_id, deadline_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match latest {
+        None => false,
+        Some((status, finished_at)) => match status.as_str() {
+            "succeeded" | "queued" | "running" => true,
+            "failed" => finished_at.is_some_and(|at| at > now - FAILED_REST),
+            _ => false,
+        },
+    })
 }
 
 /// A division whose guide the shift would build: it has sources, its guide
@@ -1642,11 +1815,11 @@ fn next_meeting(conn: &Connection, now: NaiveDateTime) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capped, digest_candidates, finish_run, fresh_steps, guide_candidates, in_window,
+        capped, digest_candidates, due_on, finish_run, fresh_steps, guide_candidates, in_window,
         insert_run, last_closed_night, meeting_end, meter, next_meeting, night_key,
-        parse_idle, should_start, startup_recovery, step_outcome, validate_shift_setting,
-        Conditions, BRIEFS, DISTILL, EXTRACT, FILE, NOTES, PREREADS, REBUILD, RECORDINGS,
-        STEPS, SYNC, WORKBOOK,
+        parse_idle, quiz_candidates, reminder_fires, should_start, startup_recovery,
+        step_outcome, validate_shift_setting, Conditions, BRIEFS, DISTILL, EXTRACT, FILE,
+        NOTES, PREREADS, QUIZZES, REBUILD, RECORDINGS, STEPS, SYNC, WORKBOOK,
     };
     use crate::db::{memory_db, set_setting};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -1709,11 +1882,109 @@ mod tests {
         assert_eq!(STEPS[EXTRACT], "Extract");
         assert_eq!(STEPS[DISTILL], "Distill");
         assert_eq!(STEPS[REBUILD], "Rebuild guides");
+        assert_eq!(STEPS[QUIZZES], "Quizzes");
         assert_eq!(STEPS[BRIEFS], "Briefs");
         assert_eq!(STEPS[WORKBOOK], "Workbook");
         assert_eq!(STEPS[PREREADS], "Pre-reads");
         assert_eq!(STEPS[NOTES], "Notes");
         assert_eq!(fresh_steps().len(), STEPS.len());
+    }
+
+    /// The quiz list (SPEC §8.3): an open quiz or exam due within two days,
+    /// for the division its date sits in — dated, or off the filed lectures
+    /// — once per deadline; a done one, a homework, one further out, one
+    /// already written for, and one no division claims are left out.
+    #[test]
+    fn the_quiz_list_is_the_quizzes_due_within_two_days_each_once() {
+        let conn = memory_db();
+        set_setting(&conn, "aibhs_root", "/nonexistent/classhub-shift-quiz").unwrap();
+        let week3 = week_unit(&conn, 3, 3, "Week 3 — Data", Some("2026-09-03"));
+        let week4 = week_unit(&conn, 3, 4, "Week 4 — Probability", Some("2026-09-10"));
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, first_week, last_week, source)
+             VALUES (4, 1, 'part', 'Part I', 1, 1, 8, 'syllabus')",
+            [],
+        )
+        .unwrap();
+        let part: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO lecture_contributions (class_id, unit_id, rel_path, start_ms, end_ms,
+                start_line, end_line, corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (4, ?1, 'Weeks/Week 02/2026-09-01 — Lecture.md', 0, 1, 1, 2, 'note', '', 'high', 'applied', 1)",
+            [part],
+        )
+        .unwrap();
+        for (id, class_id, title, kind, due, status) in [
+            (1, 3, "Quiz 2", "quiz", "2026-09-11", "open"),
+            (2, 3, "Quiz 3", "quiz", "2026-09-12", "open"),
+            (3, 3, "Quiz 1", "quiz", "2026-09-05", "done"),
+            (4, 3, "Homework 1", "assignment", "2026-09-10", "open"),
+            (5, 4, "Midterm", "exam", "2026-09-10T11:45", "open"),
+            (6, 3, "Quiz 4", "quiz", "2026-09-09", "open"),
+            (7, 1, "Quiz A", "quiz", "2026-09-10", "open"),
+        ] {
+            conn.execute(
+                "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'manual')",
+                params![id, class_id, title, kind, due, status],
+            )
+            .unwrap();
+        }
+        // Quiz 4's exam is already written; Quiz 2's failed last night.
+        for (deadline_id, status, finished_at) in [(6, "succeeded", 900_000), (1, "failed", 999_000)] {
+            conn.execute(
+                "INSERT INTO jobs (kind, class_id, scope, status, created_at, finished_at, owner_pid, payload)
+                 VALUES ('practice', 3, 'unit:8', ?1, 1, ?2, 1, ?3)",
+                params![status, finished_at, format!(r#"{{"relPath":"x","deadlineId":{deadline_id}}}"#)],
+            )
+            .unwrap();
+        }
+        let today = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+        let listed: Vec<(i64, i64)> = quiz_candidates(&conn, today, 1_000_000)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.deadline_id, c.unit_id))
+            .collect();
+        // The midterm on Sept 10 sits in Part I by the Sept 1 lecture; Quiz 3
+        // on the 12th is past the lead; Quiz A's class declares nothing.
+        assert_eq!(listed, vec![(5, part)]);
+        // Quiz 2's failure ages past the rest: listed, in Week 4 by its date.
+        let listed: Vec<(i64, i64)> = quiz_candidates(&conn, today, 999_000 + 4 * 24 * 3_600)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.deadline_id, c.unit_id))
+            .collect();
+        assert_eq!(listed, vec![(5, part), (1, week4)]);
+        let _ = week3;
+    }
+
+    /// The morning's notification (SPEC §12): once the set time has passed
+    /// and not yet today; the lines name what is due on the day.
+    #[test]
+    fn the_due_tomorrow_reminder_fires_once_a_day_after_its_time() {
+        let nine = t("09:00");
+        assert!(!reminder_fires(at("2026-09-09 08:59"), nine, None));
+        assert!(reminder_fires(at("2026-09-09 09:00"), nine, None));
+        assert!(reminder_fires(at("2026-09-09 14:00"), nine, Some("2026-09-08")));
+        assert!(!reminder_fires(at("2026-09-09 14:00"), nine, Some("2026-09-09")));
+        let conn = memory_db();
+        conn.execute(
+            "INSERT INTO deadlines (class_id, title, kind, due_at, status, source) VALUES
+             (3, 'Homework 1', 'assignment', '2026-09-10T23:59', 'open', 'manual'),
+             (1, 'Quiz 1', 'quiz', '2026-09-10', 'open', 'manual'),
+             (1, 'Done already', 'quiz', '2026-09-10', 'done', 'manual'),
+             (2, 'Later', 'quiz', '2026-09-11', 'open', 'manual')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            due_on(&conn, "2026-09-10").unwrap(),
+            vec![
+                "Homework 1 · Biostatistics for AI".to_string(),
+                "Quiz 1 · Fundamentals of AI in Medicine I".to_string()
+            ]
+        );
+        assert!(due_on(&conn, "2026-09-12").unwrap().is_empty());
     }
 
     /// A step's line, cap and failures included.

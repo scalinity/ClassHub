@@ -1149,6 +1149,69 @@ pub fn current_unit(conn: &Connection, class_id: i64, today: &str) -> Result<Opt
         .map(|(_, unit)| unit))
 }
 
+/// Where a course is today (SPEC §8.5), read one of two ways: from its
+/// published dates, or — for a course that publishes none — from the week
+/// its latest lecture was filed into on or before today.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Position {
+    pub unit: UnitInfo,
+    /// The week, where the reading is a filed lecture's: the Part is the
+    /// unit and this is the week inside it. `None` for a dated course, whose
+    /// unit already names its week.
+    pub week: Option<i64>,
+}
+
+/// The dated reading first (`current_unit`); for a course with no dated
+/// division, the latest week a lecture was filed into on or before `today`,
+/// read from `lecture_contributions` and the week folders — never from
+/// arithmetic — and the division that week feeds. `None` before the first
+/// filing, and `None` throughout for a course with neither.
+pub fn current_position(conn: &Connection, class_id: i64, today: &str) -> Result<Option<Position>> {
+    if let Some(unit) = current_unit(conn, class_id, today)? {
+        return Ok(Some(Position { unit, week: None }));
+    }
+    let Some(target) = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok() else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(
+        "SELECT rel_path, unit_id FROM lecture_contributions
+         WHERE class_id = ?1 AND status = 'applied'",
+    )?;
+    let filed = stmt
+        .query_map([class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some((week, unit_id)) = latest_filed_week(&filed, target) else {
+        return Ok(None);
+    };
+    let unit = conn
+        .query_row(
+            &format!("SELECT {UNIT_COLUMNS} FROM units WHERE id = ?1 AND class_id = ?2"),
+            params![unit_id, class_id],
+            read_unit,
+        )
+        .optional()?;
+    Ok(unit.map(|unit| Position { unit, week: Some(week) }))
+}
+
+/// The week of the latest lecture filed on or before `today`, with the
+/// division it feeds: the session date is what the file name opens with
+/// (SPEC §7.1), the week what the folder says. Two lectures on one day go
+/// to the later week; a file named without a date, or filed outside a week
+/// folder, says nothing.
+pub(crate) fn latest_filed_week(filed: &[(String, i64)], today: NaiveDate) -> Option<(i64, i64)> {
+    filed
+        .iter()
+        .filter_map(|(rel_path, unit_id)| {
+            let week = week_from_rel_path(rel_path)?;
+            let name = rel_path.rsplit('/').next()?;
+            let date = NaiveDate::parse_from_str(name.get(..10)?, "%Y-%m-%d").ok()?;
+            (date <= today).then_some((date, week, *unit_id))
+        })
+        .max_by_key(|(date, week, _)| (*date, *week))
+        .map(|(_, week, unit_id)| (week, unit_id))
+}
+
 /// `Part I: … (Weeks 1-8)` → `Some((1, 8))`.
 ///
 /// How a range written into a name is read — into `first_week`/`last_week`
@@ -2244,6 +2307,66 @@ mod tests {
         assert_eq!(week.ordinal, 2);
         // A class with no divisions at all has no answer either.
         assert_eq!(now(2, "2026-09-02"), None);
+    }
+
+    /// A course that publishes no dates reads its week off its filed lectures
+    /// (SPEC §8.5): the latest one on or before today, none before the first
+    /// filing, and the dated reading still wins where a course has dates.
+    #[test]
+    fn an_undated_course_reads_its_week_off_its_filed_lectures() {
+        let conn = db();
+        for (ordinal, name) in [
+            (1, "Part I: Deep Learning to Large Language Models (Weeks 1-8)"),
+            (2, "Part II: Reinforcement Learning and Alignment (Weeks 9-12)"),
+        ] {
+            write(&conn, 4, &unit(ordinal, "part", name, None));
+        }
+        let part = |n: i64| -> i64 {
+            conn.query_row("SELECT id FROM units WHERE class_id = 4 AND ordinal = ?1", [n], |r| r.get(0))
+                .expect("the part")
+        };
+        assert!(current_position(&conn, 4, "2026-09-09").expect("resolve").is_none(), "nothing filed");
+        for (rel, unit_id) in [
+            ("Weeks/Week 01/2026-08-25 — Lecture.md", part(1)),
+            ("Weeks/Week 02/2026-09-01 — Lecture.md", part(1)),
+            ("Weeks/Week 09/2026-10-20 — Lecture.md", part(2)),
+            // Loose under Weeks/, and named without a date: neither reads.
+            ("Weeks/2026-09-15 — Guest.md", part(1)),
+            ("Weeks/Week 03/Lecture notes.md", part(1)),
+        ] {
+            conn.execute(
+                "INSERT INTO lecture_contributions (class_id, unit_id, rel_path, start_ms, end_ms,
+                    start_line, end_line, corpus_rel_path, summary, confidence, status, created_at)
+                 VALUES (4, ?1, ?2, 0, 1, 1, 2, ?2, '', 'high', 'applied', 1)",
+                params![unit_id, rel],
+            )
+            .expect("contribution");
+        }
+        let at = |today: &str| {
+            current_position(&conn, 4, today)
+                .expect("resolve")
+                .map(|p| (p.unit.ordinal, p.week))
+        };
+        assert_eq!(at("2026-08-24"), None, "before the first filing");
+        assert_eq!(at("2026-08-25"), Some((1, Some(1))));
+        assert_eq!(at("2026-09-09"), Some((1, Some(2))), "the Sept 1 lecture is the latest");
+        assert_eq!(at("2026-10-20"), Some((2, Some(9))), "into the next Part");
+        assert_eq!(at("today"), None);
+        // The dated reading wins where a course has dates, and carries no week.
+        write(&conn, 1, &unit(2, "week", "Week 2 \u{2014} Ethics", Some("2026-09-01")));
+        let dated = current_position(&conn, 1, "2026-09-09").expect("resolve").expect("dated");
+        assert_eq!((dated.unit.ordinal, dated.week), (2, None));
+        // Two lectures on one day: the later week.
+        assert_eq!(
+            latest_filed_week(
+                &[
+                    ("Weeks/Week 03/2026-09-08 — Lecture.md".to_string(), 1),
+                    ("Weeks/Week 04/2026-09-08 — Lecture (2).md".to_string(), 1),
+                ],
+                NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+            ),
+            Some((4, 1))
+        );
     }
 
     /// Two rows can share an ordinal — the scan numbers a row by its position

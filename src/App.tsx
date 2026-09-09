@@ -10,6 +10,8 @@ import { AuthWarning, JobCenter } from "@/components/JobCenter";
 import { NoticeToast } from "@/components/NoticeToast";
 import { SectionHeading } from "@/components/SectionHeading";
 import { SettingsScreen } from "@/components/Settings";
+import { TenCards } from "@/components/TenCards";
+import { Today } from "@/components/Today";
 import { WeekSchedule } from "@/components/WeekSchedule";
 import {
   daysSinceSync,
@@ -28,7 +30,8 @@ function Dashboard({
   onOpen,
   onSettings,
 }: {
-  onOpen: (cls: ClassInfo) => void;
+  /** Opens a workspace, and a document in it when Today names one. */
+  onOpen: (cls: ClassInfo, scope?: string) => void;
   onSettings: () => void;
 }) {
   const { data: classes, error } = useQuery(classesQuery());
@@ -71,6 +74,9 @@ function Dashboard({
         </p>
       ) : (
         <>
+          {/* The day's docket under its date (SPEC §12), then the cards. */}
+          <Today onOpen={onOpen} />
+          <TenCards />
           {classes !== undefined && <WeekSchedule classes={classes} />}
           <DeadlineStrip />
           <section className="mt-12" aria-label="Classes">
@@ -122,6 +128,8 @@ type View = "dashboard" | "settings" | ClassInfo;
 
 export default function App() {
   const [view, setViewState] = useState<View>("dashboard");
+  // A document Today asked the workspace to open with — a pre-read's scope.
+  const [openScope, setOpenScope] = useState<string | null>(null);
   // Each view is its own page; carrying scroll depth between them opens the
   // next one mid-scroll.
   // Every view change goes through here, so the drop target rides along with
@@ -129,9 +137,10 @@ export default function App() {
   // derived state). Native file drops land in the open class's inbox
   // (SPEC §10); sorter.ts already carries the dashboard default for the
   // initial mount.
-  const setView = (next: View) => {
+  const setView = (next: View, scope?: string) => {
     window.scrollTo(0, 0);
     setDropTarget(typeof next === "object" ? next.id : null);
+    setOpenScope(scope ?? null);
     setViewState(next);
   };
 
@@ -148,7 +157,12 @@ export default function App() {
         ) : view === "settings" ? (
           <SettingsScreen onBack={() => setView("dashboard")} />
         ) : (
-          <ClassWorkspace info={view} onBack={() => setView("dashboard")} />
+          <ClassWorkspace
+            key={`${view.id}-${openScope ?? ""}`}
+            info={view}
+            initialScope={openScope}
+            onBack={() => setView("dashboard")}
+          />
         )}
         <JobCenter />
         <NoticeToast />

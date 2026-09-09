@@ -246,6 +246,13 @@ function UnitRow({
         {unit.ordinal}
       </span>
       <span className="min-w-0 flex-1 truncate text-body">{unit.name}</span>
+      {/* The weeks a Part spans (SPEC §8.5), as data on the row rather than
+          a suffix a rescan may drop from the name. */}
+      {unit.kind !== "week" && unit.firstWeek !== null && unit.lastWeek !== null && (
+        <span className={`shrink-0 ${meta}`}>
+          Weeks {unit.firstWeek}–{unit.lastWeek}
+        </span>
+      )}
       {/* The list marks where the course is; it does not scroll there. A
           still dot, because nothing is running — the pulse means a job. */}
       {current && (

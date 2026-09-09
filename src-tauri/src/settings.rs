@@ -4,7 +4,7 @@
 //! own settings (model, effort, key state) live in chat.rs — the chat sidebar
 //! is their home — and the shift's in shift.rs.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::json;
@@ -50,10 +50,22 @@ pub const JOB_KINDS: [(&str, &str); 13] = [
     ("announcement_scan", "Announcement scan"),
 ];
 
-/// The two notifications (SPEC §12), each a setting that defaults to on.
+/// The four notifications (SPEC §12), each a setting that defaults to on:
+/// the shift's summary, a failed job, the deadlines due tomorrow at a time
+/// of day, and a notice the announcement scan read a to-do out of.
 pub const NOTIFY_SHIFT_FINISHED: &str = "notify_shift_finished";
 pub const NOTIFY_JOB_FAILED: &str = "notify_job_failed";
-const NOTIFY_KEYS: [&str; 2] = [NOTIFY_SHIFT_FINISHED, NOTIFY_JOB_FAILED];
+pub const NOTIFY_DUE_TOMORROW: &str = "notify_due_tomorrow";
+pub const NOTIFY_ANNOUNCEMENT_ACTION: &str = "notify_announcement_action";
+const NOTIFY_KEYS: [&str; 4] = [
+    NOTIFY_SHIFT_FINISHED,
+    NOTIFY_JOB_FAILED,
+    NOTIFY_DUE_TOMORROW,
+    NOTIFY_ANNOUNCEMENT_ACTION,
+];
+/// When the due-tomorrow notification is shown, `HH:MM` local.
+pub const NOTIFY_DUE_TIME: &str = "notify_due_time";
+const DEFAULT_NOTIFY_DUE_TIME: &str = "09:00";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +102,10 @@ pub struct AppSettings {
     pub shift: crate::shift::ShiftSettings,
     pub notify_shift_finished: bool,
     pub notify_job_failed: bool,
+    pub notify_due_tomorrow: bool,
+    pub notify_announcement_action: bool,
+    /// `HH:MM`, when the due-tomorrow notification is shown.
+    pub notify_due_time: String,
     /// Whether the app is registered as a login item (SPEC §12).
     pub login_item: bool,
     /// A dev build: the shift's "run in this build" toggle only means
@@ -125,6 +141,9 @@ pub fn get(app: &AppHandle) -> Result<AppSettings> {
             shift: crate::shift::settings(conn),
             notify_shift_finished: flag(conn, NOTIFY_SHIFT_FINISHED, true),
             notify_job_failed: flag(conn, NOTIFY_JOB_FAILED, true),
+            notify_due_tomorrow: flag(conn, NOTIFY_DUE_TOMORROW, true),
+            notify_announcement_action: flag(conn, NOTIFY_ANNOUNCEMENT_ACTION, true),
+            notify_due_time: notify_due_time(conn).format("%H:%M").to_string(),
             login_item,
             dev_build: cfg!(debug_assertions),
         })
@@ -345,12 +364,28 @@ pub fn set_job_kind_effort(app: &AppHandle, kind: &str, effort: Option<&str>) ->
     }
 }
 
-/// One of the two notifications, on or off (SPEC §12).
+/// One of the notifications, on or off (SPEC §12).
 pub fn set_notify(app: &AppHandle, key: &str, on: bool) -> Result<()> {
     if !NOTIFY_KEYS.contains(&key) {
         bail!("no notification setting called {key}");
     }
     set_audited(app, key, if on { "1" } else { "0" })
+}
+
+/// When the due-tomorrow notification is shown; an odd row reads as the
+/// default.
+pub(crate) fn notify_due_time(conn: &Connection) -> chrono::NaiveTime {
+    let stored = setting(conn, NOTIFY_DUE_TIME).ok().flatten();
+    stored
+        .as_deref()
+        .and_then(crate::shift::parse_clock)
+        .unwrap_or_else(|| crate::shift::parse_clock(DEFAULT_NOTIFY_DUE_TIME).expect("default"))
+}
+
+/// The time of day the due-tomorrow notification is shown, `HH:MM`.
+pub fn set_notify_due_time(app: &AppHandle, value: &str) -> Result<()> {
+    let time = crate::shift::parse_clock(value).context("a time like 09:00")?;
+    set_audited(app, NOTIFY_DUE_TIME, &time.format("%H:%M").to_string())
 }
 
 pub fn set_job_concurrency(app: &AppHandle, count: usize) -> Result<()> {

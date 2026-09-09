@@ -11,6 +11,7 @@ import {
   formatPercent,
   formatScore,
   listGrades,
+  projectionLine,
   saveGradeCategory,
   saveGradeItem,
   type GradeCategory,
@@ -81,6 +82,12 @@ export function GradesSection({ classId }: { classId: number }) {
           <p className={errorLine}>The grades didn't load: {String(error)}</p>
         )}
         {actionError && <p className={errorLine}>{actionError}</p>}
+        {/* Where the grade could land (SPEC §11), once a score exists. */}
+        {data?.projection && (
+          <p className="mt-3 max-w-xl text-body text-muted-foreground">
+            {projectionLine(data.projection)}
+          </p>
+        )}
         {showWeightWarning && (
           <p className="mt-3 text-body text-class-amber">
             Weights sum to {formatPercent(weightTotal)},{" "}

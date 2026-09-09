@@ -29,6 +29,7 @@ import {
   setJobKindModel,
   setJobModel,
   setLoginItem,
+  setNotifyDueTime,
   setNotifySetting,
   setShiftSetting,
   type AppSettings,
@@ -508,7 +509,7 @@ function ShiftSection({
   );
 }
 
-/** SPEC §12 — the login item and the two notifications. */
+/** SPEC §12 — the login item and the four notifications. */
 function AlwaysThereSection({
   settings,
   pending,
@@ -553,6 +554,29 @@ function AlwaysThereSection({
           on={settings.notifyJobFailed}
           disabled={pending}
           onChange={(on) => notify("notify_job_failed", on)}
+        />
+        <Switch
+          label="Notify what is due tomorrow"
+          note="Once a day at the time below, from the build that runs the shift — nothing on a day with nothing due."
+          on={settings.notifyDueTomorrow}
+          disabled={pending}
+          onChange={(on) => notify("notify_due_tomorrow", on)}
+        />
+        <div key={settings.notifyDueTime} className="pl-2">
+          <ValueField
+            label="Say it at"
+            type="time"
+            current={settings.notifyDueTime}
+            pending={pending}
+            onApply={(v) => apply(setNotifyDueTime(v))}
+          />
+        </div>
+        <Switch
+          label="Notify when a notice asks for something"
+          note="A Canvas announcement the scan read a to-do out of, the moment it is read."
+          on={settings.notifyAnnouncementAction}
+          disabled={pending}
+          onChange={(on) => notify("notify_announcement_action", on)}
         />
       </div>
     </Section>

@@ -517,6 +517,26 @@ lecture_hints(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
               kind TEXT,                    -- emphasis|exam_hint|correction|confusion|action|thread
               text TEXT, anchor TEXT NULL, created_at INTEGER);
 
+-- A practice exam's self-score (§8.3), as its panel posts it: one row per
+-- question, replaced when the exam is scored again. `scope` is the
+-- division, folder or semester the exam was written for, read off its job
+-- when the score lands, so the next exam of that scope finds the topics
+-- this one missed.
+practice_results(id INTEGER PK, guide_id INTEGER FK,  -- guides(id), cascading
+                 scope TEXT NULL, question TEXT,       -- the panel's label, `Q01`
+                 topic TEXT, correct INTEGER, recorded_at INTEGER);
+
+-- The cards every guide and digest writes beside itself (§8.1, §8.4),
+-- indexed on read (§12): upserted on (class, scope, front) so a card keeps
+-- its box and due date across a rewrite, dropped with a sidecar that is
+-- gone. Three boxes; a card answered wrong carries `wrong_at` until it is
+-- answered right, and its topic counts among the class's weak topics.
+cards(id INTEGER PK, class_id INTEGER FK, scope TEXT, front TEXT, back TEXT,
+      source TEXT NULL, topic TEXT NULL, box INTEGER,
+      due_on TEXT NULL,                    -- YYYY-MM-DD; NULL until first shown
+      wrong_at INTEGER NULL,
+      UNIQUE(class_id, scope, front));
+
 -- `canvas_assignment_id` is the join between a deadline, a score and the thing
 -- on Canvas (§7.2): set by approval of a Canvas card, or on first contact for a
 -- row the syllabus put here on the same title and day. Unique per class where
@@ -754,7 +774,10 @@ claude -p <prompt>
   guide is stale or absent and whose meeting has passed — the class's first meeting on or
   after a dated division's start, this calendar week's for an undated Part — oldest
   meeting first, up to `shift_guides_per_night`; never the master, never a folder guide.
-  Then the small documents (§8.6), four steps: write a brief for each open assignment or
+  Then a practice exam for each open quiz or exam due within two days (§8.3), for the
+  division its date sits in and focused on what that scope's last self-score missed,
+  once per deadline — the job's payload names the deadline, and a quiz is at most one a
+  week a class, so the step carries no cap. Then the small documents (§8.6), four steps: write a brief for each open assignment or
   project item due within five days with no brief or a stale one, soonest first, up to
   `shift_briefs_per_night`; refresh the workbook of one class whose project has an item
   due within seven days and whose workbook is stale or absent; write a pre-read per course
@@ -778,8 +801,14 @@ claude -p <prompt>
   night as well as the insert's check. A run whose process is gone is settled at launch
   as a job's is, and quitting mid-run settles it on the way out. The meter beside it counts
   this week's digests, guides, exams and small documents and their minutes from the `jobs`
-  table, never dollars. Two notifications, each a setting: `Shift finished` with the
-  summary, and `A job failed` naming the kind and scope of any failed job.
+  table, never dollars. Four notifications, each a setting: `Shift finished` with the
+  summary, `A job failed` naming the kind and scope of any failed job, `Due tomorrow`
+  naming the open deadlines due the next day — once a day at a time of day that is a
+  setting (nine in the morning by default), on the scheduler's minute tick and from the
+  build that runs shifts, so two builds on one database never both say it, the day
+  stamped whether or not anything was due — and a notice that asks for something, the
+  moment the announcement scan reads a to-do out of it (§7.2), naming the class and the
+  notice.
 - **Streaming**: parse stream-json lines into typed events (init, assistant text deltas, tool
   use, result). Persist raw lines to `log_path`; forward condensed progress events to the
   frontend via Tauri events (`job://{id}/progress`).
@@ -1360,8 +1389,8 @@ shows the course's word (`Module 3`, `Week 7`), never "unit". Prompt contract:
   ink beside the `★ EXAM` tag — new is information, not emphasis; a first write carries
   none. And a required second output, the cards file at `.classhub/cards/<guide file
   stem>.json`: `[{front, back, source, topic}]`, one card per self-test question and per
-  glossary term, `source` the citation the entry carries. Nothing reads the cards until
-  M37; the finalizer requires the file and checks it parses, so the shape holds.
+  glossary term, `source` the citation the entry carries. The finalizer requires the file
+  and checks it parses; the cards index reads it (§12).
 - Required sections (the "guide anatomy"):
   1. **Key concepts** — dense high-yield summaries, exam-oriented
   2. **Diagrams** — inline SVG concept maps / flowcharts / comparison tables
@@ -1412,19 +1441,32 @@ and the button that writes — carrying the same `focus` the chat tool passes. T
 receives the scope's `{hints}` (§8.4) and an `{assessment}` block: the class's categories
 with their weights (§11), the next open deadline of kind `quiz` or `exam` with its date, and
 the kinds of assessment the calendar holds — and its rubric matches them, its cover naming
-the assessment it rehearses for, rather than a volume guessed from the material. Two lines
-settled for M37: every question block carries a `data-topic` naming the concept it tests,
-and the self-scoring panel, once totalled, posts `{exam, results: [{question, topic,
-correct}]}` to `window.parent`, which a sandboxed frame may; nothing receives it yet, and
-the listener that comes matches `event.source` against the frame it framed — an
-opaque-origin frame's `event.origin` reads `null` and proves nothing — and treats the
-payload as model output.
+the assessment it rehearses for, rather than a volume guessed from the material. Every
+question block carries a `data-topic` naming the concept it tests, and the self-scoring
+panel, once totalled, posts `{exam, results: [{question, topic, correct}]}` to
+`window.parent`, which a sandboxed frame may.
 Output: `Study Guides/Practice/<scope> — <date>.html`, exam-style questions with hidden
 answers + scoring rubric; the row shows `Writing the exam…` while it is written, and the
 exam appears in the workspace's Practice exams listing when the job succeeds, with a
 `guides` row scoped `practice:<rel path>` whose manifest is §7 step 5's, so it reads stale
 like everything else once its sources change; the listing merges the rows with the files
 that predate them, which carry no freshness.
+
+**The exam remembers its score.** An exam with a row opens in the guide viewer, whose
+frame the self-score listener matches: a message is taken only from the frame the viewer
+framed, by `event.source` — an opaque-origin frame's `event.origin` reads `null` and proves
+nothing — and only for the exam it opened, and the payload goes to the backend as model
+output, refused by name unless it is the settled shape with a question and a topic on every
+answer, capped at two hundred, and naming this exam's file where it names one. The rows
+replace the exam's earlier ones in `practice_results` (§5), each carrying the scope the
+exam was written for, read off the practice job whose payload names the file. The viewer
+says `Scored 12 of 19 · recorded`; the Practice exams row shows the score and the topics
+missed. When the `Focus on…` field is left empty, the exam's focus defaults to the topics
+its scope's last self-score missed, then the topics of the class's cards answered wrong
+(§12), and the job's payload records the focus the prompt was given, so what an exam was
+pointed at is readable with no run; nothing recorded leaves the prompt its own "cover the
+whole scope evenly". The shift writes one exam two days before each open quiz or exam
+(§6), for the division the quiz's date sits in.
 
 ### 8.4 Session documents (`lecture_digest` job)
 
@@ -1523,11 +1565,17 @@ one called a week. Two starting on one day go to the week over a coarser divisio
 inside, then to the later ordinal. One query answers for every reader: the class card, the
 workspace band, the Structure list (a `now` mark on the row, matched by id; the list marks it
 and does not scroll to it) and the chat overview's `Now:` line — and the query is keyed by the
-day, so a dashboard left open across midnight asks again. A course that published no dates has
-no current division and the app shows nothing, because the only alternative is a week from
-arithmetic; Applied Generative AI, whose Parts name week ranges and no days, is that course
-today. Nothing published says when a course ends — no scan has ever filled `ends_on` — so past
-its last dated division the last one stays current.
+day, so a dashboard left open across midnight asks again. A course that published no dates
+reads its week off its filed lectures instead, since the only other answer is a week from
+arithmetic: the latest week a lecture was filed into on or before today, read from
+`lecture_contributions` and the week folders — the session date the file name opens with, the
+week the folder says, two lectures on one day going to the later week — and the division that
+week feeds; nothing before the first filing, and nothing for a course with neither. Applied
+Generative AI, whose Parts name week ranges and no days, is that course: every reader carries
+the week beside the division (`Part I · Week 2` on the card and the band, `1–8 · wk 2` on the
+semester strip, `now, week 2` on the Structure row's mark), and the chat overview's line says
+it was read from the latest filed lecture. Nothing published says when a course ends — no
+scan has ever filled `ends_on` — so past its last dated division the last one stays current.
 
 This is worth stating because the obvious alternative is wrong here. Asking the digest to
 segment a lecture across units would buy nothing — no division is finer than a meeting, so
@@ -1893,6 +1941,16 @@ alike. The shift reviews the oldest unreviewed such note, one a night.
   syllabus writes nothing and leaves no row. Whether the weights add up is the section's own
   ≠100% warning's job, and chat's weights line reports the same sum.
 
+  **The projection.** Once a class holds a graded item, one line under the Grades heading
+  says where the grade could land: the current weighted grade with its letter, how many
+  percentage points of the grade are still open — the categories nothing is graded in, and
+  the weight nobody has assigned, read against the weights' sum where it is over 100 —
+  the floor and the ceiling (`could land 61–91%`: everything open scoring zero, or full
+  marks), and what the open share has to average for the next letter up, `out of reach`
+  past full marks; the card's grade chip carries the range. The letter scale is the one the
+  syllabi share (A 93, A− 90, B+ 87, B 83, B− 80, C+ 77, C 73, C− 70, D 60, E below). With
+  no item, nothing; with nothing open, the line says so.
+
 ## 12. UI specification & design language
 
 **Any milestone session that touches UI MUST first read the frontend-design skill**
@@ -1925,24 +1983,55 @@ and apply it. Non-negotiable per project owner.
   course code) in the class ink, the next meeting and its distance (`Thu 11:45 am–1:40 pm ·
   in 6 days`, or an `In session` chip), the current division (§8.5) in the course's own words
   as the card's headline — `Week 3` in meta over the topic in the headline role, wrapping to
-  two lines, a `No Class` week exactly as the syllabus wrote it, and nothing for a course
-  with no current division — the nearest open deadline as one sentence (`Homework 1 due Mon,
-  Sep 7 at 11:59 pm`, `Quiz 1 overdue since Sep 3`), and a bottom row of chips: the current
-  grade, `N proposed deadlines`, `N to sort`, `N guides stale` in amber. Instructors, room
-  and credits live on the workspace band, not the card.
+  two lines, a `No Class` week exactly as the syllabus wrote it, and for a course reading its
+  week off its lectures the week beside the division in the meta line (`Part I · Week 2`) —
+  the nearest open deadline as one sentence (`Homework 1 due Mon, Sep 7 at 11:59 pm`, `Quiz 1
+  overdue since Sep 3`), and a bottom row of chips: the current grade with the range it could
+  land in (`Grade 90% · 45–95%`, §11), `N proposed deadlines`, `N to sort`, `N guides stale`
+  in amber. Instructors, room and credits live on the workspace band, not the card.
 - **Views**: Dashboard (a small wordmark; the day as the headline — `Friday, September 4` —
   with the semester and the Canvas sync's age as meta beside the settings icon: `Canvas
   synced yesterday`, `synced 6 days ago`, `never synced`, `syncing…`, in the destructive
-  colour from seven days and opening Settings where the sync lives; the This week schedule
-  grid with the next class beside its heading; Due in the next 7 days as class-washed chips,
-  each a button with a ring at its edge that fills with a check when clicked, the title struck
-  and `done` in place of the due day, clickable back to open (§11); the four class cards)
+  colour from seven days and opening Settings where the sync lives; **Today**, the day's
+  docket under its date, from the tables and zero tokens — each line's kind as a label in the
+  margin, the lines separated by hairlines, absent lines absent: each meeting today as its
+  time, the class in its ink opening the workspace, its division with the week where the
+  reading is a lecture's, and `Before class` where a pre-read exists for it; `Due`, what is
+  due within three days as the strip's own chips; `Overnight` (`Last shift` once a day has
+  passed), what the last shift did in its summary's words with an `Undo` on each batch it
+  wrote that nothing has reversed — the files the sync filed, a note the review appended to
+  — read off the audit rows of the run's window; `Notices`, the announcements posted since
+  the app was last opened, each with its class, title and posting time and its to-dos with
+  the ring the workspace's section uses, the previous open being the stamp before this one
+  (a launch and every focus of the window stamp it, a focus within half an hour of the last
+  counting as the same open); and `Waiting`, every decision nothing has made — files to
+  sort, proposed deadlines with a series as one line, recordings found on Zoom and not
+  captured or whose capture failed, a meeting of the past week with no transcript filed and
+  no recording waiting for it, and a Canvas sign-in the shift cannot sync without. When
+  nothing is on the docket, one sentence and `Sync Canvas`. Then **Ten cards**: the ten
+  cards due soonest across the classes, one at a time on a card in its class's wash — the
+  class and the document it came from in meta, the front in the reading role, `Show the
+  back`, then the back with its citation and `Right` / `Wrong` — the count (`3 of 10`)
+  counting the day's answers, the day's ten holding still while they are worked through,
+  `No cards due today` or `Done for today · 7 right, 3 wrong` when the face is empty; the
+  This week schedule grid with the next class beside its heading; Due in the next 7 days as
+  class-washed chips, each a button with a ring at its edge that fills with a check when
+  clicked, the title struck and `done` in place of the due day, clickable back to open
+  (§11); the four class cards)
   · Class Workspace (a full-width band in the class wash holding the back link, the class
-  name in the display role, the current division in the headline role and one meta row —
-  meeting, room, credits, instructors — then a sticky row of section links in the page's own
-  order, Semester master · Inbox · Notices · Structure · Deadlines · Project · Grades ·
-  Materials · Lectures · Flagged · Practice exams · Notes, each present only while its section has
-  content, read off the query the section renders; the sections follow in that order, each
+  name in the display role, the current division in the headline role — with the week
+  beside it where the reading is a lecture's — and one meta row — meeting, room, credits,
+  instructors — then a sticky row of section links in the page's own order, Semester master
+  · Inbox · Notices · Structure · Deadlines · Project · Grades · Materials · Lectures ·
+  Flagged · Cards · Practice exams · Notes, each present only while its section has content,
+  read off the query the section renders; under the links the **semester strip**: each
+  division as a segment in the course's own order, labelled by its number or a Part's week
+  range, two lines a segment — the top the lectures, ink when a transcript is filed and the
+  class colour once one is distilled; the bottom the guide, the colour when fresh and amber
+  dashed when stale, the form carrying it on the class whose colour is amber — a ring above
+  the number for a quiz or exam whose day the division's span holds, today's segment in the
+  class ink with `· wk 2` where the week is read off the lectures, the words in each
+  segment's title and a legend beneath; the sections follow in that order, each
   a headline with its count in meta and its text actions on the right, rows separated by
   hairlines because they are a list, every row's actions visible at low emphasis — the muted
   text and icon controls, never revealed on hover — and decisions — proposals, forms — as
@@ -1969,10 +2058,21 @@ and apply it. Non-negotiable per project owner.
   10` with the division it precedes and `Write the pre-read`, `Writing the pre-read…`, or
   `Read` with `Rewrite` when the folder changed; a note's row offers `Against the room` while
   the note is dated for a distilled session and carries no such section, `Reading against the
-  room…` while it is read, and a quiet `against the room` once it has been; the `Flagged` section lists what the professor flagged
+  room…` while it is read, and a quiet `against the room` once it has been; a session's row
+  carries what the session was about in the digest's own words where its name does not
+  already say it; the `Structure` row shows a Part's week range (`Weeks 1–8`) as meta beside
+  its name; the `Flagged` section lists what the professor flagged
   (§8.4) newest session first under the session's title and date, each item its kind as a
   chip, its text, and its `HH:MM` as a mono link that opens the transcript at that heading,
-  absent until a session has been distilled for it)
+  absent until a session has been distilled for it; the `Cards` section, present once a
+  guide or a distilled lecture has written cards, lists one row per document with its
+  count and offers `Export for Anki`, which writes `Study Guides/Cards/<class>.tsv` — front,
+  back, tags (ClassHub, the class, the document), opening with Anki's own header lines
+  (`#separator:tab`, `#html:true`, `#tags column:3`) so the import needs no dialog settings,
+  a field holding a tab, a line break or a quote quoted with its quotes doubled — says where
+  it landed and offers `Show in Finder`; the owner imports it once and again as it grows,
+  Anki deduplicating on the front; the `Practice exams` row shows an exam's last self-score
+  and the topics it missed (§8.3), and an exam with a row opens in the guide viewer)
   · Guide viewer (sandboxed iframe rendering the HTML file + Open in browser / Show in Finder;
   its eyebrow names the document's family — Study guide, Session, Practice exam, Homework
   brief, Project workbook, Pre-read, Presentation kit)
@@ -1989,10 +2089,11 @@ and apply it. Non-negotiable per project owner.
   dollars), the current or last run's title and summary, its plan as a numbered list with
   each step's mark and outcome, tonight in one line — when it runs, or why it will not —
   and `Run the shift now` and `Pause tonight` (§6); then the recent actions and the jobs
-  with live logs) · Settings (the library, transcription, the synthesis pair and a row per
-  kind, `The idle shift` — on or off, the window, the idle threshold, the three caps, and in
-  a dev build whether that build runs shifts — `Always there` — the login item and the two
-  notifications — Canvas and chat).
+  with live logs, a finished job's row carrying its summary in its own words) · Settings
+  (the library, transcription, the synthesis pair and a row per kind, `The idle shift` — on
+  or off, the window, the idle threshold, the three caps, and in a dev build whether that
+  build runs shifts — `Always there` — the login item and the four notifications, with the
+  time of day the due-tomorrow one is shown — Canvas and chat).
   The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
   previews on the page it will be read on; generated guides keep their own design (§8.1).
 - **The window closes into the tray.** Closing the main window hides it — the shift's thread
@@ -2178,8 +2279,19 @@ and apply it. Non-negotiable per project owner.
   with material and no transcript, a past or undated week ruled out — with its listing,
   the shift's list and the supersede, the note-date convention, the section's append once
   and the review's targets and list (a brief mapped to the wrong weeks, a homework listed as
-  a milestone, a pre-read for last week and a section appended twice are each silent). UI
-  and job plumbing are exercised by running the app.
+  a milestone, a pre-read for last week and a section appended twice are each silent), the
+  undated course's week off its filed lectures (§8.5 — the latest on or before today, none
+  before the first filing, the dated reading still winning, two lectures on one day), the
+  exam panel's message in its settled shape and no other (§8.3 — a wrong shape recorded as
+  a score is silent), a score replacing an exam's rows and the scope's weak topics being
+  the latest score's, the default focus's words, the boxes' schedule and the TSV's escaping
+  (§12 — a card that never comes back, or a line Anki splits on a tab, is silent), the
+  index's upsert, drop and keep across a rewrite and a sidecar gone, the projection on a
+  worked example with the open share and the next letter (§11), the quiz list within its
+  lead and once per deadline, the reminder's once-a-day rule and its lines (§6), the open
+  stamps' rotation, a run's reversible rows grouped with the undone left out, and the past
+  week's meeting with no transcript (§12). UI and job plumbing are exercised by running the
+  app.
 
 ## 14. Milestones
 
@@ -2542,7 +2654,7 @@ Mark the checkbox when the acceptance criteria pass.
   pre-read exists for the week that qualifies, a fixture note gains its section once and undoes,
   and the shift's plan lists the four steps with their caps.
 
-- [ ] **M37 — Today.** (`milestones/M37-today.md`)
+- [x] **M37 — Today.** (`milestones/M37-today.md`)
   The app says what it knows: a `Today` block on the dashboard from the tables — meetings,
   what is due, what the shift did with its `Undo`, announcements since the last open, and every
   decision waiting — with two more notifications; a semester strip per class with Applied's

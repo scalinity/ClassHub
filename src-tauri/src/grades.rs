@@ -78,6 +78,109 @@ pub struct GradesInfo {
     pub weight_total: f64,
     /// SPEC §11 math — None until at least one item is recorded.
     pub current_grade: Option<f64>,
+    /// SPEC §11 — where the grade could land, once a score exists.
+    pub projection: Option<Projection>,
+}
+
+/// SPEC §11 — the projection: the current weighted grade, how much of the
+/// grade is still open, where the final grade could land, and what the open
+/// share has to average for the next letter up. None until a score exists.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Projection {
+    /// The current weighted grade over the graded categories, renormalized.
+    pub current: f64,
+    pub letter: String,
+    /// Percentage points of the final grade already banked.
+    pub earned: f64,
+    /// Percentage points still open: the categories nothing is graded in,
+    /// and the weight nobody has assigned.
+    pub open: f64,
+    /// The final grade if everything still open scored zero, and full marks.
+    pub floor: f64,
+    pub ceiling: f64,
+    /// The next letter up from the current one, and what the open share has
+    /// to average to reach it; none at the top, or with nothing open.
+    pub next_letter: Option<String>,
+    pub needed: Option<f64>,
+}
+
+/// The letter scale the syllabi share, highest first.
+const LETTERS: [(f64, &str); 9] = [
+    (93.0, "A"),
+    (90.0, "A\u{2212}"),
+    (87.0, "B+"),
+    (83.0, "B"),
+    (80.0, "B\u{2212}"),
+    (77.0, "C+"),
+    (73.0, "C"),
+    (70.0, "C\u{2212}"),
+    (60.0, "D"),
+];
+
+pub(crate) fn letter(percent: f64) -> &'static str {
+    LETTERS
+        .iter()
+        .find(|(floor, _)| percent >= *floor - 1e-9)
+        .map(|(_, letter)| *letter)
+        .unwrap_or("E")
+}
+
+/// The projection from each category's weight and its graded points. The
+/// weights are read against their sum where it is over 100 and against 100
+/// where it is under, so an unassigned share counts as open; a category
+/// counts as graded on the same terms as the weighted grade.
+pub(crate) fn project(categories: &[(f64, f64, f64)]) -> Option<Projection> {
+    let assigned: f64 = categories.iter().map(|(w, _, _)| w).filter(|w| **w > 0.0).sum();
+    let total = assigned.max(100.0);
+    let mut earned = 0.0;
+    let mut locked = 0.0;
+    for (weight, score, max) in categories {
+        if *weight > 0.0 && *max > 0.0 {
+            earned += weight * score / max;
+            locked += weight;
+        }
+    }
+    if locked <= 0.0 {
+        return None;
+    }
+    let earned = earned / total * 100.0;
+    let locked = locked / total * 100.0;
+    let current = earned / locked * 100.0;
+    let open = (100.0 - locked).max(0.0);
+    let next = LETTERS
+        .iter()
+        .rev()
+        .find(|(floor, _)| *floor > current + 1e-9);
+    let (next_letter, needed) = match next {
+        Some((floor, name)) if open > 0.0 => (Some(name.to_string()), Some((floor - earned) / open * 100.0)),
+        _ => (None, None),
+    };
+    Some(Projection {
+        current,
+        letter: letter(current).to_string(),
+        earned,
+        open,
+        floor: earned,
+        ceiling: earned + open,
+        next_letter,
+        needed,
+    })
+}
+
+/// SPEC §11: the class's projection, from its categories' rows.
+pub(crate) fn projection(conn: &Connection, class_id: i64) -> Result<Option<Projection>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.weight, COALESCE(SUM(i.score), 0), COALESCE(SUM(i.max_score), 0)
+         FROM grade_categories c LEFT JOIN grade_items i ON i.category_id = c.id
+         WHERE c.class_id = ?1 GROUP BY c.id",
+    )?;
+    let rows = stmt
+        .query_map([class_id], |row| {
+            Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(project(&rows))
 }
 
 pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
@@ -103,6 +206,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
     let mut categories = Vec::with_capacity(heads.len());
     let mut weight_total = 0.0;
     let mut grade = GradeAccumulator::default();
+    let mut points = Vec::with_capacity(heads.len());
     for (id, name, weight, canvas_group_id) in heads {
         let items = item_stmt
             .query_map([id], |row| {
@@ -121,6 +225,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
         let percent = (max_sum > 0.0).then(|| score_sum / max_sum * 100.0);
         // Derived from the rows already in hand rather than re-queried.
         grade.add(weight, score_sum, max_sum);
+        points.push((weight, score_sum, max_sum));
         weight_total += weight;
         categories.push(GradeCategory {
             id,
@@ -133,6 +238,7 @@ pub fn list_grades(conn: &Connection, class_id: i64) -> Result<GradesInfo> {
     }
     Ok(GradesInfo {
         current_grade: grade.percent(),
+        projection: project(&points),
         categories,
         weight_total,
     })
@@ -1174,6 +1280,49 @@ mod tests {
 
     fn count(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |row| row.get(0)).expect("count")
+    }
+
+    /// The projection on a worked example (SPEC §11): Homework 50% graded
+    /// at 90%, Quizzes 20% at 80%, Project 30% ungraded — the current grade
+    /// over the graded 70%, the open 30, the floor and the ceiling, and what
+    /// the project has to average for an A. No score, no projection; a set
+    /// of weights under 100 counts the unassigned share as open.
+    #[test]
+    fn the_projection_reads_the_open_share_and_the_next_letter_up() {
+        assert_eq!(project(&[(50.0, 0.0, 0.0), (30.0, 0.0, 0.0)]), None);
+        let p = project(&[(50.0, 45.0, 50.0), (20.0, 16.0, 20.0), (30.0, 0.0, 0.0)]).expect("a score exists");
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(p.current, 61.0 / 70.0 * 100.0), "{}", p.current);
+        assert_eq!(p.letter, "B+");
+        assert!(near(p.earned, 61.0));
+        assert!(near(p.open, 30.0));
+        assert!(near(p.floor, 61.0));
+        assert!(near(p.ceiling, 91.0));
+        assert_eq!(p.next_letter.as_deref(), Some("A\u{2212}"));
+        // (90 − 61) / 30 = 96.7% on the project for an A−.
+        assert!(near(p.needed.unwrap(), 29.0 / 30.0 * 100.0));
+
+        // Everything graded: nothing open, no next letter to reach.
+        let done = project(&[(100.0, 95.0, 100.0)]).unwrap();
+        assert!(near(done.open, 0.0));
+        assert_eq!((done.letter.as_str(), done.next_letter), ("A", None));
+        assert_eq!(done.needed, None);
+
+        // Weights summing to 80: the unassigned 20 is open too.
+        let under = project(&[(60.0, 60.0, 100.0), (20.0, 0.0, 0.0)]).unwrap();
+        assert!(near(under.earned, 36.0));
+        assert!(near(under.open, 40.0));
+        assert!(near(under.current, 60.0));
+        assert_eq!(under.letter, "D");
+
+        // Weights summing to 120 read against their sum.
+        let over = project(&[(60.0, 60.0, 60.0), (60.0, 0.0, 0.0)]).unwrap();
+        assert!(near(over.earned, 50.0));
+        assert!(near(over.open, 50.0));
+
+        assert_eq!(letter(93.0), "A");
+        assert_eq!(letter(92.99), "A\u{2212}");
+        assert_eq!(letter(59.9), "E");
     }
 
     /// The row and how it landed, for the tests that care about nothing else.

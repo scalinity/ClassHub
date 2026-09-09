@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 import { CLASS_ACCENTS, splitUnitName, type ClassInfo } from "@/lib/classes";
-import { formatPercent } from "@/lib/grades";
+import { formatPercent, formatRange } from "@/lib/grades";
 import {
   chip,
   chipAccent,
@@ -68,14 +68,23 @@ export function ClassCard({
       )}
 
       {/* Where the course is in its own sequence (SPEC §8.5), in its own words;
-          a course that publishes no dates shows nothing here. */}
+          a course that publishes no dates reads its week off its filed
+          lectures, and the meta line carries it beside the division. */}
       {division && (
         <div className="mt-5">
           {division.topic === null ? (
-            <p className="text-headline">{division.label}</p>
+            <>
+              {info.currentUnit?.week != null && (
+                <p className={meta}>Week {info.currentUnit.week}</p>
+              )}
+              <p className="text-headline">{division.label}</p>
+            </>
           ) : (
             <>
-              <p className={meta}>{division.label}</p>
+              <p className={meta}>
+                {division.label}
+                {info.currentUnit?.week != null && ` · Week ${info.currentUnit.week}`}
+              </p>
               <p className="mt-0.5 text-headline">{division.topic}</p>
             </>
           )}
@@ -99,10 +108,17 @@ export function ClassCard({
         <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-5">
           {info.currentGrade != null && (
             <span
-              title="Current weighted grade over graded items"
+              title={
+                info.projection !== null && info.projection.open > 0
+                  ? `Current weighted grade over graded items · ${info.projection.letter} · could land ${formatRange(info.projection)} from the floor if everything still open scored zero to the ceiling if it all scored full marks`
+                  : "Current weighted grade over graded items"
+              }
               className={chipAccent}
             >
               Grade {formatPercent(info.currentGrade)}
+              {info.projection !== null &&
+                info.projection.open > 0 &&
+                ` · ${formatRange(info.projection)}`}
             </span>
           )}
           {info.pendingDeadlineProposals > 0 && (

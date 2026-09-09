@@ -18,6 +18,8 @@ interface HubChange {
     | "canvasSyllabus"
     | "recordings"
     | "project"
+    | "cards"
+    | "practice"
     | "index";
 }
 
@@ -31,6 +33,8 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The dashboard strip and class lists, plus the card's deadline line.
       void queryClient.invalidateQueries({ queryKey: ["deadlines"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      // Today's waiting lines count the proposed deadlines.
+      void queryClient.invalidateQueries({ queryKey: ["today"] });
       // The project's items are deadlines (SPEC §8.6), and a brief's row is
       // labelled by its deadline's title.
       void queryClient.invalidateQueries({ queryKey: ["project"] });
@@ -56,6 +60,7 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // PROPOSED count, which reads the same queue.
       void queryClient.invalidateQueries({ queryKey: ["deadlineProposals"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      void queryClient.invalidateQueries({ queryKey: ["today"] });
       break;
     case "notes":
       void queryClient.invalidateQueries({ queryKey: ["notes"] });
@@ -68,6 +73,7 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       // The workspace inbox queue and the card badges.
       void queryClient.invalidateQueries({ queryKey: ["sortState"] });
       void queryClient.invalidateQueries({ queryKey: ["classes"] });
+      void queryClient.invalidateQueries({ queryKey: ["today"] });
       break;
     case "units":
       // A Canvas sync or a syllabus scan changed the course's divisions, and
@@ -92,17 +98,29 @@ void listen<HubChange>("hub-changed", ({ payload }) => {
       break;
     case "announcements":
       // A Canvas sync recorded or updated what the professor said; the
-      // workspace's NOTICES section reads it.
+      // workspace's NOTICES section reads it, and Today lists what is new.
       void queryClient.invalidateQueries({ queryKey: ["announcements"] });
+      void queryClient.invalidateQueries({ queryKey: ["today"] });
       break;
     case "recordings":
       // A sync listed recordings behind the Zoom tool, or a capture filed
-      // one; the Lectures section lists what still waits.
+      // one; the Lectures section lists what still waits, as does Today.
       void queryClient.invalidateQueries({ queryKey: ["recordings"] });
+      void queryClient.invalidateQueries({ queryKey: ["today"] });
       break;
     case "canvasSyllabus":
       // A Canvas sync mirrored the syllabus page; the scan picker offers it.
       void queryClient.invalidateQueries({ queryKey: ["canvasSyllabus"] });
+      break;
+    case "cards":
+      // A card was answered: the class's listing follows. The dashboard's
+      // ten hold still — the day's ten are the list as it was fetched, and
+      // an answered card leaves the face on its own (TenCards.tsx).
+      void queryClient.invalidateQueries({ queryKey: ["cards", "list"] });
+      break;
+    case "practice":
+      // An exam's self-score landed; its row shows the score.
+      void queryClient.invalidateQueries({ queryKey: ["practice"] });
       break;
     case "files":
       // An approved move changed the tree on disk.

@@ -30,8 +30,9 @@ use crate::extract::{
 /// SPEC §5/§8.2: the guides/jobs scope value for the semester master.
 const MASTER_OUTPUT: &str = "Study Guides/Semester Master.html";
 /// SPEC §8.1: where a guide's cards sidecar goes — `<guide file stem>.json`
-/// under here, one card per self-test question and glossary term. Nothing
-/// reads them until M37; the finalizer requires the file so the shape holds.
+/// under here, one card per self-test question and glossary term. The cards
+/// index reads them on the way to the dashboard (`cards.rs`); the finalizer
+/// requires the file so the shape holds.
 pub const CARDS_DIR: &str = ".classhub/cards";
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/module_guide.md");
 const MASTER_TEMPLATE: &str = include_str!("../prompts/master_guide.md");
@@ -698,19 +699,30 @@ pub fn synthesize_master(
 /// is finalized as it always was — the file checked, no row.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PracticePayload {
-    rel_path: String,
+pub(crate) struct PracticePayload {
+    pub rel_path: String,
     #[serde(default)]
-    source_manifest: Option<String>,
+    pub source_manifest: Option<String>,
+    /// The focus the prompt was given — typed, or the scope's weak topics
+    /// from its last self-score (SPEC §8.3) — so the row says what the exam
+    /// was pointed at without a run to read.
+    #[serde(default)]
+    pub focus: Option<String>,
+    /// The quiz or exam the shift wrote it for (SPEC §6), so it writes one
+    /// exam per deadline.
+    #[serde(default)]
+    pub deadline_id: Option<i64>,
 }
 
 /// SPEC §8.3: practice exam synthesis, from chat (M8) or the workspace's
 /// Practice exam action (M19). Scope is a folder rel path, `unit:<id>` for
 /// one of the course's own divisions — drawing on the same sources as that
 /// division's guide (SPEC §8.5) — or `master` (the whole semester); `focus`
-/// narrows topics. `date_label` names the file (`<scope> — <date>.html`), so
-/// it must be filename-safe (YYYY-MM-DD), and it is the day the rubric's next
-/// assessment is measured from.
+/// narrows topics, and left empty defaults to the scope's weak topics from
+/// its last self-score and the class's cards answered wrong (SPEC §8.3).
+/// `date_label` names the file (`<scope> — <date>.html`), so it must be
+/// filename-safe (YYYY-MM-DD), and it is the day the rubric's next assessment
+/// is measured from. `deadline_id` is the quiz the shift writes it for.
 pub fn generate_practice(
     app: &AppHandle,
     class_id: i64,
@@ -718,6 +730,7 @@ pub fn generate_practice(
     focus: Option<&str>,
     generated_at_label: &str,
     date_label: &str,
+    deadline_id: Option<i64>,
 ) -> Result<(i64, String)> {
     let (class_dir, output_rel, prompt, payload) = {
         let db = app.state::<crate::Db>();
@@ -726,6 +739,10 @@ pub fn generate_practice(
         if has_active_job(&conn, class_id, "practice", scope)? {
             bail!("a practice exam for this scope is already queued or running");
         }
+        let focus = match focus.map(str::trim).filter(|f| !f.is_empty()) {
+            Some(typed) => Some(typed.to_string()),
+            None => crate::practice::default_focus(&conn, class_id, scope)?,
+        };
         let (scope_label, (ctx, corpus), hints) = match unit_scope_id(scope) {
             Some(unit_id) => {
                 let unit_name: String = conn
@@ -807,7 +824,7 @@ pub fn generate_practice(
             &ctx,
             &PracticeBlocks {
                 scope_label: &scope_label,
-                focus: focus.map(str::trim).filter(|f| !f.is_empty()).unwrap_or(
+                focus: focus.as_deref().unwrap_or(
                     "none — cover the whole scope evenly, weighted toward what an exam would test",
                 ),
                 output_rel: &output_rel,
@@ -820,6 +837,8 @@ pub fn generate_practice(
         let payload = serde_json::to_string(&PracticePayload {
             rel_path: output_rel.clone(),
             source_manifest: Some(serde_json::to_string(&ctx.manifest)?),
+            focus,
+            deadline_id,
         })?;
         (class_dir, output_rel, prompt, payload)
     };
@@ -965,8 +984,9 @@ pub fn finalize_practice(
     )
 }
 
-/// One practice exam as the workspace lists it: the file, and its row's
-/// freshness where one exists — exams written before rows carry none.
+/// One practice exam as the workspace lists it: the file, its row's
+/// freshness where one exists — exams written before rows carry none — and
+/// its last self-score (SPEC §8.3).
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PracticeInfo {
@@ -976,6 +996,7 @@ pub struct PracticeInfo {
     pub scope: Option<String>,
     pub stale: Option<bool>,
     pub diff: Option<ManifestDiff>,
+    pub score: Option<crate::practice::ExamScore>,
 }
 
 /// Practice exams for the workspace listing — the directory is the truth for
@@ -987,21 +1008,27 @@ pub fn list_practice(conn: &Connection, class_id: i64) -> Result<Vec<PracticeInf
             .into_iter()
             .map(|g| (g.rel_path.clone(), g))
             .collect();
-    Ok(crate::notes::list_dir_files(&class_dir.join(PRACTICE_DIR), PRACTICE_DIR)
+    let mut out = Vec::new();
+    for f in crate::notes::list_dir_files(&class_dir.join(PRACTICE_DIR), PRACTICE_DIR)
         .into_iter()
         .filter(|f| f.name.to_lowercase().ends_with(".html"))
-        .map(|f| {
-            let row = rows.get(&f.rel_path);
-            PracticeInfo {
-                scope: row.map(|g| g.scope.clone()),
-                stale: row.map(|g| g.stale),
-                diff: row.map(|g| g.diff.clone()),
-                name: f.name,
-                rel_path: f.rel_path,
-                modified_at: f.modified_at,
-            }
-        })
-        .collect())
+    {
+        let row = rows.get(&f.rel_path);
+        let score = match row {
+            Some(g) => crate::practice::last_score(conn, class_id, &g.scope)?,
+            None => None,
+        };
+        out.push(PracticeInfo {
+            scope: row.map(|g| g.scope.clone()),
+            stale: row.map(|g| g.stale),
+            diff: row.map(|g| g.diff.clone()),
+            score,
+            name: f.name,
+            rel_path: f.rel_path,
+            modified_at: f.modified_at,
+        });
+    }
+    Ok(out)
 }
 
 /// SPEC §6 resumability: re-invoke a failed master run with
@@ -1130,31 +1157,38 @@ pub(crate) fn has_active_job(conn: &Connection, class_id: i64, kind: &str, scope
 // Completion (called by the job runner before the row leaves 'running')
 
 /// One card of a cards sidecar, as a digest or a guide writes it.
-#[derive(Deserialize)]
-struct RawCard {
-    front: String,
-    back: String,
+#[derive(Deserialize, Debug, Clone)]
+pub(crate) struct RawCard {
+    pub front: String,
+    pub back: String,
     #[serde(default)]
-    source: Option<String>,
+    pub source: Option<String>,
     #[serde(default)]
-    topic: Option<String>,
+    pub topic: Option<String>,
 }
 
-/// Checks a cards file's shape — an array of `{front, back, source, topic}`,
-/// both sides non-empty; an empty array is valid — and returns the count.
-/// Nothing reads the cards until M37, so the check is the whole contract.
-pub(crate) fn parse_cards(json: &str) -> Result<usize> {
+/// Reads a cards file — an array of `{front, back, source, topic}`, both
+/// sides non-empty; an empty array is valid — into its cards, which the
+/// index keeps (`cards.rs`).
+pub(crate) fn read_cards(json: &str) -> Result<Vec<RawCard>> {
     let items: Vec<serde_json::Value> =
         serde_json::from_str(json).context("the cards file is not a JSON array")?;
+    let mut cards = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let card: RawCard = serde_json::from_value(item.clone())
             .with_context(|| format!("card {} is not {{front, back, source, topic}}", index + 1))?;
         if card.front.trim().is_empty() || card.back.trim().is_empty() {
             bail!("card {} has an empty side", index + 1);
         }
-        let _ = (card.source, card.topic);
+        cards.push(card);
     }
-    Ok(items.len())
+    Ok(cards)
+}
+
+/// Checks a cards file's shape and returns the count — what a finalizer
+/// requires of the file (SPEC §8.1, §8.4).
+pub(crate) fn parse_cards(json: &str) -> Result<usize> {
+    Ok(read_cards(json)?.len())
 }
 
 pub fn finalize_job(
@@ -1515,8 +1549,13 @@ mod tests {
         fs::write(dir.join(format!("{base}.html")), "earlier today").expect("write");
         assert_eq!(practice_output_rel(&dir, &base, &claimed), format!("{base} (2).html"));
 
-        let payload = serde_json::to_string(&PracticePayload { rel_path: format!("{base} (2).html"), source_manifest: None })
-            .expect("payload");
+        let payload = serde_json::to_string(&PracticePayload {
+            rel_path: format!("{base} (2).html"),
+            source_manifest: None,
+            focus: None,
+            deadline_id: None,
+        })
+        .expect("payload");
         conn.execute(
             "INSERT INTO jobs (kind, class_id, scope, status, payload, created_at, owner_pid)
              VALUES ('practice', 3, 'unit:1', 'running', ?1, 1, 1)",

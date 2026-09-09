@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { AddLecture } from "@/components/AddLecture";
+import { CardsSection, cardsQuery } from "@/components/CardsSection";
 import { DeadlinesSection } from "@/components/Deadlines";
 import { FileTree } from "@/components/FileTree";
 import { FileViewer, type ViewedFile } from "@/components/FileViewer";
@@ -25,6 +26,7 @@ import { NoteEditor, type EditedNote } from "@/components/NoteEditor";
 import { announcementsQuery, NoticesSection } from "@/components/Notices";
 import { ProjectSection, projectQuery } from "@/components/Project";
 import { SectionHeading } from "@/components/SectionHeading";
+import { SemesterStrip } from "@/components/SemesterStrip";
 import { StructureSection } from "@/components/Structure";
 import { listUnits } from "@/lib/canvas";
 import { CLASS_ACCENTS, classesQuery, type ClassInfo } from "@/lib/classes";
@@ -99,9 +101,12 @@ function jumpTo(id: string) {
 
 export function ClassWorkspace({
   info: snapshot,
+  initialScope = null,
   onBack,
 }: {
   info: ClassInfo;
+  /** A document to open with — the pre-read Today's meeting names. */
+  initialScope?: string | null;
   onBack: () => void;
 }) {
   // The card the dashboard handed over is a snapshot from navigation time. A
@@ -240,7 +245,7 @@ export function ClassWorkspace({
   });
 
   const drag = useDragState();
-  const [viewScope, setViewScope] = useState<string | null>(null);
+  const [viewScope, setViewScope] = useState<string | null>(initialScope);
   const [viewFile, setViewFile] = useState<ViewedFile | null>(null);
   const [editingNote, setEditingNote] = useState<EditedNote | null>(null);
   // Open with nothing, or pre-filled from a recording the sync found whose
@@ -390,6 +395,16 @@ export function ClassWorkspace({
     queryKey: ["grades", info.id],
     queryFn: () => listGrades(info.id),
   });
+  // The cards the guides and digests wrote (SPEC §12), indexed on read.
+  const { data: cards } = useQuery(cardsQuery(info.id));
+  // What each distilled session was about, in the digest's own words — for
+  // a row whose name does not already say it, since the digest names its
+  // document for the same topic.
+  const summaryFor = new Map(
+    (contributions ?? [])
+      .filter((c) => c.distilled && !c.summary.startsWith("Whole session"))
+      .map((c) => [c.relPath, c.summary]),
+  );
   const hasMaterials = tree !== undefined && tree.length > 0;
   const hasDeadlines =
     (allDeadlines ?? []).some((d) => d.classId === info.id && d.status === "open") ||
@@ -413,6 +428,7 @@ export function ClassWorkspace({
     hasMaterials && { id: "materials", label: "Materials" },
     hasLectures && { id: "lectures", label: "Lectures" },
     (hints?.length ?? 0) > 0 && { id: "flagged", label: "Flagged" },
+    (cards?.length ?? 0) > 0 && { id: "cards", label: "Cards" },
     hasPractice && { id: "practice-exams", label: "Practice exams" },
     (notes?.length ?? 0) > 0 && { id: "notes", label: "Notes" },
   ].filter((l): l is { id: string; label: string } => l !== false);
@@ -434,6 +450,9 @@ export function ClassWorkspace({
           {info.currentUnit && (
             <p className="mt-1.5 text-headline font-medium text-(--accent-ink)">
               {info.currentUnit.name}
+              {info.currentUnit.week !== null && (
+                <span className="text-muted-foreground"> · Week {info.currentUnit.week}</span>
+              )}
             </p>
           )}
           <p className={`mt-3 ${meta}`}>{metaLine}</p>
@@ -463,6 +482,16 @@ export function ClassWorkspace({
       </nav>
 
       <div className="mx-auto max-w-4xl px-8 pb-20">
+        {/* The semester in one row (SPEC §12): each division's state, and
+            today's mark, off the queries the sections below already hold. */}
+        <SemesterStrip
+          units={units ?? []}
+          contributions={contributions ?? []}
+          guides={guideMap}
+          deadlines={(allDeadlines ?? []).filter((d) => d.classId === info.id)}
+          currentUnitId={info.currentUnit?.id ?? null}
+          currentWeek={info.currentUnit?.week ?? null}
+        />
         {tree !== undefined && tree.length > 0 && (
           <MasterGuideStrip
             classId={info.id}
@@ -820,6 +849,15 @@ export function ClassWorkspace({
                   stamp={formatGeneratedAt(session.generatedAt)}
                   badge={
                     <>
+                      {/* What the session was about, in the digest's own words. */}
+                      {summaryFor.has(transcript) && !session.relPath.includes(summaryFor.get(transcript) ?? "") && (
+                        <span
+                          title={summaryFor.get(transcript)}
+                          className="hidden min-w-0 shrink truncate text-fine text-muted-foreground sm:block sm:max-w-[18rem]"
+                        >
+                          {summaryFor.get(transcript)}
+                        </span>
+                      )}
                       {unread && (
                         <span className="hidden shrink-0 text-fine text-muted-foreground/70 sm:block">
                           Not yet read for what was flagged
@@ -856,6 +894,8 @@ export function ClassWorkspace({
 
         <FlaggedSection classId={info.id} onOpenTranscript={openTranscriptAt} />
 
+        <CardsSection classId={info.id} />
+
         {hasPractice && (
           <section id="practice-exams" className="mt-14 scroll-mt-20">
             <SectionHeading
@@ -888,16 +928,38 @@ export function ClassWorkspace({
                   strippedExt=".html"
                   stamp={formatGeneratedAt(exam.modifiedAt)}
                   // An exam's row records what it was built from (SPEC §8.3);
-                  // one written before rows existed carries no freshness.
+                  // one written before rows existed carries no freshness. Its
+                  // last self-score and the topics it missed sit beside.
                   badge={
-                    exam.stale === true && exam.diff !== null ? (
-                      <span title={deltaTitle(exam.diff)} className={chipAmber}>
-                        stale
-                      </span>
-                    ) : undefined
+                    <>
+                      {exam.score !== null && (
+                        <span
+                          title={
+                            exam.score.weakTopics.length > 0
+                              ? `Missed: ${exam.score.weakTopics.join(", ")} — the next exam of this scope focuses on them`
+                              : "Full marks on the last self-score"
+                          }
+                          className="hidden min-w-0 shrink truncate text-fine text-muted-foreground sm:block sm:max-w-[22rem]"
+                        >
+                          {exam.score.correct} of {exam.score.total}
+                          {exam.score.weakTopics.length > 0 &&
+                            ` · missed ${exam.score.weakTopics.join(", ")}`}
+                        </span>
+                      )}
+                      {exam.stale === true && exam.diff !== null && (
+                        <span title={deltaTitle(exam.diff)} className={chipAmber}>
+                          stale
+                        </span>
+                      )}
+                    </>
                   }
+                  // An exam with a row opens in the guide viewer, whose frame
+                  // the self-score listener matches (SPEC §8.3); one written
+                  // before rows existed keeps no score, and opens as a file.
                   onView={(name) =>
-                    setViewFile({ relPath: exam.relPath, name, kind: "html" })
+                    exam.scope !== null && guideMap.has(exam.scope)
+                      ? setViewScope(exam.scope)
+                      : setViewFile({ relPath: exam.relPath, name, kind: "html" })
                   }
                 />
               ))}

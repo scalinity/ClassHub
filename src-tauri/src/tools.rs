@@ -617,12 +617,22 @@ fn class_block(
     // `units::MAX_UNIT_NAME`, and a chat that does not know which week it is
     // would be the worse trade.
     let units = crate::units::list_units(conn, class.id)?;
-    let current = crate::units::current_unit(conn, class.id, today_iso)?;
+    let position = crate::units::current_position(conn, class.id, today_iso)?;
+    let current = position.as_ref().map(|p| p.unit.clone());
     let contributions = crate::lectures::list_contributions(conn, class.id)?;
     let guides = crate::guides::list_guides(conn, class.id)?;
     out.push_str(&divisions_line(&units));
-    if let Some(unit) = &current {
-        out.push_str(&format!("Now: {}\n", unit.name));
+    if let Some(position) = &position {
+        // An undated course's week is read off its latest filed lecture
+        // (SPEC §8.5), and the line says so rather than passing it off as a
+        // published date.
+        match position.week {
+            Some(week) => out.push_str(&format!(
+                "Now: {} · week {week}, read from the latest filed lecture\n",
+                position.unit.name
+            )),
+            None => out.push_str(&format!("Now: {}\n", position.unit.name)),
+        }
     }
     if detailed {
         out.push_str(&division_rows(&units, current.as_ref(), &contributions, &guides));
@@ -1979,6 +1989,7 @@ fn generate_practice(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
         focus.as_deref(),
         ctx.today,
         ctx.today_iso,
+        None,
     )?;
     Ok(Outcome::ok(format!(
         "Practice exam queued — {} · {} (job #{job_id})\n\

@@ -6497,3 +6497,196 @@ sessions should know:
   well.
 - A spawned run's init event names its `permissionMode`; read it before
   trusting any allow rule.
+
+## M37 — Today (2026-09-09)
+
+### Phase 0 — measured
+
+Read off a `.backup` copy of the live database taken on Sept 9 at 00:46, and
+the tree, before anything changed:
+
+- **What Today would list.** One meeting on the Wednesday: Design Studio
+  5:10–6:00 pm, in `Week 3 — HiPerGator and NaviGator II`. Due within three
+  days: `Problem Statement and AI Sketch` (Sept 9, Canvas). The last
+  `shift_runs` row is the dev build's zero-cap run of Sept 8 (`1 workbook
+  refreshed, 1 pre-read written, 1 note reviewed · 13 more for tomorrow`,
+  `budget`); its one reversible row, the review's `review.write_note` 272,
+  was undone (273) during M36's verification. Ten announcements, the latest
+  Sept 3, and no stamp of when the app was last opened. Pending move
+  proposals 0; deadline proposals 15 — Fundamentals' twelve `Live coding
+  session` dates as one series plus two from a notice, Design Studio's one
+  syllabus row, past; recordings `new` 5 (Design Studio 2, Biostatistics 2,
+  Applied 1, the Sept 8 lecture among them); one pre-read written, Biostatistics
+  Week 4 for Sept 10.
+- **The fields fetched and not rendered**, each confirmed still fetched:
+  `Contribution.summary`, `Unit.firstWeek/lastWeek`, `JobInfo.summary`,
+  `ModelOption.maxTokens`, `GradeItem.gradedAt`. `Deadline.notes` renders
+  beneath the row with Canvas's description since M35, so the brief's
+  tooltip-only reading was out of date.
+- **Applied's filed lectures**: `Weeks/Week 01/2026-08-25 — Lecture.md` and
+  `Weeks/Week 02/2026-09-01 — Lecture.md`, both feeding Part I; the Sept 8
+  recording still waits for the shift, so the reading is Week 2 today.
+- **The exam's panel.** The Week 3 exam of Sept 8 carries twenty
+  `data-topic` blocks and a `Total my exam` button whose script posts
+  `{exam: <file name>, results: [{question: "Q01", topic, correct}]}` to
+  `window.parent` — the shape M32 settled, read off the file.
+- **The cards sidecars**: five files, 454 cards — Biostatistics 336 (the
+  Semester Master's 155, the Week 3 guide's 90, the Sept 3 session's 91),
+  Fundamentals 72 (the Aug 25 session), Applied 46 (the Aug 25 session),
+  Design Studio none. Anki's text import takes tab-separated lines with a
+  header naming the separator, HTML and the tags column.
+- **The grade formula's inputs**: every class weighted (Fundamentals 50/30/20,
+  Design Studio 20/0/60/20, Biostatistics 50/20/30/0, Applied 10/10/10/50/
+  10/10) and one graded item in all — Biostatistics' `Programming Quiz 1`,
+  0 of 1, from Canvas — so the projection appears there without a fixture.
+
+### What was built
+
+- **Migration `0020`**: `practice_results` and `cards` (SPEC §5).
+- **`units.rs`**: `Position`, `current_position` and `latest_filed_week` —
+  the dated reading first, else the latest week a lecture was filed into on
+  or before today, off `lecture_contributions` and the week folders;
+  `db::CurrentUnit` and the class card carry `week`, the chat overview's
+  `Now:` line says it was read from the latest filed lecture.
+- **`practice.rs`**: `parse_posted` (the settled shape, capped),
+  `record_results` (the rows replaced, the origin scope read off the job),
+  `last_score`, `weak_topics_of_scope`, `default_focus` and `focus_line`.
+  `guides::generate_practice` takes the default focus when none was typed
+  and a `deadline_id`; `PracticePayload` records `focus` and `deadlineId`;
+  `PracticeInfo` carries `score`.
+- **`cards.rs`**: the sidecar walk (a guide's file matched to its row, a
+  session's beside its note, an unclaimed file under its own name), `index`
+  (upsert on the front, drop what is gone, keep what will not parse),
+  `list_cards`, `due_cards`, `schedule` and `answer` (one, three, then seven
+  days; wrong to box one for tomorrow), `weak_topics`, `export_anki`, `tsv`
+  and `tag`.
+- **`today.rs`**: `note_opened` (a launch and every focus of the window, a
+  focus within half an hour the same open), `summary` — the meetings with
+  the pre-read for the day, the last run with its reversible rows grouped
+  (`reversible_between`), the notices since the previous open, the waiting
+  lines per class and the Canvas sign-in — and `meeting_without_transcript`.
+- **`grades.rs`**: `Projection`, `project`, `projection`, `letter`; the
+  class card and `GradesInfo` carry it.
+- **`shift.rs`**: eleven steps with `Quizzes` after `Rebuild guides`
+  (`quiz_candidates`, `quiz_written`, the exams tally), and the morning's
+  reminder on the minute tick (`remind_due_tomorrow`, `reminder_fires`,
+  `due_on`, the `due_reminder_sent_on` stamp). **`settings.rs`**: the two
+  notification keys, `notify_due_time` and its setter. **`announcements.rs`**:
+  the notification when a scan reads a to-do, the titles on `ScanRecord`.
+- **`lib.rs`**: `today_summary`, `due_cards`, `answer_card`, `list_cards`,
+  `export_cards`, `record_practice_results`, `set_notify_due_time`; the
+  launch stamp in setup and the focus stamp on the main window's event.
+- **The frontend**: `Today.tsx` (the docket under the date, `DueChips`
+  shared with the strip, the overnight `Undo` through `undoAuditRows`),
+  `TenCards.tsx`, `SemesterStrip.tsx`, `CardsSection.tsx`; `lib/practice.ts`
+  (the one window listener matched against the frame the viewer registers
+  through its ref), `lib/today.ts`, `lib/cards.ts`; `GuideViewer.tsx` frames
+  an exam and says its score; `ClassWorkspace.tsx` opens an exam with a row
+  in the viewer, shows the score and the missed topics on its row, the
+  session's summary where the name does not say it, the week on the band,
+  the strip and the Cards section; `ClassCard.tsx` the week and the grade
+  range; `Structure.tsx` a Part's week range; `JobCenter.tsx` a finished
+  job's summary; `Grades.tsx` the projection line; `Settings.tsx` the two
+  switches and the time; `App.tsx` opens a workspace on a document.
+- SPEC §5, §6, §8.1, §8.3, §8.5, §11, §12, §13 and §14 state the design;
+  the brief was revised where the notes and the database contradicted it
+  (the migration number, Applied's week today, the graded item, the
+  rendered notes, the eleventh step, the tables' columns, the reminder's
+  time as a setting, Anki's header lines, the payload check).
+
+### Verified
+
+- `cargo test`: 349 pass, sixteen new — the undated course's week off its
+  lectures; the panel's message shape; a score replacing rows and the
+  scope's weak topics; the default focus's words; the boxes' schedule; the
+  TSV's escaping and the tags; the index across a rewrite and a sidecar
+  gone with the due list and the weak topics; the projection on a worked
+  example; the quiz list; the reminder; the open stamps; a run's reversible
+  rows; the past week's meeting; the plan's eleven indices. `npx tsc
+  --noEmit` clean.
+- **Live on the dev build** (pid 42990, migration 20 applied on launch),
+  with a fixture deadline `M37 fixture deadline` due Sept 10 on
+  Fundamentals, a fixture card for `_Inbox/M37 fixture.csv`, a fixture
+  score `M37 fixture score` 9/10 under Fundamentals' Assignments, and
+  `previous_opened_at` set to Aug 30 so the notices line had something to
+  list:
+  - **Today** read, under the date: `5:10–6:00 pm · AI in Health Design
+    Studio I · Week 3 — HiPerGator and NaviGator II`; `Due` with the
+    Problem Statement chip and the fixture's; `Overnight · 1 workbook
+    refreshed, 1 pre-read written, 1 note reviewed · 13 more for tomorrow`
+    with no `Undo`, its one row undone already; `Notices` with five
+    announcements since Aug 30 and their to-do rings; `Waiting` with
+    `1 file to sort`, `Live coding session as one series, 12 dates · 2
+    proposed deadlines`, `1 proposed deadline` and the three recordings
+    lines. The class-name links open the workspace.
+  - **The notification**: `notify_due_time` set to the coming minute and
+    `shift_in_dev_build` on, the scheduler's tick stamped
+    `due_reminder_sent_on = 2026-09-09` twice (01:18 and, after the stamp
+    was cleared, 01:20) with no `notification not built` line on stderr;
+    the banner itself was not caught on a screen capture, the plugin
+    dropping its result and a dev build's notification being Terminal's.
+  - **The cards**: 454 indexed on the first read; the first card, a
+    Fundamentals Aug 25 one, answered `Right` went to box 2 due Sept 10; the
+    next, answered `Wrong`, to box 1 due Sept 10 with `wrong_at` set and its
+    topic (`Inspectable evidence`) among the class's weak topics; the count
+    read `1 of 10`. `Export for Anki` on Biostatistics wrote `Study
+    Guides/Cards/Biostatistics for AI.tsv`: three header lines and 336
+    rows, every row three fields, `Show in Finder` beside it. The Cards
+    section lists `Semester Master · 155`, `2026-09-03 — Lecture · 91`,
+    `Week 3 — … · 90`. The Anki import is the owner's step.
+  - **The exam**: the Week 3 exam opened in the guide viewer; two options
+    pressed and `Total my exam` posted nineteen results; `practice_results`
+    holds 19 rows under scope `unit:8`, Q03 and Q04 correct; the viewer
+    reads `Scored 2 of 19 · recorded` and the row `2 of 19 · missed missing
+    data mechanisms, MCAR recognition, …`. A `Practice exam` on the Week 3
+    row with the field left empty enqueued job 344 whose payload's `focus`
+    reads `missed in the last self-scored exam of this scope: missing data
+    mechanisms, MCAR recognition, IQR outlier rule, …` (twelve topics);
+    cancelled at once, five log lines and no result event. (A first press
+    landed on Week 4's row — job 343, `unit:9`, `focus: null` as it should
+    be with no score — cancelled after reading one note.)
+  - **The week**: Applied's card reads `Part I · Week 2` over the topic, its
+    band `Part I: Deep Learning to Large Language Models · Week 2`, its strip
+    `1–8 · wk 2`, its Structure rows `Weeks 1–8`, `Weeks 9–12`, `Weeks
+    13–16`; the three dated courses read Week 3.
+  - **The strip** renders on all four workspaces: Fundamentals with Weeks 1
+    and 2 distilled and guided, Week 3 filed; Biostatistics with Week 3
+    distilled and its guide fresh and quiz rings on Weeks 3, 6, 8 and 10;
+    Design Studio empty; Applied's stale Part I guide amber and dashed.
+  - **The projection**: Fundamentals' Grades heading read `Current 90% · A−
+    · 50% of the grade still open · could land 45–95% · the rest needs to
+    average 96% for an A` and its card chip `Grade 90% · 45–95%`; deleting
+    the fixture removed both. Biostatistics reads its real `Current 0% · E ·
+    80% of the grade still open · could land 0–80% · the rest needs to
+    average 75% for a D` off the 0-of-1 quiz Canvas posted.
+  - Settings shows `Notify what is due tomorrow`, `Say it at` and `Notify
+    when a notice asks for something`; the Job Center's self-check row
+    carries `— Subscription auth verified — apiKeySource none …`.
+- Nothing was synthesized: the two cancelled practice jobs' logs carry no
+  cost line. No chat turn. The fixtures, the two test answers, the test
+  score and the settings were put back; the exported TSV stays.
+
+### Left as it is
+
+- Applied still gets no pre-read: its weeks carry no dates, and the
+  lectures reading names the week the course is in, not when the next one
+  meets.
+- The notice notification fires from the announcement scan's finalize,
+  which nothing provoked tonight — every notice was read on Sept 8.
+- §16 held no Anki line to remove; the export lives in §12.
+- The two cancelled practice jobs (343, 344) stay in the jobs table as the
+  history they are.
+
+### Gotchas
+
+- `AX_NTH` counts from zero: `AX_NTH=1` picks the second of a name, and the
+  second `Practice exam` on the Biostatistics workspace is Week 3's row, the
+  first the master strip's.
+- A Job Center row's button carries `aria-label`, so the accessibility
+  text hides its inner spans; a screenshot is the check for a row's words.
+- `screencapture -R` takes points, not pixels; a rect off the display
+  fails, and a banner is gone in seconds — poll the stamp and capture at
+  once.
+- The exam's option buttons and `Total my exam` are reachable through the
+  sandboxed frame's accessibility tree by their text, the latter in the
+  capitals its CSS renders.

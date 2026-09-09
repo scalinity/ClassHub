@@ -282,11 +282,18 @@ function JobRow({
             <StatusIcon job={job} />
           </span>
           <span className={chipMuted}>{jobKindLabel(job.kind)}</span>
-          <span className="min-w-0 truncate text-body text-muted-foreground">
+          <span
+            title={job.summary ?? undefined}
+            className="min-w-0 truncate text-body text-muted-foreground"
+          >
             {/* scope 'master' is redundant with the Semester master kind label */}
             {[job.className, job.scope === "master" ? null : job.scopeLabel]
               .filter(Boolean)
               .join(" · ")}
+            {/* What a finished job recorded, in its own words. */}
+            {job.summary && job.status === "succeeded" && (
+              <span className="text-muted-foreground/70"> — {job.summary}</span>
+            )}
           </span>
         </button>
         <span className={`shrink-0 ${meta}`}>{timeLabel}</span>

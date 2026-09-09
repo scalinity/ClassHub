@@ -130,6 +130,12 @@ export function undoNotice(notice: Notice): Promise<void> {
     });
 }
 
+/** Reverses audit rows a surface holds without a notice — Today's line on
+ *  what the shift did (SPEC §12). The refetches follow the hub pushes. */
+export function undoAuditRows(auditIds: number[]): Promise<UndoOutcome> {
+  return invoke<UndoOutcome>("undo_audit", { auditIds });
+}
+
 export function useNotices(): NoticesSnapshot {
   return useSyncExternalStore(
     (cb) => {

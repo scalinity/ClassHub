@@ -57,8 +57,8 @@ pub fn is_practice_scope(scope: &str) -> bool {
 /// SPEC §8.6 — the small documents. A homework brief is scoped by the
 /// deadline it maps, `brief:<deadline id>`, so a retitled assignment keeps
 /// its brief; the project workbook is one per class, `project`; a pre-read
-/// is scoped by the division it precedes, `preread:<unit id>`; a
-/// presentation kit by the paper it reads, `kit:<pdf rel path>`.
+/// is scoped by the division it precedes and the week, `preread:<unit
+/// id>:<week>`; a presentation kit by the paper it reads, `kit:<pdf rel path>`.
 pub const BRIEF_SCOPE_PREFIX: &str = "brief:";
 pub const PROJECT_SCOPE: &str = "project";
 pub const PREREAD_SCOPE_PREFIX: &str = "preread:";
@@ -278,6 +278,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0017_shift_runs.sql"),
     include_str!("../migrations/0018_one_run_a_night.sql"),
     include_str!("../migrations/0019_what_canvas_knows.sql"),
+    include_str!("../migrations/0020_today.sql"),
 ];
 
 /// The migration that makes one note per transcript name in a division
@@ -327,12 +328,15 @@ pub struct DeadlineChip {
 }
 
 /// The division a course is in today (SPEC §8.5), in the course's own words.
-/// The id is what the Structure list matches its row on.
+/// The id is what the Structure list matches its row on. `week` is set only
+/// where the reading is a filed lecture's — a Part-numbered course with no
+/// dates — and names the week inside the division.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentUnit {
     pub id: i64,
     pub name: String,
+    pub week: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -361,6 +365,9 @@ pub struct ClassCard {
     pub next_deadline: Option<DeadlineChip>,
     /// SPEC §11: current weighted grade over graded items (grades.rs math).
     pub current_grade: Option<f64>,
+    /// SPEC §11: where the grade could land, once a score exists — the
+    /// chip's range.
+    pub projection: Option<crate::grades::Projection>,
     /// ISO start of the final exam, when scheduled — the dashboard's
     /// countdown chips (SPEC §11).
     pub final_exam_start: Option<String>,
@@ -498,11 +505,14 @@ pub fn list_classes(conn: &Connection, today: &str) -> Result<Vec<ClassCard>> {
                 },
             )
             .optional()?;
-        let current_grade = crate::grades::weighted_grade(conn, id)?;
-        let current_unit = crate::units::current_unit(conn, id, today)?.map(|unit| CurrentUnit {
-            id: unit.id,
-            name: unit.name,
-        });
+        let projection = crate::grades::projection(conn, id)?;
+        let current_grade = projection.as_ref().map(|p| p.current);
+        let current_unit =
+            crate::units::current_position(conn, id, today)?.map(|position| CurrentUnit {
+                id: position.unit.id,
+                name: position.unit.name,
+                week: position.week,
+            });
         cards.push(ClassCard {
             id,
             display_name,
@@ -517,6 +527,7 @@ pub fn list_classes(conn: &Connection, today: &str) -> Result<Vec<ClassCard>> {
             pending_deadline_proposals,
             next_deadline,
             current_grade,
+            projection,
             final_exam_start,
             current_unit,
             meetings,
@@ -557,8 +568,26 @@ mod tests {
             .query_row("SELECT id FROM units WHERE name = ?1", [&now.name], |row| row.get(0))
             .expect("the row");
         assert_eq!(now.id, row_id);
-        assert!(by_id(4).current_unit.is_none(), "no dates, no answer");
+        assert!(now.week.is_none(), "a dated course's week is its unit");
+        assert!(by_id(4).current_unit.is_none(), "no dates and no lecture, no answer");
         assert!(by_id(1).current_unit.is_none(), "no divisions, no answer");
+
+        // The undated course reads its week off its filed lectures (SPEC §8.5).
+        let part: i64 = conn
+            .query_row("SELECT id FROM units WHERE class_id = 4", [], |row| row.get(0))
+            .expect("the part");
+        conn.execute(
+            "INSERT INTO lecture_contributions (class_id, unit_id, rel_path, start_ms, end_ms,
+                start_line, end_line, corpus_rel_path, summary, confidence, status, created_at)
+             VALUES (4, ?1, 'Weeks/Week 02/2026-09-01 — Lecture.md', 0, 1, 1, 2,
+                     '.classhub/corpus/Part I/2026-09-01 — Lecture.md', '', 'high', 'applied', 1)",
+            [part],
+        )
+        .expect("contribution");
+        let cards = list_classes(&conn, "2026-11-26").expect("cards");
+        let applied = cards.iter().find(|c| c.id == 4).expect("Applied");
+        let now = applied.current_unit.as_ref().expect("read from its lectures");
+        assert_eq!((now.id, now.week), (part, Some(2)));
     }
 }
 

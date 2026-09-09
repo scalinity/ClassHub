@@ -59,6 +59,7 @@ export function PracticeAction({
         <input
           autoFocus
           aria-label="Focus the exam on"
+          title="Left empty, the exam focuses on what the last self-score missed and the cards answered wrong"
           placeholder="Focus on…"
           value={focus}
           onChange={(e) => setFocus(e.target.value)}
@@ -87,7 +88,7 @@ export function PracticeAction({
   return (
     <button
       type="button"
-      title="Write a practice exam from this scope's material"
+      title="Write a practice exam from this scope's material — focused, unless told otherwise, on what the last self-score missed"
       onClick={() => setOpen(true)}
       className={buttonTextMuted}
     >

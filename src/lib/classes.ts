@@ -27,15 +27,32 @@ export interface ClassInfo {
   nextDeadline: { title: string; dueAt: string } | null;
   /** Current weighted grade over graded items (null until something is graded). */
   currentGrade: number | null;
+  /** Where the grade could land, once a score exists (SPEC §11). */
+  projection: Projection | null;
   /** ISO start of the final exam, when scheduled (dashboard countdown chip). */
   finalExamStart: string | null;
   /**
    * Where the course is today, in its own words (SPEC §8.5) — resolved from
-   * its published schedule, never computed, so a course that publishes no
-   * dates has none.
+   * its published schedule, or for a course that publishes no dates from the
+   * week its latest lecture was filed into, which `week` then names; never
+   * computed.
    */
-  currentUnit: { id: number; name: string } | null;
+  currentUnit: { id: number; name: string; week: number | null } | null;
   meetings: Meeting[];
+}
+
+/** Mirrors `grades.rs::Projection`. */
+export interface Projection {
+  current: number;
+  letter: string;
+  /** Percentage points of the final grade already banked. */
+  earned: number;
+  /** Percentage points still open. */
+  open: number;
+  floor: number;
+  ceiling: number;
+  nextLetter: string | null;
+  needed: number | null;
 }
 
 /** `today` is YYYY-MM-DD from the same clock as the card's meeting and

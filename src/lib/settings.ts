@@ -29,6 +29,10 @@ export interface AppSettings {
   shift: ShiftSettings;
   notifyShiftFinished: boolean;
   notifyJobFailed: boolean;
+  notifyDueTomorrow: boolean;
+  notifyAnnouncementAction: boolean;
+  /** `HH:MM`, when the due-tomorrow notification is shown. */
+  notifyDueTime: string;
   /** Whether the app is registered as a login item (SPEC §12). */
   loginItem: boolean;
   /** A dev build, where the shift's "run in this build" switch means something. */
@@ -121,10 +125,19 @@ export function setShiftSetting(key: ShiftSettingKey, value: string): Promise<vo
   return invoke("set_shift_setting", { key, value });
 }
 
-export type NotifyKey = "notify_shift_finished" | "notify_job_failed";
+export type NotifyKey =
+  | "notify_shift_finished"
+  | "notify_job_failed"
+  | "notify_due_tomorrow"
+  | "notify_announcement_action";
 
 export function setNotifySetting(key: NotifyKey, on: boolean): Promise<void> {
   return invoke("set_notify_setting", { key, on });
+}
+
+/** When the due-tomorrow notification is shown, `HH:MM`. */
+export function setNotifyDueTime(time: string): Promise<void> {
+  return invoke("set_notify_due_time", { time });
 }
 
 /** Registers or removes the login item (SPEC §12). */

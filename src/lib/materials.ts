@@ -80,6 +80,8 @@ export interface PracticeFile extends ManagedFile {
   scope: string | null;
   stale: boolean | null;
   diff: import("@/lib/guides").ManifestDiff | null;
+  /** The exam's last self-score (SPEC §8.3); null until it has been scored. */
+  score: import("@/lib/practice").ExamScore | null;
 }
 
 /** Generated practice exams in Study Guides/Practice, newest first. */

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
@@ -11,6 +12,7 @@ import {
   type GuideInfo,
 } from "@/lib/guides";
 import { openInDefaultApp, revealInFinder } from "@/lib/materials";
+import { setExamFrame, type ExamScore } from "@/lib/practice";
 import { dragWindow } from "@/lib/window";
 import { buttonIcon, buttonTextMuted, chipAmber, meta } from "@/lib/styles";
 
@@ -19,6 +21,11 @@ import { buttonIcon, buttonTextMuted, chipAmber, meta } from "@/lib/styles";
  * allow-same-origin) runs the guide's inline interactive devices in an
  * opaque origin, isolated from the app: no IPC, no storage, no navigation.
  * The guide contract additionally forbids network and storage APIs.
+ *
+ * A practice exam's frame is the one the self-score listener matches
+ * (SPEC §8.3): registered through the frame's ref while it is on screen,
+ * for the exam this viewer opened, and the score it records is said in the
+ * header.
  */
 export function GuideViewer({
   classId,
@@ -37,6 +44,9 @@ export function GuideViewer({
     queryKey: ["guideHtml", classId, guide.scope, guide.generatedAt],
     queryFn: () => readGuide(classId, guide.scope),
   });
+  const [scored, setScored] = useState<ExamScore | null>(null);
+  const [refused, setRefused] = useState<string | null>(null);
+  const exam = guide.family === "practice";
 
   return (
     <div
@@ -60,6 +70,23 @@ export function GuideViewer({
         {guide.stale && (
           <span title={deltaTitle(guide.diff)} className={chipAmber}>
             stale · {deltaLabel(guide.diff)}
+          </span>
+        )}
+        {scored !== null && (
+          <span
+            title={
+              scored.weakTopics.length > 0
+                ? `Missed: ${scored.weakTopics.join(", ")} — the next exam of this scope focuses on them`
+                : "Full marks — nothing for the next exam to revisit"
+            }
+            className={`pointer-events-none shrink-0 ${meta} text-(--accent-ink)`}
+          >
+            Scored {scored.correct} of {scored.total} · recorded
+          </span>
+        )}
+        {refused !== null && (
+          <span className="pointer-events-none min-w-0 truncate text-fine text-destructive">
+            Score not recorded: {refused}
           </span>
         )}
         <span className={`ml-auto shrink-0 ${meta}`}>
@@ -104,6 +131,26 @@ export function GuideViewer({
             sandbox="allow-scripts"
             srcDoc={withDocumentCsp(html)}
             title={`${guide.label} study guide`}
+            // The frame the listener matches the panel's message against;
+            // cleared when the frame leaves the screen.
+            ref={
+              exam
+                ? (el) => {
+                    if (el === null) return;
+                    setExamFrame({
+                      frame: el,
+                      classId,
+                      scope: guide.scope,
+                      onScored: (score) => {
+                        setRefused(null);
+                        setScored(score);
+                      },
+                      onRefused: setRefused,
+                    });
+                    return () => setExamFrame(null);
+                  }
+                : undefined
+            }
             className="block h-full w-full border-0"
           />
         )}

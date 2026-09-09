@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { Projection } from "@/lib/classes";
+
 export interface GradeItem {
   id: number;
   name: string;
@@ -42,6 +44,36 @@ export interface GradesInfo {
   weightTotal: number;
   /** SPEC §11 math — null until at least one item is recorded. */
   currentGrade: number | null;
+  /** Where the grade could land, once a score exists (SPEC §11). */
+  projection: Projection | null;
+}
+
+/** `61–91%` — where the final grade could land, floor to ceiling. */
+export function formatRange(projection: Projection): string {
+  return `${Math.round(projection.floor)}–${Math.round(projection.ceiling)}%`;
+}
+
+/**
+ * The Grades section's one line (SPEC §11): the current grade and its
+ * letter, how much of the grade is still open, and what the open share has
+ * to average for the next letter up — `out of reach` past full marks.
+ */
+export function projectionLine(projection: Projection): string {
+  const parts = [`Current ${formatPercent(projection.current)} · ${projection.letter}`];
+  if (projection.open > 0) {
+    parts.push(`${formatPercent(projection.open)} of the grade still open`);
+    parts.push(`could land ${formatRange(projection)}`);
+    if (projection.nextLetter !== null && projection.needed !== null) {
+      parts.push(
+        projection.needed > 100
+          ? `${projection.nextLetter} is out of reach`
+          : `the rest needs to average ${formatPercent(projection.needed)} for ${projection.nextLetter === "A" ? "an" : "a"} ${projection.nextLetter}`,
+      );
+    }
+  } else {
+    parts.push("nothing left open");
+  }
+  return parts.join(" · ");
 }
 
 export function listGrades(classId: number): Promise<GradesInfo> {

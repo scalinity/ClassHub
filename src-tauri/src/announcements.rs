@@ -182,6 +182,8 @@ pub(crate) struct ScanRecord {
     pub todos: usize,
     pub changes: usize,
     pub skipped: Vec<String>,
+    /// The notices a to-do was read out of — what the notification names.
+    pub todo_titles: Vec<String>,
 }
 
 /// Records the scan's answer (SPEC §7.2): a proposal per dated item through
@@ -217,6 +219,28 @@ pub fn finalize_job(
         emit_hub_change(app, "deadlineProposals");
     }
     emit_hub_change(app, "announcements");
+    // A notice that asks for something is worth a word the moment it is
+    // read (SPEC §12), whether a sync or the shift brought it across.
+    if !recorded.todo_titles.is_empty() {
+        let class_name = with_conn(app, |conn| {
+            Ok(conn.query_row(
+                "SELECT display_name FROM classes WHERE id = ?1",
+                [class_id],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap_or_default();
+        crate::notifications::notify(
+            app,
+            crate::settings::NOTIFY_ANNOUNCEMENT_ACTION,
+            &format!("{class_name} · a notice asks for something"),
+            &format!(
+                "{} · {}",
+                plural(recorded.todos, "to-do", "to-dos"),
+                recorded.todo_titles.join(" · ")
+            ),
+        );
+    }
     Ok(recorded.summary())
 }
 
@@ -327,7 +351,11 @@ pub(crate) fn record_entries(
                 Recorded::AlreadyDeadline | Recorded::DismissedBefore => out.known += 1,
             }
         }
-        out.todos += record_actions(&tx, announcement_id, "todo", &entry.todos)?;
+        let todos = record_actions(&tx, announcement_id, "todo", &entry.todos)?;
+        if todos > 0 {
+            out.todo_titles.push(title.clone());
+        }
+        out.todos += todos;
         out.changes += record_actions(&tx, announcement_id, "change", &entry.changes)?;
         tx.execute(
             "UPDATE announcements SET scanned_at = ?1 WHERE id = ?2",
@@ -492,7 +520,16 @@ mod tests {
         let recorded = record_entries(&conn, 2, &entries, today).unwrap();
         assert_eq!(
             recorded,
-            ScanRecord { notices: 1, omitted: 0, proposed: 1, known: 1, todos: 1, changes: 1, skipped: vec![] }
+            ScanRecord {
+                notices: 1,
+                omitted: 0,
+                proposed: 1,
+                known: 1,
+                todos: 1,
+                changes: 1,
+                skipped: vec![],
+                todo_titles: vec!["Today's Office Hours Postponed".to_string()],
+            }
         );
         let (source, title): (String, String) = conn
             .query_row(

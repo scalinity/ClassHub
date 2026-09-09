@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check } from "lucide-react";
 
@@ -18,6 +18,48 @@ import { checkCircle, checkCircleDone, errorLine, readingText } from "@/lib/styl
  * command, so the two surfaces share one audit row and one query.
  */
 export function DeadlineStrip() {
+  const { data } = useQuery({
+    queryKey: ["deadlines"],
+    queryFn: listDeadlines,
+  });
+  if (data === undefined) return null;
+  const due = data.filter((d) => d.status === "open" && daysUntil(d.dueAt) < 7).length;
+
+  return (
+    <section className="mt-12" aria-label="Deadlines in the next 7 days">
+      <SectionHeading
+        title="Due in the next 7 days"
+        count={due === 0 ? undefined : due === 1 ? "1 due" : `${due} due`}
+      />
+      <DueChips
+        within={7}
+        empty={
+          <p className={`mt-3 ${readingText} text-muted-foreground`}>
+            Nothing due in the next 7 days.
+          </p>
+        }
+        wrap={(chips) => <div className="mt-4">{chips}</div>}
+      />
+    </section>
+  );
+}
+
+/**
+ * The chips for every open deadline due within `within` days, overdue ones
+ * included — the strip's, and Today's for the next three days (SPEC §12).
+ * A chip marked done here stays as done until the dashboard is next opened,
+ * a second click reopening it; `wrap` frames the chips when there are any,
+ * and `empty` stands in when there are none.
+ */
+export function DueChips({
+  within,
+  empty,
+  wrap,
+}: {
+  within: number;
+  empty: ReactNode;
+  wrap: (chips: ReactNode) => ReactNode;
+}) {
   const { data } = useQuery({
     queryKey: ["deadlines"],
     queryFn: listDeadlines,
@@ -53,39 +95,28 @@ export function DeadlineStrip() {
 
   const shown = data.filter(
     (d) =>
-      (d.status === "open" || completedHere.has(d.id)) && daysUntil(d.dueAt) < 7,
+      (d.status === "open" || completedHere.has(d.id)) && daysUntil(d.dueAt) < within,
   );
-  const due = shown.filter((d) => d.status === "open").length;
+  if (shown.length === 0) return <>{empty}</>;
 
-  return (
-    <section className="mt-12" aria-label="Deadlines in the next 7 days">
-      <SectionHeading
-        title="Due in the next 7 days"
-        count={due === 0 ? undefined : due === 1 ? "1 due" : `${due} due`}
-      >
-        {[...errors].map(([id, message]) => (
-          <p key={id} className={errorLine}>
-            {data.find((d) => d.id === id)?.title ?? "A deadline"}: {message}
-          </p>
-        ))}
-      </SectionHeading>
-      {shown.length === 0 ? (
-        <p className={`mt-3 ${readingText} text-muted-foreground`}>
-          Nothing due in the next 7 days.
+  return wrap(
+    <>
+      {[...errors].map(([id, message]) => (
+        <p key={id} className={`${errorLine} mt-0 mb-3`}>
+          {data.find((d) => d.id === id)?.title ?? "A deadline"}: {message}
         </p>
-      ) : (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {shown.map((deadline) => (
-            <DeadlineChip
-              key={deadline.id}
-              deadline={deadline}
-              onKeep={keep}
-              onError={report}
-            />
-          ))}
-        </div>
-      )}
-    </section>
+      ))}
+      <div className="flex flex-wrap gap-2">
+        {shown.map((deadline) => (
+          <DeadlineChip
+            key={deadline.id}
+            deadline={deadline}
+            onKeep={keep}
+            onError={report}
+          />
+        ))}
+      </div>
+    </>,
   );
 }
 
