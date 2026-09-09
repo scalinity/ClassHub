@@ -82,7 +82,7 @@ within five days with no fresh brief, write one, up to a cap of two a night
 ## Phase 2 — Project workbooks
 
 A job kind `project_workbook`, prompt `project_workbook.md`, same tools, one document per class
-at `Study Guides/Project Workbook.html` with a markdown twin, scoped `project` in `guides`.
+at `Study Guides/Workbook/Project Workbook.html` with a markdown twin, scoped `project` in `guides`.
 A project item is a deadline of kind `project`, or one of kind `assignment` whose title speaks
 the project's vocabulary — draft, proposal, milestone, demo, prototype, presentation, sketch,
 teaming, scaling, project — with no homework word in it: the syllabus scan typed Design Studio's
@@ -109,7 +109,7 @@ the kit` and reads stale when the paper changes.
 ## Phase 3 — The pre-read
 
 A job kind `pre_read` at the light tier, prompt `pre_read.md`, writing `Study Guides/Sessions/
-<date> — Before class.html` with a markdown twin, scoped `preread:<unit id>`. Inputs: the week
+<date> — Before class.html` with a markdown twin, scoped `preread:<unit id>:<week>`. Inputs: the week
 folder's files with their extracts, the previous division's note and hints, and the objectives.
 Output, one page: five things to know walking in; the terms; how it follows from last week;
 three questions to listen for. A candidate is a week the course dates within the next seven

@@ -6408,3 +6408,92 @@ changed:
   `src/lib/`.
 - `deadlines::due_instant` is `#[cfg(test)]`; `briefs::due_datetime` carries
   its own end-of-day rule.
+
+## Post-M36 — Review fixes (2026-09-09)
+
+A two-agent review of the M36 changeset since 9fe0377 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced one critical
+issue, eleven warnings and fourteen suggestions once the two reports were
+merged, three of them raised by both reviewers. Each fix went through
+`scripts/gate.sh`, seven commits in all, grouped by concern. What future
+sessions should know:
+
+- **A brief goes with its deadline** (the critical, both reviewers). A brief
+  is scoped `brief:<deadline id>` and nothing forgot its row when the
+  deadline left the list — deleted from the row or from chat, folded into
+  its Canvas row by the sync's settle or the launch's fold, its creation or
+  its syllabus approval undone — while `deadlines.id` is a plain rowid
+  SQLite reissues, so the orphan would have answered for the next assignment
+  under the id. `briefs::forget` drops the row through
+  `guides::forget_document` inside each path's transaction, and the files go
+  after the commit through `guides::remove_forgotten`, which removes only a
+  plain path under `Study Guides/`; `Settled`, `Folds` and `Undone` carry the
+  forgotten files past the commit.
+- **The tool scoping was inert, and had been since M32.** The probe that
+  verified the new folder rules found the interactive config's
+  `defaultMode: auto` in every spawned run's init event, and under it an
+  allow rule restricts nothing: `Edit(**/Briefs/**)` let a write into
+  `Project/` through with no denial recorded. Under `--permission-mode
+  default` the same rule refused it and allowed the write into `Briefs/`.
+  Every spawn passes the default mode now, which is what makes the digest's
+  `Edit(**/Sessions/**)` and the four new folder rules the boundary they
+  claim to be; the deny list and the write guard were the whole boundary
+  before. The workbook moved to `Study Guides/Workbook/` for a leaf folder
+  of its own that does not name `Project/`; tonight's workbook was moved
+  by hand and its row pointed there.
+- **A pre-read is keyed per week** (`preread:<unit id>:<week>`): a Part
+  spans several weeks, and the division-keyed scope would have shared one
+  row, one file and one supersede across them once M37 dates Applied's
+  weeks; tonight's row was rekeyed by hand. An undated written pre-read is
+  listed undated and last, not as January 1900 and first. Applied still
+  carries no pre-read until its weeks carry dates.
+- **No two documents share a file.** `guides::document_output_rel` returns a
+  row's own path on a rewrite and the next free suffix when another row or
+  a queued document holds the base name — two divisions dated the same day,
+  a syllabus row and its Canvas twin before the fold.
+- **Errors are errors, not "no sources".** `window_manifest` answers empty
+  only for a deadline that is gone and propagates the rest, since an empty
+  set read as "nothing changed" rather than "cannot tell"; the workbook's
+  fallback branches on `project_manifest` being empty rather than on any
+  error out of the context; `window_units` parses each division's date
+  itself, where `meeting_end`'s undated branch had placed a badly dated one
+  in the due date's own week.
+- **The project's vocabulary is read off the raw title.** `assignment_key`
+  folds "assignment" into "homework" for the family rule, which had dropped
+  `Final Project Assignment` from the project; `is_project_item` splits the
+  title itself. A title of numbers alone keeps its key as its family.
+- **An undone review stays undone.** The shift's Notes step read `reviewed`
+  off the note's text and would have re-appended a section the owner undid
+  every night; a note whose review once succeeded is the row's to ask for
+  again and never the shift's. The editor's untouched `<date> — ` title is
+  not a meeting's note; a note too long for a section is refused before the
+  run is spent.
+- **The shift** checks for a pause, the window's close or the rate limit
+  between its four new steps, and the workbook's and the notes' fixed caps
+  no longer end a run as `budget`.
+- **Tests**: the fold forgets a brief and names its files; an undone
+  creation returns them; output names never collide; the window's error and
+  not-found cases; a badly dated division; a numbers-only family; the
+  project vocabulary with "Assignment"; a kit's manifest and mixed-case
+  extension; the label join for a brief and a pre-read with the fallbacks;
+  `documents_written` with the twin missing, empty and present;
+  `appendable` both ways; the shift leaving an undone review alone. 336
+  pass. `npx tsc --noEmit` clean. Nothing was pushed.
+- **Left as it is**: `PROJECT_SCOPE` stays the bare `project`, the shape
+  `master` has carried since M1 (a class folder named `project` is
+  unreachable on this filesystem); a scratch note the owner dates on a
+  distilled session's day is the owner's to review or not; `record_session`'s
+  supersede call site and the shift's run loops take an `AppHandle` and stay
+  covered by the live run; a brief's window is still derived per row, with
+  the week slots and filings now loaded once per listing.
+
+### Gotchas
+
+- macOS has no `timeout`; a bounded CLI probe is the Bash tool's own limit.
+- `zsh -ic` from the Bash tool hangs waiting for a terminal; the setup
+  token is read off the `export` line of `.zshrc` instead.
+- The interactive `claude` login's OAuth had expired while the app's runs
+  kept working: the app spawns with the setup token, and a probe has to as
+  well.
+- A spawned run's init event names its `permissionMode`; read it before
+  trusting any allow rule.
