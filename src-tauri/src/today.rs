@@ -21,6 +21,8 @@ const PREVIOUS_OPENED_AT: &str = "previous_opened_at";
 const OPEN_GAP: i64 = 30 * 60;
 /// A meeting this many days back with no transcript is still worth a line.
 const TRANSCRIPT_LOOKBACK: u64 = 7;
+/// How many notices the block lists; past this it says how many more.
+const MAX_NOTICES: usize = 12;
 
 /// Stamps a launch or a focus (SPEC §12): on a launch, or a focus after the
 /// gap, the last stamp becomes the previous open.
@@ -96,7 +98,7 @@ pub struct Waiting {
     pub class_id: Option<i64>,
     pub class_name: Option<String>,
     pub class_color: Option<String>,
-    /// cards | deadlines | recordings | transcript | signin
+    /// sort | deadlines | recordings | transcript | signin
     pub kind: String,
     pub text: String,
 }
@@ -108,7 +110,10 @@ pub struct TodaySummary {
     pub overnight: Option<Overnight>,
     /// Unix seconds of the open before this one; the notices are since it.
     pub since: Option<i64>,
+    /// The newest since the previous open, capped; `notices_more` counts
+    /// the rest, which the workspaces hold.
     pub notices: Vec<TodayNotice>,
+    pub notices_more: usize,
     pub waiting: Vec<Waiting>,
 }
 
@@ -126,8 +131,14 @@ fn classes(conn: &Connection) -> Result<Vec<ClassRow>> {
     Ok(rows)
 }
 
-/// Everything the block reads, for `today` (YYYY-MM-DD) at `now`.
-pub fn summary(conn: &Connection, today: &str, now: i64) -> Result<TodaySummary> {
+/// Everything the block reads, for `today` (YYYY-MM-DD).
+pub fn summary(conn: &Connection, today: &str) -> Result<TodaySummary> {
+    summary_with(conn, today, crate::canvas::remembered_session_kept())
+}
+
+/// `summary` with the Canvas session's presence handed in — the one read
+/// that touches the Keychain, kept out of the tables' own assembly.
+pub(crate) fn summary_with(conn: &Connection, today: &str, canvas_session: bool) -> Result<TodaySummary> {
     let date = NaiveDate::parse_from_str(today, "%Y-%m-%d").context("today is not a date")?;
     let weekday = i64::from(chrono::Datelike::weekday(&date).number_from_monday());
     let classes = classes(conn)?;
@@ -162,7 +173,7 @@ pub fn summary(conn: &Connection, today: &str, now: i64) -> Result<TodaySummary>
         }
         waiting.extend(class_waiting(conn, class, date)?);
     }
-    if !crate::canvas::remembered_session_kept() {
+    if !canvas_session {
         waiting.push(Waiting {
             class_id: None,
             class_name: None,
@@ -172,13 +183,15 @@ pub fn summary(conn: &Connection, today: &str, now: i64) -> Result<TodaySummary>
         });
     }
     let since = previous_open(conn)?;
+    let (notices, notices_more) = match since {
+        Some(since) => notices_since(conn, &classes, since)?,
+        None => (Vec::new(), 0),
+    };
     Ok(TodaySummary {
         meetings,
-        overnight: overnight(conn, now)?,
-        notices: match since {
-            Some(since) => notices_since(conn, &classes, since)?,
-            None => Vec::new(),
-        },
+        overnight: overnight(conn)?,
+        notices,
+        notices_more,
         since,
         waiting,
     })
@@ -198,7 +211,7 @@ fn class_waiting(conn: &Connection, class: &ClassRow, today: NaiveDate) -> Resul
     };
     let to_sort = crate::sorter::pending_count(conn, class.id)?;
     if to_sort > 0 {
-        out.push(line("cards", format!("{} to sort", plural(to_sort, "file", "files"))));
+        out.push(line("sort", format!("{} to sort", plural(to_sort, "file", "files"))));
     }
     let queue = crate::deadlines::queue(conn, class.id)?;
     if !queue.proposals.is_empty() {
@@ -275,11 +288,15 @@ fn meeting_without_transcript(
     Ok((transcripts == 0).then_some(met))
 }
 
-/// The announcements posted since `since`, newest first, with their lines.
-fn notices_since(conn: &Connection, classes: &[ClassRow], since: i64) -> Result<Vec<TodayNotice>> {
-    let since_local = chrono::DateTime::from_timestamp(since, 0)
+/// The announcements posted since `since`, newest first, with their lines —
+/// the newest `MAX_NOTICES` and how many more. A stamp no date can be made
+/// of lists nothing rather than everything.
+fn notices_since(conn: &Connection, classes: &[ClassRow], since: i64) -> Result<(Vec<TodayNotice>, usize)> {
+    let Some(since_local) = chrono::DateTime::from_timestamp(since, 0)
         .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%dT%H:%M").to_string())
-        .unwrap_or_default();
+    else {
+        return Ok((Vec::new(), 0));
+    };
     let mut out = Vec::new();
     for class in classes {
         for a in crate::canvas_sync::list_announcements(conn, class.id)? {
@@ -297,18 +314,24 @@ fn notices_since(conn: &Connection, classes: &[ClassRow], since: i64) -> Result<
         }
     }
     out.sort_by(|a, b| b.posted_at.cmp(&a.posted_at).then(b.id.cmp(&a.id)));
-    Ok(out)
+    let more = out.len().saturating_sub(MAX_NOTICES);
+    out.truncate(MAX_NOTICES);
+    Ok((out, more))
 }
 
 /// The last run's line and what of it is still reversible: the files the
 /// sync filed, a note the review appended to, each an `Undo` over its audit
-/// rows unless one has reversed them already.
-fn overnight(conn: &Connection, now: i64) -> Result<Option<Overnight>> {
+/// rows unless one has reversed them already. Only a finished run offers
+/// one: a run under way has no end to bound its window, and a move or a
+/// note the reader makes while it works would fall inside it.
+fn overnight(conn: &Connection) -> Result<Option<Overnight>> {
     let Some(run) = crate::shift::latest_run(conn)? else {
         return Ok(None);
     };
-    let until = run.finished_at.unwrap_or(now);
-    let undo = reversible_between(conn, run.started_at, until)?;
+    let undo = match run.finished_at {
+        Some(until) => reversible_between(conn, run.started_at, until)?,
+        None => Vec::new(),
+    };
     Ok(Some(Overnight {
         night: run.night,
         summary: run.summary.unwrap_or_else(|| "running".to_string()),
@@ -373,7 +396,7 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::memory_db;
+    use crate::db::{memory_db, set_setting};
     use serde_json::json;
 
     /// The open stamps (SPEC §12): a launch rotates the last stamp into the
@@ -423,6 +446,116 @@ mod tests {
         );
         assert!(!groups.iter().any(|g| g.audit_ids.contains(&before)));
         assert!(reversible_between(&conn, 300, 400).unwrap().is_empty());
+    }
+
+    /// The block assembled (SPEC §12): the day's meeting with its division,
+    /// the last run's line with an `Undo` only once it has finished, the
+    /// notices since the previous open and no older ones, capped with a
+    /// count of the rest, and the waiting lines — a file to sort, a
+    /// proposed deadline, a recording, the sign-in.
+    #[test]
+    fn the_block_lists_the_meeting_the_run_the_notices_and_what_waits() {
+        let conn = memory_db();
+        set_setting(&conn, "aibhs_root", "/nonexistent/classhub-today").unwrap();
+        // Design Studio meets Wednesdays; Sept 9, 2026 is one, in Week 3.
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (2, 3, 'week', 'Week 3 — HiPerGator', 3, '2026-09-09', 'syllabus')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO deadline_proposals (class_id, title, kind, due_at, status, source, created_at)
+             VALUES (1, 'Homework 2', 'assignment', '2026-09-21', 'pending', 'syllabus', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO recordings (class_id, meeting_id, recorded_at, duration_minutes, title, status, seen_at)
+             VALUES (3, 'm1', '2026-09-03T11:40', 120, 'Lecture', 'new', 1)",
+            [],
+        )
+        .unwrap();
+        for (class_id, canvas_id, title, posted_at) in [
+            (3, "a1", "Quiz 1 opened", "2026-09-05T16:13"),
+            (2, "a2", "Office hours moved", "2026-09-04T15:03"),
+            (3, "a3", "Welcome", "2026-08-20T00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO announcements (class_id, canvas_id, title, body, posted_at)
+                 VALUES (?1, ?2, ?3, '', ?4)",
+                params![class_id, canvas_id, title, posted_at],
+            )
+            .unwrap();
+        }
+        // The previous open: Sept 1 at noon, local.
+        let since = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .single()
+            .unwrap()
+            .timestamp();
+        set_setting(&conn, "previous_opened_at", &since.to_string()).unwrap();
+        let run = crate::shift::insert_run(&conn, "2026-09-08", "idle").unwrap().unwrap();
+        let (started_at, _): (i64, i64) = conn
+            .query_row("SELECT started_at, id FROM shift_runs WHERE id = ?1", [run], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (action, payload, created_at) VALUES ('canvas.filed', '{}', ?1)",
+            [started_at],
+        )
+        .unwrap();
+
+        let summary = summary_with(&conn, "2026-09-09", false).unwrap();
+        assert_eq!(summary.meetings.len(), 1);
+        let meeting = &summary.meetings[0];
+        assert_eq!((meeting.class_id, meeting.start_time.as_str()), (2, "17:10"));
+        assert_eq!(meeting.unit_name.as_deref(), Some("Week 3 — HiPerGator"));
+        assert_eq!(meeting.week, None);
+        // The run is under way: its line, and no Undo yet.
+        let overnight = summary.overnight.as_ref().expect("a run");
+        assert!(overnight.running);
+        assert!(overnight.undo.is_empty(), "a running run offers no Undo");
+        assert_eq!(summary.since, Some(since));
+        let titles: Vec<&str> = summary.notices.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["Quiz 1 opened", "Office hours moved"], "newest first, the old one out");
+        assert_eq!(summary.notices_more, 0);
+        let kinds: Vec<(Option<i64>, &str)> =
+            summary.waiting.iter().map(|w| (w.class_id, w.kind.as_str())).collect();
+        assert_eq!(
+            kinds,
+            vec![(Some(1), "deadlines"), (Some(3), "recordings"), (None, "signin")]
+        );
+        assert_eq!(summary.waiting[0].text, "1 proposed deadline");
+        assert_eq!(summary.waiting[1].text, "1 recording found on Zoom, not captured yet");
+
+        // Finished: the filing it wrote is one Undo; a stored session drops
+        // the sign-in line; the notices past the cap are counted.
+        conn.execute(
+            "UPDATE shift_runs SET finished_at = ?1, summary = '1 file filed', stopped_by = 'done' WHERE id = ?2",
+            params![started_at + 30, run],
+        )
+        .unwrap();
+        for i in 0..MAX_NOTICES + 2 {
+            conn.execute(
+                "INSERT INTO announcements (class_id, canvas_id, title, body, posted_at)
+                 VALUES (1, ?1, ?2, '', '2026-09-06T10:00')",
+                params![format!("b{i}"), format!("Notice {i}")],
+            )
+            .unwrap();
+        }
+        let summary = summary_with(&conn, "2026-09-09", true).unwrap();
+        let overnight = summary.overnight.as_ref().expect("a run");
+        assert!(!overnight.running);
+        assert_eq!(overnight.summary, "1 file filed");
+        assert_eq!(overnight.undo.len(), 1);
+        assert_eq!(overnight.undo[0].text, "1 file filed where Canvas keeps them");
+        assert!(summary.waiting.iter().all(|w| w.kind != "signin"));
+        assert_eq!(summary.notices.len(), MAX_NOTICES);
+        assert_eq!(summary.notices_more, 4);
+        assert!(summary_with(&conn, "today", true).is_err(), "not a date");
     }
 
     /// The transcript line: the past week's meeting with nothing filed under

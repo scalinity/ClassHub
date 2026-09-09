@@ -5,10 +5,9 @@ import { DueChips } from "@/components/DeadlineStrip";
 import { ActionLine } from "@/components/Notices";
 import { syncCanvas, useCanvasSync } from "@/lib/canvas";
 import { CLASS_ACCENTS, classesQuery, type ClassInfo } from "@/lib/classes";
-import { listDeadlines } from "@/lib/deadlines";
 import { undoAuditRows } from "@/lib/notices";
 import { queryClient } from "@/lib/query";
-import { daysUntil, formatDueDate, formatStamp, formatTimeRange } from "@/lib/schedule";
+import { formatDueDate, formatStamp, formatTimeRange } from "@/lib/schedule";
 import {
   buttonText,
   buttonTextNeutral,
@@ -29,7 +28,9 @@ const DUE_WITHIN_DAYS = 4;
  * the notices posted since the app was last opened with their to-dos, and
  * every decision waiting. A label in the margin names each line's kind;
  * absent lines are absent, and when nothing is on the docket the block is
- * one sentence and one action.
+ * one sentence and one action. Whether anything is due is the chips' own
+ * call — a chip marked done here stays on the docket, struck through, and
+ * the empty sentence takes its place only once the chips have nothing.
  */
 export function Today({
   onOpen,
@@ -38,10 +39,6 @@ export function Today({
 }) {
   const { data: today, error } = useQuery(todayQuery());
   const { data: classes } = useQuery(classesQuery());
-  const { data: deadlines } = useQuery({
-    queryKey: ["deadlines"],
-    queryFn: listDeadlines,
-  });
   const open = (classId: number, scope?: string) => {
     const cls = classes?.find((c) => c.id === classId);
     if (cls) onOpen(cls, scope);
@@ -50,12 +47,9 @@ export function Today({
     return <p className={`${errorLine} mt-8`}>Today didn't load: {String(error)}</p>;
   }
   if (today === undefined) return null;
-  const dueSoon = (deadlines ?? []).filter(
-    (d) => d.status === "open" && daysUntil(d.dueAt) < DUE_WITHIN_DAYS,
-  ).length;
 
-  const meetings = today.meetings.map((m) => (
-    <Row key={`${m.classId}-${m.startTime}`} label={formatTimeRange(m.startTime, m.endTime)}>
+  const meetings = today.meetings.map((m, index) => (
+    <Row key={`${m.classId}-${m.startTime}-${index}`} label={formatTimeRange(m.startTime, m.endTime)}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <ClassLink name={m.className} color={m.classColor} onClick={() => open(m.classId)} />
         {m.unitName && (
@@ -79,8 +73,7 @@ export function Today({
     </Row>
   ));
 
-  const lines: ReactNode[] = [
-    ...meetings,
+  const rest: ReactNode[] = [
     today.overnight && <OvernightRow key="overnight" overnight={today.overnight} />,
     today.notices.length > 0 && (
       <Row
@@ -117,6 +110,12 @@ export function Today({
               )}
             </li>
           ))}
+          {today.noticesMore > 0 && (
+            <li className={meta}>
+              and {today.noticesMore === 1 ? "1 more" : `${today.noticesMore} more`} in the
+              workspaces
+            </li>
+          )}
         </ul>
       </Row>
     ),
@@ -139,31 +138,28 @@ export function Today({
       </Row>
     ),
   ].filter(Boolean);
-
-  if (lines.length === 0 && dueSoon === 0) {
-    return <Empty />;
-  }
+  const nothingElse = meetings.length === 0 && rest.length === 0;
 
   return (
     <section className="mt-8" aria-label="Today">
       {meetings}
       <DueChips
         within={DUE_WITHIN_DAYS}
-        empty={null}
+        empty={nothingElse ? <EmptyDocket /> : null}
         wrap={(chips) => <Row label="Due">{chips}</Row>}
       />
-      {lines.slice(meetings.length)}
+      {rest}
     </section>
   );
 }
 
 /** Nothing on the docket: one sentence and one action. */
-function Empty() {
+function EmptyDocket() {
   const progress = useCanvasSync();
   const running = progress !== null && !progress.done;
   const [refused, setRefused] = useState<string | null>(null);
   return (
-    <section className="mt-8" aria-label="Today">
+    <>
       <p className={`${readingText} text-muted-foreground`}>
         Nothing on the docket — no meeting today, nothing due within three days, and
         nothing waiting on you.
@@ -180,7 +176,7 @@ function Empty() {
         {running ? "Syncing Canvas…" : "Sync Canvas"}
       </button>
       {refused && <p className={errorLine}>Not started: {refused}</p>}
-    </section>
+    </>
   );
 }
 

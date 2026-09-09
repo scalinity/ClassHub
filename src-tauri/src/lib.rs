@@ -241,7 +241,7 @@ fn record_practice_results(
 #[tauri::command(async)]
 fn today_summary(state: tauri::State<Db>, today: String) -> Result<today::TodaySummary, String> {
     let conn = db::lock(&state.0);
-    today::summary(&conn, &today, db::now()).map_err(|e| format!("{e:#}"))
+    today::summary(&conn, &today).map_err(|e| format!("{e:#}"))
 }
 
 /// The ten cards due soonest across the classes.

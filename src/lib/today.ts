@@ -51,7 +51,7 @@ export interface Waiting {
   classId: number | null;
   className: string | null;
   classColor: string | null;
-  kind: "cards" | "deadlines" | "recordings" | "transcript" | "signin";
+  kind: "sort" | "deadlines" | "recordings" | "transcript" | "signin";
   text: string;
 }
 
@@ -60,7 +60,10 @@ export interface TodaySummary {
   overnight: Overnight | null;
   /** Unix seconds of the open before this one; the notices are since it. */
   since: number | null;
+  /** The newest since the previous open, capped; `noticesMore` counts the
+   *  rest, which the workspaces hold. */
   notices: TodayNotice[];
+  noticesMore: number;
   waiting: Waiting[];
 }
 
