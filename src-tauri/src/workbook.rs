@@ -42,13 +42,19 @@ pub(crate) fn is_project_item(kind: &str, title: &str) -> bool {
     if kind != "assignment" {
         return false;
     }
-    let key = crate::deadlines::assignment_key(title);
-    let words: Vec<&str> = key.split(' ').collect();
+    // The raw words, not `assignment_key`'s: that key folds "assignment"
+    // into "homework" for the family a homework series shares, which would
+    // read `Final Project Assignment` as a homework here.
+    let lowered = title.to_lowercase();
+    let words: Vec<&str> = lowered
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     const PROJECT_WORDS: &[&str] = &[
         "project", "draft", "proposal", "milestone", "demo", "prototype", "presentation",
         "presentations", "sketch", "teaming", "scaling", "capstone", "poster",
     ];
-    const HOMEWORK_WORDS: &[&str] = &["homework", "quiz", "exam", "test", "coding", "survey"];
+    const HOMEWORK_WORDS: &[&str] = &["homework", "homeworks", "hw", "quiz", "exam", "test", "coding", "survey"];
     !words.iter().any(|w| HOMEWORK_WORDS.contains(w)) && words.iter().any(|w| PROJECT_WORDS.contains(w))
 }
 
@@ -274,30 +280,38 @@ pub fn write_workbook(app: &AppHandle, class_id: i64, generated_at_label: &str) 
             .iter()
             .find(|item| item.status == "open" && item.due_at.get(..10).unwrap_or("") >= today.as_str());
         // The workbook builds from the guidelines and the drafts; with neither
-        // on disk it still has the items, the notices and the room.
-        let ctx = match synthesis_context(conn, class_id, PROJECT_SCOPE, BTreeSet::new(), false, "") {
-            Ok(ctx) => ctx,
-            Err(_) => {
-                let (class_name, color): (String, String) = conn.query_row(
-                    "SELECT display_name, color FROM classes WHERE id = ?1",
-                    [class_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-                let (accent_light, accent_dark) = crate::guides::accent_values(&color);
-                crate::guides::SynthesisContext {
-                    class_name,
-                    accent_light,
-                    accent_dark,
-                    manifest: Vec::new(),
-                    manifest_block: "(no guideline file or draft is indexed yet)".into(),
-                    files_block: "(none — no file named for the project, no guidelines and no \
-                                  draft under Project/ is indexed; work from the items, the \
-                                  notices and the room, and say what is missing)"
-                        .into(),
-                    changes_block: String::new(),
-                    class_dir: crate::scanner::class_dir(conn, class_id)?,
-                }
+        // indexed it still has the items, the notices and the room. Decided on
+        // the condition, not on an error: a failure to read the sources is a
+        // failure, never a prompt that says nothing is indexed.
+        let ctx = if project_manifest(conn, class_id)?.is_empty() {
+            let (class_name, color): (String, String) = conn.query_row(
+                "SELECT display_name, color FROM classes WHERE id = ?1",
+                [class_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let (accent_light, accent_dark) = crate::guides::accent_values(&color);
+            crate::guides::SynthesisContext {
+                class_name,
+                accent_light,
+                accent_dark,
+                manifest: Vec::new(),
+                manifest_block: "(no guideline file or draft is indexed yet)".into(),
+                files_block: "(none — no file named for the project, no guidelines and no \
+                              draft under Project/ is indexed; work from the items, the \
+                              notices and the room, and say what is missing)"
+                    .into(),
+                changes_block: String::new(),
+                class_dir: crate::scanner::class_dir(conn, class_id)?,
             }
+        } else {
+            synthesis_context(
+                conn,
+                class_id,
+                PROJECT_SCOPE,
+                BTreeSet::new(),
+                false,
+                "no guideline file or draft is indexed — rescan the class first",
+            )?
         };
         let next_block = match next {
             Some(item) => format!(
@@ -313,21 +327,24 @@ pub fn write_workbook(app: &AppHandle, class_id: i64, generated_at_label: &str) 
             ),
             None => "(none open — every item on the list is done or past)".to_string(),
         };
+        // The app's own blocks first, the text that came from Canvas, the
+        // room or the owner last, so a `{placeholder}` literal inside a
+        // description is never rewritten by a later substitution.
         let prompt = PROMPT_TEMPLATE
             .replace("{class}", &ctx.class_name)
             .replace("{today}", &today)
-            .replace("{items}", &items_block(&items))
-            .replace("{next}", &next_block)
             .replace("{files}", &ctx.files_block)
-            .replace("{notices}", &notices_block(conn, class_id)?)
-            .replace("{actions}", &actions_block(conn, class_id)?)
             .replace("{weights}", &crate::guides::assessment_block(conn, class_id, &today)?)
             .replace("{output}", PROJECT_OUTPUT)
             .replace("{output_md}", &md_twin(PROJECT_OUTPUT))
             .replace("{accent_light}", ctx.accent_light)
             .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{manifest}", &ctx.manifest_block);
+            .replace("{manifest}", &ctx.manifest_block)
+            .replace("{items}", &items_block(&items))
+            .replace("{next}", &next_block)
+            .replace("{notices}", &notices_block(conn, class_id)?)
+            .replace("{actions}", &actions_block(conn, class_id)?);
         let payload = serde_json::to_string(&DocumentPayload {
             scope: PROJECT_SCOPE.to_string(),
             rel_path: PROJECT_OUTPUT.to_string(),
@@ -376,17 +393,23 @@ pub(crate) fn kit_scope(rel_path: &str) -> String {
     format!("{KIT_SCOPE_PREFIX}{rel_path}")
 }
 
-/// Where a kit lands: `Study Guides/Presentations/<paper>.html`.
-pub(crate) fn kit_output_rel(rel_path: &str) -> String {
+/// Where a kit lands, before its extension: `Study Guides/Presentations/<paper>`;
+/// `guides::document_output_rel` settles the name. The extension goes in any
+/// spelling, as the index's `pdf` kind was read in any spelling.
+pub(crate) fn kit_output_base(rel_path: &str) -> String {
     let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    let stem = name.strip_suffix(".pdf").or_else(|| name.strip_suffix(".PDF")).unwrap_or(name);
-    format!("{PRESENTATIONS_DIR}/{}.html", crate::units::folder_segment(stem))
+    let stem = if name.to_lowercase().ends_with(".pdf") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    format!("{PRESENTATIONS_DIR}/{}", crate::units::folder_segment(stem))
 }
 
 /// `Presentation kit` on a PDF's row (SPEC §8.6).
 pub fn write_kit(app: &AppHandle, class_id: i64, rel_path: &str, generated_at_label: &str) -> Result<i64> {
     let scope = kit_scope(rel_path);
-    let (class_dir, prompt, payload, output) = with_conn(app, |conn| {
+    let (class_dir, prompt, payload) = with_conn(app, |conn| {
         let kind: Option<String> = conn
             .query_row(
                 "SELECT kind FROM files WHERE class_id = ?1 AND rel_path = ?2",
@@ -410,7 +433,7 @@ pub fn write_kit(app: &AppHandle, class_id: i64, rel_path: &str, generated_at_la
             false,
             &format!("{rel_path} is not indexed — rescan the class first"),
         )?;
-        let output = kit_output_rel(rel_path);
+        let output = crate::guides::document_output_rel(conn, class_id, &scope, &kit_output_base(rel_path))?;
         let prompt = KIT_TEMPLATE
             .replace("{class}", &ctx.class_name)
             .replace("{paper}", rel_path)
@@ -422,15 +445,14 @@ pub fn write_kit(app: &AppHandle, class_id: i64, rel_path: &str, generated_at_la
             .replace("{manifest}", &ctx.manifest_block);
         let payload = serde_json::to_string(&DocumentPayload {
             scope: scope.clone(),
-            rel_path: output.clone(),
+            rel_path: output,
             md_rel_path: None,
             source_manifest: serde_json::to_string(&ctx.manifest)?,
         })?;
-        Ok((ctx.class_dir, prompt, payload, output))
+        Ok((ctx.class_dir, prompt, payload))
     })?;
     fs::create_dir_all(class_dir.join(PRESENTATIONS_DIR))
         .with_context(|| format!("creating {PRESENTATIONS_DIR}"))?;
-    let _ = output;
     crate::jobs::enqueue_document(app, KIT_KIND, class_id, &scope, &prompt, payload)
 }
 
@@ -450,13 +472,19 @@ mod tests {
         assert!(is_project_item("assignment", "Scaling Plan & Cost Estimates"));
         assert!(!is_project_item("assignment", "Homework 2"));
         assert!(!is_project_item("assignment", "Homework 4: draft analysis"));
+        assert!(!is_project_item("assignment", "HW 3 project proposal"));
         assert!(!is_project_item("assignment", "Introduction to Python and Version Control"));
         assert!(!is_project_item("assignment", "Live coding session 09/01"));
         assert!(!is_project_item("quiz", "Project quiz"));
+        // Canvas titles routinely say "Assignment"; that word is the project's
+        // as much as a homework's.
+        assert!(is_project_item("assignment", "AI Design Project Assignment 3"));
+        assert!(is_project_item("assignment", "Final Project Assignment"));
         assert!(is_guideline_file("AI Design Project/AI Design Project Guidelines.pdf"));
         assert!(is_guideline_file("Syllabus/rubric_v2.pdf"));
         assert!(!is_guideline_file("Weeks/Week 03/deck.pdf"));
-        assert_eq!(kit_output_rel("Reading Material/Week 3 2022 Martijn.pdf"), "Study Guides/Presentations/Week 3 2022 Martijn.html");
+        assert_eq!(kit_output_base("Reading Material/Week 3 2022 Martijn.pdf"), "Study Guides/Presentations/Week 3 2022 Martijn");
+        assert_eq!(kit_output_base("Reading Material/Martijn.Pdf"), "Study Guides/Presentations/Martijn");
     }
 
     /// The manifest and the status: the guideline files, the drafts under
@@ -483,6 +511,10 @@ mod tests {
         assert_eq!(listed, vec!["AI Design Project/AI Design Project Guidelines.pdf", "Project/draft_v1.docx"]);
         crate::db::set_setting(&conn, "project_material.2", "Syllabus/CAI5724.pdf").unwrap();
         assert_eq!(project_manifest(&conn, 2).unwrap().len(), 3);
+        // A kit's set is its one paper, through the manifest resolver.
+        let kit = crate::extract::current_manifest(&conn, 2, &kit_scope("Weeks/Week 01/deck.pdf")).unwrap();
+        assert_eq!(kit.iter().map(|e| e.rel_path.as_str()).collect::<Vec<_>>(), vec!["Weeks/Week 01/deck.pdf"]);
+        assert!(crate::extract::current_manifest(&conn, 2, &kit_scope("Weeks/none.pdf")).unwrap().is_empty());
 
         assert!(status(&conn, 2, "2026-09-08").unwrap().is_none());
         for (title, kind, due, status_) in [
