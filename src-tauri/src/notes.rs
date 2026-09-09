@@ -185,7 +185,7 @@ pub(crate) fn undo_write(
     } else {
         format!("Restored {name}")
     };
-    Ok(crate::deadlines::Undone { what, class_id: Some(class_id) })
+    Ok(crate::deadlines::Undone { what, class_id: Some(class_id), forgotten: Vec::new() })
 }
 
 #[derive(Serialize)]

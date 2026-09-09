@@ -1380,9 +1380,76 @@ pub(crate) fn md_twin(rel_path: &str) -> String {
     format!("{}.md", rel_path.strip_suffix(".html").unwrap_or(rel_path))
 }
 
+/// Removes the files a forgotten document named, once the transaction that
+/// dropped its row has committed. Only a plain path under `Study Guides/` is
+/// removed, whatever the row held, so a bad row cannot reach source material.
+pub(crate) fn remove_forgotten(class_dir: &Path, rels: &[String]) {
+    for rel in rels {
+        let path = Path::new(rel);
+        let plain = path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if plain && path.starts_with(GUIDES_DIR) {
+            let _ = fs::remove_file(class_dir.join(path));
+        }
+    }
+}
+
+/// Where a small document lands (SPEC §8.6): its row's own path when one
+/// exists, so a rewrite replaces its file; else `<base>.html`, or the next
+/// free suffix when another row of the class or a queued document already
+/// holds that name — two divisions dated the same day, or a syllabus row and
+/// its Canvas twin before the fold, must not share one file.
+pub(crate) fn document_output_rel(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    base: &str,
+) -> Result<String> {
+    let own: Option<String> = conn
+        .query_row(
+            "SELECT rel_path FROM guides WHERE class_id = ?1 AND scope = ?2",
+            params![class_id, scope],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(own) = own {
+        return Ok(own);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT rel_path FROM guides WHERE class_id = ?1 AND scope != ?2",
+    )?;
+    let mut claimed: BTreeSet<String> = stmt
+        .query_map(params![class_id, scope], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare(
+        "SELECT payload FROM jobs
+         WHERE class_id = ?1 AND scope != ?2 AND status IN ('queued', 'running')
+           AND kind IN ('assignment_brief', 'project_workbook', 'presentation_kit', 'pre_read')",
+    )?;
+    let queued = stmt
+        .query_map(params![class_id, scope], |row| row.get::<_, Option<String>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    claimed.extend(
+        queued
+            .into_iter()
+            .flatten()
+            .filter_map(|payload| serde_json::from_str::<DocumentPayload>(&payload).ok())
+            .map(|payload| payload.rel_path),
+    );
+    let mut output = format!("{base}.html");
+    let mut n = 2;
+    while claimed.contains(&output) {
+        output = format!("{base} ({n}).html");
+        n += 1;
+    }
+    Ok(output)
+}
+
 /// Removes a document's row and its files — a pre-read the session document
-/// superseded (SPEC §8.6). The row goes inside the caller's transaction; the
-/// files are returned for the caller to remove once it has committed.
+/// superseded, a brief whose deadline left the list (SPEC §8.6). The row goes
+/// inside the caller's transaction; the files are returned for the caller to
+/// remove once it has committed (`remove_forgotten`).
 pub(crate) fn forget_document(conn: &Connection, class_id: i64, scope: &str) -> Result<Vec<String>> {
     let rel_path: Option<String> = conn
         .query_row(

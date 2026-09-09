@@ -728,6 +728,14 @@ fn sync_assignments(
                 };
                 match crate::deadlines::settle_canvas_deadline(conn, class.id, &tracked) {
                     Ok(Some(settled)) => {
+                        // The settle has committed: a folded row's brief
+                        // files go now (SPEC §8.6).
+                        if !settled.forgotten.is_empty() {
+                            match crate::scanner::class_dir(conn, class.id) {
+                                Ok(dir) => crate::guides::remove_forgotten(&dir, &settled.forgotten),
+                                Err(e) => eprintln!("canvas: a folded brief's files were left behind — {e:#}"),
+                            }
+                        }
                         known += 1;
                         if settled.completed {
                             completed += 1;

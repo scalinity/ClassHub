@@ -32,6 +32,11 @@ pub fn undo(app: &AppHandle, audit_ids: &[i64]) -> Result<UndoOutcome> {
         bail!("nothing to undo");
     }
     let batch = with_conn(app, |conn| Ok(undo_in_conn(conn, audit_ids)))?;
+    // The documents an inverse forgot — a brief whose deadline's creation
+    // was undone (SPEC §8.6) — lose their files once the rows have gone.
+    for (class_id, files) in &batch.forgotten {
+        crate::deadlines::remove_forgotten_files(app, *class_id, files);
+    }
     for area in &batch.areas {
         emit_hub_change(app, area);
     }
@@ -52,6 +57,8 @@ struct Batch {
     areas: std::collections::BTreeSet<&'static str>,
     texts: Vec<String>,
     class_id: Option<i64>,
+    /// Per class, the files of the documents the inverses forgot.
+    forgotten: Vec<(i64, Vec<String>)>,
 }
 
 /// The batch on the connection, newest row first, each row once: the rows
@@ -68,6 +75,7 @@ fn undo_in_conn(conn: &Connection, audit_ids: &[i64]) -> Batch {
         areas: std::collections::BTreeSet::new(),
         texts: Vec::new(),
         class_id: None,
+        forgotten: Vec::new(),
     };
     let mut undone = match already_undone(conn) {
         Ok(undone) => undone,
@@ -84,6 +92,9 @@ fn undo_in_conn(conn: &Connection, audit_ids: &[i64]) -> Batch {
                 batch.areas.extend(touched.iter().copied());
                 batch.texts.push(reversed.what);
                 batch.class_id = batch.class_id.or(reversed.class_id);
+                if let (Some(class_id), false) = (reversed.class_id, reversed.forgotten.is_empty()) {
+                    batch.forgotten.push((class_id, reversed.forgotten));
+                }
             }
             Err(e) => batch.outcome.refused.push(format!("#{id}: {e:#}")),
         }
@@ -227,9 +238,13 @@ mod tests {
             "ui.upsert_deadline",
             json!({ "id": 7, "classId": 1, "title": "Homework 1", "created": true }),
         );
+        // A brief written for it goes with it (SPEC §8.6), its files named.
+        crate::guides::upsert_guide(&conn, 1, "brief:7", "Study Guides/Briefs/2026-09-07 — Homework 1.html", "[]").unwrap();
         let (undone, _) = undo_one(&conn, created).expect("undo the create");
         assert_eq!(undone.what, "Removed Homework 1");
+        assert_eq!(undone.forgotten, vec!["Study Guides/Briefs/2026-09-07 — Homework 1.md".to_string(), "Study Guides/Briefs/2026-09-07 — Homework 1.html".to_string()]);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM deadlines WHERE id = 7"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM guides WHERE scope = 'brief:7'"), 0);
         let again = undo_one(&conn, created).expect_err("a second undo is refused");
         assert!(again.to_string().contains("already undone"), "{again:#}");
 

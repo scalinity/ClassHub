@@ -299,20 +299,35 @@ pub fn set_deadline_status(app: &AppHandle, id: i64, done: bool) -> Result<()> {
 /// stands in for a confirmation prompt. Delete and audit commit together:
 /// the audit row IS the undo, so the delete must never outlive it.
 pub fn delete_deadline(app: &AppHandle, id: i64) -> Result<()> {
-    let (audit_id, title, class_id) = with_conn(app, |conn| {
+    let (audit_id, title, class_id, forgotten) = with_conn(app, |conn| {
         let tx = conn.unchecked_transaction()?;
         let row = deadline_row(&tx, id)?.with_context(|| format!("no deadline #{id}"))?;
         let title = row["title"].as_str().unwrap_or_default().to_string();
         let class_id = row["classId"].as_i64().unwrap_or_default();
+        // Its brief goes with it (SPEC §8.6): the row here, the files after.
+        let forgotten = crate::briefs::forget(&tx, class_id, id)?;
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
         decline_assignment(&tx, &row)?;
         let audit_id = audit(&tx, "ui.delete_deadline", row)?;
         tx.commit()?;
-        Ok((audit_id, title, class_id))
+        Ok((audit_id, title, class_id, forgotten))
     })?;
+    remove_forgotten_files(app, class_id, &forgotten);
     emit_hub_change(app, "deadlines");
     notify(app, format!("Deleted {title}"), vec![audit_id], Some(class_id));
     Ok(())
+}
+
+/// Removes the files of the briefs a deadline's removal forgot, once the
+/// transaction has committed (SPEC §8.6).
+pub(crate) fn remove_forgotten_files(app: &AppHandle, class_id: i64, forgotten: &[String]) {
+    if forgotten.is_empty() {
+        return;
+    }
+    match with_conn(app, |conn| crate::scanner::class_dir(conn, class_id)) {
+        Ok(class_dir) => crate::guides::remove_forgotten(&class_dir, forgotten),
+        Err(e) => eprintln!("deadlines: the forgotten brief's files were left behind — {e:#}"),
+    }
 }
 
 /// A deleted deadline that Canvas tracks is a decision the next sync has to
@@ -383,6 +398,10 @@ pub(crate) fn deadline_row(conn: &Connection, id: i64) -> Result<Option<serde_js
 pub(crate) struct Undone {
     pub what: String,
     pub class_id: Option<i64>,
+    /// The files of the documents the inverse forgot — a brief whose
+    /// deadline's creation was undone (SPEC §8.6) — for the caller to remove
+    /// once the undo's transaction has committed.
+    pub forgotten: Vec<String>,
 }
 
 /// The row an audit entry names, checked to still be that row: `deadlines.id`
@@ -421,8 +440,12 @@ pub(crate) fn undo_upsert(conn: &Connection, payload: &serde_json::Value) -> Res
     let class_id = payload["classId"].as_i64();
     let title = same_deadline(conn, id, payload["title"].as_str(), class_id)?;
     if payload["created"].as_bool() == Some(true) {
+        let forgotten = match class_id {
+            Some(class_id) => crate::briefs::forget(conn, class_id, id)?,
+            None => Vec::new(),
+        };
         conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
-        return Ok(Undone { what: format!("Removed {title}"), class_id });
+        return Ok(Undone { what: format!("Removed {title}"), class_id, forgotten });
     }
     let before = &payload["before"];
     let (Some(old_title), Some(kind), Some(due_at)) = (
@@ -451,7 +474,7 @@ pub(crate) fn undo_upsert(conn: &Connection, payload: &serde_json::Value) -> Res
         "UPDATE deadlines SET title = ?1, kind = ?2, due_at = ?3, notes = ?4 WHERE id = ?5",
         params![old_title, kind, due_at, before["notes"].as_str(), id],
     )?;
-    Ok(Undone { what: format!("Restored {old_title}"), class_id })
+    Ok(Undone { what: format!("Restored {old_title}"), class_id, forgotten: Vec::new() })
 }
 
 /// `ui.delete_deadline` / `chat.delete_deadline`: the row comes back under
@@ -481,7 +504,7 @@ pub(crate) fn undo_delete(conn: &Connection, payload: &serde_json::Value) -> Res
             payload["canvasAssignmentId"].as_str(),
         ],
     )?;
-    Ok(Undone { what: format!("Restored {title}"), class_id: Some(class_id) })
+    Ok(Undone { what: format!("Restored {title}"), class_id: Some(class_id), forgotten: Vec::new() })
 }
 
 /// `ui.set_deadline_status` / `chat.complete_deadline`: the status before —
@@ -512,14 +535,19 @@ pub(crate) fn undo_status(conn: &Connection, payload: &serde_json::Value) -> Res
     } else {
         format!("Reopened {title}")
     };
-    Ok(Undone { what, class_id: Some(class_id) })
+    Ok(Undone { what, class_id: Some(class_id), forgotten: Vec::new() })
 }
 
 /// `syllabus.insert_deadline`: the deadline goes and its card returns to the
 /// queue. Refused when the deadline is already gone.
 pub(crate) fn undo_insert(conn: &Connection, payload: &serde_json::Value) -> Result<Undone> {
     let id = payload["deadlineId"].as_i64().context("the row names no deadline")?;
-    let title = same_deadline(conn, id, payload["title"].as_str(), payload["classId"].as_i64())?;
+    let class_id = payload["classId"].as_i64();
+    let title = same_deadline(conn, id, payload["title"].as_str(), class_id)?;
+    let forgotten = match class_id {
+        Some(class_id) => crate::briefs::forget(conn, class_id, id)?,
+        None => Vec::new(),
+    };
     conn.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
     if let Some(proposal_id) = payload["proposalId"].as_i64() {
         conn.execute(
@@ -527,7 +555,7 @@ pub(crate) fn undo_insert(conn: &Connection, payload: &serde_json::Value) -> Res
             [proposal_id],
         )?;
     }
-    Ok(Undone { what: format!("Removed {title}"), class_id: payload["classId"].as_i64() })
+    Ok(Undone { what: format!("Removed {title}"), class_id, forgotten })
 }
 
 // ---------------------------------------------------------------------------
@@ -1786,6 +1814,9 @@ pub(crate) struct Settled {
     /// The titles of the untracked rows that named this assignment beside
     /// the tracked one — the syllabus's reading of it — and were folded in.
     pub merged: Vec<String>,
+    /// The files of the briefs those rows carried, forgotten with them and
+    /// the caller's to remove once the settle has committed (SPEC §8.6).
+    pub forgotten: Vec<String>,
 }
 
 /// Brings the deadline for a Canvas assignment up to date, if there is one.
@@ -1920,7 +1951,7 @@ pub(crate) fn settle_canvas_deadline(
     // Any other untracked row that names this assignment — the syllabus's
     // reading of it, left beside the tracked row — is folded in.
     let due_now = canvas_due.unwrap_or(due_at.as_str());
-    settled.merged = fold_into(&tx, class_id, id, &title, due_now, assignment.id)?;
+    settled.merged = fold_into(&tx, class_id, id, &title, due_now, assignment.id, &mut settled.forgotten)?;
     tx.commit()?;
     Ok(Some(settled))
 }
@@ -1929,7 +1960,8 @@ pub(crate) fn settle_canvas_deadline(
 /// assignment into it (SPEC §7.2): their notes carried onto the row where
 /// they add anything, their own rows removed, each fold audited. Not
 /// reversible, as no `canvas.*` row is: the next sync would fold it again.
-/// Answers with the folded titles.
+/// Answers with the folded titles; a folded row's brief is forgotten with it
+/// (SPEC §8.6), its files added to `forgotten` for removal after the commit.
 fn fold_into(
     tx: &Connection,
     class_id: i64,
@@ -1937,6 +1969,7 @@ fn fold_into(
     kept_title: &str,
     kept_due: &str,
     canvas_id: &str,
+    forgotten: &mut Vec<String>,
 ) -> Result<Vec<String>> {
     let mut stmt = tx.prepare(
         "SELECT id, title, due_at, status, kind, notes, source FROM deadlines
@@ -1966,6 +1999,7 @@ fn fold_into(
                 tx.execute("UPDATE deadlines SET notes = ?1 WHERE id = ?2", params![kept, kept_id])?;
             }
         }
+        forgotten.extend(crate::briefs::forget(tx, class_id, dup_id)?);
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [dup_id])?;
         audit(
             tx,
@@ -1986,11 +2020,18 @@ pub struct Fold {
     pub canvas_title: String,
 }
 
+/// What a launch's fold did: the folds, and per class the files of the
+/// briefs the folded rows carried, to remove once it has committed.
+pub struct Folds {
+    pub folds: Vec<Fold>,
+    pub forgotten: Vec<(i64, Vec<String>)>,
+}
+
 /// Folds, for every tracked deadline the list holds, the untracked rows that
 /// name its assignment — what an earlier sync left beside Canvas's row, or a
 /// syllabus scan added after it (SPEC §7.2). Needs no Canvas read: the
 /// tracked row carries Canvas's words and day. One transaction for the lot.
-pub fn fold_duplicates(conn: &Connection) -> Result<Vec<Fold>> {
+pub fn fold_duplicates(conn: &Connection) -> Result<Folds> {
     let tx = conn.unchecked_transaction()?;
     let mut stmt = tx.prepare(
         "SELECT id, class_id, title, due_at, canvas_assignment_id FROM deadlines
@@ -2001,25 +2042,33 @@ pub fn fold_duplicates(conn: &Connection) -> Result<Vec<Fold>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     let mut folds = Vec::new();
+    let mut forgotten: Vec<(i64, Vec<String>)> = Vec::new();
     for (id, class_id, title, due_at, canvas_id) in tracked {
-        for theirs in fold_into(&tx, class_id, id, &title, &due_at, &canvas_id)? {
+        let mut files = Vec::new();
+        for theirs in fold_into(&tx, class_id, id, &title, &due_at, &canvas_id, &mut files)? {
             folds.push(Fold { class_id, theirs, canvas_title: title.clone() });
+        }
+        if !files.is_empty() {
+            forgotten.push((class_id, files));
         }
     }
     tx.commit()?;
-    Ok(folds)
+    Ok(Folds { folds, forgotten })
 }
 
 /// The launch's fold (SPEC §7.2): what it folded is said per class on the
 /// window, with nothing to undo, and the lists refetch.
 pub fn fold_at_launch(app: &AppHandle) {
-    let folds = match with_conn(app, fold_duplicates) {
+    let Folds { folds, forgotten } = match with_conn(app, fold_duplicates) {
         Ok(folds) => folds,
         Err(e) => {
             eprintln!("deadlines: the launch fold failed — {e:#}");
             return;
         }
     };
+    for (class_id, files) in &forgotten {
+        remove_forgotten_files(app, *class_id, files);
+    }
     if folds.is_empty() {
         return;
     }
@@ -2390,9 +2439,19 @@ mod tests {
         deadline(&conn, 3, "Homework 1", "2026-09-13", "syllabus", None);
         let sketch = deadline(&conn, 2, "Problem Statement and AI Sketch", "2026-09-09T23:59", "canvas", None);
         conn.execute("UPDATE deadlines SET canvas_assignment_id = '7300444' WHERE id = ?1", [sketch]).unwrap();
-        deadline(&conn, 2, "Problem Statement + AI Pitch", "2026-09-09", "syllabus", None);
+        let pitch = deadline(&conn, 2, "Problem Statement + AI Pitch", "2026-09-09", "syllabus", None);
         let stays = deadline(&conn, 2, "AI Solution Architecture", "2026-09-16", "syllabus", None);
-        let folds = fold_duplicates(&conn).unwrap();
+        // The syllabus row carries a brief (SPEC §8.6): the fold forgets it
+        // and names its files for removal.
+        let brief = crate::briefs::brief_scope(pitch);
+        crate::guides::upsert_guide(&conn, 2, &brief, "Study Guides/Briefs/2026-09-09 — Pitch.html", "[]").unwrap();
+        let Folds { folds, forgotten } = fold_duplicates(&conn).unwrap();
+        assert_eq!(
+            forgotten,
+            vec![(2, vec!["Study Guides/Briefs/2026-09-09 — Pitch.md".to_string(), "Study Guides/Briefs/2026-09-09 — Pitch.html".to_string()])]
+        );
+        let brief_rows: i64 = conn.query_row("SELECT COUNT(*) FROM guides WHERE scope = ?1", [&brief], |r| r.get(0)).unwrap();
+        assert_eq!(brief_rows, 0, "the folded row's brief went with it");
         let named: Vec<(i64, &str, &str)> = folds
             .iter()
             .map(|f| (f.class_id, f.theirs.as_str(), f.canvas_title.as_str()))
@@ -2408,7 +2467,7 @@ mod tests {
         assert_eq!(left, 3);
         let kept: i64 = conn.query_row("SELECT COUNT(*) FROM deadlines WHERE id = ?1", [stays], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1);
-        assert!(fold_duplicates(&conn).unwrap().is_empty(), "a second launch folds nothing");
+        assert!(fold_duplicates(&conn).unwrap().folds.is_empty(), "a second launch folds nothing");
     }
 
     /// A syllabus row is the Canvas assignment's on first contact by that
@@ -2958,7 +3017,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &unsubmitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: false, card_resolved: false, merged: Vec::new() })
+            Some(Settled { due_moved: true, completed: false, card_resolved: false, merged: Vec::new(), forgotten: Vec::new() })
         );
         assert_eq!(
             row(),
@@ -2984,7 +3043,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("submitted"),
-            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new() })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new(), forgotten: Vec::new() })
         );
         assert_eq!(row().2, "done");
         let named: i64 = conn
@@ -3089,7 +3148,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &submitted).expect("settle"),
-            Some(Settled { due_moved: true, completed: true, card_resolved: false, merged: vec!["Quiz 1".to_string()] })
+            Some(Settled { due_moved: true, completed: true, card_resolved: false, merged: vec!["Quiz 1".to_string()], forgotten: Vec::new() })
         );
         let (source, status): (String, String) = conn
             .query_row(
@@ -3123,7 +3182,7 @@ mod tests {
         };
         assert_eq!(
             settle_canvas_deadline(&conn, 3, &tracked).expect("settle"),
-            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new() })
+            Some(Settled { due_moved: false, completed: true, card_resolved: false, merged: Vec::new(), forgotten: Vec::new() })
         );
         let (due_at, status): (String, String) = conn
             .query_row(

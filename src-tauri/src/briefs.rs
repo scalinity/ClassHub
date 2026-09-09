@@ -31,6 +31,15 @@ pub(crate) fn brief_scope(deadline_id: i64) -> String {
     format!("{BRIEF_SCOPE_PREFIX}{deadline_id}")
 }
 
+/// The deadline is leaving the list — deleted, folded into its Canvas row,
+/// or its creation undone — and its brief goes with it: `deadlines.id` is a
+/// plain rowid SQLite reissues, so a brief left behind would answer for the
+/// next assignment under that id. The row leaves inside the caller's
+/// transaction; the files are the caller's to remove after the commit.
+pub(crate) fn forget(conn: &Connection, class_id: i64, deadline_id: i64) -> Result<Vec<String>> {
+    crate::guides::forget_document(conn, class_id, &brief_scope(deadline_id))
+}
+
 /// The kinds a brief is written for: the work that is not an exam.
 pub(crate) fn briefable(kind: &str) -> bool {
     matches!(kind, "assignment" | "project")
@@ -193,10 +202,11 @@ pub fn window_manifest(conn: &Connection, class_id: i64, deadline_id: i64) -> Re
     Ok(entries)
 }
 
-/// Where a brief lands: `Study Guides/Briefs/<due date> — <title>.html`.
-pub(crate) fn output_rel(due_at: &str, title: &str) -> String {
+/// Where a brief lands, before its extension: `Study Guides/Briefs/<due date>
+/// — <title>`; `guides::document_output_rel` settles the name.
+pub(crate) fn output_base(due_at: &str, title: &str) -> String {
     format!(
-        "{BRIEFS_DIR}/{} \u{2014} {}.html",
+        "{BRIEFS_DIR}/{} \u{2014} {}",
         due_at.chars().take(10).collect::<String>(),
         crate::units::folder_segment(title)
     )
@@ -259,7 +269,12 @@ pub fn write_brief(
             window.assignment.title
         );
         let ctx = synthesis_context(conn, class_id, &scope, listed_apart, false, &nothing)?;
-        let output = output_rel(&window.assignment.due_at, &window.assignment.title);
+        let output = crate::guides::document_output_rel(
+            conn,
+            class_id,
+            &scope,
+            &output_base(&window.assignment.due_at, &window.assignment.title),
+        )?;
         let output_md = md_twin(&output);
         let a = &window.assignment;
         let description = match a.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
@@ -440,6 +455,50 @@ mod tests {
         assert_eq!(due_datetime("2026-09-14T23:59"), Some(at("2026-09-14 23:59")));
     }
 
+    /// A brief goes with its deadline (SPEC §8.6): `forget` drops the row and
+    /// names both files for the caller to remove; and two documents are never
+    /// handed one name — a second scope on a taken base takes the suffix,
+    /// while a rewrite keeps its row's own path.
+    #[test]
+    fn a_brief_goes_with_its_deadline_and_no_two_share_a_file() {
+        let conn = memory_db();
+        let base = "Study Guides/Briefs/2026-09-14 \u{2014} Homework 1";
+        let first = crate::guides::document_output_rel(&conn, 3, &brief_scope(7), base).unwrap();
+        assert_eq!(first, format!("{base}.html"));
+        crate::guides::upsert_guide(&conn, 3, &brief_scope(7), &first, "[]").unwrap();
+        // The syllabus's twin of the same title and day, before the fold.
+        let second = crate::guides::document_output_rel(&conn, 3, &brief_scope(8), base).unwrap();
+        assert_eq!(second, format!("{base} (2).html"));
+        // A queued document claims its name too.
+        let payload = serde_json::to_string(&DocumentPayload {
+            scope: brief_scope(9),
+            rel_path: second.clone(),
+            md_rel_path: Some(md_twin(&second)),
+            source_manifest: "[]".into(),
+        })
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs (kind, class_id, scope, status, payload, created_at, owner_pid)
+             VALUES ('assignment_brief', 3, ?1, 'queued', ?2, 1, 1)",
+            params![brief_scope(9), payload],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::guides::document_output_rel(&conn, 3, &brief_scope(10), base).unwrap(),
+            format!("{base} (3).html")
+        );
+        // A rewrite lands on its own row's path, whatever else is taken.
+        assert_eq!(crate::guides::document_output_rel(&conn, 3, &brief_scope(7), base).unwrap(), first);
+
+        let files = forget(&conn, 3, 7).unwrap();
+        assert_eq!(files, vec![format!("{base}.md"), first.clone()]);
+        assert!(forget(&conn, 3, 7).unwrap().is_empty(), "nothing twice");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM guides WHERE scope = ?1", [brief_scope(7)], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
     /// Against rows: a quiz the Canvas sync typed `assignment` is not the
     /// previous homework; the first homework's window opens at the start.
     #[test]
@@ -474,7 +533,7 @@ mod tests {
         let second = window_for(&conn, 3, hw2).unwrap();
         assert_eq!(second.previous.as_ref().map(|p| p.id), Some(hw1));
         assert_eq!(second.units.iter().map(|u| u.number).collect::<Vec<_>>(), vec![Some(5)]);
-        assert_eq!(output_rel("2026-09-14T23:59", "Homework Assignment 1"), "Study Guides/Briefs/2026-09-14 \u{2014} Homework Assignment 1.html");
+        assert_eq!(output_base("2026-09-14T23:59", "Homework Assignment 1"), "Study Guides/Briefs/2026-09-14 \u{2014} Homework Assignment 1");
 
         // The shift's list: due within five days, no brief yet; a done row
         // and one further out are not listed, and a fresh brief clears it.

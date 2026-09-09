@@ -28,9 +28,10 @@ pub(crate) fn preread_scope(unit_id: i64) -> String {
     format!("{PREREAD_SCOPE_PREFIX}{unit_id}")
 }
 
-/// Where a pre-read lands: `Study Guides/Sessions/<meeting date> — Before class.html`.
-pub(crate) fn output_rel(meets_on: &str) -> String {
-    format!("{SESSIONS_DIR}/{meets_on} \u{2014} Before class.html")
+/// Where a pre-read lands, before its extension: `Study Guides/Sessions/<meeting
+/// date> — Before class`; `guides::document_output_rel` settles the name.
+pub(crate) fn output_base(meets_on: &str) -> String {
+    format!("{SESSIONS_DIR}/{meets_on} \u{2014} Before class")
 }
 
 /// The weeks a pre-read may be written for (SPEC §8.6): those the course
@@ -193,7 +194,7 @@ pub fn write_preread(app: &AppHandle, class_id: i64, unit_id: i64, generated_at_
             false,
             &format!("nothing is filed under {}'s folder yet", slot.unit_name),
         )?;
-        let output = output_rel(&meets_on);
+        let output = crate::guides::document_output_rel(conn, class_id, &scope, &output_base(&meets_on))?;
         let output_md = md_twin(&output);
         let prompt = PROMPT_TEMPLATE
             .replace("{class}", &ctx.class_name)
@@ -317,12 +318,12 @@ mod tests {
         assert_eq!(listed.iter().map(|p| (p.unit_id, p.candidate, p.files)).collect::<Vec<_>>(), vec![(4, true, 1)],
             "Week 3 has its transcript, Week 5 nothing filed, Week 6 is past the week ahead");
         assert_eq!(listed[0].meets_on, "2026-09-10");
-        assert_eq!(output_rel("2026-09-10"), "Study Guides/Sessions/2026-09-10 \u{2014} Before class.html");
+        assert_eq!(output_base("2026-09-10"), "Study Guides/Sessions/2026-09-10 \u{2014} Before class");
 
         // The shift takes the same candidate, once, and a fresh pre-read clears it.
         assert_eq!(candidates(&conn, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(), 1_000_000).unwrap().len(), 1);
         crate::guides::upsert_guide(
-            &conn, 3, &preread_scope(4), &output_rel("2026-09-10"),
+            &conn, 3, &preread_scope(4), &format!("{}.html", output_base("2026-09-10")),
             r#"[{"relPath":"Weeks/Week 04 — Topic/reading.pdf","sha256":"Weeks/Week 04 — Topic/reading.pdf"}]"#,
         ).unwrap();
         assert!(candidates(&conn, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(), 1_000_000).unwrap().is_empty());

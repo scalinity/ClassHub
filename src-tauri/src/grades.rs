@@ -460,7 +460,7 @@ pub(crate) fn undo_save_category(conn: &Connection, payload: &serde_json::Value)
             bail!("{name} holds {items} score(s) now — delete it from the Grades section instead");
         }
         conn.execute("DELETE FROM grade_categories WHERE id = ?1", [id])?;
-        return Ok(Undone { what: format!("Removed {name}"), class_id });
+        return Ok(Undone { what: format!("Removed {name}"), class_id, forgotten: Vec::new() });
     }
     let before = &payload["before"];
     let (Some(old_name), Some(weight)) = (before["name"].as_str(), before["weight"].as_f64()) else {
@@ -480,7 +480,7 @@ pub(crate) fn undo_save_category(conn: &Connection, payload: &serde_json::Value)
         "UPDATE grade_categories SET name = ?1, weight = ?2 WHERE id = ?3",
         params![old_name, weight, id],
     )?;
-    Ok(Undone { what: format!("Restored {old_name}"), class_id })
+    Ok(Undone { what: format!("Restored {old_name}"), class_id, forgotten: Vec::new() })
 }
 
 /// `ui.delete_grade_category`: the category and its scores come back under
@@ -524,7 +524,7 @@ pub(crate) fn undo_delete_category(conn: &Connection, payload: &serde_json::Valu
             ],
         )?;
     }
-    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id) })
+    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id), forgotten: Vec::new() })
 }
 
 /// `ui.save_grade_item` / `chat.add_grade_item`: a created row goes, an
@@ -552,7 +552,7 @@ pub(crate) fn undo_save_item(conn: &Connection, payload: &serde_json::Value) -> 
     // A chat row carries no `created` flag; it is always a create.
     if payload["created"].as_bool() == Some(true) || payload["before"].is_null() {
         conn.execute("DELETE FROM grade_items WHERE id = ?1", [id])?;
-        return Ok(Undone { what: format!("Removed {name}"), class_id });
+        return Ok(Undone { what: format!("Removed {name}"), class_id, forgotten: Vec::new() });
     }
     let before = &payload["before"];
     let (Some(old_name), Some(score), Some(max_score)) = (
@@ -580,7 +580,7 @@ pub(crate) fn undo_save_item(conn: &Connection, payload: &serde_json::Value) -> 
         "UPDATE grade_items SET name = ?1, score = ?2, max_score = ?3 WHERE id = ?4",
         params![old_name, score, max_score, id],
     )?;
-    Ok(Undone { what: format!("Restored {old_name}"), class_id })
+    Ok(Undone { what: format!("Restored {old_name}"), class_id, forgotten: Vec::new() })
 }
 
 /// `ui.delete_grade_item`: the score comes back under its own id, in a
@@ -611,7 +611,7 @@ pub(crate) fn undo_delete_item(conn: &Connection, payload: &serde_json::Value) -
             payload["canvasAssignmentId"].as_str(),
         ],
     )?;
-    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id) })
+    Ok(Undone { what: format!("Restored {name}"), class_id: Some(class_id), forgotten: Vec::new() })
 }
 
 // ---------------------------------------------------------------------------

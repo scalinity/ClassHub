@@ -1581,7 +1581,7 @@ fn complete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
 }
 
 fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
-    let (outcome, audit_id, title, class_id) = with_conn(app, |conn| {
+    let (outcome, audit_id, title, class_id, forgotten) = with_conn(app, |conn| {
         let id = int_arg(input, "id")?;
         let row = crate::deadlines::deadline_row(conn, id)?
             .with_context(|| format!("no deadline #{id} — get_overview lists the ids"))?;
@@ -1591,6 +1591,8 @@ fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
         // One transaction, because the promise below — that the row survives
         // in the audit log — is only true if both statements land together.
         let tx = conn.unchecked_transaction()?;
+        // Its brief goes with it (SPEC §8.6): the row here, the files after.
+        let forgotten = crate::briefs::forget(&tx, class_id, id)?;
         tx.execute("DELETE FROM deadlines WHERE id = ?1", [id])?;
         // A tracked assignment's card is declined, or the next sync would
         // write the deadline back (SPEC §7.2).
@@ -1605,8 +1607,10 @@ fn delete_deadline(app: &AppHandle, input: &Value) -> Result<Outcome> {
             audit_id,
             title,
             class_id,
+            forgotten,
         ))
     })?;
+    crate::deadlines::remove_forgotten_files(app, class_id, &forgotten);
     emit_hub_change(app, "deadlines");
     notify(app, format!("Deleted {title}"), vec![audit_id], Some(class_id));
     Ok(outcome)

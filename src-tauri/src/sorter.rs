@@ -2202,6 +2202,7 @@ pub(crate) fn undo_move(
     Ok(crate::deadlines::Undone {
         what: format!("Returned {name} to {back_to}"),
         class_id: Some(class_id),
+        forgotten: Vec::new(),
     })
 }
 
