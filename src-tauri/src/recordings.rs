@@ -82,6 +82,13 @@ pub(crate) fn sync_for_course(
     course_id: i64,
     on_stage: &dyn Fn(&str),
 ) -> Result<Listing> {
+    let _listing = match LISTING.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            bail!("a read of the Zoom recordings is already in flight — try again when it ends")
+        }
+    };
     let Some(launch) = session.zoom_launch_url(course_id, on_stage)? else {
         bail!("the course shows no Zoom tool in its navigation");
     };
@@ -431,20 +438,23 @@ fn last_filed(conn: &Connection, class_id: i64) -> Result<Option<(NaiveDate, i64
 // ---------------------------------------------------------------------------
 // Capturing what was found
 
-/// What a capture pass did.
-#[derive(Debug, Default)]
+/// What a capture pass did. The counts add up to the rows it was given:
+/// every row is captured, waiting for the form, skipped, failed or left.
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Captured {
     pub captured: usize,
     /// Rows whose week nothing settled, left for the form.
     pub waiting: usize,
+    /// Rows a lecture already filed for their day covers.
+    pub skipped: usize,
     pub failed: usize,
-    /// Rows past the cap.
+    /// Rows past the cap, past a stop, or behind a class already ingesting.
     pub left: usize,
     pub notes: Vec<String>,
 }
 
 impl Captured {
-    /// `2 captured, 1 waiting for the form, 1 failed`.
+    /// `2 captured, 1 waiting for the form, 1 failed, 3 past the cap`.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.captured > 0 {
@@ -452,6 +462,9 @@ impl Captured {
         }
         if self.waiting > 0 {
             parts.push(format!("{} waiting for the form", self.waiting));
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} already filed", self.skipped));
         }
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
@@ -475,16 +488,57 @@ struct Pending {
     recorded_at: String,
 }
 
+/// Where a capture left its row (SPEC §7.1), applied by `record_transition`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Transition {
+    /// Filed and marked by the ingestion itself.
+    Filed { rel_path: String },
+    /// Filed, but the row's mark did not land: the row stays as it is, and
+    /// the next pass finds the day filed and skips it, so nothing is
+    /// captured twice while the reader hears why.
+    NotMarked { rel_path: String },
+    /// The ingestion refused or failed; the row says why and is tried again.
+    Failed { why: String },
+    /// A lecture is already filed for that day.
+    Skipped { why: String },
+    /// No week settles it; the form's to place.
+    Waiting,
+}
+
+fn record_transition(conn: &Connection, id: i64, transition: &Transition) -> Result<()> {
+    let (status, note): (&str, Option<String>) = match transition {
+        Transition::Filed { .. } => return Ok(()),
+        Transition::NotMarked { .. } => return Ok(()),
+        Transition::Failed { why } => ("failed", Some(crate::db::truncate(why, MAX_NOTE_CHARS))),
+        Transition::Skipped { why } => ("skipped", Some(crate::db::truncate(why, MAX_NOTE_CHARS))),
+        Transition::Waiting => ("new", Some("pick its week in the Add lecture form".to_string())),
+    };
+    conn.execute(
+        "UPDATE recordings SET status = ?1, note = ?2 WHERE id = ?3",
+        params![status, note, id],
+    )?;
+    Ok(())
+}
+
+/// The listing's guard: one read of the Zoom tool at a time, since one
+/// window carries it and a second read would close the first's.
+static LISTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Files every recording waiting for a capture — `new`, and `failed` for
 /// another try — oldest first, up to `cap`, through the ordinary ingestion
-/// with the window hidden as `reveal` says. No digest is enqueued: by hand
-/// the row's `Distill` is a click away, and the shift's own Distill step
-/// lists a filed lecture without its note under the digest cap (SPEC §6).
+/// with the window hidden as `reveal` says; `stop` is asked between rows,
+/// and a row it stops ahead of counts as left. The class's ingestion claim
+/// is taken before a row spends the cap, so a class the form is adding a
+/// lecture for leaves its rows for later rather than failing them. No
+/// digest is enqueued: by hand the row's `Distill` is a click away, and the
+/// shift's own Distill step lists a filed lecture without its note under
+/// the digest cap (SPEC §6).
 pub(crate) fn capture_waiting(
     app: &AppHandle,
     class_id: Option<i64>,
     cap: usize,
     reveal: Reveal,
+    stop: &dyn Fn() -> bool,
     on_stage: &dyn Fn(&str),
 ) -> Captured {
     let mut out = Captured::default();
@@ -516,8 +570,9 @@ pub(crate) fn capture_waiting(
         }
     };
     let mut done = 0usize;
+    let mut changed = false;
     for p in pending {
-        if done >= cap {
+        if done >= cap || stop() {
             out.left += 1;
             continue;
         }
@@ -525,34 +580,44 @@ pub(crate) fn capture_waiting(
         let day_label = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
             .map(|d| d.format("%a, %b %-d").to_string())
             .unwrap_or_else(|_| date.clone());
-        let week = match with_conn(app, |conn| week_for(conn, p.class_id, &date)) {
-            Ok(week) => week,
-            Err(e) => {
-                out.notes.push(format!("{day_label}: {e:#}"));
-                continue;
-            }
-        };
-        let Some(week) = week else {
-            let _ = with_conn(app, |conn| {
-                conn.execute(
-                    "UPDATE recordings SET status = 'new', note = ?1 WHERE id = ?2",
-                    params!["pick its week in the Add lecture form", p.id],
-                )?;
-                Ok(())
-            });
-            out.waiting += 1;
-            continue;
-        };
-        done += 1;
-        on_stage(&format!("Capturing {}'s {day_label} recording…", p.class_name));
+        // The claim first: a class the form is adding a lecture for is not a
+        // failure, and its rows wait for the next pass without a slot spent.
         let _claim = match crate::lectures::claim_ingest(p.class_id) {
             Ok(claim) => claim,
             Err(e) => {
                 out.notes.push(format!("{day_label}: {e:#}"));
-                out.failed += 1;
+                out.left += 1;
                 continue;
             }
         };
+        let plan = with_conn(app, |conn| {
+            if dates_filed_by_hand(conn, p.class_id)?.contains(&date) {
+                return Ok(Err(Transition::Skipped {
+                    why: format!("a lecture for {day_label} is already filed"),
+                }));
+            }
+            Ok(week_for(conn, p.class_id, &date)?.ok_or(Transition::Waiting))
+        });
+        let week = match plan {
+            Ok(Ok(week)) => week,
+            Ok(Err(transition)) => {
+                match &transition {
+                    Transition::Skipped { .. } => out.skipped += 1,
+                    _ => out.waiting += 1,
+                }
+                changed |= settle(app, &p, &day_label, &transition, &mut out);
+                continue;
+            }
+            Err(e) => {
+                let transition = Transition::Failed { why: format!("{e:#}") };
+                out.failed += 1;
+                out.notes.push(format!("{day_label}: {e:#}"));
+                changed |= settle(app, &p, &day_label, &transition, &mut out);
+                continue;
+            }
+        };
+        done += 1;
+        on_stage(&format!("Capturing {}'s {day_label} recording…", p.class_name));
         let request = crate::lectures::AddRequest {
             class_id: p.class_id,
             source: p.play_url.clone(),
@@ -560,18 +625,19 @@ pub(crate) fn capture_waiting(
             date: date.clone(),
             title: None,
             digest: false,
+            recording_id: Some(p.id),
         };
-        match crate::lectures::add_with(app, &request, reveal, on_stage) {
-            Ok(result) => {
-                let _ = with_conn(app, |conn| {
-                    conn.execute(
-                        "UPDATE recordings SET status = 'filed', rel_path = ?1, note = NULL WHERE id = ?2",
-                        params![result.rel_path, p.id],
-                    )?;
-                    Ok(())
-                });
+        let transition = match crate::lectures::add_with(app, &request, reveal, on_stage) {
+            Ok(result) if result.recording_marked == Some(true) => {
+                Transition::Filed { rel_path: result.rel_path }
+            }
+            Ok(result) => Transition::NotMarked { rel_path: result.rel_path },
+            Err(e) => Transition::Failed { why: format!("{e:#}") },
+        };
+        match &transition {
+            Transition::Filed { rel_path } => {
                 out.captured += 1;
-                let folder = result.rel_path.rsplit_once('/').map(|(dir, _)| dir.to_string());
+                let folder = rel_path.rsplit_once('/').map(|(dir, _)| dir.to_string());
                 crate::db::notify(
                     app,
                     format!(
@@ -583,24 +649,38 @@ pub(crate) fn capture_waiting(
                     Some(p.class_id),
                 );
             }
-            Err(e) => {
-                let why = format!("{e:#}");
-                let _ = with_conn(app, |conn| {
-                    conn.execute(
-                        "UPDATE recordings SET status = 'failed', note = ?1 WHERE id = ?2",
-                        params![why, p.id],
-                    )?;
-                    Ok(())
-                });
+            Transition::NotMarked { rel_path } => {
+                out.failed += 1;
+                out.notes.push(format!(
+                    "{day_label}: filed as {rel_path}, but its row could not be marked — the next \
+                     pass skips that day"
+                ));
+            }
+            Transition::Failed { why } => {
                 out.failed += 1;
                 out.notes.push(format!("{day_label}: {why}"));
             }
+            _ => {}
         }
+        changed |= settle(app, &p, &day_label, &transition, &mut out);
+    }
+    if changed {
         emit_hub_change(app, "recordings");
     }
     out
 }
 
+/// Writes a transition onto its row; a write that fails is a note, since
+/// the row is what the next pass reads. Answers whether the row changed.
+fn settle(app: &AppHandle, p: &Pending, day_label: &str, transition: &Transition, out: &mut Captured) -> bool {
+    match with_conn(app, |conn| record_transition(conn, p.id, transition)) {
+        Ok(()) => !matches!(transition, Transition::NotMarked { .. }),
+        Err(e) => {
+            out.notes.push(format!("{day_label}: its row could not be updated — {e:#}"));
+            false
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // The listing the workspace shows, and the find run by hand
 
@@ -650,14 +730,18 @@ pub fn play_url_of(conn: &Connection, id: i64) -> Result<Option<String>> {
         .flatten())
 }
 
-/// Marks a waiting recording filed once the form filed it (the form's own
-/// `add` knows nothing of the row), so it leaves the listing.
-pub fn mark_filed(conn: &Connection, id: i64, rel_path: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE recordings SET status = 'filed', rel_path = ?1, note = NULL WHERE id = ?2",
-        params![rel_path, id],
+/// Marks a waiting recording filed, from inside the ingestion that filed it
+/// (`lectures::add_with`) — the capture's and the form's alike — and only
+/// while the source filed is the row's own player link, so a form opened
+/// from a recording and then pointed elsewhere files that instead and
+/// leaves the recording waiting. Answers whether the row was marked.
+pub(crate) fn mark_filed(conn: &Connection, id: i64, source: &str, rel_path: &str) -> Result<bool> {
+    let marked = conn.execute(
+        "UPDATE recordings SET status = 'filed', rel_path = ?1, note = NULL
+         WHERE id = ?2 AND play_url = ?3 AND status IN ('new', 'failed')",
+        params![rel_path, id, source.trim()],
     )?;
-    Ok(())
+    Ok(marked == 1)
 }
 
 pub const PROGRESS_EVENT: &str = "recordings://progress";
@@ -734,13 +818,20 @@ fn find(app: &AppHandle, class_id: i64, on_stage: &dyn Fn(&str)) -> Result<Strin
         let session = Session::open(app, on_stage)?;
         sync_for_course(app, &session, class_id, course_id, on_stage)?
     };
-    let captured = capture_waiting(app, Some(class_id), usize::MAX, Reveal::OnAsk, on_stage);
+    // Capped as the shift caps its own step: a find that meets a term's backlog
+    // captures a night's worth and says what it left, and the next press
+    // takes the next.
+    let cap = with_conn(app, |conn| Ok(crate::shift::settings(conn).digests_per_night as usize))?;
+    let captured = capture_waiting(app, Some(class_id), cap, Reveal::OnAsk, &|| false, on_stage);
     let mut summary = format!(
         "{} listed for {class_name} · {} new · {}",
         listing.found,
         listing.new,
         captured.summary()
     );
+    if captured.left > 0 {
+        summary.push_str(" — press again for the next");
+    }
     if !captured.notes.is_empty() {
         summary.push_str(&format!(" · {}", captured.notes.join("; ")));
     }
@@ -1119,9 +1210,48 @@ mod tests {
 
         let waiting = list_waiting(&conn, 1).unwrap();
         assert_eq!(waiting.len(), 2);
-        let m1 = waiting.iter().find(|w| w.title == "CAI5720" && w.status == "new").unwrap();
-        mark_filed(&conn, m1.id, "Weeks/Week 03 — X/2026-09-08 — Lecture.md").unwrap();
+        let m1 = waiting.iter().find(|w| w.status == "new" && w.id == 1).unwrap();
+        // The mark takes only while the source filed is the row's own link.
+        assert!(!mark_filed(&conn, m1.id, "https://ufl.zoom.us/rec/play/other", "Weeks/W/x.md").unwrap());
+        assert_eq!(list_waiting(&conn, 1).unwrap().len(), 2);
+        assert!(mark_filed(&conn, m1.id, " https://ufl.zoom.us/rec/play/x ", "Weeks/Week 03 — X/2026-09-08 — Lecture.md").unwrap());
         assert_eq!(list_waiting(&conn, 1).unwrap().len(), 1);
+        assert!(!mark_filed(&conn, m1.id, "https://ufl.zoom.us/rec/play/x", "Weeks/W/again.md").unwrap());
+    }
+
+    /// A capture's outcome lands on its row: a failure or a skip with its
+    /// note, a row nothing settles as waiting for the form, and a filing
+    /// whose mark was lost left exactly as it was, so the next pass reads
+    /// the day as filed. The summary adds up what the pass did.
+    #[test]
+    fn a_captures_transition_is_written_on_its_row() {
+        let conn = crate::db::memory_db();
+        conn.execute(
+            "INSERT INTO recordings (class_id, meeting_id, play_url, recorded_at, duration_minutes,
+             title, status, seen_at) VALUES (1, 'm', 'https://ufl.zoom.us/rec/play/x',
+             '2026-09-08T15:52', 209, 'T', 'new', 1)",
+            [],
+        )
+        .unwrap();
+        let read = |conn: &Connection| -> (String, Option<String>) {
+            conn.query_row("SELECT status, note FROM recordings WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        record_transition(&conn, 1, &Transition::Waiting).unwrap();
+        assert_eq!(read(&conn), ("new".into(), Some("pick its week in the Add lecture form".into())));
+        record_transition(&conn, 1, &Transition::Failed { why: "x".repeat(900) }).unwrap();
+        let (status, note) = read(&conn);
+        assert_eq!(status, "failed");
+        assert!(note.unwrap().chars().count() <= MAX_NOTE_CHARS + 1);
+        record_transition(&conn, 1, &Transition::NotMarked { rel_path: "Weeks/W/x.md".into() }).unwrap();
+        assert_eq!(read(&conn).0, "failed");
+        record_transition(&conn, 1, &Transition::Skipped { why: "a lecture for Tue, Sep 8 is already filed".into() }).unwrap();
+        assert_eq!(read(&conn).0, "skipped");
+        let summary = Captured { captured: 2, waiting: 1, skipped: 1, failed: 1, left: 3, notes: vec![] }.summary();
+        assert_eq!(summary, "2 captured, 1 waiting for the form, 1 already filed, 1 failed, 3 past the cap");
+        assert_eq!(Captured::default().summary(), "nothing new");
     }
 
     /// A lecture is filed by hand when its contribution row names a path no

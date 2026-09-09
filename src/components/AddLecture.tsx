@@ -10,7 +10,6 @@ import {
   clearLectureProgress,
   dateFromFileName,
   lectureWeeks,
-  noteRecordingForForm,
   useLectureProgress,
   type LectureFormOpen,
   type LectureProgress,
@@ -150,10 +149,13 @@ export function AddLecture({
   const submit = () => {
     setError(null);
     setSubmitted(true);
-    // A found recording's row leaves the listing once this run files it.
-    if (initial?.recordingId !== undefined) {
-      noteRecordingForForm(classId, initial.recordingId);
-    }
+    // A form opened from a found recording names it, so the run that files
+    // the transcript marks its row — only while the source is still that
+    // recording's link; pointed elsewhere, the form files that instead.
+    const recordingId =
+      initial?.recordingId !== undefined && source.trim() === initial.source
+        ? initial.recordingId
+        : undefined;
     addLecture({
       classId,
       source: source.trim(),
@@ -161,6 +163,7 @@ export function AddLecture({
       date: resolvedDate,
       title: title.trim() === "" ? null : title.trim(),
       digest,
+      recordingId,
     }).catch((e) => {
       setSubmitted(false);
       setError(String(e));

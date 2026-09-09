@@ -390,14 +390,6 @@ fn recording_play_url(state: tauri::State<Db>, id: i64) -> Result<Option<String>
     recordings::play_url_of(&conn, id).map_err(|e| format!("{e:#}"))
 }
 
-/// The form filed a waiting recording: its row leaves the listing.
-#[tauri::command]
-fn mark_recording_filed(app: tauri::AppHandle, id: i64, rel_path: String) -> Result<(), String> {
-    db::with_conn(&app, |conn| recordings::mark_filed(conn, id, &rel_path)).map_err(|e| format!("{e:#}"))?;
-    db::emit_hub_change(&app, "recordings");
-    Ok(())
-}
-
 /// SPEC §7.2: the checkbox on a to-do under a notice.
 #[tauri::command]
 fn set_announcement_action_done(app: tauri::AppHandle, id: i64, done: bool) -> Result<(), String> {
@@ -1000,7 +992,6 @@ pub fn run() {
             list_recordings,
             find_recordings,
             recording_play_url,
-            mark_recording_filed,
             set_announcement_action_done,
             canvas_syllabus,
             stage_inbox_files,

@@ -56,6 +56,11 @@ pub struct AddRequest {
     pub title: Option<String>,
     /// Whether to spend tokens distilling it once it is filed.
     pub digest: bool,
+    /// The recording this lecture is, where the app found it behind the Zoom
+    /// tool (SPEC §7.1): its row is marked filed by the same run that files
+    /// the transcript, and only while the source is the row's own link.
+    #[serde(default)]
+    pub recording_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +79,11 @@ pub struct AddResult {
     /// reads as "no digest was wanted".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest_error: Option<String>,
+    /// For a run that names a found recording: whether its row was marked
+    /// filed. `Some(false)` is a filed transcript whose row did not take
+    /// the mark, which the capture reports rather than trusts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_marked: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +197,21 @@ pub fn add_with(
     }
     crate::extract::spawn_pipeline(app, req.class_id);
 
+    // The recording's row, marked by the run that filed it: the one place
+    // that knows both the row and the file (SPEC §7.1).
+    let recording_marked = req.recording_id.map(|id| {
+        match with_conn(app, |conn| crate::recordings::mark_filed(conn, id, &req.source, &rel_path)) {
+            Ok(marked) => marked,
+            Err(e) => {
+                eprintln!("recording {id}: filed as {rel_path} but its row could not be marked: {e:#}");
+                false
+            }
+        }
+    });
+    if recording_marked.is_some() {
+        emit_hub_change(app, "recordings");
+    }
+
     let mut digest_error = None;
     let digest_job_id = if req.digest && !routed_to_inbox {
         match enqueue_digest(app, req.class_id, &rel_path, &req.date) {
@@ -217,6 +242,7 @@ pub fn add_with(
         speakers: crate::transcripts::speakers(&cues),
         digest_job_id,
         digest_error,
+        recording_marked,
     })
 }
 

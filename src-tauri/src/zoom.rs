@@ -63,6 +63,10 @@ pub enum Reveal {
 /// looking at.
 const HIDDEN_STALL: Duration = Duration::from_secs(60);
 
+/// One capture at a time: one window carries it, and a second capture would
+/// close the first's and read the close as the reader cancelling.
+static CAPTURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Reads the transcript for a Zoom recording link, returning the caption text
 /// and a display name for where it came from.
 pub fn fetch_caption(
@@ -80,6 +84,13 @@ pub fn fetch_caption(
     if !is_zoom_host(&host) {
         bail!("{url} is not a Zoom recording link");
     }
+    let _capturing = match CAPTURING.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            bail!("a recording is already being read — wait for it to finish")
+        }
+    };
 
     on_stage(if reveal == Reveal::Always {
         "Opening Zoom — sign in if prompted…"

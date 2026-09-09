@@ -34,6 +34,8 @@ export interface AddLectureRequest {
   date: string;
   title: string | null;
   digest: boolean;
+  /** The found recording this lecture is, whose row the run marks filed. */
+  recordingId?: number;
 }
 
 export interface AddResult {
@@ -84,6 +86,8 @@ function init() {
       void queryClient.invalidateQueries({ queryKey: ["classTree"] });
       void queryClient.invalidateQueries({ queryKey: ["guides"] });
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
+      // A run opened from a found recording marked its row on the way.
+      void queryClient.invalidateQueries({ queryKey: ["recordings"] });
     }
   });
 }
@@ -258,10 +262,6 @@ export function recordingPlayUrl(id: number): Promise<string | null> {
   return invoke<string | null>("recording_play_url", { id });
 }
 
-function markRecordingFiled(id: number, relPath: string): Promise<void> {
-  return invoke("mark_recording_filed", { id, relPath });
-}
-
 /** `3 h 29 m`, `45 m`. */
 export function formatDuration(minutes: number): string {
   const h = Math.floor(minutes / 60);
@@ -286,15 +286,6 @@ function emitFind(next: ReadonlyMap<number, FindProgress>) {
   for (const notify of findListeners) notify();
 }
 
-// The waiting recording the form was opened for, per class: when the form's
-// own run files it, the row leaves the listing. Set by the form on submit and
-// consumed by the progress listener, so nothing needs an effect.
-const pendingRecording = new Map<number, number>();
-
-export function noteRecordingForForm(classId: number, recordingId: number) {
-  pendingRecording.set(classId, recordingId);
-}
-
 let findInitialized = false;
 function initFind() {
   if (findInitialized) return;
@@ -307,17 +298,6 @@ function initFind() {
       void queryClient.invalidateQueries({ queryKey: ["recordings"] });
       void queryClient.invalidateQueries({ queryKey: ["classTree"] });
       void queryClient.invalidateQueries({ queryKey: ["contributions"] });
-    }
-  });
-  void listen<LectureProgress>("lecture://progress", (e) => {
-    if (!e.payload.done) return;
-    const recordingId = pendingRecording.get(e.payload.classId);
-    if (recordingId === undefined) return;
-    pendingRecording.delete(e.payload.classId);
-    if (e.payload.result && !e.payload.result.routedToInbox) {
-      void markRecordingFiled(recordingId, e.payload.result.relPath).then(() =>
-        queryClient.invalidateQueries({ queryKey: ["recordings"] }),
-      );
     }
   });
 }

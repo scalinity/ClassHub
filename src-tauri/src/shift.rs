@@ -749,13 +749,7 @@ impl Progress<'_> {
     /// the rate limit, or — for a run the idle check started — the window's
     /// close, since the owner is back at the machine by then.
     fn stop_reason(&self) -> Option<End> {
-        let (paused, window_closed) = with_conn(self.app, |conn| {
-            let paused = paused_on(conn).is_some_and(|on| on == self.night);
-            let (start, end) = settings(conn).window();
-            let closed = self.trigger == "idle" && !in_window(Local::now().time(), start, end);
-            Ok((paused, closed))
-        })
-        .unwrap_or((false, false));
+        let (paused, window_closed) = stop_now(self.app, &self.night, &self.trigger);
         if paused {
             return Some(End {
                 stopped_by: "paused",
@@ -805,6 +799,18 @@ impl Progress<'_> {
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Whether the night is paused, and whether an idle run's window has closed
+/// — read between jobs, and between the captures of the Recordings step.
+fn stop_now(app: &AppHandle, night: &str, trigger: &str) -> (bool, bool) {
+    with_conn(app, |conn| {
+        let paused = paused_on(conn).is_some_and(|on| on == night);
+        let (start, end) = settings(conn).window();
+        let closed = trigger == "idle" && !in_window(Local::now().time(), start, end);
+        Ok((paused, closed))
+    })
+    .unwrap_or((false, false))
 }
 
 /// How long a run waits on one job before leaving it to the runner. The
@@ -924,11 +930,16 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     // with a digest of its own: the Distill step below lists a filed
     // lecture without its note under the same cap.
     p.begin(RECORDINGS);
+    let (night, trigger) = (p.night.clone(), p.trigger.clone());
     let captured = crate::recordings::capture_waiting(
         app,
         None,
         s.digests_per_night as usize,
         crate::zoom::Reveal::Never,
+        &|| {
+            let (paused, closed) = stop_now(app, &night, &trigger);
+            paused || closed || crate::jobs::rate_limit_reached().is_some()
+        },
         &|_| {},
     );
     p.captured = captured.captured;
