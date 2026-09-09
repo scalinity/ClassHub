@@ -1897,36 +1897,29 @@ fn record_session(
             payload.source_manifest
         ],
     )?;
-    if let Some(hints) = &hints {
-        let row: Option<(i64, i64)> = tx
-            .query_row(
-                "SELECT id, unit_id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
-                rusqlite::params![class_id, &payload.transcript_rel_path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((id, unit_id)) = row {
-            replace_hints(&tx, class_id, unit_id, id, hints)?;
-            // The stamp is what tells an empty ledger from one never read.
-            tx.execute(
-                "UPDATE lecture_contributions SET hints_read_at = ?1 WHERE id = ?2",
-                rusqlite::params![now(), id],
-            )?;
-        }
-    }
-
-    // A pre-read written for this division is superseded by the session
-    // document (SPEC §8.6): its row goes with this transaction, its files
-    // after the commit.
-    let mapped_unit: Option<i64> = tx
+    // The contribution the transcript is mapped by: the ledger's home, and
+    // the division whose pre-read the session document supersedes.
+    let mapped: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT unit_id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
+            "SELECT id, unit_id FROM lecture_contributions WHERE class_id = ?1 AND rel_path = ?2",
             rusqlite::params![class_id, &payload.transcript_rel_path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let superseded_preread = match (mapped_unit, crate::units::week_from_rel_path(&payload.transcript_rel_path)) {
-        (Some(unit_id), Some(week)) => crate::preread::supersede(&tx, class_id, unit_id, week)?,
+    if let (Some(hints), Some((id, unit_id))) = (&hints, mapped) {
+        replace_hints(&tx, class_id, unit_id, id, hints)?;
+        // The stamp is what tells an empty ledger from one never read.
+        tx.execute(
+            "UPDATE lecture_contributions SET hints_read_at = ?1 WHERE id = ?2",
+            rusqlite::params![now(), id],
+        )?;
+    }
+
+    // A pre-read written for this week is superseded by the session
+    // document (SPEC §8.6): its row goes with this transaction, its files
+    // after the commit.
+    let superseded_preread = match (mapped, crate::units::week_from_rel_path(&payload.transcript_rel_path)) {
+        (Some((_, unit_id)), Some(week)) => crate::preread::supersede(&tx, class_id, unit_id, week)?,
         _ => Vec::new(),
     };
 
