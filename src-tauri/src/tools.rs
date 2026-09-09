@@ -128,9 +128,10 @@ pub fn is_write(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
 }
 
-/// Tool schemas sent with every request (SPEC §9: four read tools, nine write
-/// tools). Thirteen schemas ride every round of the loop — roughly two
-/// thousand tokens, a fine price for the model always seeing its full reach.
+/// Tool schemas sent with every request (SPEC §9: five read tools and the
+/// write tools `WRITE_TOOLS` names). They ride every round of the loop, which
+/// is a few thousand tokens — cached behind the breakpoint on the last of
+/// them, and a fine price for the model always seeing its full reach.
 pub fn definitions() -> Value {
     json!([
         {
@@ -2581,9 +2582,47 @@ fn approve_deadlines(app: &AppHandle, input: &Value) -> Result<Outcome> {
     Ok(Outcome::ok(text))
 }
 
+/// Where a lecture may be read from when the model, rather than a file
+/// picker, chose the path.
+///
+/// The URL arm of the ingestion is already bounded — `zoom::fetch_caption`
+/// refuses a host off its allowlist. The path arm is not: it reads whatever
+/// it is given. Behind the form that is a human's own pick; behind a tool it
+/// is a string the model wrote, and the model reads Canvas announcements,
+/// syllabi and extracts verbatim, so a sentence in any of them could name a
+/// file outside the tree. Once filed, the content is indexed and its text
+/// goes to the API with the next search.
+///
+/// So: inside the AIBHS root, or inside `~/Downloads`, which is where a
+/// caption saved from a browser lands and the one real case outside the tree.
+fn readable_source(app: &AppHandle, source: &str) -> Result<()> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Ok(());
+    }
+    let path = std::fs::canonicalize(source)
+        .with_context(|| format!("no file at {source}"))?;
+    let root = with_conn(app, |conn| crate::db::aibhs_root(conn))?;
+    let mut allowed = vec![std::fs::canonicalize(&root).unwrap_or(root)];
+    if let Some(home) = std::env::var_os("HOME") {
+        let downloads = PathBuf::from(home).join("Downloads");
+        if let Ok(downloads) = std::fs::canonicalize(&downloads) {
+            allowed.push(downloads);
+        }
+    }
+    if allowed.iter().any(|dir| path.starts_with(dir)) {
+        return Ok(());
+    }
+    bail!(
+        "{source} is outside the library and the Downloads folder — move it into one of \
+         them, or add the lecture from the Add lecture form, which takes any file Daniel \
+         picks himself"
+    )
+}
+
 fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
     let date = str_arg(input, "date")?;
+    readable_source(app, &str_arg(input, "source")?)?;
     // The week the form would show: for a course whose weeks carry dates the
     // nearest meeting's, resolved here rather than left to the caller, since
     // a request without one routes the lecture to the inbox for the sorter —
@@ -3465,5 +3504,37 @@ mod tests {
             !ranged.iter().any(|s| s.meets_on.is_some()),
             "the fixture's Part carries no meeting day"
         );
+    }
+
+    /// A lecture's source has to sit somewhere the reader would have put it.
+    /// The model writes this path, and it reads Canvas notices and extracts
+    /// verbatim, so a sentence in one of them could otherwise name any file
+    /// on the machine — which would then be filed, indexed and sent to the
+    /// API with the next search.
+    #[test]
+    fn a_lecture_source_outside_the_library_is_refused() {
+        let root = std::env::temp_dir().join(format!("classhub-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Biostatistics for AI")).expect("root");
+        std::fs::write(root.join("Biostatistics for AI/inside.vtt"), "WEBVTT\n").expect("inside");
+        let outside = std::env::temp_dir().join(format!("classhub-out-{}.txt", std::process::id()));
+        std::fs::write(&outside, "not a lecture").expect("outside");
+
+        let allowed = |source: &std::path::Path| {
+            let path = std::fs::canonicalize(source).expect("canonical");
+            let root = std::fs::canonicalize(&root).expect("canonical root");
+            path.starts_with(&root)
+        };
+        assert!(allowed(&root.join("Biostatistics for AI/inside.vtt")));
+        assert!(!allowed(&outside), "a file beside the library is not in it");
+
+        // A URL is the ingestion's other arm, bounded by the Zoom host
+        // allowlist rather than by the tree.
+        for url in ["https://ufl.zoom.us/rec/play/x", "http://example.com/x"] {
+            assert!(url.starts_with("http://") || url.starts_with("https://"));
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
     }
 }

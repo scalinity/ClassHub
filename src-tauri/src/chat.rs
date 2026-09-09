@@ -870,11 +870,11 @@ struct Run<'a> {
     today_iso: &'a str,
 }
 
-/// The thirteen tool schemas, with a cache breakpoint on the last one.
+/// Every tool schema, with a cache breakpoint on the last one.
 ///
 /// A breakpoint covers everything before it, so marking the final schema makes
-/// the whole block cacheable — roughly two thousand tokens that would otherwise
-/// be re-billed on every round of the loop.
+/// the whole block cacheable — a few thousand tokens that would otherwise be
+/// re-billed on every round of the loop.
 fn cacheable_tools() -> Value {
     let mut tools = crate::tools::definitions();
     if let Some(last) = tools.as_array_mut().and_then(|t| t.last_mut()) {
