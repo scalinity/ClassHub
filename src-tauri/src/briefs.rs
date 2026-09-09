@@ -40,9 +40,12 @@ pub(crate) fn forget(conn: &Connection, class_id: i64, deadline_id: i64) -> Resu
     crate::guides::forget_document(conn, class_id, &brief_scope(deadline_id))
 }
 
-/// The kinds a brief is written for: the work that is not an exam.
+/// The kinds a brief is written for: the work that is not an exam. The one
+/// list the shift's scan, the row action and the frontend's affordance read.
+pub(crate) const BRIEFABLE_KINDS: [&str; 2] = ["assignment", "project"];
+
 pub(crate) fn briefable(kind: &str) -> bool {
-    matches!(kind, "assignment" | "project")
+    BRIEFABLE_KINDS.contains(&kind)
 }
 
 /// The family a title belongs to: its assignment key with every number
@@ -52,11 +55,19 @@ pub(crate) fn briefable(kind: &str) -> bool {
 /// kind, since the Canvas sync types a quiz `assignment` and a homework's
 /// window is what was taught since the last homework.
 pub(crate) fn title_family(title: &str) -> String {
-    crate::deadlines::assignment_key(title)
+    let key = crate::deadlines::assignment_key(title);
+    let family = key
         .split(' ')
         .filter(|word| !word.chars().all(|c| c.is_ascii_digit()))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    // A title that is only numbers — a date, a bare `1` — keeps its key, so
+    // two such rows are not one family.
+    if family.is_empty() {
+        key
+    } else {
+        family
+    }
 }
 
 /// A due date as the instant it names (SPEC §11): a date-only value is the
@@ -74,9 +85,10 @@ pub(crate) fn due_datetime(due_at: &str) -> Option<NaiveDateTime> {
 /// meeting falls after the previous deadline of the family and on or before
 /// the due date; a first of its family takes every division that met by the
 /// due date; a window nothing met in takes the last division that met before
-/// the due date. An undated division has no meeting to place, and is never
-/// in a window. Pure, since the wrong answer is silent — a brief that maps a
-/// homework to the wrong weeks reads like a right one.
+/// the due date. A division with no date, or one whose date does not read as
+/// one, has no meeting to place and is never in a window. Pure, since the
+/// wrong answer is silent — a brief that maps a homework to the wrong weeks
+/// reads like a right one.
 pub(crate) fn window_units(
     units: &[crate::units::UnitInfo],
     meetings: &[(u32, NaiveTime)],
@@ -85,9 +97,13 @@ pub(crate) fn window_units(
 ) -> Vec<crate::units::UnitInfo> {
     let met: Vec<(NaiveDateTime, &crate::units::UnitInfo)> = units
         .iter()
-        .filter(|unit| unit.starts_on.is_some())
         .filter_map(|unit| {
-            let end = crate::shift::meeting_end(unit.starts_on.as_deref(), meetings, due)?;
+            // Parsed here rather than left to `meeting_end`, whose undated
+            // branch would place a badly dated division in the due date's
+            // own week.
+            let starts = unit.starts_on.as_deref()?;
+            NaiveDate::parse_from_str(starts, "%Y-%m-%d").ok()?;
+            let end = crate::shift::meeting_end(Some(starts), meetings, due)?;
             Some((end, unit))
         })
         .filter(|(end, _)| *end <= due)
@@ -151,13 +167,13 @@ pub(crate) struct Window {
     pub previous: Option<Assignment>,
 }
 
-pub(crate) fn window_for(conn: &Connection, class_id: i64, deadline_id: i64) -> Result<Window> {
+/// `None` when the deadline is no longer on the list; any other failure is
+/// an error, never an empty window.
+pub(crate) fn window_for(conn: &Connection, class_id: i64, deadline_id: i64) -> Result<Option<Window>> {
     let all = class_assignments(conn, class_id)?;
-    let assignment = all
-        .iter()
-        .find(|a| a.id == deadline_id)
-        .cloned()
-        .context("that deadline is no longer on the list")?;
+    let Some(assignment) = all.iter().find(|a| a.id == deadline_id).cloned() else {
+        return Ok(None);
+    };
     let due = due_datetime(&assignment.due_at)
         .with_context(|| format!("{} carries no readable due date", assignment.title))?;
     let family = title_family(&assignment.title);
@@ -171,21 +187,36 @@ pub(crate) fn window_for(conn: &Connection, class_id: i64, deadline_id: i64) -> 
     let units = crate::units::list_units(conn, class_id)?;
     let meetings = crate::shift::meeting_ends(conn, class_id)?;
     let previous_due = previous.as_ref().and_then(|p| due_datetime(&p.due_at));
-    Ok(Window {
+    Ok(Some(Window {
         units: window_units(&units, &meetings, previous_due, due),
         assignment,
         previous,
-    })
+    }))
 }
 
 /// The brief's manifest (SPEC §7 step 5): the union of its window's
-/// divisions' sets — what `current_manifest` answers for `brief:<id>`.
-pub fn window_manifest(conn: &Connection, class_id: i64, deadline_id: i64) -> Result<Vec<ManifestEntry>> {
-    let Ok(window) = window_for(conn, class_id, deadline_id) else {
+/// divisions' sets — what `current_manifest` answers for `brief:<id>`. Empty
+/// only for a deadline that is gone; a failure to read the window is an
+/// error, since an empty set would read as "nothing changed" rather than
+/// "cannot tell". `sources` is the class's week slots and filings when the
+/// caller has loaded them once for a listing.
+pub fn window_manifest(
+    conn: &Connection,
+    class_id: i64,
+    deadline_id: i64,
+    sources: Option<&crate::extract::ClassSources>,
+) -> Result<Vec<ManifestEntry>> {
+    let Some(window) = window_for(conn, class_id, deadline_id)? else {
         return Ok(Vec::new());
     };
-    let slots = crate::units::week_slots(conn, class_id)?;
-    let filed = crate::extract::filed_under_weeks(conn, class_id)?;
+    let loaded;
+    let sources = match sources {
+        Some(sources) => sources,
+        None => {
+            loaded = crate::extract::ClassSources::load(conn, class_id)?;
+            &loaded
+        }
+    };
     let mut entries = Vec::new();
     for unit in &window.units {
         entries.extend(crate::extract::unit_manifest(
@@ -193,8 +224,8 @@ pub fn window_manifest(conn: &Connection, class_id: i64, deadline_id: i64) -> Re
             class_id,
             unit.id,
             unit.rel_path.as_deref(),
-            &slots,
-            &filed,
+            &sources.slots,
+            &sources.filed,
         )?);
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -247,7 +278,8 @@ pub fn write_brief(
         if crate::guides::has_active_job(conn, class_id, KIND, &scope)? {
             bail!("a brief for this assignment is already queued or running");
         }
-        let window = window_for(conn, class_id, deadline_id)?;
+        let window = window_for(conn, class_id, deadline_id)?
+            .context("that deadline is no longer on the list")?;
         if !briefable(&window.assignment.kind) {
             bail!(
                 "{} is a {} — a brief maps an assignment or a project item; the practice exam is \
@@ -288,13 +320,13 @@ pub fn write_brief(
             Some(p) => format!("{} (due {})", p.title, p.due_at.chars().take(10).collect::<String>()),
             None => "none — this is the first of its kind, so the window opens at the semester's start".to_string(),
         };
+        // The app's own blocks first, the text that came from Canvas or the
+        // owner last, so a `{placeholder}` literal inside a description is
+        // never rewritten by a later substitution.
         let prompt = PROMPT_TEMPLATE
             .replace("{class}", &ctx.class_name)
-            .replace("{title}", &a.title)
             .replace("{kind}", &a.kind)
             .replace("{due}", &a.due_at)
-            .replace("{description}", &description)
-            .replace("{notes}", a.notes.as_deref().unwrap_or("(none)"))
             .replace("{previous}", &previous)
             .replace("{window}", &window_block(conn, &window)?)
             .replace("{files}", &ctx.files_block)
@@ -305,7 +337,10 @@ pub fn write_brief(
             .replace("{accent_light}", ctx.accent_light)
             .replace("{accent_dark}", ctx.accent_dark)
             .replace("{generated_at}", generated_at_label)
-            .replace("{manifest}", &ctx.manifest_block);
+            .replace("{manifest}", &ctx.manifest_block)
+            .replace("{title}", &a.title)
+            .replace("{notes}", a.notes.as_deref().unwrap_or("(none)"))
+            .replace("{description}", &description);
         let payload = serde_json::to_string(&DocumentPayload {
             scope: scope.clone(),
             rel_path: output,
@@ -332,9 +367,10 @@ pub(crate) struct BriefCandidate {
 
 pub(crate) fn candidates(conn: &Connection, today: NaiveDate, now_secs: i64) -> Result<Vec<BriefCandidate>> {
     let last = today + chrono::Days::new(DAYS_AHEAD as u64);
+    // The kinds are `briefable`'s to decide, below; the query stays wide.
     let mut stmt = conn.prepare(&format!(
         "SELECT d.id, d.class_id, d.title, d.kind, d.due_at FROM deadlines d
-         WHERE d.status = 'open' AND d.kind IN ('assignment', 'project')
+         WHERE d.status = 'open'
            AND substr(d.due_at, 1, 10) >= ?1 AND substr(d.due_at, 1, 10) <= ?2
          ORDER BY {}, d.id",
         crate::deadlines::DUE_INSTANT_SQL
@@ -414,6 +450,9 @@ mod tests {
         assert_eq!(title_family("AI Design Project Presentations"), "ai design project presentations");
         assert_eq!(title_family("Draft: Methods"), "draft methods");
         assert_ne!(title_family("Conceptual Quiz 1 (Actual quiz)"), title_family("Homework 1"));
+        // A title of numbers alone keeps its key: two such rows are not one family.
+        assert_eq!(title_family("2026-09-14"), "2026 09 14");
+        assert_ne!(title_family("1"), title_family("2"));
         assert!(briefable("assignment") && briefable("project") && !briefable("quiz"));
     }
 
@@ -431,6 +470,8 @@ mod tests {
             week(4, 4, Some("2026-09-15")),
             week(5, 5, Some("2026-09-22")),
             week(9, 9, None),
+            // A date that does not read as one is no meeting to place.
+            week(10, 10, Some("soon")),
         ];
         // Homework 2 due Sept 21 after Homework 1 due Sept 7: Weeks 3 and 4.
         let ids = |list: Vec<crate::units::UnitInfo>| list.iter().map(|u| u.id).collect::<Vec<_>>();
@@ -527,12 +568,19 @@ mod tests {
         }
         let hw1: i64 = conn.query_row("SELECT id FROM deadlines WHERE title = 'Homework Assignment 1'", [], |r| r.get(0)).unwrap();
         let hw2: i64 = conn.query_row("SELECT id FROM deadlines WHERE title = 'Homework 2'", [], |r| r.get(0)).unwrap();
-        let first = window_for(&conn, 3, hw1).unwrap();
+        let first = window_for(&conn, 3, hw1).unwrap().expect("on the list");
         assert!(first.previous.is_none(), "the quiz is not a homework");
         assert_eq!(first.units.iter().map(|u| u.number).collect::<Vec<_>>(), vec![Some(1), Some(2), Some(3), Some(4)]);
-        let second = window_for(&conn, 3, hw2).unwrap();
+        let second = window_for(&conn, 3, hw2).unwrap().expect("on the list");
         assert_eq!(second.previous.as_ref().map(|p| p.id), Some(hw1));
         assert_eq!(second.units.iter().map(|u| u.number).collect::<Vec<_>>(), vec![Some(5)]);
+        // A deadline that left the list has no window and an empty set; a
+        // due date that does not read as one is an error, never an empty set.
+        assert!(window_for(&conn, 3, 999).unwrap().is_none());
+        assert!(window_manifest(&conn, 3, 999, None).unwrap().is_empty());
+        conn.execute("UPDATE deadlines SET due_at = 'soon' WHERE id = ?1", [hw2]).unwrap();
+        assert!(window_manifest(&conn, 3, hw2, None).is_err(), "cannot tell is not nothing changed");
+        conn.execute("UPDATE deadlines SET due_at = '2026-10-04' WHERE id = ?1", [hw2]).unwrap();
         assert_eq!(output_base("2026-09-14T23:59", "Homework Assignment 1"), "Study Guides/Briefs/2026-09-14 \u{2014} Homework Assignment 1");
 
         // The shift's list: due within five days, no brief yet; a done row

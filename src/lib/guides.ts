@@ -18,6 +18,9 @@ export function briefScope(deadlineId: number): string {
   return `${BRIEF_SCOPE_PREFIX}${deadlineId}`;
 }
 
+/** The deadline kinds a brief is written for, mirroring `briefs::BRIEFABLE_KINDS`. */
+export const BRIEFABLE_KINDS: readonly string[] = ["assignment", "project"];
+
 export function kitScope(relPath: string): string {
   return `${KIT_SCOPE_PREFIX}${relPath}`;
 }

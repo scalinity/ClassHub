@@ -1260,13 +1260,16 @@ fn guides_where(
     // One note read by three guides is hashed once per listing, not thrice.
     let hashes: std::cell::RefCell<std::collections::HashMap<String, Option<String>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    // The week slots and the `Weeks/` filings every division, brief and
+    // pre-read row reads, loaded once for the listing rather than per row.
+    let sources = crate::extract::ClassSources::load(conn, class_id)?;
 
     let mut guides = Vec::with_capacity(rows.len());
     for (scope, rel_path, generated_at, manifest_json, unit_name) in rows {
         if !keep(&scope) {
             continue;
         }
-        let current = current_manifest(conn, class_id, &scope)?;
+        let current = crate::extract::current_manifest_in(conn, class_id, &scope, Some(&sources))?;
         // An entry outside the scope's own set — a note, a page mirror, a
         // file the job found through --add-dir — is resolved to what it is
         // now, so a widened manifest reads honestly rather than stale forever.
@@ -1355,14 +1358,7 @@ pub fn finalize_document(
     let db = app.state::<crate::Db>();
     let conn = lock(&db.0);
     let class_dir = crate::scanner::class_dir(&conn, class_id)?;
-    for rel in std::iter::once(&payload.rel_path).chain(payload.md_rel_path.iter()) {
-        let written = fs::metadata(class_dir.join(rel))
-            .map(|m| m.is_file() && m.len() > 0)
-            .unwrap_or(false);
-        if !written {
-            bail!("no document written at {rel}");
-        }
-    }
+    documents_written(&class_dir, &payload)?;
     let listed = serde_json::from_str::<Vec<ManifestEntry>>(&payload.source_manifest)
         .unwrap_or_default();
     let manifest = union_manifest(&conn, class_id, &class_dir, listed, read)?;
@@ -1373,6 +1369,22 @@ pub fn finalize_document(
         &payload.rel_path,
         &serde_json::to_string(&manifest)?,
     )
+}
+
+/// Every file a document's run was contracted to write, present and
+/// non-empty — the markdown twin included, since "wrote the HTML, skipped
+/// the markdown" would otherwise pass and leave the document out of chat's
+/// reach.
+pub(crate) fn documents_written(class_dir: &Path, payload: &DocumentPayload) -> Result<()> {
+    for rel in std::iter::once(&payload.rel_path).chain(payload.md_rel_path.iter()) {
+        let written = fs::metadata(class_dir.join(rel))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false);
+        if !written {
+            bail!("no document written at {rel}");
+        }
+    }
+    Ok(())
 }
 
 /// The markdown twin a small document writes beside its HTML, for search.
@@ -1643,11 +1655,72 @@ mod tests {
             )
             .expect("guide");
         }
+        // The small documents' rows (SPEC §8.6): a brief carries its
+        // deadline's title, a pre-read its division's name, through the
+        // same join; the workbook and a kit are named for what they are.
+        conn.execute(
+            "INSERT INTO deadlines (id, class_id, title, kind, due_at, status, source)
+             VALUES (12, 1, 'Homework 2', 'assignment', '2026-09-21', 'open', 'syllabus')",
+            [],
+        )
+        .expect("deadline");
+        for (scope, rel_path) in [
+            ("brief:12", "Study Guides/Briefs/2026-09-21 — Homework 2.html"),
+            ("preread:24:2", "Study Guides/Sessions/2026-09-01 — Before class.html"),
+            ("project", "Study Guides/Workbook/Project Workbook.html"),
+            ("kit:Slides/paper.pdf", "Study Guides/Presentations/paper.html"),
+        ] {
+            conn.execute(
+                "INSERT INTO guides (class_id, scope, rel_path, generated_at, source_manifest)
+                 VALUES (1, ?1, ?2, 1, '[]')",
+                [scope, rel_path],
+            )
+            .expect("guide");
+        }
         let guides = list_guides(&conn, 1).expect("list");
         let label = |scope: &str| guides.iter().find(|g| g.scope == scope).expect(scope).label.clone();
+        let family = |scope: &str| guides.iter().find(|g| g.scope == scope).expect(scope).family.clone();
         assert_eq!(label("unit:24"), "Week 2 — Responsible AI");
         assert_eq!(label("master"), "Semester Master");
         assert_eq!(label("Module 1"), "Module 1");
+        assert_eq!(label("brief:12"), "Brief · Homework 2");
+        assert_eq!(label("preread:24:2"), "Before class · Week 2 — Responsible AI");
+        assert_eq!(label("project"), "Project workbook");
+        assert_eq!(label("kit:Slides/paper.pdf"), "Kit · paper");
+        assert_eq!((family("unit:24").as_str(), family("brief:12").as_str(), family("preread:24:2").as_str()), ("guide", "brief", "preread"));
+        assert_eq!((family("project").as_str(), family("kit:Slides/paper.pdf").as_str(), family("master").as_str()), ("project", "kit", "guide"));
+        // The label without its row: what the job's row reads while the
+        // deadline or the division is gone.
+        assert_eq!(scope_label("brief:99", None), "Homework brief");
+        assert_eq!(scope_label("preread:99:4", None), "Pre-read");
+        assert_eq!(crate::db::preread_scope_key("preread:99:4"), Some((99, 4)));
+        assert_eq!(crate::db::preread_scope_key("preread:99"), None);
+    }
+
+    /// A document's run wrote every contracted file, or it did not finish
+    /// (SPEC §8.6): the markdown twin missing fails it like the HTML would.
+    #[test]
+    fn a_document_counts_only_with_every_contracted_file() {
+        let dir = std::env::temp_dir().join(format!("classhub-document-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Study Guides/Briefs")).unwrap();
+        let payload = DocumentPayload {
+            scope: "brief:1".into(),
+            rel_path: "Study Guides/Briefs/x.html".into(),
+            md_rel_path: Some("Study Guides/Briefs/x.md".into()),
+            source_manifest: "[]".into(),
+        };
+        assert!(documents_written(&dir, &payload).is_err(), "nothing written");
+        fs::write(dir.join("Study Guides/Briefs/x.html"), "<html></html>").unwrap();
+        let err = documents_written(&dir, &payload).unwrap_err();
+        assert!(format!("{err:#}").contains("x.md"), "the twin is required: {err:#}");
+        fs::write(dir.join("Study Guides/Briefs/x.md"), "").unwrap();
+        assert!(documents_written(&dir, &payload).is_err(), "an empty twin is no twin");
+        fs::write(dir.join("Study Guides/Briefs/x.md"), "# brief").unwrap();
+        documents_written(&dir, &payload).expect("both written");
+        let kit = DocumentPayload { md_rel_path: None, ..payload };
+        documents_written(&dir, &kit).expect("a kit has no twin to require");
+        let _ = fs::remove_dir_all(&dir);
     }
     /// The master's roster (SPEC §8.2) is the course's own divisions in its
     /// own order, each with its date or its week range, never a folder.

@@ -22,7 +22,14 @@ import {
   type DeadlineProposal,
   type DeadlineSeries,
 } from "@/lib/deadlines";
-import { briefScope, deltaLabel, deltaTitle, writeBrief, type GuideInfo } from "@/lib/guides";
+import {
+  BRIEFABLE_KINDS,
+  briefScope,
+  deltaLabel,
+  deltaTitle,
+  writeBrief,
+  type GuideInfo,
+} from "@/lib/guides";
 import { useJobs } from "@/lib/jobs";
 import type { TreeNode } from "@/lib/materials";
 import { daysUntil, dueDayLabel, formatDueDate, isOverdue } from "@/lib/schedule";
@@ -423,16 +430,6 @@ function DeadlineRow({
   const overdue = !isDone && isOverdue(deadline.dueAt);
   const badge = deadlineSourceBadge(deadline.source, deadline.canvasAssignmentId);
   const hasMore = deadline.description !== null || deadline.notes !== null;
-  // The homework brief (SPEC §8.6): offered on an open assignment or project
-  // item, and readable once written whatever the row's state.
-  const scope = briefScope(deadline.id);
-  const brief = briefs.guides.get(scope);
-  const writingBrief = briefs.activeScopes.has(scope);
-  const briefable =
-    !isDone && (deadline.kind === "assignment" || deadline.kind === "project");
-  const startBrief = () =>
-    run(writeBrief(deadline.classId, deadline.id).then(() => undefined));
-
   const run = (action: Promise<void>) => {
     setBusy(true);
     action
@@ -442,6 +439,14 @@ function DeadlineRow({
         setBusy(false);
       });
   };
+  // The homework brief (SPEC §8.6): offered on an open row of a briefable
+  // kind, and readable once written whatever the row's state.
+  const scope = briefScope(deadline.id);
+  const brief = briefs.guides.get(scope);
+  const writingBrief = briefs.activeScopes.has(scope);
+  const briefable = !isDone && BRIEFABLE_KINDS.includes(deadline.kind);
+  const startBrief = () =>
+    run(writeBrief(deadline.classId, deadline.id).then(() => undefined));
 
   return (
     <div className="border-b border-border/70 last:border-b-0">

@@ -890,6 +890,34 @@ pub fn current_manifest(
     class_id: i64,
     scope: &str,
 ) -> Result<Vec<ManifestEntry>> {
+    current_manifest_in(conn, class_id, scope, None)
+}
+
+/// What the scopes over the week folders read: the course's week slots and
+/// the files filed under `Weeks/`. A listing loads them once for every row
+/// (SPEC §8.5) rather than once per division, brief and pre-read.
+pub struct ClassSources {
+    pub slots: Vec<crate::units::WeekSlot>,
+    pub filed: Vec<(ManifestEntry, Option<String>)>,
+}
+
+impl ClassSources {
+    pub fn load(conn: &Connection, class_id: i64) -> Result<Self> {
+        Ok(Self {
+            slots: crate::units::week_slots(conn, class_id)?,
+            filed: filed_under_weeks(conn, class_id)?,
+        })
+    }
+}
+
+/// `current_manifest` with the class's sources loaded once by the caller;
+/// `None` loads them where a scope needs them.
+pub fn current_manifest_in(
+    conn: &Connection,
+    class_id: i64,
+    scope: &str,
+    sources: Option<&ClassSources>,
+) -> Result<Vec<ManifestEntry>> {
     let read = |rows: rusqlite::Rows<'_>| -> rusqlite::Result<Vec<ManifestEntry>> {
         rows.mapped(|row| {
             Ok(ManifestEntry {
@@ -925,7 +953,7 @@ pub fn current_manifest(
     // divisions, the workbook's the project's files, a pre-read's the
     // division it precedes, a kit's the one paper.
     if let Some(deadline_id) = crate::db::brief_scope_id(scope) {
-        return crate::briefs::window_manifest(conn, class_id, deadline_id);
+        return crate::briefs::window_manifest(conn, class_id, deadline_id, sources);
     }
     if scope == crate::db::PROJECT_SCOPE {
         return crate::workbook::project_manifest(conn, class_id);
@@ -957,9 +985,15 @@ pub fn current_manifest(
         let Some((unit_id, unit_folder)) = unit else {
             return Ok(Vec::new());
         };
-        let slots = crate::units::week_slots(conn, class_id)?;
-        let filed = filed_under_weeks(conn, class_id)?;
-        return unit_manifest(conn, class_id, unit_id, unit_folder.as_deref(), &slots, &filed);
+        let loaded;
+        let sources = match sources {
+            Some(sources) => sources,
+            None => {
+                loaded = ClassSources::load(conn, class_id)?;
+                &loaded
+            }
+        };
+        return unit_manifest(conn, class_id, unit_id, unit_folder.as_deref(), &sources.slots, &sources.filed);
     }
 
     // A duplicate is left out of every scope's set (SPEC §7 step 1): the
