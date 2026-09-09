@@ -405,7 +405,7 @@ pub fn scope_label(scope: &str, unit_name: Option<&str>) -> String {
 /// brief. `{table}` is the alias of the scoped row.
 pub(crate) const LABEL_JOINS: &str =
     "LEFT JOIN units u ON u.class_id = {t}.class_id
-       AND ({t}.scope = 'unit:' || u.id OR {t}.scope = 'preread:' || u.id)
+       AND ({t}.scope = 'unit:' || u.id OR {t}.scope LIKE 'preread:' || u.id || ':%')
      LEFT JOIN deadlines d ON d.class_id = {t}.class_id AND {t}.scope = 'brief:' || d.id";
 
 pub(crate) fn label_joins(alias: &str) -> String {

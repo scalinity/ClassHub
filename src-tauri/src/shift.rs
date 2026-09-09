@@ -1144,8 +1144,9 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
     p.begin(PREREADS);
     let todo = with_conn(app, |conn| crate::preread::candidates(conn, Local::now().date_naive(), now()))?;
     let mut preread_notes = Vec::new();
-    for (class_id, unit_id, unit_name) in &todo {
-        match crate::preread::write_preread(app, *class_id, *unit_id, &label()) {
+    for c in &todo {
+        let (unit_name, class_id) = (&c.unit_name, c.class_id);
+        match crate::preread::write_preread(app, class_id, c.unit_id, c.week, &label()) {
             Ok(job_id) => {
                 let status = p.wait(job_id);
                 if status == "succeeded" {

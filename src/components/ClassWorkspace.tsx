@@ -690,7 +690,7 @@ export function ClassWorkspace({
               const writing = activePrereadScopes.has(preread.scope);
               const start = () => {
                 setPrereadError(null);
-                writePreread(info.id, preread.unitId).catch((e) => setPrereadError(String(e)));
+                writePreread(info.id, preread.unitId, preread.week).catch((e) => setPrereadError(String(e)));
               };
               return (
                 <div key={preread.scope} className={row}>
@@ -702,11 +702,11 @@ export function ClassWorkspace({
                       onClick={() => setViewScope(preread.scope)}
                       className={rowTitle}
                     >
-                      Before class · {formatMeetingDay(preread.meetsOn)}
+                      Before class{preread.meetsOn !== null && ` · ${formatMeetingDay(preread.meetsOn)}`}
                     </button>
                   ) : (
                     <span className="min-w-0 flex-1 truncate text-title">
-                      Before class · {formatMeetingDay(preread.meetsOn)}
+                      Before class{preread.meetsOn !== null && ` · ${formatMeetingDay(preread.meetsOn)}`}
                     </span>
                   )}
                   <FeedsUnit unitName={preread.unitName} />

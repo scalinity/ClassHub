@@ -1925,9 +1925,9 @@ fn record_session(
             |row| row.get(0),
         )
         .optional()?;
-    let superseded_preread = match mapped_unit {
-        Some(unit_id) => crate::preread::supersede(&tx, class_id, unit_id)?,
-        None => Vec::new(),
+    let superseded_preread = match (mapped_unit, crate::units::week_from_rel_path(&payload.transcript_rel_path)) {
+        (Some(unit_id), Some(week)) => crate::preread::supersede(&tx, class_id, unit_id, week)?,
+        _ => Vec::new(),
     };
 
     // The row's summary was a placeholder from filing time. Now that the

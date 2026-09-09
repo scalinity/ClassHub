@@ -285,9 +285,10 @@ fn write_preread(
     app: tauri::AppHandle,
     class_id: i64,
     unit_id: i64,
+    week: i64,
     generated_at_label: String,
 ) -> Result<i64, String> {
-    preread::write_preread(&app, class_id, unit_id, &generated_at_label).map_err(|e| format!("{e:#}"))
+    preread::write_preread(&app, class_id, unit_id, week, &generated_at_label).map_err(|e| format!("{e:#}"))
 }
 
 /// The notes dated for a distilled session, and whether each is reviewed.

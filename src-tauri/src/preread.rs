@@ -24,8 +24,10 @@ pub const KIND: &str = "pre_read";
 /// this many days of today, today included.
 pub(crate) const DAYS_AHEAD: i64 = 7;
 
-pub(crate) fn preread_scope(unit_id: i64) -> String {
-    format!("{PREREAD_SCOPE_PREFIX}{unit_id}")
+/// A pre-read's scope names the division and the week (`preread:9:4`): a
+/// Part spans several weeks, and the page precedes one meeting.
+pub(crate) fn preread_scope(unit_id: i64, week: i64) -> String {
+    format!("{PREREAD_SCOPE_PREFIX}{unit_id}:{week}")
 }
 
 /// Where a pre-read lands, before its extension: `Study Guides/Sessions/<meeting
@@ -58,8 +60,9 @@ pub struct PrereadInfo {
     pub unit_id: i64,
     pub unit_name: String,
     pub week: i64,
-    /// The meeting the page is for, `YYYY-MM-DD`.
-    pub meets_on: String,
+    /// The meeting the page is for, `YYYY-MM-DD`; none for a written
+    /// pre-read whose week has since lost its date.
+    pub meets_on: Option<String>,
     pub scope: String,
     /// Files under the week folder — what the page would read.
     pub files: i64,
@@ -97,13 +100,13 @@ pub fn list(conn: &Connection, class_id: i64, today: &str) -> Result<Vec<Preread
         if files == 0 || transcript {
             continue;
         }
-        let scope = preread_scope(slot.unit_id);
+        let scope = preread_scope(slot.unit_id, slot.week);
         let row = written.iter().find(|g| g.scope == scope);
         out.push(PrereadInfo {
             unit_id: slot.unit_id,
             unit_name: slot.unit_name.clone(),
             week: slot.week,
-            meets_on: slot.meets_on.clone().unwrap_or_default(),
+            meets_on: slot.meets_on.clone(),
             scope,
             files,
             candidate: true,
@@ -114,20 +117,20 @@ pub fn list(conn: &Connection, class_id: i64, today: &str) -> Result<Vec<Preread
     }
     // A pre-read written for a week that no longer qualifies — its meeting
     // passed with no transcript filed — stays readable until a session
-    // document supersedes it.
+    // document supersedes it; one whose week lost its date is listed undated.
     for row in &written {
         if out.iter().any(|p| p.scope == row.scope) {
             continue;
         }
-        let Some(unit_id) = crate::db::preread_scope_id(&row.scope) else {
+        let Some((unit_id, week)) = crate::db::preread_scope_key(&row.scope) else {
             continue;
         };
-        let slot = slots.iter().find(|s| s.unit_id == unit_id);
+        let slot = slots.iter().find(|s| s.week == week);
         out.push(PrereadInfo {
             unit_id,
             unit_name: slot.map(|s| s.unit_name.clone()).unwrap_or_else(|| row.label.clone()),
-            week: slot.map_or(0, |s| s.week),
-            meets_on: slot.and_then(|s| s.meets_on.clone()).unwrap_or_default(),
+            week,
+            meets_on: slot.and_then(|s| s.meets_on.clone()),
             scope: row.scope.clone(),
             files: slot.map(|s| files_under(conn, class_id, &s.folder)).transpose()?.unwrap_or(0),
             candidate: false,
@@ -136,7 +139,14 @@ pub fn list(conn: &Connection, class_id: i64, today: &str) -> Result<Vec<Preread
             stale: row.stale,
         });
     }
-    out.sort_by(|a, b| a.meets_on.cmp(&b.meets_on).then(a.unit_id.cmp(&b.unit_id)));
+    // By meeting date, the undated last.
+    out.sort_by(|a, b| {
+        a.meets_on
+            .is_none()
+            .cmp(&b.meets_on.is_none())
+            .then(a.meets_on.cmp(&b.meets_on))
+            .then(a.week.cmp(&b.week))
+    });
     Ok(out)
 }
 
@@ -164,8 +174,8 @@ fn previous_block(conn: &Connection, class_id: i64, slot: &crate::units::WeekSlo
 }
 
 /// `Write the pre-read` (SPEC §8.6).
-pub fn write_preread(app: &AppHandle, class_id: i64, unit_id: i64, generated_at_label: &str) -> Result<i64> {
-    let scope = preread_scope(unit_id);
+pub fn write_preread(app: &AppHandle, class_id: i64, unit_id: i64, week: i64, generated_at_label: &str) -> Result<i64> {
+    let scope = preread_scope(unit_id, week);
     let (class_dir, prompt, payload) = with_conn(app, |conn| {
         if crate::guides::has_active_job(conn, class_id, KIND, &scope)? {
             bail!("a pre-read for this week is already being written");
@@ -173,8 +183,8 @@ pub fn write_preread(app: &AppHandle, class_id: i64, unit_id: i64, generated_at_
         let slots = crate::units::week_slots(conn, class_id)?;
         let slot = slots
             .iter()
-            .find(|s| s.unit_id == unit_id)
-            .context("that division is no longer one of the course's weeks")?
+            .find(|s| s.unit_id == unit_id && s.week == week)
+            .context("that week is no longer one the course declares")?
             .clone();
         let meets_on = slot
             .meets_on
@@ -224,29 +234,43 @@ pub fn write_preread(app: &AppHandle, class_id: i64, unit_id: i64, generated_at_
     crate::jobs::enqueue_document(app, KIND, class_id, &scope, &prompt, payload)
 }
 
+/// One week the shift would write a pre-read for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PrereadCandidate {
+    pub class_id: i64,
+    pub unit_id: i64,
+    pub week: i64,
+    pub unit_name: String,
+}
+
 /// The shift's list (SPEC §6): per class, the first coming week that
-/// qualifies and has no fresh pre-read — one per course a night.
-pub(crate) fn candidates(conn: &Connection, today: NaiveDate, now_secs: i64) -> Result<Vec<(i64, i64, String)>> {
+/// qualifies and has no fresh pre-read — one per course a night. A week
+/// whose last run failed within the rest waits.
+pub(crate) fn candidates(conn: &Connection, today: NaiveDate, now_secs: i64) -> Result<Vec<PrereadCandidate>> {
     let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
     let class_ids: Vec<i64> = stmt.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::new();
     for class_id in class_ids {
-        let first = list(conn, class_id, &today.to_string())?
-            .into_iter()
-            .filter(|p| p.candidate && (p.rel_path.is_none() || p.stale))
-            .find(|p| !crate::shift::recently_failed(conn, KIND, class_id, &p.scope, now_secs).unwrap_or(true));
-        if let Some(p) = first {
-            out.push((class_id, p.unit_id, p.unit_name));
+        for p in list(conn, class_id, &today.to_string())? {
+            if !p.candidate || (p.rel_path.is_some() && !p.stale) {
+                continue;
+            }
+            if crate::shift::recently_failed(conn, KIND, class_id, &p.scope, now_secs)? {
+                continue;
+            }
+            out.push(PrereadCandidate { class_id, unit_id: p.unit_id, week: p.week, unit_name: p.unit_name });
+            break;
         }
     }
     Ok(out)
 }
 
-/// The session document landed for a lecture of this division: its pre-read
-/// is superseded (SPEC §8.6). The row goes inside the caller's transaction;
-/// the files it names are the caller's to remove after the commit.
-pub(crate) fn supersede(conn: &Connection, class_id: i64, unit_id: i64) -> Result<Vec<String>> {
-    crate::guides::forget_document(conn, class_id, &preread_scope(unit_id))
+/// The session document landed for a lecture filed under this week: its
+/// pre-read is superseded (SPEC §8.6). The row goes inside the caller's
+/// transaction; the files it names are the caller's to remove after the
+/// commit.
+pub(crate) fn supersede(conn: &Connection, class_id: i64, unit_id: i64, week: i64) -> Result<Vec<String>> {
+    crate::guides::forget_document(conn, class_id, &preread_scope(unit_id, week))
 }
 
 #[cfg(test)]
@@ -317,13 +341,13 @@ mod tests {
         let listed = list(&conn, 3, "2026-09-08").unwrap();
         assert_eq!(listed.iter().map(|p| (p.unit_id, p.candidate, p.files)).collect::<Vec<_>>(), vec![(4, true, 1)],
             "Week 3 has its transcript, Week 5 nothing filed, Week 6 is past the week ahead");
-        assert_eq!(listed[0].meets_on, "2026-09-10");
+        assert_eq!(listed[0].meets_on.as_deref(), Some("2026-09-10"));
         assert_eq!(output_base("2026-09-10"), "Study Guides/Sessions/2026-09-10 \u{2014} Before class");
 
         // The shift takes the same candidate, once, and a fresh pre-read clears it.
         assert_eq!(candidates(&conn, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(), 1_000_000).unwrap().len(), 1);
         crate::guides::upsert_guide(
-            &conn, 3, &preread_scope(4), &format!("{}.html", output_base("2026-09-10")),
+            &conn, 3, &preread_scope(4, 4), &format!("{}.html", output_base("2026-09-10")),
             r#"[{"relPath":"Weeks/Week 04 — Topic/reading.pdf","sha256":"Weeks/Week 04 — Topic/reading.pdf"}]"#,
         ).unwrap();
         assert!(candidates(&conn, NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(), 1_000_000).unwrap().is_empty());
@@ -333,12 +357,12 @@ mod tests {
         let later = list(&conn, 3, "2026-09-20").unwrap();
         assert_eq!(later.iter().map(|p| (p.unit_id, p.candidate)).collect::<Vec<_>>(), vec![(4, false), (6, true)], "Week 6 is now within the week");
         // The session document lands: the pre-read is forgotten with its files named.
-        let files = supersede(&conn, 3, 4).unwrap();
+        let files = supersede(&conn, 3, 4, 4).unwrap();
         assert_eq!(files, vec![
             "Study Guides/Sessions/2026-09-10 \u{2014} Before class.md".to_string(),
             "Study Guides/Sessions/2026-09-10 \u{2014} Before class.html".to_string(),
         ]);
         assert_eq!(list(&conn, 3, "2026-09-20").unwrap().iter().map(|p| p.unit_id).collect::<Vec<_>>(), vec![6]);
-        assert!(supersede(&conn, 3, 4).unwrap().is_empty(), "nothing twice");
+        assert!(supersede(&conn, 3, 4, 4).unwrap().is_empty(), "nothing twice");
     }
 }

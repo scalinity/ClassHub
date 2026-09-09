@@ -232,10 +232,11 @@ export function writePresentationKit(classId: number, relPath: string): Promise<
 }
 
 /** `Write the pre-read` on a coming week's row in Lectures. */
-export function writePreread(classId: number, unitId: number): Promise<number> {
+export function writePreread(classId: number, unitId: number, week: number): Promise<number> {
   return invoke<number>("write_preread", {
     classId,
     unitId,
+    week,
     generatedAtLabel: generatedAtLabel(),
   });
 }
@@ -276,8 +277,8 @@ export interface PrereadInfo {
   unitId: number;
   unitName: string;
   week: number;
-  /** The meeting's date, `YYYY-MM-DD`. */
-  meetsOn: string;
+  /** The meeting's date, `YYYY-MM-DD`; null for a written pre-read whose week lost its date. */
+  meetsOn: string | null;
   scope: string;
   files: number;
   /** Whether the week still qualifies: material filed, no transcript, the meeting coming. */
