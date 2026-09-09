@@ -24,10 +24,20 @@ pub(crate) const HEADING: &str = "## Against the room";
 const MAX_NOTE_CHARS: usize = 40_000;
 const MAX_SECTION_CHARS: usize = 12_000;
 
-/// The meeting date a note's title opens with (`2026-09-10 — In class`), if any.
+/// The meeting date a note's title opens with (`2026-09-10 — In class`), if
+/// any. The title is the date alone, or the date, a separator and words of
+/// the owner's own: the editor offers `<date> — ` on every new note, and a
+/// title left at that is nothing the owner dated for a meeting.
 pub(crate) fn note_date(title: &str) -> Option<NaiveDate> {
-    let date: String = title.trim().chars().take(10).collect();
-    NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
+    let title = title.trim();
+    let date: String = title.chars().take(10).collect();
+    let parsed = NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+    let rest = title.chars().skip(10).collect::<String>();
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}' | ':' | '·'));
+    if rest.is_empty() && !title.chars().skip(10).any(|c| !c.is_whitespace()) {
+        return Some(parsed);
+    }
+    rest.chars().any(char::is_alphanumeric).then_some(parsed)
 }
 
 /// Whether the note already carries the section.
@@ -124,21 +134,28 @@ pub fn review_note(app: &AppHandle, class_id: i64, rel_path: &str) -> Result<i64
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let note = std::fs::read_to_string(class_dir.join(&target.rel_path))
             .with_context(|| format!("reading {}", target.rel_path))?;
+        // Decidable before the run is spent: the note plus the largest
+        // section has to fit what a note save accepts.
+        if note.len() + MAX_SECTION_CHARS * 4 > crate::notes::MAX_NOTE_BYTES {
+            bail!("{} is too long for a section to be appended — a note is 1 MB at most", target.name);
+        }
         let class_name: String = conn.query_row(
             "SELECT display_name FROM classes WHERE id = ?1",
             [class_id],
             |row| row.get(0),
         )?;
+        // The note's own text last, so a `{placeholder}` literal inside it
+        // is never rewritten by a later substitution.
         Ok(PROMPT_TEMPLATE
             .replace("{class}", &class_name)
             .replace("{date}", &target.date)
             .replace("{unit}", &target.unit_name)
             .replace("{note_path}", &target.rel_path)
-            .replace("{note}", &crate::db::truncate(note.trim(), MAX_NOTE_CHARS))
             .replace("{session}", &crate::guides::md_twin(&target.session_rel_path))
             .replace("{session_html}", &target.session_rel_path)
             .replace("{transcript}", &target.transcript_rel_path)
-            .replace("{heading}", HEADING))
+            .replace("{heading}", HEADING)
+            .replace("{note}", &crate::db::truncate(note.trim(), MAX_NOTE_CHARS)))
     })?;
     let payload = serde_json::to_string(&ReviewPayload { rel_path: rel_path.to_string() })?;
     crate::jobs::enqueue_notes_review(app, class_id, rel_path, &prompt, payload)
@@ -160,6 +177,22 @@ pub(crate) fn section_text(body: &str) -> Result<String> {
         bail!("the review's section carries the heading itself — the app adds it");
     }
     Ok(format!("{HEADING}\n\n{}\n", crate::db::truncate(body, MAX_SECTION_CHARS)))
+}
+
+/// Whether the section may be appended to this note at finalize time: a
+/// note under `Notes/`, read again under the lock, that does not carry the
+/// heading — a second review of a note that gained it meanwhile is refused.
+pub(crate) fn appendable(rel_path: &str, note: &str) -> Result<()> {
+    if !rel_path.starts_with(&format!("{NOTES_DIR}/")) {
+        bail!("{rel_path} is not a note");
+    }
+    if has_section(note) {
+        bail!(
+            "{} already carries {HEADING} — not appended twice",
+            crate::notes::note_title(rel_path)
+        );
+    }
+    Ok(())
 }
 
 /// The note with the section appended — a blank line between, and the
@@ -186,14 +219,9 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: Option<&str>, resul
     let (written, name) = with_conn(app, |conn| {
         let class_dir = crate::scanner::class_dir(conn, class_id)?;
         let rel = payload.rel_path.as_str();
-        if !rel.starts_with(&format!("{NOTES_DIR}/")) {
-            bail!("{rel} is not a note");
-        }
         let note = std::fs::read_to_string(class_dir.join(rel))
             .with_context(|| format!("{rel} could not be read — it may have been removed"))?;
-        if has_section(&note) {
-            bail!("{} already carries {HEADING} — not appended twice", crate::notes::note_title(rel));
-        }
+        appendable(rel, &note)?;
         let written = crate::notes::overwrite_note(conn, class_id, rel, &appended(&note, &section), "review.write_note")?;
         Ok((written, crate::notes::note_title(rel).to_string()))
     })?;
@@ -208,7 +236,10 @@ pub fn finalize_job(app: &AppHandle, class_id: i64, payload: Option<&str>, resul
 }
 
 /// The shift's list (SPEC §6): every unreviewed note dated for a distilled
-/// session, across the classes, the oldest date first; one a night.
+/// session, across the classes, the oldest date first; one a night. A note
+/// whose review once succeeded is not read again by the shift — its section
+/// undone, or edited out by hand, is the owner's decision, and the row's
+/// action stays for a second reading asked for.
 pub(crate) fn candidates(conn: &Connection, now_secs: i64) -> Result<Vec<(i64, ReviewTarget)>> {
     let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
     let class_ids: Vec<i64> = stmt.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -217,6 +248,8 @@ pub(crate) fn candidates(conn: &Connection, now_secs: i64) -> Result<Vec<(i64, R
         for target in list_targets(conn, class_id)? {
             if target.reviewed
                 || crate::shift::recently_failed(conn, KIND, class_id, &target.rel_path, now_secs)?
+                || crate::shift::last_job_status(conn, KIND, class_id, &target.rel_path)?.as_deref()
+                    == Some("succeeded")
             {
                 continue;
             }
@@ -239,8 +272,15 @@ mod tests {
     fn a_note_is_a_meetings_when_its_title_opens_with_the_date() {
         assert_eq!(note_date("2026-09-10 \u{2014} Biostatistics in class"), NaiveDate::from_ymd_opt(2026, 9, 10));
         assert_eq!(note_date("2026-09-10"), NaiveDate::from_ymd_opt(2026, 9, 10));
+        assert_eq!(note_date("2026-09-10: in class"), NaiveDate::from_ymd_opt(2026, 9, 10));
         assert_eq!(note_date("Central tendency \u{2014} quick reference"), None);
         assert_eq!(note_date("Notes from 2026-09-10"), None);
+        // The editor's untouched default is nothing the owner dated.
+        assert_eq!(note_date("2026-09-10 \u{2014}"), None);
+        assert_eq!(note_date("2026-09-10 \u{2014} "), None);
+        assert!(appendable("Notes/x.md", "# note").is_ok());
+        assert!(appendable("Weeks/x.md", "# note").is_err());
+        assert!(appendable("Notes/x.md", "# note\n\n## Against the room\n").is_err());
         assert!(has_section("# Note\n\n## Against the room\n\nbody"));
         assert!(has_section("## Against the room  "));
         assert!(!has_section("# Note\n\n### Against the room\n"));
@@ -299,6 +339,17 @@ mod tests {
         std::fs::write(class_dir.join("Notes/2026-09-03 \u{2014} In class.md"), appended("# In class\n", &section)).unwrap();
         assert!(list_targets(&conn, 3).unwrap()[0].reviewed);
         assert!(candidates(&conn, 1_000_000).unwrap().is_empty(), "reviewed once");
+        // The section undone: the row offers the review again, the shift
+        // does not spend a second run on a note whose review succeeded.
+        std::fs::write(class_dir.join("Notes/2026-09-03 \u{2014} In class.md"), "# In class\n").unwrap();
+        conn.execute(
+            "INSERT INTO jobs (kind, class_id, scope, status, created_at, started_at, finished_at)
+             VALUES ('notes_review', 3, 'Notes/2026-09-03 \u{2014} In class.md', 'succeeded', 5, 5, 6)",
+            [],
+        )
+        .unwrap();
+        assert!(!list_targets(&conn, 3).unwrap()[0].reviewed, "the row's action is back");
+        assert!(candidates(&conn, 1_000_000).unwrap().is_empty(), "the shift leaves an undone review alone");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

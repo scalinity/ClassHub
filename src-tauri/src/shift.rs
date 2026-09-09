@@ -1114,12 +1114,16 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
     }
     p.done(BRIEFS, step_outcome(p.briefs, todo.len(), left, "brief", "briefs", &brief_notes));
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
 
-    // 8. The workbook of a class with an item due within the week, one a night.
+    // 8. The workbook of a class with an item due within the week, one a
+    // night. A fixed cap is the night's measure, not a shortfall: what it
+    // leaves is said on the step and not counted as more for tomorrow.
     p.begin(WORKBOOK);
     let candidates = with_conn(app, |conn| crate::workbook::candidates(conn, Local::now().date_naive(), now()))?;
     let (todo, left) = capped(candidates, WORKBOOKS_PER_NIGHT as u32);
-    p.left += left;
     let mut workbook_notes = Vec::new();
     for (class_id, name) in &todo {
         match crate::workbook::write_workbook(app, *class_id, &label()) {
@@ -1139,6 +1143,9 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
     }
     p.done(WORKBOOK, step_outcome(p.workbooks, todo.len(), left, "workbook", "workbooks", &workbook_notes));
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
 
     // 9. A pre-read per course for the coming week whose deck posted early.
     p.begin(PREREADS);
@@ -1163,12 +1170,15 @@ fn run_plan(app: &AppHandle, id: i64) -> Result<End> {
         }
     }
     p.done(PREREADS, step_outcome(p.prereads, todo.len(), 0, "pre-read", "pre-reads", &preread_notes));
+    if let Some(end) = p.stop_reason() {
+        return Ok(p.finish_early(end));
+    }
 
-    // 10. A note read against its session, one a night.
+    // 10. A note read against its session, one a night — a fixed cap, as
+    // the workbook's.
     p.begin(NOTES);
     let candidates = with_conn(app, |conn| crate::notes_review::candidates(conn, now()))?;
     let (todo, left) = capped(candidates, REVIEWS_PER_NIGHT as u32);
-    p.left += left;
     let mut review_notes = Vec::new();
     for (class_id, target) in &todo {
         match crate::notes_review::review_note(app, *class_id, &target.rel_path) {
@@ -1252,6 +1262,18 @@ pub(crate) struct DigestCandidate {
 /// lecture or a division that fails for a stable reason cannot hold a cap
 /// night after night.
 const FAILED_REST: i64 = 3 * 24 * 60 * 60;
+
+/// The status of the newest job of this kind and scope, if any ran.
+pub(crate) fn last_job_status(conn: &Connection, kind: &str, class_id: i64, scope: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT status FROM jobs WHERE kind = ?1 AND class_id = ?2 AND scope = ?3
+             ORDER BY id DESC LIMIT 1",
+            params![kind, class_id, scope],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
 
 /// Whether the newest job of this kind and scope failed within `FAILED_REST`
 /// of `now`.

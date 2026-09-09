@@ -13,7 +13,7 @@ use tauri::AppHandle;
 use crate::db::{NOTES_DIR, audit, emit_hub_change, notify, with_conn};
 
 /// Notes are prose; anything bigger than this is not a note.
-const MAX_NOTE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_NOTE_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
