@@ -30,9 +30,9 @@ database and the chat sessions' stored usage:
 
 - `SELECT sqlite_compileoption_used('ENABLE_FTS5')` through the app's own connection (the bundled
   build is expected to say yes; if not, the plan changes to a build flag before anything else).
-- For the stored sessions, per round: input tokens, cache-write and cache-read tokens, from the
-  usage the API returned (stored, or reconstructed from the message sizes) — the shape of the
-  saving.
+- For the stored sessions, per round, the replayed prefix reconstructed from the message sizes —
+  the shape of the saving. A round's usage is not kept: `chat.rs` prints it to stderr at
+  `message_stop` and nothing writes it down, so the stored rows are the only record.
 - Three real questions from the stored sessions run through today's `search_material` on the
   backup's tree: hits, files, lines returned versus total, and whether the file that answers
   the question is among the first eighty lines.
@@ -43,11 +43,32 @@ The findings go in the notes; nothing is changed until they are written down.
 
 ## Phase 1 — Ranked search
 
-Migration `0019`: `material_fts` as an FTS5 virtual table over `(class_id UNINDEXED, rel_path
-UNINDEXED, kind UNINDEXED, content)`, filled at extract finalize for every extract, on write for
-corpus notes, sidecars' text, notes and the markdown twins of guides, briefs and session
-documents, and rebuilt in full by a `rebuild_search_index` command and at the first launch after
-the migration. A duplicate (M33) and a Canvas page mirror are indexed once each.
+Migration `0021`: `material_fts` as an FTS5 virtual table over `(class_id UNINDEXED, rel_path
+UNINDEXED, kind UNINDEXED, content)` beside a `material_index` row per file holding its
+modification time, its length and the FTS rowid.
+
+**What is indexed** is what `search_material` reads today: every `.md` under the four folders —
+the extracts (the Canvas page mirrors among them), the corpus notes, `Notes/` and the markdown
+twins under `Study Guides/` — and, where a document has no twin, its HTML stripped to text
+through the extractor's stripper. A division guide, the semester master, a practice exam and a
+presentation kit are written as HTML alone (§8.1, §8.2, §8.3, §8.6), so indexing twins only
+would drop every study guide out of search. A session document's HTML is skipped where its twin
+is there, as ripgrep skips it today. The hints and cards sidecars are not indexed: §9 states the
+scope as extracts, corpus notes, notes and guides, a flagged item's text is the session
+document's own *Said out loud* section and a card's front is the guide's own self-test question,
+so a sidecar would answer twice under a path the reader cannot usefully open — `list_hints`
+below is what reaches the ledger.
+
+**How it is filled**: one reconcile, `search::sync_class`, which stats the four folders, reads
+only the files whose modification time or length moved, and drops the rows of files that are
+gone — run before a search and by `rebuild_search_index`, which clears the class first. Not a
+write-through at each of the pipeline's writers: there are nine of them (the extract's record,
+the digest's, each small document's, the guide finalize, the note save, the Canvas page mirror,
+the scan's removals), a missed one serves stale text silently, and the index is derived, so a
+reconcile that reads the disk cannot be wrong for longer than one search. The stat-keyed skip
+and the immediate transaction opened after the reads are M37's cards index, which learned both
+the hard way. A duplicate (M33) is dropped at query time, the way ripgrep's hits are dropped
+today, so a mark that changes needs no reindex.
 
 `search_material` queries FTS with `bm25()` and `snippet()`, returns the top twenty hits as
 `relpath: snippet` with the matched line's number where the content carries lines, and the
@@ -79,6 +100,20 @@ and `list_hints(class, since?)` over `lecture_hints`. The write-tool names live 
 `chat_tool_names` command the sidebar reads, so the literal array in `src/lib/chat.ts` goes. The
 system prompt's write policy says an approval is the reader asking and a move that came from
 chat's own proposal still needs the reader's word.
+
+Three of these need more than a call:
+
+- **`undo_last`** has nothing to call. `undo::undo` takes ids and the notice is what carries a
+  batch's (§6, §12); there is no last-row reader. So `undo::last_reversible` is written: the
+  newest audit row whose action has an inverse and that no `undo.*` row already names, with
+  every row of its batch where it carries one — the same rows the notice's own `Undo` holds.
+- **`dismiss_move`** writes no audit row — the decline branch only resolves the card — so a
+  dismissal cannot be undone, and the tool result says so rather than implying otherwise.
+- **`add_lecture`** takes the ingestion's own request: an absolute path or a Zoom link, a
+  required `YYYY-MM-DD` date, an optional week (a course that publishes none files to `_Inbox/`)
+  and the digest flag. There is no unit parameter — the week resolves it (§8.5). It runs
+  synchronously on the chat thread under the same one-per-class claim the form takes, so the
+  answer states what was filed rather than that filing started.
 
 SPEC §9 states the search, the caching, the compaction and the tools.
 

@@ -658,5 +658,6 @@ function openCitation(cite: HTMLElement) {
     relPath,
     name: cite.dataset.name ?? relPath,
     kind: cite.dataset.kind ?? "md",
+    anchor: cite.dataset.anchor,
   });
 }

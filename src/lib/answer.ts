@@ -49,15 +49,139 @@ const md = new Marked({
   },
 });
 
+/**
+ * Extensions a citation can open, and the viewer kind each becomes. The set
+ * follows `VIEWABLE_KINDS` in `materials.ts`: a script and a CSV read in the
+ * document register the same way a note does, and the material viewer has
+ * rendered them since M20 — only this map had not caught up, so an answer
+ * citing an R script or a dataset left dead text where a link belonged.
+ */
 const VIEWABLE: Record<string, string> = {
   md: "md",
   markdown: "md",
   txt: "md",
   rmd: "rmd",
   r: "r",
+  py: "py",
+  csv: "csv",
   html: "html",
   htm: "html",
 };
+
+/**
+ * A transcript: a markdown file under the class's `Weeks/` folder, which is
+ * where every filed lecture lives (SPEC §4). Only these carry `## HH:MM`
+ * headings, so only these get a time turned into a link.
+ */
+function isTranscript(relPath: string): boolean {
+  return (
+    relPath.startsWith("Weeks/") && relPath.toLowerCase().endsWith(".md")
+  );
+}
+
+/**
+ * Where a citation stops carrying: a heading, which starts a new subject.
+ *
+ * Not the end of every paragraph, because that is not how the answer is
+ * written. The model names the transcript once and then lists the moments
+ * under it — "Four exam hints, all from `<path>`:" followed by a bullet per
+ * `HH:MM` — so a citation has to reach the list it introduces.
+ */
+const SECTION_END = /(<\/h[1-6]>)/g;
+
+/**
+ * A time written as a clock time, which is not a transcript anchor: the app
+ * writes those `11:59 pm` (SPEC §12) and a lecture anchor never carries a
+ * meridiem. Checked on what follows the match.
+ */
+const CLOCK_TIME = /^\s*(?:&nbsp;)?\s*[ap]\.?m\.?/i;
+
+/** A citation button, capturing what it points at. */
+const CITE =
+  /<button[^>]*class="cite"[^>]*data-path="([^"]*)"[^>]*>[\s\S]*?<\/button>/;
+
+/**
+ * Within one block: a whole citation button, any other tag, or a bare `HH:MM`
+ * in text. Matching tags explicitly is what keeps a time inside an attribute —
+ * a `data-path` naming a lecture at 09:00 — from being rewritten, and matching
+ * the button whole keeps a time that is already a link from being wrapped
+ * twice.
+ */
+const CITE_TAG_OR_TIME =
+  /(<button[^>]*class="cite"[^>]*data-path="([^"]*)"[^>]*>[\s\S]*?<\/button>)|(<[^>]+>)|(\b([01]?\d|2[0-3]):([0-5]\d)\b)/g;
+
+/** The class id and colour a time's link borrows from the citation beside it. */
+interface Cited {
+  path: string;
+  classId: string;
+  color: string;
+}
+
+function citedTranscript(button: string): Cited | null {
+  const path = decodeEntities(CITE.exec(button)?.[1] ?? "");
+  if (!isTranscript(path)) return null;
+  return {
+    path,
+    classId: /data-class="(\d+)"/.exec(button)?.[1] ?? "",
+    color: /--cite: var\(--class-([a-z]+)\)/.exec(button)?.[1] ?? "",
+  };
+}
+
+/**
+ * SPEC §9 — an `HH:MM` beside a transcript's citation becomes a link that
+ * opens the transcript at that heading, through the `## HH:MM` ids the
+ * document register gives a transcript's headings.
+ *
+ * "Beside" is the section: a time takes the transcript cited before it, or —
+ * since the model writes the time first as readily as last, "he said it at
+ * 01:23 in `<path>`" — the first one cited anywhere in the section. A section
+ * that cited no transcript leaves its times as text, and a clock time keeps
+ * its meridiem and stays text wherever it appears, so a due time is never a
+ * link. A heading ends the carry.
+ *
+ * A time linked to a heading the transcript happens not to have opens it at
+ * the top, which is what the viewer does with any anchor it cannot find — so
+ * the cost of reaching one bullet too far is a scroll, not a wrong document.
+ */
+function linkTimes(html: string): string {
+  return html
+    .split(SECTION_END)
+    .map((section) => {
+      const cites = section.match(new RegExp(CITE.source, "g")) ?? [];
+      const fallback = cites.map(citedTranscript).find((c) => c !== null) ?? null;
+      if (fallback === null) return section;
+      let current: Cited | null = null;
+      return section.replace(
+        CITE_TAG_OR_TIME,
+        (
+          whole: string,
+          button: string | undefined,
+          _path: string | undefined,
+          _tag: string | undefined,
+          time: string | undefined,
+          _hour: string | undefined,
+          _minute: string | undefined,
+          at: number,
+        ) => {
+          if (button !== undefined) {
+            current = citedTranscript(button);
+            return whole;
+          }
+          if (time === undefined) return whole;
+          if (CLOCK_TIME.test(section.slice(at + time.length))) return whole;
+          const cite = current ?? fallback;
+          const name = cite.path.split("/").pop() ?? cite.path;
+          return (
+            `<button type="button" class="cite" style="--cite: var(--class-${cite.color})" ` +
+            `data-class="${cite.classId}" data-kind="md" ` +
+            `data-path="${escapeHtml(cite.path)}" data-anchor="${time}" ` +
+            `data-name="${escapeHtml(name)}">${time}</button>`
+          );
+        },
+      );
+    })
+    .join("");
+}
 
 /**
  * Math, then markdown, then citations.
@@ -111,7 +235,7 @@ export function renderAnswer(
     (whole, index: string) => rendered[Number(index)] ?? whole,
   );
   // Fenced blocks carry a language class or sit inside <pre>; skip those.
-  return html.replace(
+  const cited = html.replace(
     /(?<!<pre>)<code>([^<]+)<\/code>/g,
     (whole, inner: string) => {
       const path = decodeEntities(inner);
@@ -127,6 +251,9 @@ export function renderAnswer(
       );
     },
   );
+  // Times last: they borrow the class and colour of the citation beside them,
+  // so the citations have to exist first.
+  return linkTimes(cited);
 }
 
 /**

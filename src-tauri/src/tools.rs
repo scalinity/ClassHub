@@ -63,6 +63,10 @@ const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LINE_CHARS: usize = 600;
 const MAX_SEARCH_LINES: usize = 80;
 const MAX_MATCH_CHARS: usize = 300;
+/// How long the pattern fallback may run. Ripgrep over the whole tree answers
+/// in well under a second; anything past this is a pattern backtracking, and
+/// the chat thread has no watchdog of its own.
+const RG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// One tool call's result: what the model receives, plus the one-line label the
 /// sidebar shows on its chip.
@@ -96,21 +100,32 @@ impl Outcome {
 }
 
 /// Tools that change something. The sidebar marks their chips differently, and
-/// deriving that here rather than from a hand-kept copy in the frontend means a
-/// new write tool cannot quietly render as a read.
+/// this is the one place the list lives: the frontend reads it through
+/// `chat_tool_names` rather than keeping a copy that a new write tool could
+/// quietly fall out of.
+pub const WRITE_TOOLS: &[&str] = &[
+    "upsert_deadline",
+    "complete_deadline",
+    "delete_deadline",
+    "upsert_grade_category",
+    "add_grade_item",
+    "write_note",
+    "trigger_synthesis",
+    "generate_practice",
+    "propose_file_moves",
+    "approve_move",
+    "dismiss_move",
+    "approve_all_moves",
+    "run_sort",
+    "run_syllabus_scan",
+    "approve_deadlines",
+    "add_lecture",
+    "run_shift",
+    "undo_last",
+];
+
 pub fn is_write(name: &str) -> bool {
-    matches!(
-        name,
-        "upsert_deadline"
-            | "complete_deadline"
-            | "delete_deadline"
-            | "upsert_grade_category"
-            | "add_grade_item"
-            | "write_note"
-            | "trigger_synthesis"
-            | "generate_practice"
-            | "propose_file_moves"
-    )
+    WRITE_TOOLS.contains(&name)
 }
 
 /// Tool schemas sent with every request (SPEC §9: four read tools, nine write
@@ -120,10 +135,15 @@ pub fn definitions() -> Value {
     json!([
         {
             "name": "get_overview",
-            "description": "Snapshot of the hub, in full: every class, when it meets, how the course divides itself (its weeks, modules or parts, with dates and which one is current), the professor's latest Canvas announcements with their text, the lectures filed under each division and whether they have been distilled or have a session document, what material is indexed and extracted per folder, which study guides exist and whether they are stale, every deadline or file-move proposal waiting for approval (with ids), and open deadlines. Use it for questions about the schedule, this week, what the professor announced, deadlines, what exists, what is waiting, or what has been synthesized — not to find content inside material.",
+            "description": "Snapshot of the hub, in full: every class, when it meets, how the course divides itself (its weeks, modules or parts, with dates and which one is current), the professor's latest Canvas announcements with their text, the lectures filed under each division and whether they have been distilled or have a session document, what material is indexed and extracted per folder, which study guides exist and whether they are stale, every deadline or file-move proposal waiting for approval WITH ITS ID — which is what approve_move and approve_deadlines need — and open deadlines. Use it for questions about the schedule, this week, what the professor announced, deadlines, what exists, what is waiting, or what has been synthesized, and before approving anything; not to find content inside material. Pass a class when the question is about one, which also brings back what the professor flagged in it.",
             "input_schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "class": {
+                        "type": "string",
+                        "description": "Optional class name to report on that class alone, in more detail."
+                    }
+                },
                 "additionalProperties": false
             }
         },
@@ -148,17 +168,21 @@ pub fn definitions() -> Value {
         },
         {
             "name": "search_material",
-            "description": "Grep every extract, distilled lecture note, note and study guide, returning matching lines with file paths and line numbers. This is the primary way to find content: search before reading. The query is a regular expression, case-insensitive unless it contains an uppercase letter. Prefer short distinctive phrases; if a query comes back thin, try a synonym or a narrower term.",
+            "description": "Ranked full-text search over every extract, distilled lecture note, note and study guide. This is the primary way to find content: search before reading. Returns the twenty most relevant DOCUMENTS, best first, each with the stretch of text that matched and the line it is on — hand the path and line straight to read_material. Write the query as words: a phrase ('central tendency') ranks documents holding the phrase above ones holding the words apart, and '|' separates alternatives ('mean|median|mode'). If a query comes back thin, try a synonym or a narrower term.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Regular expression, e.g. 'central tendency' or 'mean|median|mode'."
+                        "description": "Words or a phrase, e.g. 'central tendency' or 'mean|median|mode'."
                     },
                     "class": {
                         "type": "string",
                         "description": "Optional class name to search only that class."
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Set true to match the query as a regular expression instead — for a shape rather than words (a date, a character class). Slower, unranked, and returns matching lines rather than ranked documents."
                     }
                 },
                 "required": ["query"],
@@ -325,6 +349,121 @@ pub fn definitions() -> Value {
                 "required": ["moves"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "approve_move",
+            "description": "Approve one waiting file-move proposal by its id, which moves the file (get_overview lists each waiting proposal with its id). Only when Daniel has asked for this one — an approval is his to give, and a proposal this conversation itself made is no exception. The move is audit-logged and a notice with Undo follows it.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The proposal's id." },
+                    "destination": { "type": "string", "description": "Optional class-relative path to file it at instead of the proposed one, including the file name." }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "dismiss_move",
+            "description": "Decline one waiting file-move proposal by its id: the file stays where it is and the card leaves the queue. Nothing moves and nothing is written, so this cannot be undone — say so if Daniel might want it back.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The proposal's id." }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "approve_all_moves",
+            "description": "Approve every waiting file-move proposal for one class, as the Inbox's 'Approve all' does: one batch, one notice, one Undo. A card whose move fails is left waiting and named. Only on a clear request covering all of them.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." }
+                },
+                "required": ["class"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "run_sort",
+            "description": "Queue a sort job over one class's inbox: a read-only run on the Claude subscription that proposes a destination per file. It proposes; nothing moves without approval. Refused when the inbox is empty or a sort is already running for the class. Report it as queued.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." }
+                },
+                "required": ["class"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "run_syllabus_scan",
+            "description": "Queue a syllabus scan for one class: a read-only subscription job that reads the deadlines, the course's own divisions and the grade weights out of the syllabus. Deadlines land as proposals to approve; the divisions and weights are recorded directly. Report it as queued.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "target": { "type": "string", "description": "Optional class-relative path of the file to read, e.g. 'Syllabus/CAI5731 Syllabus.pdf'. Omit to let the job read the whole class folder." }
+                },
+                "required": ["class"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "approve_deadlines",
+            "description": "Approve waiting deadline proposals, which records them as real deadlines: pass ids for specific ones, or a class to take every proposal it has waiting (as 'Add all' does). One batch, one notice, one Undo. Only when Daniel has asked — a proposal is a reading of a syllabus or a notice, and approving it is his call.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "integer" }, "description": "The proposals to approve, as get_overview lists them." },
+                    "class": { "type": "string", "description": "Approve every waiting proposal for this class instead. Ignored when ids are given." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "add_lecture",
+            "description": "File a lecture into the class's Weeks folder: a caption track or recording at an absolute path, or a Zoom recording link. The transcript is normalized and indexed as source material. Takes a minute or two and, for a Zoom link, opens a window Daniel may have to sign in to. Set digest true only when he asks for the session document — it is a long subscription job. Leave week out on a course whose weeks carry dates, and the meeting date resolves it; on a course whose divisions name week ranges (Applied Generative AI) pass the week, or the file goes to the inbox for the sorter.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "source": { "type": "string", "description": "Absolute path to a .vtt/.srt/.txt caption or a media file, or a Zoom recording share link." },
+                    "date": { "type": "string", "description": "The session's date, YYYY-MM-DD." },
+                    "week": { "type": "integer", "description": "The course's own week number, when it needs saying." },
+                    "title": { "type": "string", "description": "Optional title for the transcript file; defaults to 'Lecture'." },
+                    "digest": { "type": "boolean", "description": "Distil the transcript into a session document afterwards. Defaults to false — it is a long, token-heavy subscription job." }
+                },
+                "required": ["class", "source", "date"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "run_shift",
+            "description": "Start the idle shift's run for tonight now, as the tray's 'Run the shift now' does: sync, file, capture, extract, distil, rebuild stale guides, write the exams and the small documents, all under tonight's caps. Refused when one is already running or tonight's has already run. Long and token-heavy on the subscription — only on a clear request.",
+            "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "undo_last",
+            "description": "Reverse the most recent action that can be reversed — the one the last notice's Undo would take, with every row of its batch. Use it when Daniel says to undo, take that back, or put it back. Say what was reversed.",
+            "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "list_hints",
+            "description": "What the professor flagged, from the distilled lectures: emphasis, exam hints, corrections to the slides, where the room got stuck, things assigned, and what a session built on. Each item carries its session, its date and an HH:MM anchor into the transcript. Cite the transcript path and the anchor so it can be opened at that moment.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "since": { "type": "string", "description": "Optional YYYY-MM-DD; only items from sessions on or after this date." },
+                    "kind": { "type": "string", "enum": ["emphasis", "exam_hint", "correction", "confusion", "action", "thread"], "description": "Optional single kind to list." }
+                },
+                "required": ["class"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -334,7 +473,14 @@ pub fn definitions() -> Value {
 pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Outcome {
     let result = match name {
         "get_overview" => {
-            with_conn(app, |conn| overview_text(conn, true, ctx.today_iso)).map(Outcome::ok)
+            with_conn(app, |conn| {
+                let focus = match opt_str_arg(input, "class") {
+                    Some(name) => Some(resolve_class(conn, &name)?.id),
+                    None => None,
+                };
+                overview_text(conn, true, ctx.today_iso, focus)
+            })
+            .map(Outcome::ok)
         }
         "list_material" => with_conn(app, |conn| list_material(conn, input)),
         "search_material" => search_material(app, input),
@@ -348,6 +494,16 @@ pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Out
         "trigger_synthesis" => trigger_synthesis(app, input, ctx),
         "generate_practice" => generate_practice(app, input, ctx),
         "propose_file_moves" => propose_file_moves(app, input),
+        "approve_move" => approve_move(app, input),
+        "dismiss_move" => dismiss_move(app, input),
+        "approve_all_moves" => approve_all_moves(app, input),
+        "run_sort" => run_sort(app, input),
+        "run_syllabus_scan" => run_syllabus_scan(app, input, ctx),
+        "approve_deadlines" => approve_deadlines(app, input),
+        "add_lecture" => add_lecture(app, input),
+        "run_shift" => run_shift(app),
+        "undo_last" => undo_last(app),
+        "list_hints" => with_conn(app, |conn| list_hints(conn, input)),
         other => Err(anyhow::anyhow!(
             "unknown tool '{other}' — the available tools are listed in the tools parameter"
         )),
@@ -480,7 +636,18 @@ fn waiting_line(pending_moves: i64, pending_deadlines: i64) -> Option<String> {
 /// The hub in text. `detailed` adds per-class inventories and guide dates; the
 /// compact form is what rides in the system prompt. `today_iso` is what each
 /// class's current division is resolved against (SPEC §8.5).
-pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Result<String> {
+/// `focus` names one class to report in full. The whole hub in detail is one
+/// tool result and `MAX_TOOL_RESULT_CHARS` cuts it — measured 2026-09-09, the
+/// four classes ran to 37 KB against a 24 KB cap and the tail was lost — so
+/// the unfocused detailed form leaves the flagged items to `list_hints`,
+/// which reads them all with a date and a kind to filter by, and a focused
+/// call carries them for the one class asked about.
+pub fn overview_text(
+    conn: &Connection,
+    detailed: bool,
+    today_iso: &str,
+    focus: Option<i64>,
+) -> Result<String> {
     let root = crate::db::aibhs_root(conn)?;
     let classes = class_rows(conn)?;
     let open_deadlines: i64 = conn.query_row(
@@ -508,16 +675,28 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
     }
 
     for class in classes {
-        class_block(conn, &class, detailed, today_iso, &mut out)?;
+        if focus.is_some_and(|id| id != class.id) {
+            continue;
+        }
+        // The flagged items only where one class was asked for; otherwise the
+        // count, and `list_hints` for the rest.
+        let ledger = focus == Some(class.id);
+        class_block(conn, &class, detailed, ledger, today_iso, &mut out)?;
     }
 
+    // The compact form rides every turn, and this list was most of it —
+    // measured 2026-09-09, 4,436 bytes of 7,987, twenty-five rows carrying
+    // Canvas's descriptions. What is due inside a week is what a question
+    // asked today is about; the rest are a count, and `get_overview` still
+    // carries all twenty-five with their ids.
+    let horizon = if detailed { None } else { Some(7) };
     let mut deadline_stmt = conn.prepare(&format!(
         "SELECT d.id, c.display_name, d.title, d.kind, d.due_at, d.notes
          FROM deadlines d JOIN classes c ON c.id = d.class_id
          WHERE d.status = 'open' ORDER BY {} LIMIT 25",
         crate::deadlines::DUE_INSTANT_SQL
     ))?;
-    let deadlines = deadline_stmt
+    let rows = deadline_stmt
         .query_map([], |row| {
             let id: i64 = row.get(0)?;
             let class: String = row.get(1)?;
@@ -526,20 +705,62 @@ pub fn overview_text(conn: &Connection, detailed: bool, today_iso: &str) -> Resu
             let due: String = row.get(4)?;
             let notes: Option<String> = row.get(5)?;
             // The [#id] is what upsert/complete/delete_deadline address.
-            Ok(format!(
-                "- [#{id}] {due} · {class} · {title} ({kind}){}",
-                notes.map(|n| format!(" — {n}")).unwrap_or_default()
+            Ok((
+                due.clone(),
+                format!(
+                    "- [#{id}] {due} · {class} · {title} ({kind}){}",
+                    notes.map(|n| format!(" — {n}")).unwrap_or_default()
+                ),
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let (deadlines, rest) = within_horizon(&rows, today_iso, horizon);
     out.push_str("\n## Open deadlines\n");
-    out.push_str(&if deadlines.is_empty() {
-        "None recorded.\n".to_string()
+    if deadlines.is_empty() && rest == 0 {
+        out.push_str("None recorded.\n");
     } else {
-        format!("{}\n", deadlines.join("\n"))
-    });
+        if !deadlines.is_empty() {
+            out.push_str(&format!("{}\n", deadlines.join("\n")));
+        }
+        if rest > 0 {
+            out.push_str(&format!(
+                "{} more open after {}{} — get_overview lists them all with their ids.\n",
+                rest,
+                horizon.map(|d| format!("the next {d} days")).unwrap_or_else(|| "these".into()),
+                if deadlines.is_empty() { ", the soonest still ahead" } else { "" }
+            ));
+        }
+    }
 
     Ok(out)
+}
+
+/// The rows due within `days` of today, and how many were left out. `None`
+/// keeps them all — the detailed form's answer. A row with no valid date
+/// counts as inside, since dropping it would hide it entirely.
+fn within_horizon<'a>(
+    rows: &'a [(String, String)],
+    today_iso: &str,
+    days: Option<i64>,
+) -> (Vec<&'a str>, usize) {
+    let Some(days) = days else {
+        return (rows.iter().map(|(_, line)| line.as_str()).collect(), 0);
+    };
+    let cutoff = chrono::NaiveDate::parse_from_str(today_iso, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.checked_add_days(chrono::Days::new(days as u64)))
+        .map(|d| d.format("%Y-%m-%d").to_string());
+    let mut kept = Vec::new();
+    let mut rest = 0usize;
+    for (due, line) in rows {
+        // A date-only value compares as its own day; a timed one by its date
+        // part, so a row due at 11:59 pm on the last day is still inside.
+        match cutoff.as_deref() {
+            Some(cutoff) if due.get(..10).is_some_and(|d| d > cutoff) => rest += 1,
+            _ => kept.push(line.as_str()),
+        }
+    }
+    (kept, rest)
 }
 
 /// One class of the overview: how it meets, how the course divides itself and
@@ -552,6 +773,7 @@ fn class_block(
     conn: &Connection,
     class: &ClassRow,
     detailed: bool,
+    ledger: bool,
     today_iso: &str,
     out: &mut String,
 ) -> Result<()> {
@@ -644,8 +866,11 @@ fn class_block(
     out.push_str(&lectures_block(conn, class.id, &contributions, &guides, current.as_ref(), detailed)?);
     out.push_str(&material_line(conn, class.id)?);
     out.push_str(&guides_line(&guides, detailed));
-    out.push_str(&flagged_block(conn, class.id, detailed)?);
+    // The queue before the ledger: these are the ids the approval tools act
+    // on, and if the result is ever cut they are the last thing that should
+    // go.
     out.push_str(&waiting_block(conn, class.id, detailed)?);
+    out.push_str(&flagged_block(conn, class.id, ledger)?);
     if detailed {
         out.push_str(&grades_line(conn, class.id)?);
     }
@@ -655,7 +880,7 @@ fn class_block(
 /// How many of the professor's announcements the overview carries per class,
 /// and how much of each body the detailed form quotes.
 const NOTICES_SHOWN: usize = 3;
-const NOTICE_BODY_CHARS: usize = 600;
+const NOTICE_BODY_CHARS: usize = 400;
 
 /// `Notices:` — the professor's latest announcements (SPEC §7.2), newest
 /// first and three at most: titles alone in the compact form, since it rides
@@ -872,8 +1097,14 @@ fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
     format!("Guides: {described}\n")
 }
 
-/// How many flagged items the detailed form lists per class.
+/// How many flagged items the detailed form lists per class, and how much of
+/// each. The overview is one tool result and `MAX_TOOL_RESULT_CHARS` cuts it:
+/// measured 2026-09-09 on the real hub, twenty full items a class ran the
+/// detailed form to 37 KB against a 24 KB cap, so Biostatistics' waiting
+/// queue and the whole of Applied Generative AI's block never reached the
+/// model — and `approve_move` reads its id from exactly there.
 const FLAGGED_SHOWN: usize = 20;
+const FLAGGED_CHARS: usize = 200;
 
 /// `Flagged:` — what the professor flagged across the class's distilled
 /// sessions (SPEC §8.4): a count and the earliest session's date in the
@@ -893,6 +1124,11 @@ fn flagged_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<Str
     if !detailed {
         return Ok(format!("Flagged: {} since {since}\n", plural(hints.len(), "item")));
     }
+    // The detailed form names the newest few and points at the tool, rather
+    // than carrying twenty items a class. `list_hints` (SPEC §9) reaches the
+    // whole ledger with a date and a kind to filter by, so the same text here
+    // was a second copy — and one that pushed the proposal ids past the
+    // tool-result cap, which is where the write tools read them.
     let mut out = format!("Flagged ({} since {since}, newest first):\n", plural(hints.len(), "item"));
     for h in hints.iter().take(FLAGGED_SHOWN) {
         let anchor = h.anchor.as_deref().map_or(String::new(), |a| format!(" {a}"));
@@ -900,7 +1136,13 @@ fn flagged_block(conn: &Connection, class_id: i64, detailed: bool) -> Result<Str
             "- {}{anchor} · {} · {}\n",
             h.date,
             crate::lectures::hint_kind_label(&h.kind).to_lowercase(),
-            h.text.split_whitespace().collect::<Vec<_>>().join(" ")
+            truncate(&h.text.split_whitespace().collect::<Vec<_>>().join(" "), FLAGGED_CHARS)
+        ));
+    }
+    if hints.len() > FLAGGED_SHOWN {
+        out.push_str(&format!(
+            "- … {} more · list_hints reads them all, by date or by kind\n",
+            hints.len() - FLAGGED_SHOWN
         ));
     }
     Ok(out)
@@ -1171,8 +1413,85 @@ fn list_material(conn: &Connection, input: &Value) -> Result<Outcome> {
 /// itself runs without it. Spawning ripgrep and waiting for it under the app's
 /// single connection blocked every other command, every chat tool, and the job
 /// runner for the whole search.
+/// The ranked half: reconcile, query, format. `None` means the query held no
+/// words FTS could match on — a regular expression — and the caller should
+/// take the ripgrep path instead.
+fn ranked(
+    app: &AppHandle,
+    classes: &[ClassRow],
+    query: &str,
+    dropped: &std::collections::HashSet<String>,
+) -> Result<Option<Outcome>> {
+    // Read as a pattern before any word is pulled out of it: `^\d{4}` holds
+    // the letter `d`, and searching for that would answer confidently and
+    // wrongly rather than taking the path the model meant.
+    if crate::search::looks_like_regex(query) || crate::search::fts_query(query).is_none() {
+        return Ok(None);
+    }
+    let ids: Vec<i64> = classes.iter().map(|c| c.id).collect();
+    // One lock per class rather than one across all four: the reconcile reads
+    // whatever moved off disk, and a first build reads every document — no
+    // reason to hold the connection through the next class's reads too.
+    for class in classes {
+        let synced = with_conn(app, |conn| {
+            let dir = crate::scanner::class_dir(conn, class.id)?;
+            crate::search::sync_class(conn, class.id, &dir)
+        });
+        if let Err(e) = synced {
+            eprintln!(
+                "search index: {} could not be reconciled: {e:#}",
+                class.display_name
+            );
+        }
+    }
+    let (hits, total) = with_conn(app, |conn| crate::search::run(conn, &ids, query, dropped))?;
+
+    let scope = if classes.len() == 1 {
+        format!(" in {}", classes[0].display_name)
+    } else {
+        String::new()
+    };
+    if hits.is_empty() {
+        return Ok(Some(Outcome::ok(format!(
+            "No documents match '{query}'{scope}.\n\nTry a shorter phrase, a synonym, or a \
+             single distinctive term. For a shape rather than words — a date, a character \
+             class — call this tool again with regex: true.\n"
+        ))));
+    }
+    let mut text = format!(
+        "{total} document(s) match '{query}'{scope}, best first{}\n\n",
+        if total > hits.len() {
+            format!(" ({} shown)", hits.len())
+        } else {
+            String::new()
+        }
+    );
+    for hit in &hits {
+        let line = hit.line.map(|n| format!(":{n}")).unwrap_or_default();
+        text.push_str(&format!(
+            "{}{line} [{}]\n    {}\n",
+            hit.rel_path,
+            hit.kind,
+            truncate(&hit.snippet, MAX_MATCH_CHARS)
+        ));
+    }
+    text.push_str(
+        "\nEach line is one document, ranked by relevance, with the stretch that matched. \
+         Read the ones worth reading with read_material at the line given.\n",
+    );
+    Ok(Some(Outcome::ok(text)))
+}
+
+/// SPEC §9 — ranked search first, ripgrep behind it.
+///
+/// The index is reconciled against the disk before the query rather than
+/// written through by the pipeline (`search.rs`), so what comes back is what
+/// the tree holds now; an unchanged tree costs a stat of a few hundred files.
+/// A reconcile that fails is logged and the query runs on what the index
+/// already holds — a stale answer beats none, and the index is derived.
 fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let query = str_arg(input, "query")?;
+    let as_regex = input["regex"].as_bool().unwrap_or(false);
     let (root, classes, duplicate_extracts) = with_conn(app, |conn| {
         let root = crate::db::aibhs_root(conn)?;
         let classes = match opt_str_arg(input, "class") {
@@ -1201,6 +1520,12 @@ fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
         }
         Ok((root, classes, duplicate_extracts))
     })?;
+
+    if !as_regex {
+        if let Some(outcome) = ranked(app, &classes, &query, &duplicate_extracts)? {
+            return Ok(outcome);
+        }
+    }
 
     let mut dirs = Vec::new();
     for class in &classes {
@@ -1271,7 +1596,7 @@ fn search_material(app: &AppHandle, input: &Value) -> Result<Outcome> {
         String::new()
     };
     let mut text = format!(
-        "{hits} matching line(s) in {} file(s) for /{query}/{scope}\n\n",
+        "{hits} matching line(s) in {} file(s) for the pattern /{query}/{scope}\n\n",
         files.len()
     );
     if lines.is_empty() {
@@ -1329,8 +1654,22 @@ fn run_rg(query: &str, dirs: &[PathBuf], fixed: bool) -> Result<std::process::Ou
     for dir in dirs {
         cmd.arg(dir);
     }
-    cmd.output()
-        .context("running ripgrep (install it with `brew install ripgrep`)")
+    // Bounded like every other subprocess the app spawns (LibreOffice, the
+    // idle read, Parakeet): a pattern that backtracks catastrophically over
+    // two megabytes of markdown would otherwise park the chat thread with no
+    // way back, and the chat loop has no watchdog of its own.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = cmd
+        .spawn()
+        .context("running ripgrep (install it with `brew install ripgrep`)")?;
+    crate::jobs::wait_bounded(child, RG_TIMEOUT).with_context(|| {
+        format!(
+            "the pattern search did not finish within {} seconds — narrow the pattern, or \
+             search for words instead",
+            RG_TIMEOUT.as_secs()
+        )
+    })
 }
 
 fn rg_bin() -> PathBuf {
@@ -2062,6 +2401,293 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
     Ok(outcome)
 }
 
+// ---------------------------------------------------------------------------
+// Running the pipeline (SPEC §9)
+//
+// Each of these calls the same audited function its button does, so a move
+// chat approved is the move the Inbox card makes, with the same audit row and
+// the same notice with its `Undo`. Nothing here is a second path into the
+// data: what is new is only that a sentence reaches it.
+
+/// The proposal a chat approval is about, checked before the move so the
+/// refusal names the queue rather than a rename.
+fn pending_move(conn: &Connection, id: i64) -> Result<(i64, String, String)> {
+    let row: Option<(i64, String, String, String)> = conn
+        .query_row(
+            "SELECT class_id, source_rel_path, dest_rel_path, status
+             FROM move_proposals WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((class_id, source, dest, status)) = row else {
+        bail!("no file-move proposal has id {id} — get_overview lists the waiting ones");
+    };
+    if status != "pending" {
+        bail!("proposal {id} is already {status} — it is no longer waiting");
+    }
+    Ok((class_id, source, dest))
+}
+
+fn approve_move(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let id = int_arg(input, "id")?;
+    let destination = opt_str_arg(input, "destination");
+    let (_, source, proposed) = with_conn(app, |conn| pending_move(conn, id))?;
+    let outcome = crate::sorter::resolve_proposal(app, id, true, destination.clone())?;
+    let dest = destination.unwrap_or(proposed);
+    Ok(Outcome::ok(format!(
+        "Approved — {source} → {dest}\n{outcome}\nThe move is audit-logged and the notice at \
+         the bottom of the window offers Undo."
+    )))
+}
+
+fn dismiss_move(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let id = int_arg(input, "id")?;
+    let (_, source, _) = with_conn(app, |conn| pending_move(conn, id))?;
+    crate::sorter::resolve_proposal(app, id, false, None)?;
+    Ok(Outcome::ok(format!(
+        "Declined — {source} stays where it is and the card has left the queue.\nNothing \
+         moved, so nothing was written and this cannot be undone; the file can be proposed \
+         again by sorting the inbox."
+    )))
+}
+
+fn approve_all_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let waiting: i64 = with_conn(app, |conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM move_proposals WHERE class_id = ?1 AND status = 'pending'",
+            [class.id],
+            |r| r.get(0),
+        )?)
+    })?;
+    if waiting == 0 {
+        bail!("{} has no file-move proposals waiting", class.display_name);
+    }
+    let outcome = crate::sorter::approve_all(app, class.id)?;
+    let mut text = format!(
+        "{} file(s) filed in {} — one batch, one Undo on the notice\n",
+        outcome.approved.len(),
+        class.display_name
+    );
+    for line in &outcome.skipped {
+        text.push_str(&format!("- left waiting: {line}\n"));
+    }
+    Ok(Outcome::ok(text))
+}
+
+fn run_sort(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let job_id = crate::sorter::run_sort_job(app, class.id)?;
+    Ok(Outcome::ok(format!(
+        "Sort queued — job #{job_id} · {}\nIt reads the inbox and proposes a destination per \
+         file. Nothing moves until Daniel approves. Report it as queued, not done.",
+        class.display_name
+    )))
+}
+
+fn run_syllabus_scan(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let target = opt_str_arg(input, "target");
+    let job_id = crate::deadlines::run_scan(app, class.id, target.as_deref(), ctx.today)?;
+    Ok(Outcome::ok(format!(
+        "Syllabus scan queued — job #{job_id} · {} · reading {}\nIts deadlines arrive as \
+         proposals to approve; the course's divisions and its grade weights are recorded \
+         directly. Report it as queued.",
+        class.display_name,
+        target.unwrap_or_else(|| "the whole class folder".into())
+    )))
+}
+
+fn approve_deadlines(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let ids: Vec<i64> = match input["ids"].as_array() {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .map(|v| {
+                v.as_i64()
+                    .context("every entry of 'ids' must be a proposal id")
+            })
+            .collect::<Result<Vec<_>>>()?,
+        // A class instead: every proposal it has waiting, as `Add all` takes.
+        _ => {
+            let name = opt_str_arg(input, "class")
+                .context("pass either 'ids' or a 'class' whose proposals to approve")?;
+            with_conn(app, |conn| {
+                let class = resolve_class(conn, &name)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM deadline_proposals
+                     WHERE class_id = ?1 AND status = 'pending' ORDER BY id",
+                )?;
+                let ids = stmt
+                    .query_map([class.id], |r| r.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if ids.is_empty() {
+                    bail!("{} has no deadline proposals waiting", class.display_name);
+                }
+                Ok(ids)
+            })?
+        }
+    };
+    let outcome = crate::deadlines::approve_proposals(app, &ids)?;
+    let mut text = format!(
+        "{} deadline(s) added — one batch, one Undo on the notice\n",
+        outcome.approved.len()
+    );
+    for line in &outcome.skipped {
+        text.push_str(&format!("- not added: {line}\n"));
+    }
+    Ok(Outcome::ok(text))
+}
+
+fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let date = str_arg(input, "date")?;
+    // The week the form would show: for a course whose weeks carry dates the
+    // nearest meeting's, resolved here rather than left to the caller, since
+    // a request without one routes the lecture to the inbox for the sorter —
+    // which for a dated course is a step nothing asked for.
+    let week = match input["week"].as_i64() {
+        Some(week) => Some(week),
+        None => with_conn(app, |conn| {
+            let slots = crate::units::week_slots(conn, class.id)?;
+            Ok(if slots.iter().any(|s| s.meets_on.is_some()) {
+                crate::units::nearest_week(&slots, &date)
+            } else {
+                None
+            })
+        })?,
+    };
+    let request = crate::lectures::AddRequest {
+        class_id: class.id,
+        source: str_arg(input, "source")?,
+        week,
+        date,
+        title: opt_str_arg(input, "title"),
+        // Off unless asked: a digest is a long subscription job, and the
+        // reader saying "file this lecture" has not asked for one.
+        digest: input["digest"].as_bool().unwrap_or(false),
+        recording_id: None,
+    };
+    // The same one-per-class claim the Add lecture form takes, so a chat
+    // filing and a form filing cannot run over each other.
+    let _claim = crate::lectures::claim_ingest(class.id)?;
+    let result = crate::lectures::add(app, &request, &|stage| {
+        eprintln!("chat add_lecture: {stage}");
+    })?;
+
+    let mut text = if result.routed_to_inbox {
+        format!(
+            "Filed to the inbox — {}\nIts week could not be resolved, so it waits in \
+             {}'s inbox for a sort proposal to place it.\n",
+            result.rel_path, class.display_name
+        )
+    } else {
+        format!(
+            "Filed — {}{}\n",
+            result.rel_path,
+            result
+                .unit_name
+                .as_deref()
+                .map(|u| format!(" · counts toward {u}"))
+                .unwrap_or_default()
+        )
+    };
+    if !result.speakers.is_empty() {
+        text.push_str(&format!("Speakers named: {}\n", result.speakers.join(", ")));
+    }
+    match (result.digest_job_id, result.digest_error.as_deref()) {
+        (Some(job), _) => text.push_str(&format!(
+            "Session document queued — job #{job}. Report it as queued.\n"
+        )),
+        (None, Some(error)) => text.push_str(&format!("No session document: {error}\n")),
+        (None, None) => text.push_str(
+            "No session document was made. Ask for one with 'distil that lecture' if it \
+             is wanted.\n",
+        ),
+    }
+    Ok(Outcome::ok(text))
+}
+
+fn run_shift(app: &AppHandle) -> Result<Outcome> {
+    let run_id = crate::shift::run_now(app)?;
+    Ok(Outcome::ok(format!(
+        "Shift started — run #{run_id}. It works through tonight's plan under tonight's caps \
+         and reports in the Job Center. Report it as started, not finished."
+    )))
+}
+
+fn undo_last(app: &AppHandle) -> Result<Outcome> {
+    let last = with_conn(app, |conn| crate::undo::last_reversible(conn))?;
+    let Some((ids, action)) = last else {
+        bail!("nothing on record can be reversed — the log holds no action with an inverse");
+    };
+    let outcome = crate::undo::undo(app, &ids)?;
+    let mut text = format!(
+        "Reversed {} — {} row(s) put back\n",
+        action,
+        outcome.undone.len()
+    );
+    for line in &outcome.refused {
+        text.push_str(&format!("- refused: {line}\n"));
+    }
+    Ok(Outcome::ok(text))
+}
+
+fn list_hints(conn: &Connection, input: &Value) -> Result<Outcome> {
+    let class = resolve_class(conn, &str_arg(input, "class")?)?;
+    let since = opt_str_arg(input, "since");
+    let kind = opt_str_arg(input, "kind");
+    let hints = crate::lectures::list_hints(conn, class.id)?;
+    let kept: Vec<_> = hints
+        .iter()
+        .filter(|h| since.as_deref().is_none_or(|s| h.date.as_str() >= s))
+        .filter(|h| kind.as_deref().is_none_or(|k| h.kind == k))
+        .collect();
+    if kept.is_empty() {
+        return Ok(Outcome::ok(format!(
+            "Nothing flagged in {}{}. A lecture has to be distilled before what the \
+             professor said out loud is on record.",
+            class.display_name,
+            since.map(|s| format!(" since {s}")).unwrap_or_default()
+        )));
+    }
+    let mut text = format!(
+        "{} flagged item(s) in {}, newest session first\n",
+        kept.len(),
+        class.display_name
+    );
+    let mut session = String::new();
+    for hint in kept {
+        let heading = format!("{} — {}", hint.date, hint.unit_name);
+        if heading != session {
+            text.push_str(&format!(
+                "\n## {heading}{}\n  transcript: {}/{}\n",
+                if hint.title.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", hint.title)
+                },
+                class.folder_name,
+                hint.rel_path
+            ));
+            session = heading;
+        }
+        text.push_str(&format!(
+            "- [{}] {}{}\n",
+            crate::lectures::hint_kind_label(&hint.kind),
+            hint.text,
+            hint.anchor
+                .as_deref()
+                .map(|a| format!(" ({a})"))
+                .unwrap_or_default()
+        ));
+    }
+    text.push_str(
+        "\nCite a transcript's path with its HH:MM so it opens at that moment.\n",
+    );
+    Ok(Outcome::ok(text))
+}
+
 struct ValidatedMove {
     class_id: i64,
     /// Class-relative, matching the files-table convention.
@@ -2209,7 +2835,10 @@ pub fn format_size(bytes: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{overview_text, resolve_scope, waiting_line, ClassRow, Scope};
+    use super::{
+        definitions, is_write, overview_text, resolve_scope, waiting_line, ClassRow, Scope,
+        WRITE_TOOLS,
+    };
     use rusqlite::Connection;
 
     /// Biostatistics (seeded id 3) with a few of its weeks, two folders of
@@ -2294,7 +2923,7 @@ mod tests {
     #[test]
     fn the_overview_names_the_divisions_and_the_current_one_per_class() {
         let conn = fixture();
-        let text = overview_text(&conn, false, "2026-09-02").expect("overview");
+        let text = overview_text(&conn, false, "2026-09-02", None).expect("overview");
         let biostats = block(&text, "Biostatistics for AI");
         assert!(biostats.contains("\nDivisions: 5 weeks from the syllabus\n"), "{text}");
         assert!(biostats.contains("\nNow: Week 2 \u{2014} Study Designs\n"), "{text}");
@@ -2313,7 +2942,7 @@ mod tests {
     fn the_overview_carries_lectures_folders_and_proposals() {
         let conn = fixture();
         let compact = block(
-            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            &overview_text(&conn, false, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(
@@ -2332,7 +2961,7 @@ mod tests {
         assert!(!compact.contains("#"), "ids belong to the detailed form: {compact}");
 
         let detailed = block(
-            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            &overview_text(&conn, true, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(
@@ -2377,7 +3006,7 @@ mod tests {
             .expect("announcement");
         }
         let compact = block(
-            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            &overview_text(&conn, false, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(
@@ -2388,7 +3017,7 @@ mod tests {
         );
         assert!(!compact.contains("Thursday"), "bodies belong to the detailed form: {compact}");
         let detailed = block(
-            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            &overview_text(&conn, true, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(detailed.contains("\nNotices (latest 3 of 4 announcements):\n"), "{detailed}");
@@ -2405,7 +3034,7 @@ mod tests {
         assert!(quiz_line.ends_with('…'), "{quiz_line}");
         assert_eq!(quiz_line.trim_start().chars().count(), super::NOTICE_BODY_CHARS + 1);
         let applied = block(
-            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+            &overview_text(&conn, true, "2026-09-02", None).expect("overview"),
             "Applied Generative AI in Medicine",
         );
         assert!(!applied.contains("Notices"), "{applied}");
@@ -2585,7 +3214,7 @@ mod tests {
     fn the_overview_counts_what_was_flagged() {
         let conn = fixture();
         let compact = block(
-            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            &overview_text(&conn, false, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(!compact.contains("Flagged"), "{compact}");
@@ -2607,16 +3236,117 @@ mod tests {
             .expect("hint");
         }
         let compact = block(
-            &overview_text(&conn, false, "2026-09-02").expect("overview"),
+            &overview_text(&conn, false, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
         assert!(compact.contains("\nFlagged: 2 items since 2026-08-27\n"), "{compact}");
-        let detailed = block(
-            &overview_text(&conn, true, "2026-09-02").expect("overview"),
+
+        // The whole hub in detail counts them and leaves the items to
+        // `list_hints`: the four classes' ledgers together ran the one tool
+        // result past its cap, and the ids the approval tools read sit after
+        // them.
+        let all = block(
+            &overview_text(&conn, true, "2026-09-02", None).expect("overview"),
             "Biostatistics for AI",
         );
-        assert!(detailed.contains("\nFlagged (2 items since 2026-08-27, newest first):\n"), "{detailed}");
-        assert!(detailed.contains("\n- 2026-08-27 00:45 · exam hint · Study designs are on Quiz 1\n"), "{detailed}");
-        assert!(detailed.contains("\n- 2026-08-27 · where the room got stuck · Case-control versus cohort\n"), "{detailed}");
+        assert!(all.contains("\nFlagged: 2 items since 2026-08-27\n"), "{all}");
+        assert!(!all.contains("Study designs are on Quiz 1"), "{all}");
+
+        // One class asked about carries its ledger.
+        let focused = block(
+            &overview_text(&conn, true, "2026-09-02", Some(3)).expect("overview"),
+            "Biostatistics for AI",
+        );
+        assert!(focused.contains("\nFlagged (2 items since 2026-08-27, newest first):\n"), "{focused}");
+        assert!(focused.contains("\n- 2026-08-27 00:45 · exam hint · Study designs are on Quiz 1\n"), "{focused}");
+        assert!(focused.contains("\n- 2026-08-27 · where the room got stuck · Case-control versus cohort\n"), "{focused}");
+
+        // And nothing else: a focused overview is one class's.
+        let whole = overview_text(&conn, true, "2026-09-02", Some(3)).expect("overview");
+        assert!(!whole.contains("## Applied Generative AI in Medicine"), "{whole}");
+        assert!(whole.contains("## Open deadlines"), "{whole}");
+    }
+
+    /// The waiting queue comes before the ledger, so the ids the approval
+    /// tools read are the last thing a cut result would lose.
+    #[test]
+    fn the_waiting_queue_precedes_the_flagged_ledger() {
+        let conn = fixture();
+        let text = overview_text(&conn, true, "2026-09-02", Some(3)).expect("overview");
+        let waiting = text.find("Waiting for approval:").expect("waiting block");
+        let flagged = text.find("Flagged").unwrap_or(usize::MAX);
+        assert!(waiting < flagged, "the ids must come first");
+    }
+
+    /// The compact overview carries a week of deadlines and a count of the
+    /// rest; the detailed form still carries them all with their ids, so
+    /// nothing chat could address is out of reach. Measured on the real hub,
+    /// this took the block that rides every turn from 4,436 bytes to 741.
+    #[test]
+    fn the_compact_overview_carries_a_week_of_deadlines_and_counts_the_rest() {
+        let conn = fixture();
+        conn.execute("DELETE FROM deadlines", []).expect("clear");
+        for (title, due) in [
+            ("Overdue homework", "2026-08-30"),
+            ("Due today", "2026-09-02"),
+            ("Due inside the week", "2026-09-09T23:59"),
+            ("Due the day after the week", "2026-09-10"),
+            ("Due next month", "2026-10-04"),
+        ] {
+            conn.execute(
+                "INSERT INTO deadlines (class_id, title, kind, due_at, status, source)
+                 VALUES (3, ?1, 'assignment', ?2, 'open', 'manual')",
+                rusqlite::params![title, due],
+            )
+            .expect("deadline");
+        }
+
+        let compact = overview_text(&conn, false, "2026-09-02", None).expect("overview");
+        let block = compact.split("## Open deadlines\n").nth(1).expect("block");
+        // Overdue and inside the week, in due order; the last day counts as in.
+        assert!(block.contains("Overdue homework"), "{block}");
+        assert!(block.contains("Due today"), "{block}");
+        assert!(block.contains("Due inside the week"), "{block}");
+        assert!(!block.contains("Due the day after the week"), "{block}");
+        assert!(!block.contains("Due next month"), "{block}");
+        assert!(
+            block.contains("2 more open after the next 7 days"),
+            "{block}"
+        );
+
+        // The detailed form is what carries the ids, and carries them all.
+        let detailed = overview_text(&conn, true, "2026-09-02", None).expect("overview");
+        let block = detailed.split("## Open deadlines\n").nth(1).expect("block");
+        assert!(block.contains("Due next month"), "{block}");
+        assert!(!block.contains("more open"), "{block}");
+    }
+
+    /// The write-tool list the sidebar reads is the list `is_write` answers
+    /// from, and every name on it is a tool `execute` dispatches — a write
+    /// tool that fell out of either would render as a read, quietly.
+    #[test]
+    fn the_write_tool_names_are_the_schemas_own() {
+        let schemas = definitions();
+        let names: Vec<&str> = schemas
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for tool in WRITE_TOOLS {
+            assert!(names.contains(tool), "{tool} has no schema");
+            assert!(is_write(tool), "{tool} does not read as a write");
+        }
+        // The read tools are not on it.
+        for read in ["get_overview", "list_material", "search_material", "read_material", "list_hints"] {
+            assert!(names.contains(&read), "{read} has no schema");
+            assert!(!is_write(read), "{read} reads as a write");
+        }
+        // Every schema is one or the other, and none is named twice.
+        let mut seen = std::collections::HashSet::new();
+        for name in &names {
+            assert!(seen.insert(*name), "{name} is defined twice");
+        }
+        assert_eq!(names.len(), WRITE_TOOLS.len() + 5);
     }
 }

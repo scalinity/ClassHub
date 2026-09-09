@@ -279,6 +279,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0018_one_run_a_night.sql"),
     include_str!("../migrations/0019_what_canvas_knows.sql"),
     include_str!("../migrations/0020_today.sql"),
+    include_str!("../migrations/0021_material_fts.sql"),
 ];
 
 /// The migration that makes one note per transcript name in a division

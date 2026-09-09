@@ -26,6 +26,7 @@ mod preread;
 mod recordings;
 mod remote;
 mod scanner;
+mod search;
 mod settings;
 mod shift;
 mod sorter;
@@ -666,6 +667,55 @@ fn undo_audit(app: tauri::AppHandle, audit_ids: Vec<i64>) -> Result<undo::UndoOu
     undo::undo(&app, &audit_ids).map_err(|e| format!("{e:#}"))
 }
 
+/// SPEC §9 — what the search index holds, for the Settings row.
+#[tauri::command(async)]
+fn search_index_count(state: tauri::State<Db>) -> Result<i64, String> {
+    let conn = db::lock(&state.0);
+    search::indexed_count(&conn).map_err(|e| format!("{e:#}"))
+}
+
+/// Throws the search index away and builds it again from the tree (SPEC §9).
+/// Off the runtime thread: it reads every indexed document of every class,
+/// about two megabytes of markdown today, and the connection is taken per
+/// class rather than held across the walk.
+#[tauri::command(async)]
+fn rebuild_search_index(app: tauri::AppHandle) -> Result<String, String> {
+    let classes: Vec<i64> = db::with_conn(&app, |conn| {
+        let mut stmt = conn.prepare("SELECT id FROM classes ORDER BY id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    let mut written = 0usize;
+    let mut failed = Vec::new();
+    for class_id in classes {
+        let outcome = db::with_conn(&app, |conn| {
+            let dir = scanner::class_dir(conn, class_id)?;
+            search::rebuild_class(conn, class_id, &dir)
+        });
+        match outcome {
+            Ok(count) => written += count,
+            // One class's folder missing is not the whole index's failure.
+            Err(e) => failed.push(format!("class {class_id}: {e:#}")),
+        }
+    }
+    Ok(if failed.is_empty() {
+        format!("{written} documents indexed")
+    } else {
+        format!("{written} documents indexed · {}", failed.join(" · "))
+    })
+}
+
+/// SPEC §9 — the tools that change something, so the sidebar marks a rebuilt
+/// history's chips the way a live turn's are marked without keeping its own
+/// copy of the list.
+#[tauri::command]
+fn chat_tool_names() -> Vec<&'static str> {
+    tools::WRITE_TOOLS.to_vec()
+}
+
 /// Scan a chosen file (rel_path) or the whole class folder (None) for dated
 /// items. `today` is client-formatted (std Rust cannot format a local date).
 #[tauri::command]
@@ -1207,6 +1257,9 @@ pub fn run() {
             approve_move_proposals,
             dismiss_deadline_proposals,
             undo_audit,
+            search_index_count,
+            rebuild_search_index,
+            chat_tool_names,
             list_jobs,
             cancel_job,
             get_job_events,

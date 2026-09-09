@@ -102,6 +102,96 @@ fn undo_in_conn(conn: &Connection, audit_ids: &[i64]) -> Batch {
     batch
 }
 
+/// Whether an action has an inverse — the same names `undo_with` dispatches
+/// on, as a list something can ask rather than only find out by trying. The
+/// `canvas.*` rows are the one deliberate gap: a sync would write them again
+/// (SPEC §7.2), and `undo_with` refuses them by name.
+///
+/// `canvas.filed` is a file the sync moved, which is a move like any other
+/// and does reverse.
+pub fn reversible(action: &str) -> bool {
+    matches!(
+        action,
+        "sort.move"
+            | "canvas.filed"
+            | "ui.upsert_deadline"
+            | "chat.upsert_deadline"
+            | "ui.delete_deadline"
+            | "chat.delete_deadline"
+            | "ui.set_deadline_status"
+            | "chat.complete_deadline"
+            | "syllabus.insert_deadline"
+            | "ui.write_note"
+            | "chat.write_note"
+            | "review.write_note"
+            | "ui.save_grade_category"
+            | "chat.upsert_grade_category"
+            | "ui.delete_grade_category"
+            | "ui.save_grade_item"
+            | "chat.add_grade_item"
+            | "ui.delete_grade_item"
+    )
+}
+
+/// The rows the newest still-reversible action wrote, and what it was — what
+/// `Undo` on the last notice would reverse, for a reader who asked in words
+/// instead (SPEC §9).
+///
+/// A batch is one action: a folder's files, a series' dates and a sync's
+/// placements each write a row per item under one `batch` tag and one notice
+/// with one `Undo` (SPEC §6), so the newest row's whole batch comes back
+/// together. Rows an `undo.*` row already names are skipped, so asking twice
+/// reaches the action before rather than refusing.
+pub fn last_reversible(conn: &Connection) -> Result<Option<(Vec<i64>, String)>> {
+    let undone = already_undone(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, action, payload FROM audit_log
+         WHERE action NOT LIKE 'undo.%' ORDER BY id DESC LIMIT 400",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let Some((id, action, payload)) = rows
+        .iter()
+        .find(|(id, action, _)| reversible(action) && !undone.contains(id))
+    else {
+        return Ok(None);
+    };
+    let batch = serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|p| p["batch"].as_str().map(str::to_string))
+        .filter(|b| !b.is_empty());
+    let Some(batch) = batch else {
+        return Ok(Some((vec![*id], action.clone())));
+    };
+    // Every row of the batch, the ones already reversed left out — a batch
+    // half-undone by hand is finished rather than refused.
+    let mut ids = rows
+        .iter()
+        .filter(|(row_id, row_action, row_payload)| {
+            row_action == action
+                && !undone.contains(row_id)
+                && serde_json::from_str::<Value>(row_payload)
+                    .ok()
+                    .and_then(|p| p["batch"].as_str().map(str::to_string))
+                    .as_deref()
+                    == Some(batch.as_str())
+        })
+        .map(|(row_id, _, _)| *row_id)
+        .collect::<Vec<_>>();
+    // The log was read newest first; hand the batch back in the order it was
+    // written, which is how the notice's own list reads.
+    ids.sort_unstable();
+    Ok(Some((ids, action.clone())))
+}
+
 /// Every audit row an `undo.*` row names, in one read of the log.
 fn already_undone(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
     let mut stmt = conn.prepare(
@@ -723,6 +813,14 @@ mod edited_since_tests {
 mod batch_tests {
     use super::*;
 
+    fn db() -> Connection {
+        crate::db::memory_db()
+    }
+
+    fn audit(conn: &Connection, action: &str, payload: Value) -> i64 {
+        crate::db::audit(conn, action, payload).expect("audit")
+    }
+
     /// A batch reverses newest first, refuses a row without an inverse
     /// while the rest go, names each reversal, and pushes the areas the
     /// inverses touched.
@@ -763,5 +861,94 @@ mod batch_tests {
         let again = undo_in_conn(&conn, &[first, second]);
         assert!(again.outcome.undone.is_empty());
         assert!(again.outcome.refused.iter().all(|r| r.contains("already undone")), "{:?}", again.outcome.refused);
+    }
+
+    /// What `undo_last` reaches for (SPEC §9): the newest action with an
+    /// inverse, its whole batch where it wrote one, rows an `undo.*` row
+    /// already names skipped, and the rows nothing reverses passed over
+    /// rather than refused.
+    #[test]
+    fn the_last_reversible_row_is_the_newest_one_with_its_batch() {
+        let conn = db();
+        assert!(last_reversible(&conn).expect("read").is_none(), "an empty log has none");
+
+        let older = audit(&conn, "chat.write_note", json!({ "classId": 3 }));
+        // A batch of two, written after it.
+        let one = audit(
+            &conn,
+            "sort.move",
+            json!({ "classId": 3, "batch": "approve-all-1", "from": "a", "to": "b" }),
+        );
+        let two = audit(
+            &conn,
+            "sort.move",
+            json!({ "classId": 3, "batch": "approve-all-1", "from": "c", "to": "d" }),
+        );
+        // A different batch's row, and rows nothing reverses, on top.
+        audit(&conn, "sort.move", json!({ "classId": 3, "batch": "approve-all-2" }));
+        audit(&conn, "canvas.insert_deadline", json!({ "classId": 3 }));
+        audit(&conn, "sort.proposal_vanished", json!({ "classId": 3 }));
+
+        // The newest reversible row is the second batch's, alone in it.
+        let (ids, action) = last_reversible(&conn).expect("read").expect("some");
+        assert_eq!(action, "sort.move");
+        assert_eq!(ids.len(), 1);
+
+        // With that one reversed, the batch of two comes back together.
+        audit(&conn, "undo.sort.move", json!({ "auditId": ids[0] }));
+        let (ids, action) = last_reversible(&conn).expect("read").expect("some");
+        assert_eq!(action, "sort.move");
+        assert_eq!(ids, vec![one, two]);
+
+        // Half a batch undone by hand: the rest is finished, not refused.
+        audit(&conn, "undo.sort.move", json!({ "auditId": two }));
+        let (ids, _) = last_reversible(&conn).expect("read").expect("some");
+        assert_eq!(ids, vec![one]);
+
+        // And under all of it, the note.
+        audit(&conn, "undo.sort.move", json!({ "auditId": one }));
+        let (ids, action) = last_reversible(&conn).expect("read").expect("some");
+        assert_eq!(action, "chat.write_note");
+        assert_eq!(ids, vec![older]);
+
+        // Nothing left with an inverse.
+        audit(&conn, "undo.chat.write_note", json!({ "auditId": older }));
+        assert!(last_reversible(&conn).expect("read").is_none());
+    }
+
+    /// The list `undo_last` asks and the arms `undo_with` dispatches say the
+    /// same thing. A `canvas.*` row is the deliberate gap — except the file
+    /// the sync filed, which is a move like any other.
+    #[test]
+    fn the_reversible_list_and_the_dispatch_agree() {
+        let conn = db();
+        for action in [
+            "sort.move",
+            "canvas.filed",
+            "chat.upsert_deadline",
+            "ui.set_deadline_status",
+            "syllabus.insert_deadline",
+            "review.write_note",
+            "chat.upsert_grade_category",
+            "ui.delete_grade_item",
+        ] {
+            assert!(reversible(action), "{action} should have an inverse");
+            let id = audit(&conn, action, json!({ "classId": 3 }));
+            let refused = undo_one(&conn, id).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                !refused.contains("cannot be reversed"),
+                "{action}: {refused}"
+            );
+        }
+        for action in [
+            "canvas.insert_deadline",
+            "canvas.merge_deadline",
+            "sort.proposal_vanished",
+            "cards.answer",
+        ] {
+            assert!(!reversible(action), "{action} should have no inverse");
+            let id = audit(&conn, action, json!({ "classId": 3 }));
+            assert!(undo_one(&conn, id).is_err(), "{action} was reversed");
+        }
     }
 }

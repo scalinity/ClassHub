@@ -35,6 +35,8 @@ import {
   type AppSettings,
   type NotifyKey,
   type ShiftSettingKey,
+  searchIndexCount,
+  rebuildSearchIndex,
 } from "@/lib/settings";
 import {
   buttonFilledNeutral,
@@ -263,6 +265,8 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
           <AlwaysThereSection settings={settings} pending={pending} apply={apply} />
 
           <CanvasSection />
+
+          <SearchIndexSection />
 
           <ChatSection />
         </>
@@ -592,6 +596,72 @@ function AlwaysThereSection({
  * A green "connected" chip would stay green long after the session behind it
  * had expired.
  */
+/**
+ * SPEC §9 — the ranked search index. It keeps itself current: every search
+ * reconciles it against the tree first, so this is the way back from an index
+ * a crash mid-write or an edit made while the app was closed left disagreeing
+ * with the disk, not a chore.
+ */
+function SearchIndexSection() {
+  const { data: count, refetch } = useQuery({
+    queryKey: ["searchIndex"],
+    queryFn: searchIndexCount,
+  });
+  const [rebuilding, setRebuilding] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  async function rebuild() {
+    setRebuilding(true);
+    setResult(null);
+    setFailed(null);
+    try {
+      setResult(await rebuildSearchIndex());
+    } catch (e) {
+      setFailed(String(e));
+    } finally {
+      setRebuilding(false);
+      void refetch();
+    }
+  }
+
+  return (
+    <Section
+      title="Search index"
+      lead="Chat finds material through a full-text index of everything the
+        pipeline writes — the extracts, the distilled lectures, your notes and
+        the study guides — ranked by relevance rather than by where a file
+        sorts on disk. It updates itself before every search, so this is only
+        needed if a search starts missing something you know is there."
+    >
+      <dl className="mt-5 space-y-1.5 text-body">
+        <div className="flex gap-3">
+          <dt className={`w-24 shrink-0 ${meta}`}>Indexed</dt>
+          <dd className="tabular-nums">
+            {count === undefined ? "—" : `${count} documents`}
+          </dd>
+        </div>
+      </dl>
+
+      <button
+        type="button"
+        disabled={rebuilding}
+        onClick={() => void rebuild()}
+        className={`${buttonFilledNeutral} mt-4`}
+      >
+        {rebuilding ? "Rebuilding…" : "Rebuild the index"}
+      </button>
+
+      {result !== null && (
+        <p className={`mt-3 ${meta}`}>Rebuilt · {result}</p>
+      )}
+      {failed !== null && (
+        <p className={`${errorLine} max-w-xl`}>Couldn't rebuild: {failed}</p>
+      )}
+    </Section>
+  );
+}
+
 function CanvasSection() {
   const { data: status } = useQuery({
     queryKey: ["canvasStatus"],

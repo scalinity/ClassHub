@@ -90,6 +90,9 @@ export interface ViewRequest {
   relPath: string;
   name: string;
   kind: string;
+  /** An `HH:MM` a transcript's own heading answers, when the citation named
+   *  one — the viewer opens scrolled to that moment (SPEC §9). */
+  anchor?: string;
 }
 
 export interface ChatSnapshot {
@@ -424,6 +427,7 @@ function init() {
   initialized = true;
   void listen<ChatEventPayload>("chat-event", (e) => handleEvent(e.payload));
   void refreshSettings();
+  void loadToolNames();
   void refreshSessions();
   // Global shortcut (SPEC §12). A module-level listener keeps this out of
   // component effects; Escape stays local to the panel so it never steals the
@@ -638,23 +642,27 @@ export function toolLabel(name: string): string {
   return sentence(name.replace(/_/g, " "));
 }
 
-/** M8 write tools — their chips carry a pen glyph instead of the read arrows. */
 /**
+ * The write tools, whose chips carry a pen glyph instead of the read arrows.
+ *
  * Live turns carry the flag from the backend, which owns the list. Rebuilt
- * history has no event to carry it, so it falls back to the persisted name.
+ * history has no event to carry it, so the name is what settles it — and the
+ * list is read from the backend rather than kept here, because a copy is a
+ * copy that goes stale: every tool M38 added would have rendered as a read
+ * until someone noticed.
  */
-const WRITE_TOOLS = new Set([
-  "upsert_deadline",
-  "complete_deadline",
-  "delete_deadline",
-  "upsert_grade_category",
-  "add_grade_item",
-  "write_note",
-  "trigger_synthesis",
-  "generate_practice",
-  "propose_file_moves",
-]);
+let writeTools: ReadonlySet<string> = new Set();
+
+export async function loadToolNames() {
+  try {
+    writeTools = new Set(await invoke<string[]>("chat_tool_names"));
+    // History already on screen was rendered against the empty set.
+    emitChange({});
+  } catch (e) {
+    console.error("could not read the write-tool names", e);
+  }
+}
 
 export function isWriteTool(item: { name: string; isWrite?: boolean }): boolean {
-  return item.isWrite ?? WRITE_TOOLS.has(item.name);
+  return item.isWrite ?? writeTools.has(item.name);
 }

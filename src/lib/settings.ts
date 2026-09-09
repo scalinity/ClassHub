@@ -144,3 +144,18 @@ export function setNotifyDueTime(time: string): Promise<void> {
 export function setLoginItem(on: boolean): Promise<void> {
   return invoke("set_login_item", { on });
 }
+
+/** How many documents the ranked search index holds (SPEC §9). */
+export function searchIndexCount(): Promise<number> {
+  return invoke<number>("search_index_count");
+}
+
+/**
+ * Throws the search index away and builds it again from the tree, answering
+ * with what it found. The index reconciles itself before every search, so
+ * this is the way back from one that a crash mid-write left disagreeing with
+ * the disk — not routine upkeep.
+ */
+export function rebuildSearchIndex(): Promise<string> {
+  return invoke<string>("rebuild_search_index");
+}

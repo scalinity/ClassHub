@@ -219,7 +219,11 @@ export function FileViewer({
             Loading…
           </p>
         ) : (
+          // Keyed on the anchor as well as the path: two citations of one
+          // transcript at different moments are the same document, so the
+          // frame would not reload and `onLoad` would never fire again.
           <iframe
+            key={`${file.relPath}#${file.anchor ?? ""}`}
             sandbox={framed.sandbox}
             srcDoc={framed.srcDoc}
             title={file.name}

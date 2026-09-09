@@ -6768,3 +6768,212 @@ sessions should know:
   the rest.
 - `LazyLock` around a `Mutex<HashMap>` is the shape for a per-process
   cache in a `static`; `HashMap::new()` is not `const`.
+
+## M38 — Chat that ranks (2026-09-09)
+
+### Phase 0 — measured
+
+Read off a `.backup` copy of the live database taken on Sept 9 at 02:07 and
+the tree, before anything changed:
+
+- **FTS5 is compiled in.** `sqlite_compileoption_used('ENABLE_FTS5')` answers
+  1 through the app's own bundled rusqlite, SQLite 3.53.2; a virtual table
+  creates, and `bm25()` and `snippet()` both work. The plan stood.
+- **What a multi-round turn replays.** A round's usage is not kept — `chat.rs`
+  prints it to stderr at `message_stop` and nothing writes it down — so the
+  shape came from the stored rows. Session 2's longest turn, nine rounds,
+  replayed 302,340 bytes of messages across the turn, of which all but the
+  first 98 were re-billed at full price; session 3's four-round turn 72,257
+  bytes of 72,207 re-billable. Only the system block and the tool schemas were
+  cached.
+- **Three real questions through today's `search_material`**, with the same
+  flags `run_rg` passes, against today's tree:
+
+  | query | hits | files | shown | the answering file |
+  | --- | --- | --- | --- | --- |
+  | `central tendency\|mean\|median\|mode` (Biostatistics) | 262 | 47 | 80 | line 188, **past the cut**, 34 files ahead of it |
+  | `Posit Assistant` (all classes) | 14 | 4 | 14 | line 1 |
+  | `Module 2` (Biostatistics) | 16 | 7 | 16 | line 13, 6 files ahead of it |
+
+  The first is the question M7 was accepted on. Its answer never reached the
+  model.
+- **The compact overview: 7,987 bytes**, of which the open-deadline list is
+  4,436 (25 rows carrying Canvas's descriptions) and the four class blocks
+  808 / 703 / 1,047 / 852. The detailed form 37,058 bytes.
+- **`chat_max_tokens`** held one key for one model, `claude-sonnet-5 128000` —
+  a value that had to be split before it could be read, and that a switch back
+  to a model already used would have re-fetched.
+- The corpus the index covers: 117 documents, about 2.0 MB of markdown.
+
+### What the measurements changed in the brief
+
+- Migration `0021`, not `0019`: M37 left the database at `user_version` 20.
+- **Guides have no markdown twin.** A division guide, the semester master, a
+  practice exam and a presentation kit are written as HTML alone (SPEC §8.1,
+  §8.2, §8.3, §8.6), so indexing "the markdown twins of guides" would have
+  dropped every study guide out of search. The index takes the twin where one
+  exists and the HTML stripped to text where it does not.
+- **One reconcile instead of nine write-throughs.** The pipeline has nine
+  places that write an indexable file; a missed one serves stale text
+  silently. `search::sync_class` stats the four folders before every search
+  and reads only what moved, which cannot be wrong for longer than one search.
+  The index is derived, which is what makes that trade available.
+- **The sidecars are not indexed.** SPEC §9 states the scope as extracts,
+  corpus notes, notes and guides; a flagged item's text is the session
+  document's own *Said out loud* section and a card's front is the guide's own
+  self-test question, so a sidecar answers twice under a path the reader
+  cannot open. `list_hints` reaches the ledger instead.
+- `undo::last_reversible` had to be written: undo is by id and the notice is
+  what carries a batch, so there was no last-row reader to call.
+- `add_lecture` has no unit parameter, `dismiss_move` writes no audit row, and
+  the ingestion's claim is `pub(crate)` — each recorded in the brief.
+
+### What was built
+
+- **Migration `0021`**: `material_fts` (FTS5, `porter unicode61`) and
+  `material_index`, the row per file holding its mtime, length and FTS rowid.
+- **`search.rs`**: `indexed_name` and `has_twin` (what is a document),
+  `walk_class`/`collect`/`text_of` (the stat walk and the read, HTML through
+  `extract::strip_html`), `sync_class` (reads first, then one IMMEDIATE
+  transaction), `rebuild_class`, `indexed_count`, `fts_query`/`terms_of`/
+  `quote` (the MATCH expression), `looks_like_regex`, `line_of`/`all_terms`
+  and `run` (bm25, snippet, the duplicate drop at query time).
+- **`tools.rs`**: `ranked` in front of `search_material`, the pattern path
+  behind it with `run_rg` now spawned through `jobs::wait_bounded` at twenty
+  seconds — the one unbounded spawn in the codebase; the schema takes `regex`.
+  `within_horizon` trims the compact overview's deadlines to a week and counts
+  the rest. `overview_text` takes a `focus` class; the flagged ledger rides a
+  focused call only, `FLAGGED_SHOWN` items each capped at `FLAGGED_CHARS`, and
+  `waiting_block` moved ahead of `flagged_block`. `WRITE_TOOLS` is a list and
+  `is_write` reads it. Ten new tools: `approve_move`, `dismiss_move`,
+  `approve_all_moves`, `run_sort`, `run_syllabus_scan`, `approve_deadlines`,
+  `add_lecture` (resolving the week off `units::week_slots`/`nearest_week`
+  where the course dates its weeks, under `lectures::claim_ingest`),
+  `run_shift`, `undo_last` and `list_hints`.
+- **`chat.rs`**: `mark_prefix_cacheable` on the last block of the last message
+  each round; `retry_delay` and the retry loop around opening the stream;
+  `compact` with `KEEP_QUESTIONS`; `ceiling_key` for
+  `chat_max_tokens.<model id>`, deleting the shared key it replaces.
+- **`undo.rs`**: `reversible` and `last_reversible`.
+- **`lib.rs`**: `search_index_count`, `rebuild_search_index` (per class, the
+  connection released between them) and `chat_tool_names`.
+- **`prompts/chat_system.md`**: the ranked search, the approvals policy, the
+  pipeline tools, `add_lecture`, `undo_last` and `list_hints`.
+- **The frontend**: `answer.ts` adds `py` and `csv` to the citation map and
+  `linkTimes` for the `HH:MM` anchors; `chat.ts` carries `anchor` on a
+  `ViewRequest` and reads the write-tool names through `loadToolNames`;
+  `ChatSidebar.tsx` passes the anchor; `FileViewer.tsx` keys its frame on the
+  anchor so two citations of one transcript both scroll; `Settings.tsx` gains
+  the `Search index` section; `settings.ts` its two bindings.
+- SPEC §5, §9, §12, §13 and §14 state the design.
+
+### Verified
+
+- `cargo test`: 364 pass, fourteen new. `npx tsc --noEmit` clean.
+- **The index, on the dev build** (migration 21 applied at launch,
+  `user_version` 21): Settings read `0 documents`, `Rebuild the index` wrote
+  `117 documents indexed` in under four seconds, and the row read `117
+  documents` — extracts 93, guides 17, corpus 5, notes 2.
+- **The ranking, against the live corpus.** A phrase from the Week 3 corpus
+  note (`a lab machine fails`) returns that note first at bm25 −7.381, ahead
+  of the session document that quotes it (−5.753) and the master (−4.346).
+  `central tendency|mean|median|mode` returns 26 documents; the file that
+  answers it is fifth, where ripgrep had it at line 188 of 262 behind 34
+  files.
+- **Through chat.** "What did Module 1 of Biostatistics cover about measures
+  of central tendency?" ran five rounds: `search_material` returned 26
+  documents with snippets and line numbers, and the model read the file that
+  had been invisible. Its usage, from the API's own accounting:
+
+  | round | input | cache write | cache read | output |
+  | --- | --- | --- | --- | --- |
+  | 1 | 2 | 11,218 | 0 | 189 |
+  | 2 | 2 | 3,708 | 11,218 | 321 |
+  | 3 | 2 | 3,517 | 14,926 | 286 |
+  | 4 | 2 | 4,049 | 18,443 | 248 |
+  | 5 | 2 | 2,526 | 22,492 | 141 |
+
+  Cache reads exceed cache writes from round two, and uncached input is two
+  tokens a round.
+- **The pattern path**: `MCAR|MNAR` with `regex: true` answered `80 matching
+  line(s) in 16 file(s) for the pattern /MCAR|MNAR/`, within its bound.
+- **Compaction**: after the boundary was moved to the question (below), a
+  session of four questions replayed a 14,589-token prefix where it had been
+  22,371, and answered "restate what the Module 1 slides said about which
+  measure to prefer under skew" from its own earlier text with no tool call.
+- **The pipeline tools**: "Sort the Biostatistics inbox" queued job 345, which
+  proposed the fixture CSV into the Week 3 coding folder; "approve it" wrote
+  `sort.move` audit row 274 and moved the file, the answer naming the notice's
+  Undo; "Undo that" wrote `undo.sort.move` 275, returned the file to the inbox
+  and the card to pending. "Add a lecture from `<vtt>` dated 2026-09-10 with
+  the digest off" filed `Weeks/Week 04 — Probability and Sampling
+  Distributions/2026-09-10 — M38 fixture lecture.md` with both speakers named,
+  a contribution row against Week 4, `lecture.added` audit row 277 and no
+  digest job.
+- **The anchors**: "What did the professor flag as exam hints in Biostatistics
+  Week 3?" called `list_hints` and answered with four items, each `HH:MM`
+  rendered as a link; pressing `02:05` opened the transcript scrolled to its
+  `02:05` heading, on the programming quiz's submission format.
+- **A `.csv` citation** of `waveform_ecg_demo.csv` opened the material viewer
+  as `Material · CSV`.
+- **What it cost.** The chat turns: 29 rounds, 223,425 cache-write tokens,
+  437,401 cache-read, 5,727 output, 58 uncached input — about $1.06 on Sonnet
+  5 at list prices. Two sort jobs on the subscription, $0.15 (job 345) and
+  $0.08 (job 346, the follow-up the inbox filing enqueued). No synthesis, no
+  digest, no guide.
+- The fixtures were removed and the class rescanned: no contribution row, no
+  `files` row and no index entry survives, and the two move proposals were
+  resolved as dismissed by the vanish pass, which is what §10 step 6 says.
+
+### Two things the verification changed
+
+- **The compaction boundary is the question, not the round.** A boundary that
+  slid with each round rewrote a message inside the very prefix the round's
+  cache breakpoint had just paid to store: measured, the first request after
+  one moved read 0 from the cache and wrote all 22,371 tokens again. The two
+  halves of Phase 2 would have cancelled. Counted in questions, a turn's own
+  reads are never touched while it is being answered, so a turn's prefix is
+  stable from its second round to its last and the index moves once per
+  question.
+- **`get_overview` was losing its tail.** The detailed form was 37 KB against
+  chat's 24 KB `MAX_TOOL_RESULT_CHARS`, so Biostatistics' waiting queue and
+  the whole of Applied Generative AI's block never reached the model — and
+  `approve_move` reads its id from exactly there. It showed up as the model
+  refusing to approve a card it could not find, which was the right refusal to
+  a broken input. The fix: the ledger rides a focused call only, the queue
+  comes before it, a notice body is capped at 400 characters, and
+  `get_overview` takes a class. Measured after: compact 4,350, the whole hub
+  in detail 20,508, one class 14,012–14,481.
+
+### Left as it is
+
+- The unfocused detailed overview still carries the shared 25-row deadline
+  list, which is most of what a focused call costs too. Splitting it would
+  save four kilobytes on a call that now fits.
+- `run_syllabus_scan`, `approve_all_moves`, `approve_deadlines`,
+  `dismiss_move` and `run_shift` are wired and tested at the unit level but
+  were not driven through a chat turn: each is the same audited call its
+  button makes, and a syllabus scan or a shift run would have spent
+  subscription tokens acceptance did not need.
+- The retry path is exercised by its unit test only; no 429 arrived.
+- A search reconciles the classes in scope before it answers, so the first
+  search after a large extract run pays that read. On this tree it is a stat
+  of a few hundred files and, for what moved, a read of a few hundred
+  kilobytes.
+
+### Gotchas
+
+- The chat input carries no accessible name, so the driver cannot reach it.
+  `click at {785, 700}` through System Events lands in it and reports the
+  element it hit, which is how its path was found; `⌘A` without that click
+  selects the whole page instead, and the typing then goes nowhere.
+- A `screencapture -l` of the window id from `winid` fails; the second id the
+  command prints, the one labelled ClassHub, is the window.
+- `sqlite3 -readonly <db> ".backup <path>"` does not quote-strip its argument,
+  so a destination path with a space becomes a literal directory name; back up
+  to a path without one and copy it into place.
+- FTS5's `bm25()` returns a negative score, so `ORDER BY bm25(...)` ascending
+  is best-first.
+- A `\d` inside a query is two characters, and `terms_of` would have pulled
+  the word "d" out of `^\d{4}` and searched for it confidently. The pattern
+  test runs before the expression is built, not after it comes back empty.

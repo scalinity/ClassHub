@@ -59,6 +59,31 @@ const FOLLOWUP_ANSWER_CHARS: usize = 6_000;
 const MAX_TOOL_ROUNDS: usize = 12;
 /// Tool results dominate a chat's context; keep each one bounded.
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
+/// How many questions' worth of tool results a replayed session keeps in
+/// full. Past this the bodies go and the block stays (SPEC §9): every text and
+/// thinking block survives, so what the model concluded from an earlier read
+/// is still there to answer a follow-up, while the read itself — the largest
+/// thing in a transcript, up to fifteen kilobytes a call — is not re-billed on
+/// every round of every later turn.
+///
+/// Counted in questions rather than in rounds, and this is load-bearing. A
+/// boundary that slid with each round would rewrite a message inside the very
+/// prefix the round's cache breakpoint just paid to store, so the two halves
+/// of this milestone would cancel: measured on the dev build, the first
+/// request after a sliding boundary moved read nothing from the cache and
+/// wrote all 22,371 tokens again. A question's own results are never touched
+/// while it is being answered, so a turn's prefix is stable from its second
+/// round to its last, and the index only moves when a question ends.
+const KEEP_QUESTIONS: usize = 2;
+/// What an older tool result reads as once its body has gone.
+const COMPACTED: &str =
+    "[an earlier tool result, dropped to keep this conversation short — call the tool \
+     again if you need what it said]";
+/// A 429 or a 529 is the API asking for a moment; three tries is the whole of
+/// what a turn will wait.
+const MAX_RETRIES: u32 = 3;
+/// However long the API asks for, a turn waits no longer than this per try.
+const MAX_RETRY_SECS: u64 = 60;
 /// What the sidebar shows behind a chip's disclosure.
 const MAX_DETAIL_CHARS: usize = 4_000;
 
@@ -408,6 +433,14 @@ pub fn list_models(app: &AppHandle) -> Result<ModelList> {
     Ok(ModelList { models, selected })
 }
 
+/// One setting per model, holding a bare number: `chat_max_tokens.<model id>`.
+/// The single key that held `<model> <ceiling>` kept exactly one model's
+/// ceiling, so moving back to a model already used cost another `/v1/models`
+/// fetch — and the value had to be split before it could be read.
+fn ceiling_key(model: &str) -> String {
+    format!("{MAX_TOKENS_SETTING}.{model}")
+}
+
 /// The ceiling is stored against the model it belongs to, so switching models
 /// can never leave an answer capped at the old one's limit.
 fn remember_ceiling(app: &AppHandle, models: &[ModelOption], selected: &str) -> Result<()> {
@@ -418,20 +451,21 @@ fn remember_ceiling(app: &AppHandle, models: &[ModelOption], selected: &str) -> 
     else {
         return Ok(());
     };
-    let value = format!("{selected} {ceiling}");
-    with_conn(app, |conn| set_setting(conn, MAX_TOKENS_SETTING, &value))
+    with_conn(app, |conn| {
+        set_setting(conn, &ceiling_key(selected), &ceiling.to_string())?;
+        // The key the pair used to share, left by a build before this one.
+        conn.execute("DELETE FROM settings WHERE key = ?1", [MAX_TOKENS_SETTING])?;
+        Ok(())
+    })
 }
 
 /// What a run may spend, which is the whole of what the model allows. Learned
-/// from `/v1/models` on first use of a model and remembered after that.
+/// from `/v1/models` on first use of a model and remembered per model after
+/// that.
 fn max_tokens(app: &AppHandle, key: &str, model: &str) -> u64 {
-    let stored = with_conn(app, |conn| setting(conn, MAX_TOKENS_SETTING)).ok().flatten();
-    if let Some((id, ceiling)) = stored.as_deref().and_then(|s| s.split_once(' ')) {
-        if id == model {
-            if let Ok(ceiling) = ceiling.parse::<u64>() {
-                return ceiling;
-            }
-        }
+    let stored = with_conn(app, |conn| setting(conn, &ceiling_key(model))).ok().flatten();
+    if let Some(ceiling) = stored.as_deref().and_then(|v| v.trim().parse::<u64>().ok()) {
+        return ceiling;
     }
     // Unknown model: one list fetch settles it. A failure here is not worth
     // failing the question over — the fallback still answers, just shorter.
@@ -553,7 +587,77 @@ fn api_messages(conn: &Connection, session_id: i64) -> Result<Vec<Value>> {
             serde_json::from_str(&content).context("parsing stored chat content")?;
         messages.push(json!({ "role": role, "content": blocks }));
     }
+    compact(&mut messages, KEEP_QUESTIONS);
     Ok(messages)
+}
+
+/// SPEC §9 — a long session's older tool results lose their bodies.
+///
+/// Only the body: the `tool_result` block itself stays, because the API
+/// requires one for every `tool_use` it answers, and every text and thinking
+/// block is left exactly as it was, signatures included, because the API
+/// requires those back verbatim and because they are what the model concluded
+/// — the part a follow-up about an earlier turn actually needs. What goes is
+/// the read itself, which is the only large thing in a transcript.
+///
+/// The boundary is a question, walked from the end: a user message carrying a
+/// `text` block is one being asked, and the results of the last `keep` of
+/// those are left whole. Everything a question read while it was being
+/// answered therefore stays whole until the question is two questions old,
+/// which is what keeps the prefix stable for the cache breakpoint.
+///
+/// This changes only what is sent. The rows on disk keep their full content,
+/// so the sidebar's history and a later reread are unaffected.
+fn compact(messages: &mut [Value], keep: usize) {
+    let mut questions = 0usize;
+    for message in messages.iter_mut().rev() {
+        let asked = message["role"] == "user";
+        let Some(blocks) = message["content"].as_array_mut() else {
+            continue;
+        };
+        if asked && blocks.iter().any(|b| b["type"] == "text") {
+            questions += 1;
+            continue;
+        }
+        if !blocks.iter().any(|b| b["type"] == "tool_result") {
+            continue;
+        }
+        // A question's results sit after it, so walking backwards they are
+        // met before the question they belong to: nothing seen yet is the
+        // turn under way, one question back is the previous turn, and so on.
+        if questions < keep {
+            continue;
+        }
+        for block in blocks.iter_mut() {
+            if block["type"] != "tool_result" {
+                continue;
+            }
+            // An error result is one line already and says why the model
+            // changed course; keeping it costs nothing and reads better.
+            if block["is_error"].as_bool() == Some(true) {
+                continue;
+            }
+            block["content"] = json!(COMPACTED);
+        }
+    }
+}
+
+/// Marks the last content block of the last message as a cache breakpoint, so
+/// the whole conversation up to here is a cache read on the next round rather
+/// than fresh input (SPEC §9). Beside the system block's and the tool schemas'
+/// this is the third of the four the API allows.
+///
+/// Request-only: the stored rows never carry it, and `api_messages` rebuilds
+/// the array from disk each round, so nothing accumulates.
+fn mark_prefix_cacheable(messages: &mut [Value]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    if let Some(block) = last["content"].as_array_mut().and_then(|b| b.last_mut()) {
+        if block.is_object() {
+            block["cache_control"] = json!({ "type": "ephemeral" });
+        }
+    }
 }
 
 /// A run stopped mid-loop leaves `tool_use` blocks with no results, which the
@@ -642,7 +746,7 @@ pub fn send(
         let system = SYSTEM_TEMPLATE
             .replace("{today}", today)
             .replace("{open_class}", &open_class_line(conn, class_id)?)
-            .replace("{context}", &crate::tools::overview_text(conn, false, today_iso)?);
+            .replace("{context}", &crate::tools::overview_text(conn, false, today_iso, None)?);
         insert_message(
             conn,
             session_id,
@@ -789,7 +893,13 @@ fn answer(app: &AppHandle, run: &Run, cancel: &AtomicBool) -> Result<()> {
         if cancel.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let messages = with_conn(app, |conn| api_messages(conn, session_id))?;
+        let mut messages = with_conn(app, |conn| api_messages(conn, session_id))?;
+        // The breakpoint moves to the end of the conversation every round, so
+        // round two onward reads the whole prefix from the cache instead of
+        // paying for it again. Measured on the stored sessions: one nine-round
+        // turn replayed 302 KB of messages, all but the first 98 bytes of it
+        // re-billed at full price.
+        mark_prefix_cacheable(&mut messages);
         let mut body = json!({
             "model": run.model,
             "max_tokens": run.max_tokens,
@@ -1013,6 +1123,26 @@ enum OpenBlock {
     },
 }
 
+/// How long to wait before trying a failed request again, or `None` when it
+/// should not be tried at all (SPEC §9).
+///
+/// A 429 is the rate limiter and a 529 is the API overloaded — both pass on
+/// their own, and a turn that ends there loses everything already read for
+/// it. Every other status is the request's own fault, from a bad key to a
+/// malformed body, and repeating it would only repeat the answer. The API's
+/// own `retry-after` wins where it sent one, capped so a long one does not
+/// park the session; otherwise the wait doubles, one second then two then
+/// four.
+fn retry_delay(status: u16, retry_after: Option<u64>, attempt: u32) -> Option<Duration> {
+    if !matches!(status, 429 | 529) || attempt >= MAX_RETRIES {
+        return None;
+    }
+    Some(Duration::from_secs(match retry_after {
+        Some(secs) => secs.clamp(1, MAX_RETRY_SECS),
+        None => 1u64 << attempt,
+    }))
+}
+
 /// One request/response turn: streams SSE, emitting text deltas and tool chips
 /// as they arrive, and returns the assembled content blocks.
 fn stream_turn(
@@ -1023,20 +1153,49 @@ fn stream_turn(
     body: &Value,
     cancel: &AtomicBool,
 ) -> Result<Turn> {
-    let response = client
-        .post(format!("{API_BASE}/v1/messages"))
-        .header("x-api-key", key)
-        .header("anthropic-version", API_VERSION)
-        .header("content-type", "application/json")
-        .header("accept", "text/event-stream")
-        .body(body.to_string())
-        .send()
-        .context("calling the Anthropic Messages API")?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
+    // The retry covers opening the stream only. Once bytes are flowing the
+    // sidebar has already rendered them, and starting over would repeat the
+    // answer rather than recover it.
+    let mut attempt = 0u32;
+    let response = loop {
+        let response = client
+            .post(format!("{API_BASE}/v1/messages"))
+            .header("x-api-key", key)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .body(body.to_string())
+            .send()
+            .context("calling the Anthropic Messages API")?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            break response;
+        }
+        let asked = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let body = response.text().unwrap_or_default();
-        bail!("{}", api_error(status, &body));
-    }
+        let Some(wait) = retry_delay(status, asked, attempt) else {
+            bail!("{}", api_error(status, &body));
+        };
+        eprintln!(
+            "chat session {session_id}: HTTP {status} — waiting {}s and trying again ({} of \
+             {MAX_RETRIES})",
+            wait.as_secs(),
+            attempt + 1
+        );
+        // Checked once a second so STOP does not have to wait out the backoff.
+        let until = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < until {
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(Turn::default());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        attempt += 1;
+    };
 
     let mut turn = Turn::default();
     let mut open: Option<OpenBlock> = None;
@@ -1200,6 +1359,156 @@ fn stream_turn(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A 429 and a 529 pass on their own and are worth waiting out; every
+    /// other status is the request's own fault. The API's own `retry-after`
+    /// wins, capped; without one the wait doubles; and three tries is the end
+    /// of it.
+    #[test]
+    fn only_a_rate_limit_or_an_overload_is_tried_again() {
+        assert_eq!(retry_delay(429, None, 0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(429, None, 1), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(529, None, 2), Some(Duration::from_secs(4)));
+        // Three tries and no more.
+        assert_eq!(retry_delay(429, None, MAX_RETRIES), None);
+        // What the API asked for, floored at a second and capped at a minute.
+        assert_eq!(retry_delay(429, Some(12), 0), Some(Duration::from_secs(12)));
+        assert_eq!(retry_delay(529, Some(0), 0), Some(Duration::from_secs(1)));
+        assert_eq!(
+            retry_delay(429, Some(3_600), 0),
+            Some(Duration::from_secs(MAX_RETRY_SECS))
+        );
+        // Nothing a retry could fix.
+        for status in [400, 401, 403, 404, 413, 500, 503] {
+            assert_eq!(retry_delay(status, None, 0), None, "{status}");
+        }
+    }
+
+    fn tool_round(id: &str, body: &str) -> (Value, Value) {
+        (
+            json!({ "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "reasoning", "signature": "sig" },
+                { "type": "text", "text": format!("Reading for {id}.") },
+                { "type": "tool_use", "id": id, "name": "search_material", "input": {} },
+            ]}),
+            json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": id, "content": body },
+            ]}),
+        )
+    }
+
+    fn question(text: &str) -> Value {
+        json!({ "role": "user", "content": [{ "type": "text", "text": text }] })
+    }
+
+    /// Compaction drops the bodies of older questions' tool results and
+    /// nothing else: the blocks stay so every `tool_use` still has its
+    /// answer, the thinking blocks keep their signatures, and the text the
+    /// model wrote is untouched.
+    ///
+    /// The boundary is the question, so a turn's own reads are never
+    /// rewritten while it is being answered — which is what leaves the
+    /// prefix stable for the round's cache breakpoint.
+    #[test]
+    fn compaction_drops_old_tool_bodies_and_keeps_the_rest() {
+        let mut messages = Vec::new();
+        for turn in 0..4 {
+            messages.push(question(&format!("Question {turn}?")));
+            for round in 0..3 {
+                let (assistant, result) = tool_round(&format!("toolu_{turn}_{round}"), "a long read");
+                messages.push(assistant);
+                messages.push(result);
+            }
+        }
+        compact(&mut messages, 2);
+
+        let results: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["content"][0]["type"] == "tool_result")
+            .collect();
+        assert_eq!(results.len(), 12);
+        // The first two questions' reads went; the last two questions' stayed.
+        for old in &results[..6] {
+            assert_eq!(old["content"][0]["content"], json!(COMPACTED));
+            assert!(old["content"][0]["tool_use_id"].as_str().is_some());
+        }
+        for recent in &results[6..] {
+            assert_eq!(recent["content"][0]["content"], json!("a long read"));
+        }
+
+        // A single long turn is never compacted mid-flight, however many
+        // rounds it runs: its prefix has to stay byte-identical for the
+        // breakpoint to keep paying off.
+        let mut one_turn = vec![question("One long question?")];
+        for round in 0..10 {
+            let (assistant, result) = tool_round(&format!("toolu_{round}"), "a long read");
+            one_turn.push(assistant);
+            one_turn.push(result);
+        }
+        let before = one_turn.clone();
+        compact(&mut one_turn, 2);
+        assert_eq!(one_turn, before, "a turn under way is left alone");
+        // Nothing the model wrote was touched, signatures included.
+        for message in &messages {
+            if message["role"] != "assistant" {
+                continue;
+            }
+            assert_eq!(message["content"][0]["thinking"], json!("reasoning"));
+            assert_eq!(message["content"][0]["signature"], json!("sig"));
+            assert!(message["content"][1]["text"].as_str().unwrap().starts_with("Reading"));
+            assert_eq!(message["content"][2]["type"], json!("tool_use"));
+        }
+        // Every question itself stays whole.
+        assert_eq!(messages[0]["content"][0]["text"], json!("Question 0?"));
+
+        // An error result is one line already and says why the model changed
+        // course, so it is kept.
+        let mut with_error = vec![
+            json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "a", "content": "no such path", "is_error": true },
+            ]}),
+            json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "b", "content": "a long read" },
+            ]}),
+            question("A later question?"),
+        ];
+        compact(&mut with_error, 0);
+        assert_eq!(with_error[0]["content"][0]["content"], json!("no such path"));
+        assert_eq!(with_error[1]["content"][0]["content"], json!(COMPACTED));
+
+        // A short session is left exactly as it was.
+        let mut short = vec![question("Only question?"), json!({ "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "a", "content": "kept" },
+        ]})];
+        compact(&mut short, 2);
+        assert_eq!(short[1]["content"][0]["content"], json!("kept"));
+    }
+
+    /// The breakpoint lands on the last block of the last message and nowhere
+    /// else, so the prefix caches and the earlier rounds carry none of their
+    /// own.
+    #[test]
+    fn the_breakpoint_is_the_last_block_of_the_last_message() {
+        let mut messages = vec![
+            json!({ "role": "user", "content": [{ "type": "text", "text": "q" }] }),
+            json!({ "role": "assistant", "content": [
+                { "type": "text", "text": "a" },
+                { "type": "tool_use", "id": "t", "name": "x", "input": {} },
+            ]}),
+        ];
+        mark_prefix_cacheable(&mut messages);
+        assert!(messages[0]["content"][0]["cache_control"].is_null());
+        assert!(messages[1]["content"][0]["cache_control"].is_null());
+        assert_eq!(
+            messages[1]["content"][1]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        // An empty conversation is not a panic.
+        mark_prefix_cacheable(&mut []);
+    }
+
     use super::open_class_line;
 
     /// The open workspace names itself; the dashboard, and an id no class

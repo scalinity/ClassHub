@@ -622,6 +622,20 @@ recordings(id INTEGER PK, class_id INTEGER FK,
            status TEXT,                  -- new|filed|skipped|failed
            note TEXT NULL, seen_at INTEGER);
 
+-- The ranked search index (§9): an FTS5 virtual table over the text of every
+-- document the pipeline writes, and a row per file saying what the index
+-- holds and what it was made from. The reconcile stats each file under the
+-- four searched folders and reads only the ones whose mtime or length moved,
+-- so a search over an unchanged tree opens no write transaction; `fts_rowid`
+-- is how a changed or vanished file's row is replaced. Derived: dropping the
+-- pair costs a rebuild and never data.
+material_fts USING fts5(class_id UNINDEXED, rel_path UNINDEXED,
+                        kind UNINDEXED,      -- extract|corpus|note|guide
+                        content, tokenize = 'porter unicode61');
+material_index(class_id INTEGER FK, rel_path TEXT, kind TEXT,
+               mtime INTEGER, size INTEGER, fts_rowid INTEGER,
+               PRIMARY KEY (class_id, rel_path));
+
 chat_sessions(id INTEGER PK, title TEXT, created_at INTEGER);
 chat_messages(id INTEGER PK, session_id INTEGER FK, role TEXT,
               content TEXT,                -- JSON: full Messages-API content blocks
@@ -1759,15 +1773,57 @@ alike. The shift reviews the oldest unreviewed such note, one a night.
     lists and the proposal ids go. Measured 2026-09-02 against the real hub: the compact overview is
     6.4 KB of text (6.0 KB before M19), and the whole system block — template and overview —
     cached at about 5,000 tokens beside about 3,600 for the tool schemas.
-- **Read tools** (Milestone 7):
-  - `get_overview()` — classes, schedule, divisions with dates, lectures with their notes and
-    session documents, guides with freshness, waiting proposals with ids, open deadlines
+- **Read tools**:
+  - `get_overview(class?)` — classes, schedule, divisions with dates, lectures with their notes
+    and session documents, guides with freshness, waiting proposals with ids, open deadlines.
+    Named with a class it reports that one alone and carries its flagged items; without one it
+    covers all four and counts them, leaving the items to `list_hints`, because the whole hub's
+    ledgers ran the one tool result past `MAX_TOOL_RESULT_CHARS` and the ids the approval tools
+    read sit after them. The waiting queue precedes the ledger for the same reason.
   - `list_material(class, subpath?)` — tree listing
-  - `search_material(query, class?)` — ripgrep over extracts (the mirrored Canvas Pages and
-    syllabus page among them, §7.2), corpus notes, notes, and guides; a hit in a duplicate's
-    extract is dropped (§7), and `list_material` names the duplicate's canonical copy
+  - `search_material(query, class?, regex?)` — **ranked full-text search** over the same four
+    folders per class: the extracts (the mirrored Canvas Pages and syllabus page among them,
+    §7.2), the corpus notes, `Notes/` and the documents under `Study Guides/`. The top twenty
+    documents come back best first, each with `snippet()`'s matched stretch and the line it is
+    on; a hit in a duplicate's extract is dropped (§7), and `list_material` names the
+    duplicate's canonical copy. `regex: true`, or a query whose shape is a pattern rather than
+    words — a backslash class, a bracket class, a braced quantifier, `.*` — takes the ripgrep
+    path instead, which answers in lines and is bounded at twenty seconds.
   - `read_material(path, offset?, limit?)` — bounded file reads (extracts/notes/guides/text
     sources; never binaries)
+  - `list_hints(class, since?, kind?)` — the ledger of what the professor flagged (§8.4), each
+    item with its session, its date and its `HH:MM`
+
+**The ranked index** (`material_fts`, an FTS5 virtual table beside a `material_index` row per
+file). Anthropic publishes no embeddings API (§1), so retrieval stays agentic; what FTS5 adds
+is an order. `bm25()` ranks a hit by how much the term explains the document, where ripgrep
+answered in directory-then-line order and the tool cut it at eighty lines: measured 2026-09-09
+on the question M7 was accepted on (`central tendency|mean|median|mode`), the file that
+answers it was line 188 of 262 with thirty-four files ranked ahead of it and never reached the
+model; ranked, it is fifth of twenty-six.
+
+A query's words become an FTS5 expression: `|` separates alternatives, and an alternative of
+more than one word is offered as its phrase or its terms together — `("central tendency" OR
+("central" AND "tendency"))` — so the exact phrase outranks the words apart without missing a
+document that holds only both. Every term is quoted, which is FTS5's own escape.
+
+What is indexed is every `.md` under the four folders and, under `Study Guides/`, the HTML of
+a document written without a markdown twin — a division guide, the semester master, a practice
+exam, a presentation kit (§8.1, §8.2, §8.3, §8.6) — stripped to text through the extractor's
+stripper, since indexing twins alone would drop every study guide out of search. A session
+document, a brief, the workbook and a pre-read have twins, so their HTML is skipped, as
+ripgrep skips it. The hints and cards sidecars are not indexed: a flagged item's text is the
+session document's own *Said out loud* section and a card's front is the guide's own self-test
+question, and `list_hints` is what reaches the ledger.
+
+The index is filled by one reconcile, run before every search and by `Rebuild the index` in
+Settings, which clears a class first: it stats each file under the four folders, reads only
+the ones whose modification time or length moved, and drops the rows of files that are gone,
+so an unchanged tree opens no write transaction at all. Not a write-through at each of the
+pipeline's nine writers, because a missed one serves stale text silently, while the index is
+derived — losing it costs a rebuild and never data, which is what lets a reconcile read the
+disk and correct itself. The reads happen before the transaction and the transaction is
+IMMEDIATE, since the two builds share the database (§13).
 - **Write tools** (Milestone 8):
   - `trigger_synthesis(class, scope)` — enqueue a guide job. `scope` is one of the course's
     own divisions as the overview names it (`Week 3`, or its topic), a folder of material
@@ -1783,8 +1839,50 @@ alike. The shift reviews the oldest unreviewed such note, one a night.
     directly
   - `generate_practice(class, scope, focus?)` — the same scopes as `trigger_synthesis`; a
     division's exam is built from the same sources as its guide (§8.3)
+- **Tools that run the pipeline**, each on the audited path its button uses and each answering
+  with what changed, so a move chat approved is the move the Inbox card makes with the same
+  audit row and the same notice: `approve_move(id, destination?)` and `dismiss_move(id)`,
+  `approve_all_moves(class)`, `run_sort(class)`, `run_syllabus_scan(class, target?)`,
+  `approve_deadlines(ids | class)`, `add_lecture(class, source, date, week?, title?, digest?)`,
+  `run_shift()` and `undo_last()`. The write policy is that an approval is the reader asking,
+  in this conversation, for the thing approved — a proposal chat made itself in an earlier turn
+  is no exception, since proposing and approving are two decisions and only one is the model's.
+  Three details: `dismiss_move` writes no audit row, the decline branch only resolving the
+  card, so it says it cannot be undone; `add_lecture` resolves the week from the date the way
+  the form does where the course dates its weeks, since a request without one routes the
+  lecture to `_Inbox/` for the sorter, and it runs under the same one-per-class claim the form
+  takes with the digest off unless asked; and `undo_last` reads the newest audit row whose
+  action has an inverse and that no `undo.*` row already names, with every row of its batch —
+  the rows the notice's own `Undo` holds (§6).
+- **The write-tool names live in Rust**, served by `chat_tool_names`: the sidebar marks a
+  rebuilt history's chips from that list rather than a copy of its own, which a new write tool
+  would fall out of.
+- **What a turn costs.** The system block and the tool schemas carry a cache breakpoint, and so
+  does the last message of each round, so the conversation's whole prefix is a cache read from
+  round two rather than fresh input. Measured 2026-09-09 on a five-round turn: writes 11,218 /
+  3,708 / 3,517 / 4,049 / 2,526 against reads 0 / 11,218 / 14,926 / 18,443 / 22,492, with two
+  uncached tokens a round.
+  A 429 or a 529 is retried three times, waiting what `retry-after` asks up to a minute, else
+  one second doubling; only the opening of the stream is retried, since once bytes are flowing
+  the sidebar has rendered them. Any other status is the request's own fault and is not tried
+  again.
+  A session's older tool results lose their bodies, the block staying so every `tool_use` keeps
+  its answer and every text and thinking block staying exactly as it was — those are what the
+  API requires back verbatim and what a follow-up about an earlier turn actually needs. The
+  boundary is the question, not the round: a boundary that slid with each round would rewrite a
+  message inside the very prefix the round's breakpoint just paid to store, and the two halves
+  would cancel — measured, the first request after one moved read nothing and wrote all 22,371
+  tokens again. The last two questions' reads stay whole; nothing is touched while the question
+  that made it is being answered. Only what is sent changes; the rows on disk keep their full
+  content. The model's own answer ceiling is stored per model as `chat_max_tokens.<model id>`.
 - Sidebar UX: toggleable right panel, session list, streaming markdown, tool-call chips with
-  expandable args/results, inline confirm cards for proposals.
+  expandable args/results, inline confirm cards for proposals. A citation is a class-relative
+  path in inline code, and it opens the file in the material viewer: markdown, `.R`, `.Rmd`,
+  `.py`, `.csv` and HTML. An `HH:MM` beside a transcript's citation becomes a link that opens
+  the transcript at that heading, through the ids the document register gives a transcript's
+  `## HH:MM` headings (§12) — the time takes the transcript cited before it, or the first one
+  cited in the section, a heading ending the carry, and a clock time keeps its meridiem and
+  stays text so a due time is never a link.
 
 ## 10. Drop-to-sort (propose-and-confirm)
 
@@ -2104,7 +2202,10 @@ and apply it. Non-negotiable per project owner.
   (the library, transcription, the synthesis pair and a row per kind, `The idle shift` — on
   or off, the window, the idle threshold, the three caps, and in a dev build whether that
   build runs shifts — `Always there` — the login item and the four notifications, with the
-  time of day the due-tomorrow one is shown — Canvas and chat).
+  time of day the due-tomorrow one is shown — Canvas, `Search index` — how many documents the
+  ranked index holds and `Rebuild the index`, which is the way back from one a crash mid-write
+  left disagreeing with the disk rather than routine upkeep, since every search reconciles it
+  first (§9) — and chat).
   The document register (`src/lib/document.ts`) uses the app's own paper and ink, so a note
   previews on the page it will be read on; generated guides keep their own design (§8.1).
 - **The window closes into the tray.** Closing the main window hides it — the shift's thread
@@ -2303,8 +2404,18 @@ and apply it. Non-negotiable per project owner.
   share and the next letter (§11), the quiz list within its lead and once per deadline, the
   reminder's once-a-day rule inside its window and its lines (§6), the open stamps'
   rotation, a run's reversible rows grouped with the undone left out, the assembled Today
-  block, and the past week's meeting with no transcript (§12). UI and job plumbing are
-  exercised by running the app.
+  block, and the past week's meeting with no transcript (§12), the search index's query
+  builder — a phrase offered beside its terms, alternation, punctuation quoted, a pattern told
+  from words before a term is pulled out of it — its reconcile against a real tree with an
+  edit and a deletion, and the documents it indexes as HTML against the ones it leaves to
+  their twin (§9 — a search that ranks nothing first, or reads a guide twice, is silent), the
+  retry decision, the compaction's boundary and what it keeps, the cache breakpoint's one
+  mark, the compact overview's week of deadlines and the count of the rest, the flagged ledger
+  on a focused overview and not on the hub's with the queue before it, the write-tool names
+  against the schemas, and the newest reversible row with its batch and the list that agrees
+  with the dispatch (§6, §9 — a chip that renders as a read, an undo that reaches the wrong
+  action, and proposal ids cut off the end of an overview are each silent). UI and job
+  plumbing are exercised by running the app.
 
 ## 14. Milestones
 
@@ -2680,7 +2791,7 @@ Mark the checkbox when the acceptance criteria pass.
   its lectures, an exam's self-score reaches the table and the next exam's prompt, the cards
   list and export, and a fixture grade item yields the projection.
 
-- [ ] **M38 — Chat that ranks.** (`milestones/M38-chat-that-ranks.md`)
+- [x] **M38 — Chat that ranks.** (`milestones/M38-chat-that-ranks.md`)
   An FTS5 index over everything the pipeline writes, filled at extract and on write, answering
   `search_material` with BM25 ranking and snippets, ripgrep bounded behind it; a cache breakpoint
   on the last message of each round, retries on a 429 or 529, compaction of old tool results,
