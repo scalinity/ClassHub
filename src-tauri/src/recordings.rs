@@ -50,7 +50,7 @@ const REQUEST_POLL: Duration = Duration::from_millis(250);
 const MAX_PAGES: usize = 10;
 /// Under this a recording is a test of the room, not a lecture: every course
 /// shows a few of a minute or less beside its real sessions (SPEC §1).
-pub const MIN_MINUTES: i64 = 10;
+const MIN_MINUTES: i64 = 10;
 
 /// What a listing found for one course.
 #[derive(Debug, Default, Clone, Copy)]
@@ -369,7 +369,7 @@ fn date_of_transcript(rel_path: &str) -> Option<String> {
 /// default is; for one whose divisions name week ranges and no days, the
 /// one-meeting rule over what is already filed. `None` when nothing settles
 /// it, and the row waits for the form.
-pub(crate) fn week_for(conn: &Connection, class_id: i64, date: &str) -> Result<Option<i64>> {
+fn week_for(conn: &Connection, class_id: i64, date: &str) -> Result<Option<i64>> {
     let slots = crate::units::week_slots(conn, class_id)?;
     if slots.is_empty() {
         return Ok(None);
@@ -392,7 +392,7 @@ pub(crate) fn week_for(conn: &Connection, class_id: i64, date: &str) -> Result<O
 /// into the same week; exactly one is the next week; more is a gap nothing
 /// here should bridge by arithmetic, and a recording older than the latest
 /// filing is the form's to place. `None` with nothing filed yet.
-pub(crate) fn week_by_meetings(
+fn week_by_meetings(
     last: Option<(NaiveDate, i64)>,
     date: NaiveDate,
     meeting_weekdays: &[u32],

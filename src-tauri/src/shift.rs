@@ -1470,9 +1470,10 @@ fn next_meeting(conn: &Connection, now: NaiveDateTime) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capped, digest_candidates, finish_run, guide_candidates, in_window, insert_run,
-        last_closed_night, meeting_end, meter, next_meeting, night_key, parse_idle,
-        should_start, startup_recovery, step_outcome, validate_shift_setting, Conditions,
+        capped, digest_candidates, finish_run, fresh_steps, guide_candidates, in_window,
+        insert_run, last_closed_night, meeting_end, meter, next_meeting, night_key,
+        parse_idle, should_start, startup_recovery, step_outcome, validate_shift_setting,
+        Conditions, DISTILL, EXTRACT, FILE, REBUILD, RECORDINGS, STEPS, SYNC,
     };
     use crate::db::{memory_db, set_setting};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -1520,6 +1521,20 @@ mod tests {
         }
         let m = meter(&conn, since).unwrap();
         assert_eq!((m.digests, m.guides, m.exams, m.extracts, m.minutes), (1, 2, 1, 1, 80));
+    }
+
+    /// The plan's indices name the steps they run: a step slotted in moves
+    /// every constant after it, and a constant left behind runs one step's
+    /// work under another's name.
+    #[test]
+    fn the_plans_indices_name_their_steps() {
+        assert_eq!(STEPS[SYNC], "Sync Canvas");
+        assert_eq!(STEPS[FILE], "File");
+        assert_eq!(STEPS[RECORDINGS], "Recordings");
+        assert_eq!(STEPS[EXTRACT], "Extract");
+        assert_eq!(STEPS[DISTILL], "Distill");
+        assert_eq!(STEPS[REBUILD], "Rebuild guides");
+        assert_eq!(fresh_steps().len(), STEPS.len());
     }
 
     /// A step's line, cap and failures included.

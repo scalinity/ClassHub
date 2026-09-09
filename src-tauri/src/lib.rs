@@ -4,6 +4,7 @@
 /// two accounts cannot drift onto different services.
 pub(crate) const KEYCHAIN_SERVICE: &str = "classhub";
 
+mod announcements;
 mod canvas;
 mod canvas_sync;
 mod chat;
@@ -15,11 +16,10 @@ mod guides;
 mod jobs;
 mod lectures;
 mod notebook;
+mod notes;
 mod notifications;
-mod announcements;
 mod recordings;
 mod remote;
-mod notes;
 mod scanner;
 mod settings;
 mod shift;
@@ -363,7 +363,6 @@ fn lecture_weeks(
     })
 }
 
-/// Which division each filed lecture feeds (SPEC §8.5), for the Lectures list.
 /// SPEC §7.1: the recordings found behind the course's Zoom tool that still
 /// wait for a capture, for the Lectures section.
 #[tauri::command(async)]
