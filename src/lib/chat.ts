@@ -112,6 +112,8 @@ export interface ChatSnapshot {
   /** Model-written next questions, offered under the answer they follow. */
   suggestions: readonly string[];
   suggestionsFor: number | null;
+  /** The tools that change something, served by the backend (SPEC §9). */
+  writeTools: ReadonlySet<string>;
 }
 
 interface ChatEventPayload {
@@ -137,6 +139,25 @@ interface ChatEventPayload {
   suggestions?: string[];
 }
 
+/**
+ * The floor the store starts on, so a failed `chat_tool_names` degrades to
+ * what the frontend used to know rather than to nothing. An empty set would
+ * mark every rebuilt-history write chip as a read — the exact failure the
+ * backend list exists to prevent, reached a different way. Rust owns the
+ * list; this is only what stands until it answers.
+ */
+const KNOWN_WRITE_TOOLS: readonly string[] = [
+  "upsert_deadline",
+  "complete_deadline",
+  "delete_deadline",
+  "upsert_grade_category",
+  "add_grade_item",
+  "write_note",
+  "trigger_synthesis",
+  "generate_practice",
+  "propose_file_moves",
+];
+
 // --- External store (push-based Tauri events; no useEffect per workspace rules) ---
 
 let snapshot: ChatSnapshot = {
@@ -155,6 +176,7 @@ let snapshot: ChatSnapshot = {
   viewFile: null,
   suggestions: [],
   suggestionsFor: null,
+  writeTools: new Set(KNOWN_WRITE_TOOLS),
 };
 
 const storeListeners = new Set<() => void>();
@@ -651,18 +673,21 @@ export function toolLabel(name: string): string {
  * copy that goes stale: every tool M38 added would have rendered as a read
  * until someone noticed.
  */
-let writeTools: ReadonlySet<string> = new Set();
-
 export async function loadToolNames() {
   try {
-    writeTools = new Set(await invoke<string[]>("chat_tool_names"));
-    // History already on screen was rendered against the empty set.
-    emitChange({});
+    const names = await invoke<string[]>("chat_tool_names");
+    // Into the snapshot, not a module variable: `Turn` is memoized on its
+    // props, so a patch that changes nothing it can see leaves every chip
+    // already on screen rendered against the old list.
+    emitChange({ writeTools: new Set(names) });
   } catch (e) {
     console.error("could not read the write-tool names", e);
   }
 }
 
-export function isWriteTool(item: { name: string; isWrite?: boolean }): boolean {
+export function isWriteTool(
+  item: { name: string; isWrite?: boolean },
+  writeTools: ReadonlySet<string>,
+): boolean {
   return item.isWrite ?? writeTools.has(item.name);
 }

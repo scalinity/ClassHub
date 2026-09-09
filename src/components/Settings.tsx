@@ -588,15 +588,6 @@ function AlwaysThereSection({
 }
 
 /**
- * SPEC §7.2 — Canvas.
- *
- * The section shows when data last came across and nothing more, because
- * nothing more is true: holding a session cookie is not the same as Canvas
- * still honouring it, so there is no connection whose health could be reported.
- * A green "connected" chip would stay green long after the session behind it
- * had expired.
- */
-/**
  * SPEC §9 — the ranked search index. It keeps itself current: every search
  * reconciles it against the tree first, so this is the way back from an index
  * a crash mid-write or an edit made while the app was closed left disagreeing
@@ -662,6 +653,15 @@ function SearchIndexSection() {
   );
 }
 
+/**
+ * SPEC §7.2 — Canvas.
+ *
+ * The section shows when data last came across and nothing more, because
+ * nothing more is true: holding a session cookie is not the same as Canvas
+ * still honouring it, so there is no connection whose health could be reported.
+ * A green "connected" chip would stay green long after the session behind it
+ * had expired.
+ */
 function CanvasSection() {
   const { data: status } = useQuery({
     queryKey: ["canvasStatus"],

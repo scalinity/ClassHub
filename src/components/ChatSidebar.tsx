@@ -291,6 +291,7 @@ function Panel({
                     key={index}
                     item={item}
                     classes={classes}
+                    writeTools={chat.writeTools}
                     streaming={chat.streaming && index === chat.items.length - 1}
                   />
                 ))}
@@ -463,10 +464,18 @@ function EmptyState({
 const Turn = memo(function Turn({
   item,
   classes,
+  writeTools,
   streaming,
 }: {
   item: ChatItem;
   classes: readonly ClassInfo[];
+  /**
+   * The backend's write-tool list (SPEC §9), threaded through as a prop
+   * rather than read from module state: this component is memoized, so a
+   * chip already on screen repaints when the list arrives only if `memo`
+   * can see that something changed.
+   */
+  writeTools: ReadonlySet<string>;
   streaming: boolean;
 }) {
   switch (item.kind) {
@@ -477,7 +486,7 @@ const Turn = memo(function Turn({
         </p>
       );
     case "tool":
-      return <ToolChip item={item} />;
+      return <ToolChip item={item} writeTools={writeTools} />;
     case "thinking":
       return <ThinkingBlock item={item} />;
     case "answer":
@@ -597,7 +606,13 @@ function ThinkingBlock({
   );
 }
 
-function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+function ToolChip({
+  item,
+  writeTools,
+}: {
+  item: Extract<ChatItem, { kind: "tool" }>;
+  writeTools: ReadonlySet<string>;
+}) {
   const pending = item.summary === undefined;
 
   return (
@@ -615,7 +630,7 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
           }
         >
           {/* ✎ marks a chip that changed something; » only ever read. */}
-          {isWriteTool(item) ? "✎" : "»"}
+          {isWriteTool(item, writeTools) ? "✎" : "»"}
         </span>
         <span className="shrink-0 text-fine font-semibold">
           {toolLabel(item.name)}
@@ -650,7 +665,10 @@ function ToolChip({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
 
 
 function openCitation(cite: HTMLElement) {
-  const classId = Number(cite.dataset.class);
+  // `parseInt`, not `Number`: `Number("")` is 0, which is finite, so a button
+  // with no class id would open the viewer against a class that is not there
+  // and fail the read instead of doing nothing.
+  const classId = Number.parseInt(cite.dataset.class ?? "", 10);
   const relPath = cite.dataset.path;
   if (!Number.isFinite(classId) || !relPath) return;
   requestFileView({

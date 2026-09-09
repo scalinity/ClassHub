@@ -101,14 +101,17 @@ const CITE =
   /<button[^>]*class="cite"[^>]*data-path="([^"]*)"[^>]*>[\s\S]*?<\/button>/;
 
 /**
- * Within one block: a whole citation button, any other tag, or a bare `HH:MM`
- * in text. Matching tags explicitly is what keeps a time inside an attribute —
- * a `data-path` naming a lecture at 09:00 — from being rewritten, and matching
- * the button whole keeps a time that is already a link from being wrapped
- * twice.
+ * Within one section: a whole fenced block, a whole citation button, any other
+ * tag, or a bare `HH:MM` in text.
+ *
+ * Each alternative exists to be skipped. A `<pre>` is code, and a time in a
+ * snippet is not an anchor into a lecture. Matching tags explicitly keeps a
+ * time inside an attribute — a `data-path` naming a lecture at 09:00 — from
+ * being rewritten, and matching a citation whole keeps a time that is already
+ * a link from being wrapped twice.
  */
-const CITE_TAG_OR_TIME =
-  /(<button[^>]*class="cite"[^>]*data-path="([^"]*)"[^>]*>[\s\S]*?<\/button>)|(<[^>]+>)|(\b([01]?\d|2[0-3]):([0-5]\d)\b)/g;
+const PRE_CITE_TAG_OR_TIME =
+  /(<pre[\s\S]*?<\/pre>)|(<button[^>]*class="cite"[^>]*data-path="([^"]*)"[^>]*>[\s\S]*?<\/button>)|(<[^>]+>)|(\b([01]?\d|2[0-3]):([0-5]\d)\b)/g;
 
 /** The class id and colour a time's link borrows from the citation beside it. */
 interface Cited {
@@ -117,6 +120,11 @@ interface Cited {
   color: string;
 }
 
+/**
+ * What a citation points at, or `null` when it is not a transcript — a guide
+ * or a note cited between two transcripts ends the carry rather than letting
+ * the times under it reach back to the transcript above.
+ */
 function citedTranscript(button: string): Cited | null {
   const path = decodeEntities(CITE.exec(button)?.[1] ?? "");
   if (!isTranscript(path)) return null;
@@ -128,16 +136,40 @@ function citedTranscript(button: string): Cited | null {
 }
 
 /**
+ * The one place a citation's markup is written. Both passes build the same
+ * button — the path pass from a code span, the time pass from the transcript
+ * beside it — and two hand-written copies would drift, silently breaking the
+ * time pass's own regexes, which match what this emits.
+ */
+function citeButton(
+  cls: { id: number | string; color: string },
+  relPath: string,
+  kind: string,
+  label: string,
+  anchor?: string,
+): string {
+  const name = relPath.split("/").pop() ?? relPath;
+  return (
+    `<button type="button" class="cite" style="--cite: var(--class-${cls.color})" ` +
+    `data-class="${cls.id}" data-kind="${kind}" data-path="${escapeHtml(relPath)}" ` +
+    (anchor === undefined ? "" : `data-anchor="${anchor}" `) +
+    `data-name="${escapeHtml(name)}">${label}</button>`
+  );
+}
+
+/**
  * SPEC §9 — an `HH:MM` beside a transcript's citation becomes a link that
  * opens the transcript at that heading, through the `## HH:MM` ids the
  * document register gives a transcript's headings.
  *
  * "Beside" is the section: a time takes the transcript cited before it, or —
  * since the model writes the time first as readily as last, "he said it at
- * 01:23 in `<path>`" — the first one cited anywhere in the section. A section
- * that cited no transcript leaves its times as text, and a clock time keeps
- * its meridiem and stays text wherever it appears, so a due time is never a
- * link. A heading ends the carry.
+ * 01:23 in `<path>`" — the first one cited anywhere in the section, until
+ * some other document is cited, which ends the carry so a time beside a guide
+ * does not link into a transcript named further up. A section that cited no
+ * transcript leaves its times as text, a clock time keeps its meridiem and
+ * stays text wherever it appears, a time inside a code block is code, and a
+ * heading ends the carry.
  *
  * A time linked to a heading the transcript happens not to have opens it at
  * the top, which is what the viewer does with any anchor it cannot find — so
@@ -150,11 +182,15 @@ function linkTimes(html: string): string {
       const cites = section.match(new RegExp(CITE.source, "g")) ?? [];
       const fallback = cites.map(citedTranscript).find((c) => c !== null) ?? null;
       if (fallback === null) return section;
-      let current: Cited | null = null;
+      // `null` until the first citation; from then on whatever was cited
+      // last, so a non-transcript citation suppresses the link rather than
+      // falling back past it.
+      let current: Cited | null | undefined = undefined;
       return section.replace(
-        CITE_TAG_OR_TIME,
+        PRE_CITE_TAG_OR_TIME,
         (
           whole: string,
+          _pre: string | undefined,
           button: string | undefined,
           _path: string | undefined,
           _tag: string | undefined,
@@ -169,13 +205,14 @@ function linkTimes(html: string): string {
           }
           if (time === undefined) return whole;
           if (CLOCK_TIME.test(section.slice(at + time.length))) return whole;
-          const cite = current ?? fallback;
-          const name = cite.path.split("/").pop() ?? cite.path;
-          return (
-            `<button type="button" class="cite" style="--cite: var(--class-${cite.color})" ` +
-            `data-class="${cite.classId}" data-kind="md" ` +
-            `data-path="${escapeHtml(cite.path)}" data-anchor="${time}" ` +
-            `data-name="${escapeHtml(name)}">${time}</button>`
+          const cite = current === undefined ? fallback : current;
+          if (cite === null) return whole;
+          return citeButton(
+            { id: cite.classId, color: cite.color },
+            cite.path,
+            "md",
+            time,
+            time,
           );
         },
       );
@@ -244,11 +281,7 @@ export function renderAnswer(
       const relPath = path.slice(cls.folderName.length + 1);
       const kind = VIEWABLE[relPath.split(".").pop()?.toLowerCase() ?? ""];
       if (!kind) return whole;
-      return (
-        `<button type="button" class="cite" style="--cite: var(--class-${cls.color})" ` +
-        `data-class="${cls.id}" data-kind="${kind}" data-path="${escapeHtml(relPath)}" ` +
-        `data-name="${escapeHtml(relPath.split("/").pop() ?? relPath)}">${inner}</button>`
-      );
+      return citeButton(cls, relPath, kind, inner);
     },
   );
   // Times last: they borrow the class and colour of the citation beside them,

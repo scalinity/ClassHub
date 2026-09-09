@@ -1176,9 +1176,12 @@ fn stream_turn(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
-        let body = response.text().unwrap_or_default();
+        // Named apart from the request `body` this loop is about to send
+        // again: shadowing it worked only because the binding died with the
+        // iteration, and a restructure would have posted the error text.
+        let error_body = response.text().unwrap_or_default();
         let Some(wait) = retry_delay(status, asked, attempt) else {
-            bail!("{}", api_error(status, &body));
+            bail!("{}", api_error(status, &error_body));
         };
         eprintln!(
             "chat session {session_id}: HTTP {status} — waiting {}s and trying again ({} of \
