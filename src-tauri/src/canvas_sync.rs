@@ -2423,6 +2423,26 @@ mod tests {
         assert_eq!(sanitize_name("   "), None);
     }
 
+    /// Canvas's description as the deadline keeps it: the tags gone, an
+    /// entity decoded, a list one line an item with the blank lines folded,
+    /// nothing for an empty or absent one, and a cap on the rest.
+    #[test]
+    fn a_description_is_stripped_folded_and_capped() {
+        let assignment = serde_json::json!({
+            "description": "<p>Homework assignment 1 &amp; rubric.</p>\n<ul>\n<li>Part A</li>\n<li><a href=\"x\">Part B</a><br></li>\n</ul>\n<p></p>"
+        });
+        assert_eq!(
+            description_text(&assignment).as_deref(),
+            Some("Homework assignment 1 & rubric.\nPart A\nPart B")
+        );
+        assert_eq!(description_text(&serde_json::json!({ "description": "<p> </p>" })), None);
+        assert_eq!(description_text(&serde_json::json!({ "description": null })), None);
+        assert_eq!(description_text(&serde_json::json!({})), None);
+        let long = serde_json::json!({ "description": format!("<p>{}</p>", "x".repeat(5000)) });
+        let text = description_text(&long).unwrap();
+        assert!(text.chars().count() <= MAX_DESCRIPTION_CHARS + 1, "{}", text.len());
+    }
+
     #[test]
     fn writes_whole_point_values_without_a_decimal() {
         assert_eq!(trim_number(100.0), "100");

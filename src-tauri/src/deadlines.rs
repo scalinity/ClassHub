@@ -3433,6 +3433,43 @@ mod declined_delete_tests {
 }
 
 #[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    /// Canvas's description is written with the deadline, refreshed on a
+    /// tracked row when it changes, left alone when it has not, and cleared
+    /// when Canvas no longer sends one — it mirrors the assignment.
+    #[test]
+    fn a_description_is_written_with_the_deadline_and_follows_canvas() {
+        let conn = crate::db::memory_db();
+        let assignment = |description: Option<&'static str>| CanvasAssignment {
+            id: "7300444",
+            title: "Problem Statement and AI Sketch",
+            due_at: Some("2026-09-09T23:59"),
+            submitted_at: None,
+            description,
+        };
+        let stored = |conn: &rusqlite::Connection| -> Option<String> {
+            conn.query_row(
+                "SELECT description FROM deadlines WHERE canvas_assignment_id = '7300444'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        insert_canvas_deadline(&conn, 2, &assignment(Some("Form your team.")), "assignment", "From Canvas")
+            .unwrap();
+        assert_eq!(stored(&conn).as_deref(), Some("Form your team."));
+        settle_canvas_deadline(&conn, 2, &assignment(Some("Form your team."))).unwrap().unwrap();
+        assert_eq!(stored(&conn).as_deref(), Some("Form your team."));
+        settle_canvas_deadline(&conn, 2, &assignment(Some("Form your team of 2-4."))).unwrap().unwrap();
+        assert_eq!(stored(&conn).as_deref(), Some("Form your team of 2-4."));
+        settle_canvas_deadline(&conn, 2, &assignment(None)).unwrap().unwrap();
+        assert_eq!(stored(&conn), None);
+    }
+}
+
+#[cfg(test)]
 mod dismiss_tests {
     use super::*;
 
