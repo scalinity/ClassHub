@@ -439,9 +439,13 @@ fn sync_class(
     if let Err(e) = sync_pages(app, session, class, course, outcome, on_stage) {
         note_or_carry_on(outcome, e, "pages")?;
     }
+    if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
+        note_or_fail(outcome, e, "files")?;
+    }
     // The Zoom tool's recordings (SPEC §7.1): listed here, captured by the
-    // shift's step or by hand. One more window's worth of reads, and not
-    // worth the class either.
+    // shift's step or by hand. After the files, so a launch that stalls —
+    // 45 s a course at worst — costs only the recordings, never the durable
+    // work ahead of it; and not worth the class either.
     match crate::recordings::sync_for_course(app, session, class.id, course_id, on_stage) {
         Ok(listing) => {
             outcome.recordings_found = listing.new;
@@ -456,9 +460,6 @@ fn sync_class(
             }
         }
         Err(e) => note_or_carry_on(outcome, e, "recordings")?,
-    }
-    if let Err(e) = sync_files(app, session, class, course_id, outcome, on_stage) {
-        note_or_fail(outcome, e, "files")?;
     }
 
     // Stamped only now. Written alongside the mapping it claimed a sync that
