@@ -6143,3 +6143,82 @@ the scratchpad; the findings are in SPEC §1:
   first pending transcript in path order, which was Week 01's.
 - A `cd` in one Bash call carried into the next several times; absolute
   paths throughout.
+
+## Post-M35 — Review fixes (2026-09-09)
+
+A two-agent review of the M35 changeset since c7918f3 (one bug-hunting
+pass, one architecture/security/data-integrity pass) produced three
+critical issues, fourteen warnings and six suggestions once the two reports
+were merged, three of them raised by both reviewers. Each fix went through
+`scripts/gate.sh`, eight commits in all, grouped by concern. What future
+sessions should know:
+
+- **A failed files read no longer strands the recording** (the debugger's
+  first critical). A `failed` row with no player link was never listed
+  again — its id was known — and never captured; `known_ids` leaves such a
+  row out and `record_rows` upserts on the meeting id, refreshing only a
+  `failed` row with no link. The known ids are read across classes to
+  match the global constraint, a meeting listed twice is judged once
+  (`decide`), and a row another class holds is left alone.
+- **The listing reads with the lock released** (the other). The files read
+  ran inside `with_conn`; a synchronous command parked the main thread the
+  eval needed, and every remaining meeting timed out with the app frozen.
+  The lookups take one lock, the reads none, the writes one.
+- **A capture's mark is part of the capture** (both reviewers, the
+  auditor's critical). The `filed` update ran after the ingestion under a
+  discarded result, and a lost mark let the next pass file the recording
+  again beside the first. `AddRequest.recording_id` lets the ingestion mark
+  the row itself, only while the source is the row's own player link
+  (`recordings::mark_filed`), so a form opened from a recording and pointed
+  elsewhere files that instead; a mark that did not take is reported as
+  failed, and the next pass reads the day as filed — a hand filing is now a
+  contribution no recordings row claims, not any date-named file under
+  `Weeks/` — and skips it. The frontend's mark command and its
+  progress-listener handshake went with it.
+- **The capture's counts add up.** The class's ingestion claim is taken
+  before a row spends the cap (a refusal counts as left); every outcome is
+  a `Transition` written on the row; the listing is refreshed once at the
+  end; the shift's step asks between captures whether the night is paused,
+  the window closed or the rate limit reached (`stop_now`, shared with
+  `stop_reason`); `Find recordings` captures a digest cap's worth per press
+  and says what it left.
+- **One window at a time.** A second read of the Zoom tool, or a second
+  capture, closed the first's window under it and read the close as a
+  timeout or a cancel; `LISTING` and `CAPTURING` refuse the newcomer by
+  name.
+- **The in-page read checks the host first**, as `canvas.rs`'s does, and
+  names a page that has left Zoom rather than a body that would not parse;
+  request ids come off a counter; each eval is bounded by the time left in
+  its budget rather than the budget plus an eval.
+- **One transport for the remote pages** (`remote.rs`): the bounded eval,
+  the close-then-wait on a window label, the Zoom host allowlist with its
+  tests, and the JS string literal, called from `canvas.rs`, `zoom.rs` and
+  `recordings.rs`.
+- **The recordings read follows the files**, so a launch that stalls costs
+  only the recordings.
+- **A notice the scan listed is read once.** The prompt's notice ids ride
+  the job's payload and the finalize stamps every one read once the answer
+  parses, counting the omitted as read; before, a notice the model left
+  out was offered again on every sync without bound.
+- **A recording's form failure has its own line** in the Lectures heading,
+  no longer under `No session document:`.
+- **Tests**: the description's strip, fold, cap and refresh; the listing's
+  `decide` and `record_rows`; the capture's transitions and the mark's
+  source rule; a hand filing told from a capture; the stamp on listed
+  notices; the step indices; the allowlist and the JS literal in
+  `remote.rs`. 328 pass. `npx tsc --noEmit` clean. Nothing was pushed.
+- **Left as it is**: `sorter::week_filing` stays a test-only function at
+  the baseline; the recordings read has no off switch beyond the sync's
+  own, a stall being bounded at 45 s a course; the dated-item path for an
+  office hour still ahead of today remains unexercised by a live notice.
+
+### Gotchas
+
+- A perl one-liner reading a file named through an unexported shell
+  variable dies silently on the splice; export it, or pass the path as an
+  argument.
+- The module list in `lib.rs` is alphabetical; a `mod` slotted beside its
+  neighbour by theme trips the next reviewer.
+- The reviewers' final answers truncate near 4,000 characters; asking each
+  to send every remaining batch as its own `SendMessage`, one per piece, is
+  what delivers a whole report.

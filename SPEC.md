@@ -932,9 +932,23 @@ section, run by hand, keeps it hidden and shows it only when Zoom asks for a sig
 passcode, or after a minute with no progress; the shift's capture never shows it, and a
 sign-in or a passcode ends that capture naming the form as the way through. No capture
 enqueues a digest: the first find of a term meets a backlog of every lecture ever recorded,
-and a digest a piece is the shift's to spend under its cap (§6) or a `Distill` click's. A
-captured row is `filed` with its transcript, said in a notice; a capture that fails is
-`failed` with the reason and tried again next time.
+and a digest a piece is the shift's to spend under its cap (§6) or a `Distill` click's — and
+for the same reason `Find recordings` captures a digest cap's worth per press and says what it
+left. The ingestion marks the row `filed` itself, the capture's and the form's alike, and only
+while the source it filed is the row's own player link, so a form opened from a recording and
+pointed elsewhere files that instead and leaves the recording waiting; a filing whose mark did
+not take is reported as failed and the row left as it is, and the next pass reads the day as
+filed — a lecture filed by hand being a contribution no recordings row claims — and skips
+it, so nothing is captured twice. Every outcome is written on the row (a capture that fails is
+`failed` with the reason and tried again next time; a class the form is adding a lecture to
+leaves its rows for the next pass without a slot spent), the counts add up to the rows given,
+and the shift's step asks between captures whether the night is paused, the window closed or
+the rate limit reached. One read of the Zoom tool and one capture run at a time, since each
+has one window: a second is refused by name. The listing judges every meeting once, reads the
+files of each new lecture with the database lock released — a read needs the main thread, and
+a command that takes the connection parks it — and retries a meeting whose files read failed
+before, which its row records as `failed` with no player link until a later listing refreshes
+it in place.
 
 Ingestion never overwrites: a second lecture on one date, or re-adding the same one, gets a
 ` (2)` suffix rather than replacing a file.
@@ -1159,12 +1173,15 @@ assignment becomes and refreshed on every sync for a tracked row, unaudited — 
 of the assignment, not the reader's data. The Deadlines row opens it beneath the notes on a
 chevron (§12), and a homework brief is written from it.
 
-**The Zoom tool's recordings are listed on every sync.** After the announcements and the
-Pages, the sync reads the course's navigation for the Zoom tool, launches it into a hidden
-window and lists its recordings the way the page does (§1), recording each new one with its
-verdict (§7.1). One more window's worth of reads, about six seconds a course, and not worth
-the class either: a course without the tool, or a page that will not land, is a line in the
-report. The sync only lists; the shift's step and `Find recordings` capture.
+**The Zoom tool's recordings are listed on every sync.** After the files — the durable work
+lands first, and a launch that stalls costs only the recordings — the sync reads the course's
+navigation for the Zoom tool, launches it into a hidden window and lists its recordings the way
+the page does (§1), recording each new one with its verdict (§7.1). One more window's worth of
+reads, about six seconds a course, and not worth the class either: a course without the tool,
+or a page that will not land, is a line in the report. The sync only lists; the shift's step
+and `Find recordings` capture. The three remote pages — the Canvas session, the Zoom capture
+and the recordings window — share one transport (`remote.rs`): a bounded eval, a window label
+freed before reuse, and the Zoom host allowlist with its tests.
 
 **The signed-in window steps aside once the sign-in lands.** A sync that had to ask shows
 the Canvas window for the sign-in, and the moment Canvas answers `users/self` it hides the
@@ -1182,6 +1199,27 @@ latest three (§9). A re-sync of an unchanged course writes no row, an announcem
 would not take is a line in the report, and a failed read of announcements or Pages is a line
 too — like the grades, neither is worth the class, and the file sync and the sync stamp still
 follow.
+
+**What a notice asks for is read once, by a light-tier scan.** After the announcements, the sync
+enqueues an `announcement_scan` job — read-only tools under the syllabus scan's deny list, one
+per class at a time, Sonnet at medium through the per-kind pair (§6), a few seconds and about a
+dime a run (§1) — over the class's notices nothing has read yet (`announcements.scanned_at` is
+null): the prompt carries each with its Canvas id, posting date and text, the class's deadlines,
+today and the semester, and asks per notice for the deadlines it commits to, the to-dos it asks
+for and the changes it announces, resolving a written year that falls outside the semester as
+the typo it is, and reading an office hour moved to a day still ahead as a dated item and one
+already passed as a change. The answer is model output: each dated item goes through
+`record_proposal` as the syllabus's do, source `announcement`, refused past two hundred days
+from today, so the card reads `from a notice` and the same assignment on Canvas's row answers
+as already on the list; each to-do and change is a line under the notice
+(`announcement_actions`, unique per notice and text, capped in length and at eight a kind), a
+to-do with a checkbox that is its own way back and writes an audit row; and every notice the
+prompt listed is stamped read in the same pass, the ones the answer named inside their own
+transactions and the ones it left out — the model's "nothing here", which the prompt allows —
+once the answer parses, so a notice is offered once and the next sync spends nothing on it. A
+malformed entry, an unknown Canvas id or an implausible date costs its own item and never the
+scan; an edited notice, updated in place by a sync, is read again, its lines added to. The
+listing of a notice's lines rides `list_announcements`, and the chat overview is unchanged.
 
 **Pages and the syllabus page become text in the extract cache.** Each published Page is
 written as markdown to `.classhub/extracts/Canvas/<Page title>.md` — a title line, one line
@@ -1976,12 +2014,18 @@ and apply it. Non-negotiable per project owner.
   refused while it holds scores, a Canvas row refused, a row reversed once (§6 — an undo
   that overwrote is silent until the file is opened), the one-meeting rule and a found
   recording's verdicts — a test, a non-meeting day, a date filed by hand — with the list and
-  files answers as Zoom serves them and a meeting recorded once (§7.1 — a recording
-  captured twice, or into the wrong week, is silent until a guide reads it), the
-  announcement scan's record — a card carrying `announcement`, a known deadline counted, the
-  to-dos and changes under the notice, the read stamp, a malformed entry and an implausible
-  year each costing their own item, the prompt over unread notices alone (§7.2 — a notice
-  read twice is a duplicate card, quietly), the description's strip and cap, the shift's window and night across
+  files answers as Zoom serves them, a meeting judged once with the files read's three
+  outcomes, recorded once and refreshed only where its files read failed, a hand filing told
+  from a capture, a capture's transitions on its row and the mark that takes only for the
+  row's own link (§7.1 — a recording captured twice, or into the wrong week, is silent until
+  a guide reads it), the announcement scan's record — a card carrying `announcement`, a known
+  deadline counted, the to-dos and changes under the notice, the read stamp on the notices
+  named and on the ones left out, a malformed entry and an implausible year each costing
+  their own item, the prompt over unread notices alone (§7.2 — a notice read twice is a
+  duplicate card, quietly), the description's strip, fold and cap and its refresh on a
+  tracked row (§7.2 — a stale description is silent until a brief reads it), the remote
+  pages' host allowlist (§7.1), the shift's step indices against their names (§6 — a step
+  slotted in renumbers the rest), the shift's window and night across
   midnight, its decision condition by condition, a night's one run across two inserts, the
   idle read, the caps, a division's meeting, its two lists — a note missing before a ledger
   unread, a division with sources and no guide listed while one whose meeting is ahead,
