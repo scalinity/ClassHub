@@ -693,7 +693,7 @@ pub fn overview_text(
     let mut deadline_stmt = conn.prepare(&format!(
         "SELECT d.id, c.display_name, d.title, d.kind, d.due_at, d.notes
          FROM deadlines d JOIN classes c ON c.id = d.class_id
-         WHERE d.status = 'open' ORDER BY {} LIMIT 25",
+         WHERE d.status = 'open' ORDER BY {} LIMIT {DEADLINES_LISTED}",
         crate::deadlines::DUE_INSTANT_SQL
     ))?;
     let rows = deadline_stmt
@@ -714,7 +714,12 @@ pub fn overview_text(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let (deadlines, rest) = within_horizon(&rows, today_iso, horizon);
+    let (deadlines, _) = within_horizon(&rows, today_iso, horizon);
+    // Counted against every open row, not against the twenty-five the query
+    // returned: `rest` from the fetched page saturates at the limit, so a
+    // hub with sixty open deadlines would report the same number as one with
+    // twenty-six — and this line rides the system prompt of every turn.
+    let rest = (open_deadlines as usize).saturating_sub(deadlines.len());
     out.push_str("\n## Open deadlines\n");
     if deadlines.is_empty() && rest == 0 {
         out.push_str("None recorded.\n");
@@ -723,11 +728,13 @@ pub fn overview_text(
             out.push_str(&format!("{}\n", deadlines.join("\n")));
         }
         if rest > 0 {
+            // What `get_overview` can show is capped too, so the line says
+            // the next ones rather than promising all of them.
             out.push_str(&format!(
-                "{} more open after {}{} — get_overview lists them all with their ids.\n",
-                rest,
+                "{rest} more open after {}{} — get_overview lists the next {} with their ids.\n",
                 horizon.map(|d| format!("the next {d} days")).unwrap_or_else(|| "these".into()),
-                if deadlines.is_empty() { ", the soonest still ahead" } else { "" }
+                if deadlines.is_empty() { ", the soonest still ahead" } else { "" },
+                DEADLINES_LISTED
             ));
         }
     }
@@ -1096,6 +1103,11 @@ fn guides_line(guides: &[crate::guides::GuideInfo], detailed: bool) -> String {
         .join("; ");
     format!("Guides: {described}\n")
 }
+
+/// How many open deadlines either form of the overview lists. The compact
+/// form trims those to a week and counts the rest against every open row
+/// (`open_deadlines`), so the count is the hub's and not the page's.
+const DEADLINES_LISTED: usize = 25;
 
 /// How many flagged items the detailed form lists per class, and how much of
 /// each. The overview is one tool result and `MAX_TOOL_RESULT_CHARS` cuts it:
@@ -2524,7 +2536,14 @@ fn run_syllabus_scan(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Ou
 
 fn approve_deadlines(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let ids: Vec<i64> = match input["ids"].as_array() {
-        Some(list) if !list.is_empty() => list
+        // An empty list is not "all of them". A model that sends `ids: []`
+        // meaning none would otherwise fall through and approve every
+        // proposal the class has waiting, which is the opposite of what it
+        // asked for and lands as real deadlines.
+        Some(list) if list.is_empty() => {
+            bail!("'ids' was empty — pass the proposal ids to approve, or a 'class' to take all of its waiting proposals")
+        }
+        Some(list) => list
             .iter()
             .map(|v| {
                 v.as_i64()
@@ -2532,7 +2551,7 @@ fn approve_deadlines(app: &AppHandle, input: &Value) -> Result<Outcome> {
             })
             .collect::<Result<Vec<_>>>()?,
         // A class instead: every proposal it has waiting, as `Add all` takes.
-        _ => {
+        None => {
             let name = opt_str_arg(input, "class")
                 .context("pass either 'ids' or a 'class' whose proposals to approve")?;
             with_conn(app, |conn| {
@@ -2859,7 +2878,8 @@ pub fn format_size(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        definitions, is_write, overview_text, resolve_scope, waiting_line, ClassRow, Scope,
+        definitions, is_write, overview_text, pending_move, resolve_scope, waiting_line, ClassRow,
+        Scope,
         WRITE_TOOLS,
     };
     use rusqlite::Connection;
@@ -3371,5 +3391,79 @@ mod tests {
             assert!(seen.insert(*name), "{name} is defined twice");
         }
         assert_eq!(names.len(), WRITE_TOOLS.len() + 5);
+    }
+
+    /// The proposal an approval names has to be there and still waiting, and
+    /// the refusal says which it was — the message the model reads before it
+    /// tries again.
+    #[test]
+    fn an_approval_names_a_proposal_that_is_still_waiting() {
+        let conn = fixture();
+        for (id, status) in [(1, "pending"), (2, "approved"), (3, "dismissed")] {
+            conn.execute(
+                "INSERT INTO move_proposals
+                   (id, class_id, source_rel_path, dest_rel_path, reasoning, source, status, created_at)
+                 VALUES (?1, 3, '_Inbox/a.csv', 'Weeks/Week 03/a.csv', 'r', 'sort_job', ?2, 1)",
+                rusqlite::params![id, status],
+            )
+            .expect("proposal");
+        }
+        let (class_id, source, dest) = pending_move(&conn, 1).expect("waiting");
+        assert_eq!(class_id, 3);
+        assert_eq!(source, "_Inbox/a.csv");
+        assert_eq!(dest, "Weeks/Week 03/a.csv");
+
+        let missing = pending_move(&conn, 99).expect_err("no such row");
+        assert!(missing.to_string().contains("no file-move proposal has id 99"), "{missing}");
+        for (id, word) in [(2, "approved"), (3, "dismissed")] {
+            let refused = pending_move(&conn, id).expect_err("resolved");
+            assert!(refused.to_string().contains(word), "{refused}");
+            assert!(refused.to_string().contains("no longer waiting"), "{refused}");
+        }
+    }
+
+    /// An explicitly empty `ids` is a refusal, not "approve everything for
+    /// the class" — a model that sends `[]` meaning none would otherwise get
+    /// every waiting proposal inserted as a real deadline.
+    #[test]
+    fn an_empty_id_list_is_refused_rather_than_read_as_all() {
+        let empty = serde_json::json!({ "ids": [], "class": "Biostatistics for AI" });
+        let list = empty["ids"].as_array().expect("array");
+        assert!(list.is_empty());
+        // The guard the tool applies, asserted where the tool cannot be run
+        // without an AppHandle: an empty array is its own branch.
+        let branch = match empty["ids"].as_array() {
+            Some(l) if l.is_empty() => "refused",
+            Some(_) => "ids",
+            None => "class",
+        };
+        assert_eq!(branch, "refused");
+        // And the two live branches still read as themselves.
+        let ids = serde_json::json!({ "ids": [4, 5] });
+        assert!(matches!(ids["ids"].as_array(), Some(l) if !l.is_empty()));
+        let by_class = serde_json::json!({ "class": "Biostatistics for AI" });
+        assert!(by_class["ids"].as_array().is_none());
+    }
+
+    /// `add_lecture`'s week resolution, which decides whether a lecture is
+    /// filed under its week or routed to the inbox for the sorter: a course
+    /// whose weeks carry dates resolves from the date, and one whose
+    /// divisions name week ranges and no days resolves to nothing and asks.
+    #[test]
+    fn a_lecture_resolves_its_week_only_where_the_course_dates_them() {
+        let conn = fixture();
+        let dated = crate::units::week_slots(&conn, 3).expect("slots");
+        assert!(dated.iter().any(|s| s.meets_on.is_some()), "the fixture dates its weeks");
+        assert_eq!(crate::units::nearest_week(&dated, "2026-09-03"), Some(3));
+        // The nearest meeting, which is what the form's default takes.
+        assert_eq!(crate::units::nearest_week(&dated, "2026-09-04"), Some(3));
+
+        // Applied Generative AI: Parts over week ranges, no dates, so the
+        // resolution declines and the request goes without a week.
+        let ranged = crate::units::week_slots(&conn, 4).expect("slots");
+        assert!(
+            !ranged.iter().any(|s| s.meets_on.is_some()),
+            "the fixture's Part carries no meeting day"
+        );
     }
 }

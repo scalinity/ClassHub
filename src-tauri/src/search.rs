@@ -226,12 +226,18 @@ fn indexed_rows(conn: &Connection, class_id: i64) -> Result<Indexed> {
 /// Brings one class's index up to what is on disk, and says how many
 /// documents it wrote and dropped.
 ///
+/// The three steps in one call, for a caller that can hold the connection
+/// across the disk work — the tests. Every caller in the app takes
+/// `known_rows`, `plan` and `apply` separately so the reads happen with
+/// nothing held.
+///
 /// The reads happen before the transaction and the transaction is IMMEDIATE:
 /// a deferred one that had read first is refused outright, past the busy
 /// handler, when the other build commits in between — M37's cards index
 /// learned that. A failure here is never fatal to the caller: the index is
 /// derived, and a search over a stale index is worse than a fresh one but
 /// better than no answer.
+#[cfg(test)]
 pub fn sync_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<(usize, usize)> {
     let known = known_rows(conn, class_id)?;
     let work = plan(class_dir, &known)?;
@@ -366,6 +372,7 @@ fn drop_document(tx: &Transaction<'_>, class_id: i64, rel_path: &str) -> Result<
 /// `material_index` happens to name: a rebuild that could only reach the rows
 /// the index still points at would leave behind exactly the orphans it exists
 /// to clear.
+#[cfg(test)]
 pub fn rebuild_class(conn: &Connection, class_id: i64, class_dir: &Path) -> Result<usize> {
     // Planned before anything is deleted, so a class whose folder is missing
     // keeps the index it has rather than losing it to a rebuild that then

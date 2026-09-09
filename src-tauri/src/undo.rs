@@ -110,28 +110,32 @@ fn undo_in_conn(conn: &Connection, audit_ids: &[i64]) -> Batch {
 /// `canvas.filed` is a file the sync moved, which is a move like any other
 /// and does reverse.
 pub fn reversible(action: &str) -> bool {
-    matches!(
-        action,
-        "sort.move"
-            | "canvas.filed"
-            | "ui.upsert_deadline"
-            | "chat.upsert_deadline"
-            | "ui.delete_deadline"
-            | "chat.delete_deadline"
-            | "ui.set_deadline_status"
-            | "chat.complete_deadline"
-            | "syllabus.insert_deadline"
-            | "ui.write_note"
-            | "chat.write_note"
-            | "review.write_note"
-            | "ui.save_grade_category"
-            | "chat.upsert_grade_category"
-            | "ui.delete_grade_category"
-            | "ui.save_grade_item"
-            | "chat.add_grade_item"
-            | "ui.delete_grade_item"
-    )
+    REVERSIBLE.contains(&action)
 }
+
+/// The names, in one place, so the test can walk all of them rather than a
+/// sample — a name added to `undo_with` and forgotten here would make
+/// `undo_last` skip that action silently.
+const REVERSIBLE: &[&str] = &[
+    "sort.move",
+    "canvas.filed",
+    "ui.upsert_deadline",
+    "chat.upsert_deadline",
+    "ui.delete_deadline",
+    "chat.delete_deadline",
+    "ui.set_deadline_status",
+    "chat.complete_deadline",
+    "syllabus.insert_deadline",
+    "ui.write_note",
+    "chat.write_note",
+    "review.write_note",
+    "ui.save_grade_category",
+    "chat.upsert_grade_category",
+    "ui.delete_grade_category",
+    "ui.save_grade_item",
+    "chat.add_grade_item",
+    "ui.delete_grade_item",
+];
 
 /// The rows the newest still-reversible action wrote, and what it was — what
 /// `Undo` on the last notice would reverse, for a reader who asked in words
@@ -144,52 +148,58 @@ pub fn reversible(action: &str) -> bool {
 /// reaches the action before rather than refusing.
 pub fn last_reversible(conn: &Connection) -> Result<Option<(Vec<i64>, String)>> {
     let undone = already_undone(conn)?;
+    // Newest first, and the walk stops at the first row with an inverse:
+    // `query_map` is lazy, so a log of any length costs the rows above that
+    // one and no more. No window — a run of rows nothing reverses, which a
+    // Canvas sync writes a great many of, would otherwise hide the action
+    // underneath them and answer that nothing can be reversed.
     let mut stmt = conn.prepare(
         "SELECT id, action, payload FROM audit_log
-         WHERE action NOT LIKE 'undo.%' ORDER BY id DESC LIMIT 400",
+         WHERE action NOT LIKE 'undo.%' ORDER BY id DESC",
     )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let Some((id, action, payload)) = rows
-        .iter()
-        .find(|(id, action, _)| reversible(action) && !undone.contains(id))
-    else {
+    let mut rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let found = rows.find_map(|row| match row {
+        Ok((id, action, payload)) if reversible(&action) && !undone.contains(&id) => {
+            Some(Ok((id, action, payload)))
+        }
+        Ok(_) => None,
+        Err(e) => Some(Err(e)),
+    });
+    let Some((id, action, payload)) = found.transpose()? else {
         return Ok(None);
     };
-    let batch = serde_json::from_str::<Value>(payload)
+    let batch = serde_json::from_str::<Value>(&payload)
         .ok()
         .and_then(|p| p["batch"].as_str().map(str::to_string))
         .filter(|b| !b.is_empty());
     let Some(batch) = batch else {
-        return Ok(Some((vec![*id], action.clone())));
+        return Ok(Some((vec![id], action)));
     };
-    // Every row of the batch, the ones already reversed left out — a batch
-    // half-undone by hand is finished rather than refused.
-    let mut ids = rows
-        .iter()
-        .filter(|(row_id, row_action, row_payload)| {
-            row_action == action
-                && !undone.contains(row_id)
-                && serde_json::from_str::<Value>(row_payload)
-                    .ok()
-                    .and_then(|p| p["batch"].as_str().map(str::to_string))
-                    .as_deref()
-                    == Some(batch.as_str())
-        })
-        .map(|(row_id, _, _)| *row_id)
-        .collect::<Vec<_>>();
-    // The log was read newest first; hand the batch back in the order it was
-    // written, which is how the notice's own list reads.
-    ids.sort_unstable();
-    Ok(Some((ids, action.clone())))
+    // The batch is fetched by its tag over the whole log, not gathered from
+    // the window the newest row happened to be found in. A batch that
+    // straddles that window — an `Approve all` over a large inbox, or an
+    // ordinary one sitting under a few hundred rows of newer traffic — would
+    // otherwise come back in part, and `undo_last` would report the action
+    // reversed while leaving the rest of the files where they were.
+    let mut stmt = conn.prepare(
+        "SELECT id FROM audit_log
+         WHERE action = ?1 AND json_valid(payload)
+           AND json_extract(payload, '$.batch') = ?2
+         ORDER BY id",
+    )?;
+    let mut ids = stmt
+        .query_map(rusqlite::params![&action, batch], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The ones already reversed are left out, so a batch half-undone by hand
+    // is finished rather than refused.
+    ids.retain(|row_id| !undone.contains(row_id));
+    Ok(Some((ids, action)))
 }
 
 /// Every audit row an `undo.*` row names, in one read of the log.
@@ -916,22 +926,39 @@ mod batch_tests {
         assert!(last_reversible(&conn).expect("read").is_none());
     }
 
+    /// A batch whose rows sit past the window the newest row was found in
+    /// still comes back whole: `undo_last` reporting an action reversed while
+    /// leaving half its files moved is the one outcome the batching exists to
+    /// prevent.
+    #[test]
+    fn a_batch_reaching_past_the_window_comes_back_whole() {
+        let conn = db();
+        let mut batched = Vec::new();
+        for n in 0..40 {
+            batched.push(audit(
+                &conn,
+                "sort.move",
+                json!({ "classId": 3, "batch": "approve-all-1", "from": format!("a{n}"), "to": "b" }),
+            ));
+        }
+        // Newer traffic on top, more of it than the window would hold if the
+        // batch had to share the space with it.
+        for _ in 0..450 {
+            audit(&conn, "canvas.insert_deadline", json!({ "classId": 3 }));
+        }
+        let (ids, action) = last_reversible(&conn).expect("read").expect("some");
+        assert_eq!(action, "sort.move");
+        assert_eq!(ids, batched, "every row of the batch, in the order written");
+    }
+
     /// The list `undo_last` asks and the arms `undo_with` dispatches say the
-    /// same thing. A `canvas.*` row is the deliberate gap — except the file
-    /// the sync filed, which is a move like any other.
+    /// same thing — every name on it, not a sample. A `canvas.*` row is the
+    /// deliberate gap, except the file the sync filed, which is a move like
+    /// any other.
     #[test]
     fn the_reversible_list_and_the_dispatch_agree() {
         let conn = db();
-        for action in [
-            "sort.move",
-            "canvas.filed",
-            "chat.upsert_deadline",
-            "ui.set_deadline_status",
-            "syllabus.insert_deadline",
-            "review.write_note",
-            "chat.upsert_grade_category",
-            "ui.delete_grade_item",
-        ] {
+        for action in REVERSIBLE {
             assert!(reversible(action), "{action} should have an inverse");
             let id = audit(&conn, action, json!({ "classId": 3 }));
             let refused = undo_one(&conn, id).err().map(|e| e.to_string()).unwrap_or_default();
