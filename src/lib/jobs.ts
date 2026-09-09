@@ -356,11 +356,13 @@ function releaseJob(jobId: number) {
   }
 }
 
-/** The shift's state, from the run row and the settings (SPEC §6). */
+/** The shift's state, from the run row and the settings (SPEC §6). Today's
+ *  overnight line reads the same run, so it follows every change. */
 async function refreshShift() {
   try {
     const shift = await invoke<ShiftStatus>("get_shift_status");
     emitChange({ shift, error: null });
+    void queryClient.invalidateQueries({ queryKey: ["today"] });
   } catch (e) {
     emitChange({ error: String(e) });
   }

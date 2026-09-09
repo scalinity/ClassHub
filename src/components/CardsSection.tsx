@@ -19,13 +19,23 @@ export function cardsQuery(classId: number) {
  * SPEC §12 — the class's cards, indexed from the sidecars every guide and
  * digest writes: one row per document with its count, and `Export for
  * Anki`, which writes the tab-separated file Anki imports and offers it in
- * Finder. Absent until a guide or a distilled lecture has written cards.
+ * Finder. Absent until a guide or a distilled lecture has written cards; a
+ * read that failed says so rather than leaving the section out.
  */
 export function CardsSection({ classId }: { classId: number }) {
-  const { data: cards } = useQuery(cardsQuery(classId));
+  const { data: cards, error: loadError } = useQuery(cardsQuery(classId));
   const [exported, setExported] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  if (loadError) {
+    return (
+      <section id="cards" className="mt-14 scroll-mt-20" aria-label="Cards">
+        <SectionHeading title="Cards">
+          <p className={errorLine}>The cards didn't load: {String(loadError)}</p>
+        </SectionHeading>
+      </section>
+    );
+  }
   if (cards === undefined || cards.length === 0) return null;
 
   const groups = new Map<string, { label: string; count: number }>();

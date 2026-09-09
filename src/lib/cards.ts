@@ -30,10 +30,15 @@ export function dueCards(): Promise<CardInfo[]> {
   return invoke<CardInfo[]>("due_cards", { today: todayIso() });
 }
 
+/** The day's ten hold still while they are worked through: a focus of the
+ *  window does not refetch them, so an answered card is not replaced by the
+ *  next due one mid-session; the list is fetched fresh when the dashboard
+ *  is next opened. */
 export function dueCardsQuery() {
   return {
     queryKey: ["cards", "due", todayIso()] as const,
     queryFn: dueCards,
+    refetchOnWindowFocus: false,
   };
 }
 

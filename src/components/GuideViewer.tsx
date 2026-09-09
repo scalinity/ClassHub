@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 
@@ -47,6 +47,27 @@ export function GuideViewer({
   const [scored, setScored] = useState<ExamScore | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
   const exam = guide.family === "practice";
+  // The frame the self-score listener matches the panel's message against,
+  // registered while the frame is on screen and cleared when it leaves. A
+  // stable callback, so a render — the score landing — does not clear and
+  // re-register it.
+  const scope = guide.scope;
+  const registerFrame = useCallback(
+    (el: HTMLIFrameElement) => {
+      setExamFrame({
+        frame: el,
+        classId,
+        scope,
+        onScored: (score) => {
+          setRefused(null);
+          setScored(score);
+        },
+        onRefused: setRefused,
+      });
+      return () => setExamFrame(null);
+    },
+    [classId, scope],
+  );
 
   return (
     <div
@@ -131,26 +152,7 @@ export function GuideViewer({
             sandbox="allow-scripts"
             srcDoc={withDocumentCsp(html)}
             title={`${guide.label} study guide`}
-            // The frame the listener matches the panel's message against;
-            // cleared when the frame leaves the screen.
-            ref={
-              exam
-                ? (el) => {
-                    if (el === null) return;
-                    setExamFrame({
-                      frame: el,
-                      classId,
-                      scope: guide.scope,
-                      onScored: (score) => {
-                        setRefused(null);
-                        setScored(score);
-                      },
-                      onRefused: setRefused,
-                    });
-                    return () => setExamFrame(null);
-                  }
-                : undefined
-            }
+            ref={exam ? registerFrame : undefined}
             className="block h-full w-full border-0"
           />
         )}

@@ -1062,7 +1062,10 @@ export function ClassWorkspace({
       )}
 
       {viewedGuide && (
+        // Keyed on the document, so a score recorded in one exam's viewer
+        // never carries into another's.
         <GuideViewer
+          key={viewedGuide.scope}
           classId={info.id}
           guide={viewedGuide}
           onClose={() => setViewScope(null)}
