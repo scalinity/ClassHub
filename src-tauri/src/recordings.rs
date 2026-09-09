@@ -23,7 +23,6 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -31,10 +30,11 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::canvas::Session;
 use crate::db::{emit_hub_change, now, with_conn, WEEKS_DIR};
+use crate::remote::{close_label, eval, is_zoom_host, js_string};
 use crate::zoom::Reveal;
 
 const WINDOW_LABEL: &str = "zoom-recordings";
@@ -841,23 +841,8 @@ fn find(app: &AppHandle, class_id: i64, on_stage: &dyn Fn(&str)) -> Result<Strin
 // ---------------------------------------------------------------------------
 // The page
 
-fn is_zoom_host(host: &str) -> bool {
-    ["zoom.us", "zoom.com"]
-        .iter()
-        .any(|z| host == *z || host.ends_with(&format!(".{z}")))
-}
-
 fn open_hidden(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
-    if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
-        let _ = existing.close();
-        let give_up = Instant::now() + Duration::from_secs(3);
-        while app.get_webview_window(WINDOW_LABEL).is_some() {
-            if Instant::now() >= give_up {
-                bail!("the previous recordings window is still open — try again");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    close_label(app, WINDOW_LABEL, "recordings")?;
     let parsed = tauri::Url::parse(url).context("parsing the Zoom launch")?;
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(parsed))
         .title("Zoom recordings — ClassHub is reading the list")
@@ -870,16 +855,7 @@ fn open_hidden(app: &AppHandle, url: &str) -> Result<WebviewWindow> {
 /// One eval round-trip within `budget`, so a caller's own deadline is the
 /// bound and not the deadline plus a whole eval.
 fn eval_within(window: &WebviewWindow, js: &str, budget: Duration) -> Result<Value> {
-    let (tx, rx) = mpsc::channel();
-    window
-        .eval_with_callback(js, move |result| {
-            let _ = tx.send(result);
-        })
-        .context("evaluating in the recordings window")?;
-    let raw = rx
-        .recv_timeout(budget.min(EVAL_TIMEOUT))
-        .context("the recordings page did not answer")?;
-    serde_json::from_str(&raw).with_context(|| format!("the page returned {raw:?}"))
+    eval(window, js, budget.min(EVAL_TIMEOUT), "recordings")
 }
 
 /// Request slots on the page, one per read; unique for the window's life,
@@ -1001,10 +977,6 @@ fn local_from_utc(text: &str) -> Option<String> {
             .format("%Y-%m-%dT%H:%M")
             .to_string(),
     )
-}
-
-fn js_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
 }
 
 /// Where the launch has landed, and whether the page holds its launch id yet.

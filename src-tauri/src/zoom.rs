@@ -24,7 +24,6 @@
 //! tells the user which manual step to take rather than dead-ending.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -254,14 +253,7 @@ enum Outcome {
     Media(String),
 }
 
-/// Zoom, and not merely a host whose name ends in it — `notzoom.us` is
-/// registrable, and a window opened on it would have the probe injected and its
-/// answer written into the class tree as a transcript.
-fn is_zoom_host(host: &str) -> bool {
-    ["zoom.us", "zoom.com"]
-        .iter()
-        .any(|z| host == *z || host.ends_with(&format!(".{z}")))
-}
+use crate::remote::is_zoom_host;
 
 /// What the log says about a captured track: its size, how many cues the
 /// parser reads out of it, and the first cue as the parser sees it — speaker
@@ -298,20 +290,7 @@ fn stage_label(state: &str) -> &'static str {
 // Webview
 
 fn open_window(app: &AppHandle, url: &str, visible: bool) -> Result<WebviewWindow> {
-    if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
-        // `close` posts to the event loop and returns; the label is only freed
-        // once the main thread has processed it. Building immediately fails
-        // with "a webview with label zoom-capture already exists", and once it
-        // does, every later attempt fails the same way.
-        let _ = existing.close();
-        let give_up = Instant::now() + Duration::from_secs(3);
-        while app.get_webview_window(WINDOW_LABEL).is_some() {
-            if Instant::now() >= give_up {
-                bail!("the previous Zoom window is still open — close it and try again");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    crate::remote::close_label(app, WINDOW_LABEL, "Zoom")?;
     let parsed = tauri::Url::parse(url).context("parsing the recording link")?;
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(parsed))
         .title("Sign in to Zoom — ClassHub is reading the transcript")
@@ -321,21 +300,9 @@ fn open_window(app: &AppHandle, url: &str, visible: bool) -> Result<WebviewWindo
         .context("opening the Zoom window")
 }
 
-/// Evaluates an expression in the page and returns its JSON result.
-///
-/// The callback fires once; a script that throws never calls back (Tauri
-/// swallows the exception), which the timeout covers.
+/// One probe of the page within `PROBE_TIMEOUT`.
 fn probe(window: &WebviewWindow, js: &str) -> Result<Value> {
-    let (tx, rx) = mpsc::channel();
-    window
-        .eval_with_callback(js, move |result| {
-            let _ = tx.send(result);
-        })
-        .context("evaluating in the Zoom window")?;
-    let raw = rx
-        .recv_timeout(PROBE_TIMEOUT)
-        .context("the Zoom page did not answer")?;
-    serde_json::from_str(&raw).with_context(|| format!("probe returned {raw:?}"))
+    crate::remote::eval(window, js, PROBE_TIMEOUT, "Zoom")
 }
 
 /// `name=value; …` across the given URLs, so Rust's own request carries the
@@ -623,19 +590,6 @@ mod tests {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-    }
-
-    #[test]
-    fn accepts_zoom_and_its_subdomains_only() {
-        assert!(is_zoom_host("zoom.us"));
-        assert!(is_zoom_host("ufl.zoom.us"));
-        assert!(is_zoom_host("ssrweb.zoom.us"));
-        assert!(is_zoom_host("zoom.com"));
-        // Registrable lookalikes, which a suffix match would have accepted.
-        assert!(!is_zoom_host("notzoom.us"));
-        assert!(!is_zoom_host("evilzoom.com"));
-        assert!(!is_zoom_host("zoom.us.example.com"));
-        assert!(!is_zoom_host(""));
     }
 
     /// The log line counts what the parser will read, not every arrow in the

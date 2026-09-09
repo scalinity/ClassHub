@@ -18,6 +18,7 @@ mod notebook;
 mod notifications;
 mod announcements;
 mod recordings;
+mod remote;
 mod notes;
 mod scanner;
 mod settings;

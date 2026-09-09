@@ -41,7 +41,6 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -486,7 +485,7 @@ impl Session {
     /// holds the whole file base64, which is not something to leave on the page
     /// for the rest of the sync.
     fn release(&self, id: &str) {
-        let js = RELEASE_JS.replace("__ID__", &js_string(id));
+        let js = RELEASE_JS.replace("__ID__", &crate::remote::js_string(id));
         let _ = self.window.eval_with_callback(&js, |_| {});
     }
 
@@ -497,9 +496,9 @@ impl Session {
             // rewrite itself inside its own string.
             .replace("__BINARY__", if mode == Mode::Binary { "true" } else { "false" })
             .replace("__MAXBYTES__", &MAX_DOWNLOAD_BYTES.to_string())
-            .replace("__ID__", &js_string(id))
-            .replace("__HOST__", &js_string(CANVAS_HOST))
-            .replace("__PATH__", &js_string(path));
+            .replace("__ID__", &crate::remote::js_string(id))
+            .replace("__HOST__", &crate::remote::js_string(CANVAS_HOST))
+            .replace("__PATH__", &crate::remote::js_string(path));
 
         let started = Instant::now();
         // A file has to be read, encoded and marshalled whole, none of which a
@@ -605,16 +604,7 @@ impl Session {
     /// The callback fires once; a script that throws never calls back (Tauri
     /// swallows the exception), which the timeout covers.
     fn eval(&self, js: &str) -> Result<Value> {
-        let (tx, rx) = mpsc::channel();
-        self.window
-            .eval_with_callback(js, move |result| {
-                let _ = tx.send(result);
-            })
-            .context("evaluating in the Canvas window")?;
-        let raw = rx
-            .recv_timeout(EVAL_TIMEOUT)
-            .context("the Canvas page did not answer")?;
-        serde_json::from_str(&raw).with_context(|| format!("the page returned {raw:?}"))
+        crate::remote::eval(&self.window, js, EVAL_TIMEOUT, "Canvas")
     }
 
     /// A closed window is the user cancelling, not a failure to report.
@@ -1155,22 +1145,7 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn close_existing(app: &AppHandle) -> Result<()> {
-    let Some(existing) = app.get_webview_window(WINDOW_LABEL) else {
-        return Ok(());
-    };
-    // `close` posts to the event loop and returns; the label is only freed once
-    // the main thread has processed it. Building immediately fails with "a
-    // webview with label canvas-session already exists", and once it does,
-    // every later attempt fails the same way.
-    let _ = existing.close();
-    let give_up = Instant::now() + Duration::from_secs(3);
-    while app.get_webview_window(WINDOW_LABEL).is_some() {
-        if Instant::now() >= give_up {
-            bail!("the previous Canvas window is still open — close it and try again");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
+    crate::remote::close_label(app, WINDOW_LABEL, "Canvas")
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,11 +1239,6 @@ fn kind_of(value: &Value) -> &'static str {
         Value::Null => "null",
         _ => "a value",
     }
-}
-
-/// A JS string literal for `value`, quotes included.
-fn js_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
 }
 
 // ---------------------------------------------------------------------------
