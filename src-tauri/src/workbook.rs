@@ -336,7 +336,8 @@ pub fn write_workbook(app: &AppHandle, class_id: i64, generated_at_label: &str) 
         })?;
         Ok((ctx.class_dir, prompt, payload))
     })?;
-    fs::create_dir_all(class_dir.join(crate::db::GUIDES_DIR))?;
+    fs::create_dir_all(class_dir.join(crate::db::WORKBOOK_DIR))
+        .with_context(|| format!("creating {}", crate::db::WORKBOOK_DIR))?;
     crate::jobs::enqueue_document(app, KIND, class_id, PROJECT_SCOPE, &prompt, payload)
 }
 

@@ -364,10 +364,19 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         "lecture_digest" => Some(
             "Read,Glob,Grep,Edit(**/Sessions/**),Edit(**/corpus/**),Edit(.classhub/corpus/**)",
         ),
-        // The small documents (SPEC §8.6) write under `Study Guides/` as a
-        // guide does, and the guard reads their runs the same way.
-        "extract" | "module_guide" | "master_guide" | "practice" | "assignment_brief"
-        | "project_workbook" | "presentation_kit" | "pre_read" => Some("Read,Glob,Grep,Write"),
+        // The small documents (SPEC §8.6) read untrusted material too — a
+        // Canvas description, the owner's drafts under `Project/`, a posted
+        // deck — and each writes into one leaf folder under `Study Guides/`,
+        // so each gets the digest's shape: an `Edit` rule on its own folder,
+        // which the CLI refuses a write outside of before the guard has to
+        // read the diff. The pre-read shares the digest's `Sessions/`.
+        "assignment_brief" => Some("Read,Glob,Grep,Edit(**/Briefs/**)"),
+        "project_workbook" => Some("Read,Glob,Grep,Edit(**/Workbook/**)"),
+        "presentation_kit" => Some("Read,Glob,Grep,Edit(**/Presentations/**)"),
+        "pre_read" => Some("Read,Glob,Grep,Edit(**/Sessions/**)"),
+        "extract" | "module_guide" | "master_guide" | "practice" => {
+            Some("Read,Glob,Grep,Write")
+        }
         // The notes review never writes: its section is appended by the app
         // through the note write path, with the audit row a job cannot write.
         "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review" => {
@@ -2055,7 +2064,16 @@ fn execute_job(
         .args(["--disallowedTools", disallowed_tools(&job.kind)])
         // The user-level claude config leaks MCP servers (e.g. web search)
         // into spawns; with no --mcp-config this loads zero MCP servers.
-        .arg("--strict-mcp-config");
+        .arg("--strict-mcp-config")
+        // The user-level config also sets the permission mode, and under its
+        // `auto` mode an allow rule restricts nothing: measured 2026-09-09,
+        // `Edit(**/Briefs/**)` let a write into `Project/` through with no
+        // denial recorded, and under `default` the same rule refused it and
+        // allowed the write into `Briefs/`. The mode is stated here so the
+        // folder scopes above are the boundary they claim to be, whatever
+        // the interactive config says; a run has no one to prompt, so a
+        // tool outside its rules is denied, never asked about.
+        .args(["--permission-mode", "default"]);
     if let Some(tools) = allowed_tools(&job.kind) {
         cmd.args(["--allowedTools", tools]);
     }

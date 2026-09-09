@@ -67,7 +67,10 @@ pub const KIT_SCOPE_PREFIX: &str = "kit:";
 /// the write contract and chat's search need no widening.
 pub const BRIEFS_DIR: &str = "Study Guides/Briefs";
 pub const PRESENTATIONS_DIR: &str = "Study Guides/Presentations";
-pub const PROJECT_OUTPUT: &str = "Study Guides/Project Workbook.html";
+/// The workbook's own folder: a leaf the job's `Edit` rule can name (§6),
+/// and not `Project/`, which is the owner's drafts at the class root.
+pub const WORKBOOK_DIR: &str = "Study Guides/Workbook";
+pub const PROJECT_OUTPUT: &str = "Study Guides/Workbook/Project Workbook.html";
 /// The owner's own project drafts (SPEC §4): source material like any folder.
 pub const PROJECT_DIR: &str = "Project";
 
@@ -76,9 +79,17 @@ pub fn brief_scope_id(scope: &str) -> Option<i64> {
     scope.strip_prefix(BRIEF_SCOPE_PREFIX)?.parse().ok()
 }
 
-/// The unit id a pre-read scope names — `preread:9` → 9.
+/// The division and the week a pre-read scope names — `preread:9:4` → (9, 4).
+/// Per week and not per division alone, since a Part spans several weeks
+/// and a pre-read precedes one meeting (§8.6).
+pub fn preread_scope_key(scope: &str) -> Option<(i64, i64)> {
+    let (unit, week) = scope.strip_prefix(PREREAD_SCOPE_PREFIX)?.split_once(':')?;
+    Some((unit.parse().ok()?, week.parse().ok()?))
+}
+
+/// The unit id a pre-read scope names.
 pub fn preread_scope_id(scope: &str) -> Option<i64> {
-    scope.strip_prefix(PREREAD_SCOPE_PREFIX)?.parse().ok()
+    preread_scope_key(scope).map(|(unit_id, _)| unit_id)
 }
 
 /// Which family of document a `guides` scope is, so a listing can tell the

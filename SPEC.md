@@ -361,7 +361,8 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   ├── Study Guides/                      ← APP-MANAGED: generated artifacts
 │   │   ├── Module 1.html
 │   │   ├── Semester Master.html
-│   │   ├── Project Workbook.html          ← the project workbook and its .md twin (§8.6)
+│   │   ├── Workbook/                      ← the project workbook and its .md twin (§8.6)
+│   │   │   └── Project Workbook.html
 │   │   ├── Briefs/                        ← homework briefs, <due date> — <title>.html + .md
 │   │   ├── Presentations/                 ← presentation kits, <paper>.html
 │   │   ├── Practice/                      ← generated practice exams
@@ -498,10 +499,10 @@ lecture_contributions(id INTEGER PK, class_id INTEGER FK, unit_id INTEGER FK,
 -- A practice exam's row is scoped by its file, `practice:<rel path>` (§8.3), so
 -- several exams of one scope each keep a row. The small documents (§8.6) share
 -- the table too: a homework brief `brief:<deadline id>`, the project workbook
--- `project`, a pre-read `preread:<unit id>`, a presentation kit `kit:<pdf rel
+-- `project`, a pre-read `preread:<unit id>:<week>`, a presentation kit `kit:<pdf rel
 -- path>`. The manifest is what the job was told about, widened by what its own
 -- log shows it read (§7 step 5).
-guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>' | 'practice:<path>' | 'brief:<id>' | 'project' | 'preread:<id>' | 'kit:<path>'
+guides(id INTEGER PK, class_id INTEGER FK, scope TEXT,  -- folder rel path | 'master' | 'unit:<id>' | 'session:<path>' | 'practice:<path>' | 'brief:<id>' | 'project' | 'preread:<id>:<week>' | 'kit:<path>'
        rel_path TEXT, generated_at INTEGER,
        source_manifest TEXT,               -- JSON: [{rel_path, sha256}] used for staleness
        UNIQUE(class_id, scope));
@@ -647,9 +648,19 @@ claude -p <prompt>
   boundary and both are passed:
   - Never allowed, any kind: `Bash,WebFetch,WebSearch,Task` — `Task` because a spawned
     sub-agent is a path around the parent's tool scoping.
-  - `extract`, `module_guide`, `master_guide`, `practice`, `lecture_digest`, and the small
-    documents `assignment_brief`, `project_workbook`, `presentation_kit`, `pre_read` (§8.6):
-    allow `Read,Glob,Grep,Write`.
+  - `extract`, `module_guide`, `master_guide`, `practice`: allow `Read,Glob,Grep,Write`.
+  - `lecture_digest` and the small documents (§8.6), which read untrusted material — a
+    transcript, a Canvas description, the owner's drafts, a posted deck — and each write into
+    one leaf folder under `Study Guides/`: allow `Read,Glob,Grep` and an `Edit` rule on that
+    folder alone (`Edit(**/Sessions/**)` for the digest and the pre-read, `Edit(**/Briefs/**)`,
+    `Edit(**/Workbook/**)`, `Edit(**/Presentations/**)`), so the CLI refuses a write outside it
+    before the guard has to read the diff. An `Edit` rule covers every file-editing tool,
+    `Write` included; the pattern names the leaf folder because `--allowedTools` splits on
+    spaces and `Study Guides` would arrive as two specifiers. Every spawn passes
+    `--permission-mode default`: the interactive config's `auto` mode makes an allow rule
+    inert — measured 2026-09-09, `Edit(**/Briefs/**)` under `auto` let a write into `Project/`
+    through with no denial recorded, and under `default` refused it while allowing the write
+    into `Briefs/` — and a run has no one to prompt, so a tool outside its rules is denied.
   - `sort_proposal`, `syllabus_scan`, `announcement_scan`, `notes_review`: allow
     `Read,Glob,Grep`, and additionally deny `Write,Edit,MultiEdit,NotebookEdit` (read-only is
     only real if the writes are denied). The notes review answers with its section and the
@@ -1621,7 +1632,8 @@ exists, `Rewrite · …` when stale; the shift writes one for each such row due 
 up to `shift_briefs_per_night`.
 
 **The project workbook** (`project_workbook`, scoped `project`), one per class at `Study
-Guides/Project Workbook.html` with a markdown twin. A project item is a deadline of kind
+Guides/Workbook/Project Workbook.html` with a markdown twin — its own leaf folder, so the
+job's `Edit` rule can name it (§6) without naming `Project/`, the owner's drafts. A project item is a deadline of kind
 `project`, or one of kind `assignment` whose title speaks the project's vocabulary — project,
 draft, proposal, milestone, demo, prototype, presentation, sketch, teaming, scaling, capstone,
 poster — with no homework word in it, since the syllabus scan typed Design Studio's `Draft:
@@ -1642,7 +1654,7 @@ one paragraph, talking points per figure with what it shows and does not, the me
 questioner would probe, likely questions with the answers the paper supports, and a one-slide
 summary. Its manifest is the one paper.
 
-**The pre-read** (`pre_read`, scoped `preread:<unit id>`, the light tier), one page before a
+**The pre-read** (`pre_read`, scoped `preread:<unit id>:<week>` — per meeting, since a Part spans several weeks — the light tier), one page before a
 lecture whose deck or reading posted early, at `Study Guides/Sessions/<meeting date> — Before
 class.html` with a markdown twin. A candidate is a week the course dates from today through
 seven days on whose folder holds an indexed file and no transcript; a course that publishes no
