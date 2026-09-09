@@ -963,8 +963,13 @@ pub fn enqueue_syllabus(
 
 /// SPEC §7.2: the announcement scan over a class's unread notices, one per
 /// class at a time (read-only tools).
-pub fn enqueue_announcement_scan(app: &AppHandle, class_id: i64, prompt: &str) -> Result<Option<i64>> {
-    enqueue_unique(app, "announcement_scan", Some(class_id), None, prompt, None)
+pub fn enqueue_announcement_scan(
+    app: &AppHandle,
+    class_id: i64,
+    prompt: &str,
+    payload: String,
+) -> Result<Option<i64>> {
+    enqueue_unique(app, "announcement_scan", Some(class_id), None, prompt, Some(payload))
 }
 
 /// SPEC §6: self-check asserting the active auth is the subscription. This is
@@ -1633,6 +1638,7 @@ fn run_job(
                     match crate::announcements::finalize_job(
                         &app,
                         class_id,
+                        job.payload.as_deref(),
                         result_text.as_deref().unwrap_or(""),
                     ) {
                         Ok(recorded) => summary = Some(recorded),

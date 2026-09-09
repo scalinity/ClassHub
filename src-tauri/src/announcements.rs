@@ -48,24 +48,39 @@ pub fn enqueue_scan(app: &AppHandle, class_id: i64) -> Result<Option<i64>> {
         build_prompt(conn, class_id, &today)
     })?;
     match prompt {
-        Some(prompt) => crate::jobs::enqueue_announcement_scan(app, class_id, &prompt),
+        Some((prompt, listed)) => {
+            // The notices the prompt carries ride the job, so the finalize can
+            // stamp every one of them read — an answer that leaves one out is
+            // the model saying it holds nothing, which the prompt allows.
+            let payload = serde_json::to_string(&ScanPayload { announcement_ids: listed })?;
+            crate::jobs::enqueue_announcement_scan(app, class_id, &prompt, payload)
+        }
         None => Ok(None),
     }
 }
 
-/// The prompt over the class's unread notices, or `None` with none to read.
-fn build_prompt(conn: &Connection, class_id: i64, today: &str) -> Result<Option<String>> {
+/// Carried across the job: the notices the prompt listed.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanPayload {
+    announcement_ids: Vec<i64>,
+}
+
+/// The prompt over the class's unread notices and their ids, or `None`
+/// with none to read.
+fn build_prompt(conn: &Connection, class_id: i64, today: &str) -> Result<Option<(String, Vec<i64>)>> {
     let mut stmt = conn.prepare(
-        "SELECT canvas_id, title, body, posted_at FROM announcements
+        "SELECT id, canvas_id, title, body, posted_at FROM announcements
          WHERE class_id = ?1 AND scanned_at IS NULL ORDER BY posted_at, id",
     )?;
     let unread = stmt
         .query_map([class_id], |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -95,9 +110,10 @@ fn build_prompt(conn: &Connection, class_id: i64, today: &str) -> Result<Option<
     } else {
         existing_rows.join("\n")
     };
+    let listed: Vec<i64> = unread.iter().map(|(id, ..)| *id).collect();
     let announcements = unread
         .iter()
-        .map(|(canvas_id, title, body, posted_at)| {
+        .map(|(_, canvas_id, title, body, posted_at)| {
             let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
             format!(
                 "--- canvas_id: {canvas_id} · posted {} · \"{}\"\n{}\n",
@@ -108,14 +124,15 @@ fn build_prompt(conn: &Connection, class_id: i64, today: &str) -> Result<Option<
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(Some(
+    Ok(Some((
         PROMPT_TEMPLATE
             .replace("{class}", &class_name)
             .replace("{today}", today)
             .replace("{semester}", &crate::deadlines::semester_label(today))
             .replace("{existing}", &existing)
             .replace("{announcements}", &announcements),
-    ))
+        listed,
+    )))
 }
 
 /// One entry of the job's contracted answer.
@@ -157,6 +174,9 @@ fn split_output(result_text: &str) -> Result<Vec<serde_json::Value>> {
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct ScanRecord {
     pub notices: usize,
+    /// Notices the prompt listed and the answer left out: read, with nothing
+    /// to report.
+    pub omitted: usize,
     pub proposed: usize,
     pub known: usize,
     pub todos: usize,
@@ -169,16 +189,30 @@ pub(crate) struct ScanRecord {
 /// each notice it answered for. A malformed entry costs that notice, never
 /// the scan; a notice already read, or one the class does not hold, is
 /// named and left alone.
-pub fn finalize_job(app: &AppHandle, class_id: i64, result_text: &str) -> Result<String> {
+pub fn finalize_job(
+    app: &AppHandle,
+    class_id: i64,
+    payload: Option<&str>,
+    result_text: &str,
+) -> Result<String> {
     let entries = split_output(result_text)?;
     let today = chrono::Local::now().date_naive();
-    let recorded = with_conn(app, |conn| record_entries(conn, class_id, &entries, today))?;
-    if recorded.notices == 0 && !recorded.skipped.is_empty() {
+    let listed: Vec<i64> = payload
+        .and_then(|p| serde_json::from_str::<ScanPayload>(p).ok())
+        .map(|p| p.announcement_ids)
+        .unwrap_or_default();
+    let mut recorded = with_conn(app, |conn| {
+        let mut recorded = record_entries(conn, class_id, &entries, today)?;
+        recorded.omitted = stamp_listed(conn, class_id, &listed)?;
+        Ok(recorded)
+    })?;
+    if recorded.notices == 0 && recorded.omitted == 0 && !recorded.skipped.is_empty() {
         bail!(
             "no announcement of this class was read — {}",
             recorded.skipped.join("; ")
         );
     }
+    recorded.notices += recorded.omitted;
     if recorded.proposed > 0 {
         emit_hub_change(app, "deadlineProposals");
     }
@@ -305,11 +339,26 @@ pub(crate) fn record_entries(
     Ok(out)
 }
 
-/// Whether a proposed date sits within a year or so of today — a date past
-/// that is a typo, as "9/5/2027" in a Fall 2026 course was (SPEC §1).
+/// Whether a proposed date sits within `MAX_DAYS_FROM_TODAY` of today; past
+/// that it is a typo, as "9/5/2027" in a Fall 2026 course was (SPEC §1).
 fn plausible(due_at: &str, today: NaiveDate) -> bool {
     NaiveDate::parse_from_str(due_at.get(..10).unwrap_or(""), "%Y-%m-%d")
         .is_ok_and(|d| (d - today).num_days().abs() <= MAX_DAYS_FROM_TODAY)
+}
+
+/// Stamps read every listed notice the answer left out — the model's "nothing
+/// here", which the prompt allows — so a notice is offered once and the
+/// next sync spends nothing on it again. Answers with how many.
+fn stamp_listed(conn: &Connection, class_id: i64, listed: &[i64]) -> Result<usize> {
+    let mut stamped = 0usize;
+    for id in listed {
+        stamped += conn.execute(
+            "UPDATE announcements SET scanned_at = ?1
+             WHERE id = ?2 AND class_id = ?3 AND scanned_at IS NULL",
+            params![now(), id, class_id],
+        )?;
+    }
+    Ok(stamped)
 }
 
 /// The lines of one kind under a notice, trimmed, capped, deduplicated and
@@ -443,7 +492,7 @@ mod tests {
         let recorded = record_entries(&conn, 2, &entries, today).unwrap();
         assert_eq!(
             recorded,
-            ScanRecord { notices: 1, proposed: 1, known: 1, todos: 1, changes: 1, skipped: vec![] }
+            ScanRecord { notices: 1, omitted: 0, proposed: 1, known: 1, todos: 1, changes: 1, skipped: vec![] }
         );
         let (source, title): (String, String) = conn
             .query_row(
@@ -501,15 +550,21 @@ mod tests {
         assert!(split_output(r#"{"announcements": "none"}"#).is_err());
     }
 
-    /// The prompt lists only unread notices and fills every placeholder.
+    /// The prompt lists only unread notices, names them for the job, and
+    /// fills every placeholder; a listed notice the answer leaves out is
+    /// stamped read all the same, so it is offered once.
     #[test]
     fn the_prompt_carries_the_unread_notices_alone() {
         let conn = crate::db::memory_db();
         let read = notice(&conn, 1, "1", "Read already");
         conn.execute("UPDATE announcements SET scanned_at = 1 WHERE id = ?1", [read]).unwrap();
         assert!(build_prompt(&conn, 1, "2026-09-08").unwrap().is_none());
-        notice(&conn, 1, "2", "Hipergator access");
-        let prompt = build_prompt(&conn, 1, "2026-09-08").unwrap().unwrap();
+        let unread = notice(&conn, 1, "2", "Hipergator access");
+        let (prompt, listed) = build_prompt(&conn, 1, "2026-09-08").unwrap().unwrap();
+        assert_eq!(listed, vec![unread]);
+        assert_eq!(stamp_listed(&conn, 1, &listed).unwrap(), 1);
+        assert_eq!(stamp_listed(&conn, 1, &listed).unwrap(), 0);
+        assert!(build_prompt(&conn, 1, "2026-09-08").unwrap().is_none());
         assert!(prompt.contains("canvas_id: 2"));
         assert!(!prompt.contains("Read already"));
         assert!(prompt.contains("Fall 2026"));
