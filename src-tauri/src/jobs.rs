@@ -43,7 +43,8 @@ const READ_ONLY_DISALLOWED: &str =
 
 fn disallowed_tools(kind: &str) -> &'static str {
     match kind {
-        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review" => {
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review"
+        | "card_options" => {
             READ_ONLY_DISALLOWED
         }
         _ => DISALLOWED_TOOLS,
@@ -379,7 +380,8 @@ fn allowed_tools(kind: &str) -> Option<&'static str> {
         }
         // The notes review never writes: its section is appended by the app
         // through the note write path, with the audit row a job cannot write.
-        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review" => {
+        "sort_proposal" | "syllabus_scan" | "announcement_scan" | "notes_review"
+        | "card_options" => {
             Some("Read,Glob,Grep")
         }
         _ => None, // self_check needs no tools
@@ -1030,6 +1032,18 @@ pub fn enqueue_announcement_scan(
     payload: String,
 ) -> Result<Option<i64>> {
     enqueue_unique(app, "announcement_scan", Some(class_id), None, prompt, Some(payload))
+}
+
+/// SPEC §12 — multiple-choice options for the cards that have none. Unique per
+/// class, so pressing twice or a shift step landing on a class a run is
+/// already working through does not ask for the same batch twice.
+pub fn enqueue_card_options(
+    app: &AppHandle,
+    class_id: i64,
+    prompt: &str,
+    payload: String,
+) -> Result<Option<i64>> {
+    enqueue_unique(app, "card_options", Some(class_id), None, prompt, Some(payload))
 }
 
 /// SPEC §6: self-check asserting the active auth is the subscription. This is
@@ -1705,6 +1719,19 @@ fn run_job(
                     ) {
                         Ok(recorded) => summary = Some(recorded),
                         Err(e) => demote("announcement scan finished but read no notice", e),
+                    }
+                }
+            }
+            "card_options" => {
+                if let (Some(class_id), Some(payload)) = (job.class_id, job.payload.as_deref()) {
+                    match crate::cards::finalize_job(
+                        &app,
+                        class_id,
+                        payload,
+                        result_text.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(recorded) => summary = Some(recorded),
+                        Err(e) => demote("the card options run wrote no options", e),
                     }
                 }
             }

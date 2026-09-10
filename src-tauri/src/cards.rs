@@ -52,6 +52,10 @@ pub struct CardInfo {
     #[serde(rename = "box")]
     pub box_: i64,
     pub due_on: Option<String>,
+    /// The multiple-choice options, the true one first, as the `card_options`
+    /// job wrote them (SPEC §12). `None` on a card nothing has written them
+    /// for, which the face falls back to revealing the back for.
+    pub choices: Option<Vec<String>>,
 }
 
 /// One sidecar on disk: the scope whose cards it holds, what that scope is
@@ -264,22 +268,37 @@ fn read_card(row: &rusqlite::Row<'_>, labels: &BTreeMap<String, String>) -> rusq
         topic: row.get(8)?,
         box_: row.get(9)?,
         due_on: row.get(10)?,
+        // A set that will not parse, or that lost its distractors, reads as
+        // no set at all: the face then reveals the back rather than offering
+        // a choice of one.
+        choices: row
+            .get::<_, Option<String>>(11)?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .filter(|list| list.len() >= 2),
     })
 }
 
 const CARD_COLUMNS: &str = "c.id, c.class_id, k.display_name, k.color, c.scope, c.front, c.back,
-                            c.source, c.topic, c.box, c.due_on";
+                            c.source, c.topic, c.box, c.due_on, c.choices";
 
 /// A class's cards, indexed first, by scope then by the order written.
 pub fn list_cards(conn: &Connection, class_id: i64) -> Result<Vec<CardInfo>> {
     let labels = index(conn, class_id)?;
+    // The listing browses and exports; it never offers a choice, so the
+    // options are dropped rather than sent with the true one first.
     let mut stmt = conn.prepare(&format!(
         "SELECT {CARD_COLUMNS} FROM cards c JOIN classes k ON k.id = c.class_id
          WHERE c.class_id = ?1 ORDER BY c.scope, c.id"
     ))?;
     let cards = stmt
         .query_map([class_id], |row| read_card(row, &labels))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|card| CardInfo {
+            choices: None,
+            ..card
+        })
+        .collect();
     Ok(cards)
 }
 
@@ -306,9 +325,19 @@ pub fn due_cards(conn: &Connection, today: &str, limit: usize) -> Result<Vec<Car
          WHERE c.due_on IS NULL OR c.due_on <= ?1
          ORDER BY c.due_on IS NULL, c.due_on, c.box, c.id LIMIT ?2"
     ))?;
-    let cards = stmt
+    let mut cards = stmt
         .query_map(params![today, limit as i64], |row| read_card(row, &labels))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Shuffled here rather than on the face: the stored list keeps the true
+    // option first, so serving it in that order would put the answer on the
+    // wire, and the face's index has to mean the same thing to `pick`, which
+    // reproduces this same order from the card and the day.
+    for card in &mut cards {
+        if let Some(choices) = card.choices.as_mut() {
+            let order = shuffled(choices.len(), card.id, today);
+            *choices = order.iter().map(|i| choices[*i].clone()).collect();
+        }
+    }
     Ok(cards)
 }
 
@@ -331,6 +360,55 @@ pub fn answer(app: &AppHandle, id: i64, right: bool, today: &str) -> Result<Card
     let card = with_conn(app, |conn| answer_in(conn, id, right, today))?;
     emit_hub_change(app, "cards");
     Ok(card)
+}
+
+/// What a pick was worth: whether it was the true option, which one that was,
+/// and the card as the answer scheduled it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Verdict {
+    pub right: bool,
+    /// The true option's index in the list the face was shown.
+    pub correct: usize,
+    pub card: CardInfo,
+}
+
+/// SPEC §12 — answering a card by picking one of its choices. The app marks
+/// it, not the reader: `picked` is an index into the shuffled order the face
+/// showed, and the true option is the first of the stored list, so what moves
+/// the box is what was chosen before the answer was visible.
+pub fn pick(app: &AppHandle, id: i64, picked: usize, today: &str) -> Result<Verdict> {
+    let stored = with_conn(app, |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT choices FROM cards WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?)
+    })?
+    .flatten()
+    .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+    .filter(|list| list.len() >= 2)
+    .context("this card has no options to pick from")?;
+
+    let order = shuffled(stored.len(), id, today);
+    let chosen = *order
+        .get(picked)
+        .context("that is not one of the options shown")?;
+    // The true option is stored first, wherever the shuffle put it.
+    let right = chosen == 0;
+    let correct = order
+        .iter()
+        .position(|index| *index == 0)
+        .context("the option set lost its answer")?;
+    let card = with_conn(app, |conn| answer_in(conn, id, right, today))?;
+    emit_hub_change(app, "cards");
+    Ok(Verdict {
+        right,
+        correct,
+        card,
+    })
 }
 
 /// The answer's write and the read back, in one transaction: the box moves
@@ -459,6 +537,261 @@ pub(crate) fn tag(s: &str) -> String {
     } else {
         out
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multiple choice (SPEC §12)
+
+/// How many cards a `card_options` run asks about at once. The prompt carries
+/// each card's front and back, so a batch is a few thousand tokens; small
+/// enough that one refusal costs little, large enough that the whole hub is a
+/// handful of runs rather than hundreds.
+pub const OPTIONS_BATCH: usize = 40;
+/// Longest option kept. The prompt asks for about twenty-five words; anything
+/// far past that is a distractor that gives itself away by length.
+const MAX_OPTION_CHARS: usize = 400;
+
+/// One card as the prompt states it.
+pub struct Askable {
+    pub id: i64,
+    pub front: String,
+    pub back: String,
+}
+
+/// The next batch of a class's cards with no choices yet, oldest first, so a
+/// re-run picks up where the last one stopped.
+pub fn without_choices(conn: &Connection, class_id: i64, limit: usize) -> Result<Vec<Askable>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, front, back FROM cards
+         WHERE class_id = ?1 AND choices IS NULL ORDER BY id LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![class_id, limit as i64], |row| {
+        Ok(Askable {
+            id: row.get(0)?,
+            front: row.get(1)?,
+            back: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// How many of a class's cards have choices, and how many do not.
+pub fn choice_counts(conn: &Connection, class_id: i64) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT SUM(choices IS NOT NULL), SUM(choices IS NULL) FROM cards WHERE class_id = ?1",
+        [class_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            ))
+        },
+    )?)
+}
+
+const OPTIONS_PROMPT: &str = include_str!("../prompts/card_options.md");
+
+/// Queues a run over the next batch of a class's cards with no choices.
+///
+/// The cards ride the prompt, so the run needs no file access at all — it is
+/// scoped read-only like the syllabus and announcement scans, and its answer
+/// is JSON on stdout. Refused by name when the class has nothing left to ask
+/// about, so pressing the button on a finished class says so rather than
+/// spending a run.
+pub fn run_options_job(app: &AppHandle, class_id: i64) -> Result<i64> {
+    let batch = with_conn(app, |conn| {
+        // Indexed first, so a guide written since the last run has its cards
+        // in the table before they are counted as missing.
+        index(conn, class_id)?;
+        without_choices(conn, class_id, OPTIONS_BATCH)
+    })?;
+    if batch.is_empty() {
+        bail!("every card in this class already has its options");
+    }
+    let listed = batch
+        .iter()
+        .map(|card| {
+            format!(
+                "- id {}\n  front: {}\n  back: {}",
+                card.id,
+                card.front.split_whitespace().collect::<Vec<_>>().join(" "),
+                card.back.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = OPTIONS_PROMPT.replace("{cards}", &listed);
+    let asked: Vec<i64> = batch.iter().map(|card| card.id).collect();
+    let payload = serde_json::to_string(&asked)?;
+    crate::jobs::enqueue_card_options(app, class_id, &prompt, payload)?
+        .context("a card options run for this class is already queued or running")
+}
+
+/// Records a finished run and says what it wrote, for the job's summary.
+pub fn finalize_job(
+    app: &AppHandle,
+    class_id: i64,
+    payload: &str,
+    answer: &str,
+) -> Result<String> {
+    let asked: Vec<i64> =
+        serde_json::from_str(payload).context("the run's own list of cards could not be read")?;
+    let recorded = with_conn(app, |conn| record_choices(conn, class_id, &asked, answer))?;
+    for line in &recorded.refused {
+        eprintln!("card options class {class_id}: {line}");
+    }
+    if recorded.written == 0 {
+        bail!("no option set in the answer was usable");
+    }
+    emit_hub_change(app, "cards");
+    let left = with_conn(app, |conn| choice_counts(conn, class_id))?.1;
+    Ok(format!(
+        "{} card{} answerable{}{}",
+        recorded.written,
+        if recorded.written == 1 { "" } else { "s" },
+        if recorded.refused.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} set(s) refused", recorded.refused.len())
+        },
+        if left == 0 {
+            String::new()
+        } else {
+            format!(" · {left} still to do")
+        }
+    ))
+}
+
+/// One card's option set as the model answered it, before it is trusted.
+#[derive(serde::Deserialize)]
+struct Written {
+    id: i64,
+    #[serde(rename = "true")]
+    correct: String,
+    #[serde(rename = "false")]
+    wrong: Vec<String>,
+}
+
+/// What a run's answer is worth: the sets recorded, and one line per set
+/// refused with why.
+pub struct Recorded {
+    pub written: usize,
+    pub refused: Vec<String>,
+}
+
+/// Records a `card_options` run's answer. Model output, so every set is
+/// checked before it is stored and a bad one costs itself alone (SPEC §11's
+/// rule for every reader that answers JSON).
+///
+/// A set is refused when the card is not one the run was given, when it does
+/// not carry exactly three false options, when any option is blank or absurdly
+/// long, or when two options are the same once folded — a duplicate would give
+/// the answer away by leaving three real choices, or worse, offer the true one
+/// twice.
+pub fn record_choices(
+    conn: &Connection,
+    class_id: i64,
+    asked: &[i64],
+    answer: &str,
+) -> Result<Recorded> {
+    let entries = crate::jobs::parse_entries(answer)
+        .context("the card options run did not answer with a JSON array")?;
+    let mut recorded = Recorded {
+        written: 0,
+        refused: Vec::new(),
+    };
+    for entry in entries {
+        // One malformed entry costs itself, never the run: the rest of the
+        // batch is real work already paid for.
+        let set: Written = match serde_json::from_value(entry.clone()) {
+            Ok(set) => set,
+            Err(e) => {
+                recorded.refused.push(format!("an entry could not be read: {e}"));
+                continue;
+            }
+        };
+        if !asked.contains(&set.id) {
+            recorded
+                .refused
+                .push(format!("card #{} was not in this batch", set.id));
+            continue;
+        }
+        match checked(&set) {
+            Ok(choices) => {
+                let stored = serde_json::to_string(&choices)?;
+                let took = conn.execute(
+                    "UPDATE cards SET choices = ?1 WHERE id = ?2 AND class_id = ?3",
+                    params![stored, set.id, class_id],
+                )?;
+                if took == 0 {
+                    recorded
+                        .refused
+                        .push(format!("card #{} is no longer there", set.id));
+                } else {
+                    recorded.written += 1;
+                }
+            }
+            Err(why) => recorded.refused.push(format!("card #{}: {why}", set.id)),
+        }
+    }
+    Ok(recorded)
+}
+
+/// The true option first, then the three false ones, or why the set is not
+/// usable.
+fn checked(set: &Written) -> std::result::Result<Vec<String>, String> {
+    if set.wrong.len() != 3 {
+        return Err(format!("{} false options, not three", set.wrong.len()));
+    }
+    let mut out = Vec::with_capacity(4);
+    for option in std::iter::once(&set.correct).chain(set.wrong.iter()) {
+        let text = option.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return Err("an option is blank".to_string());
+        }
+        if text.chars().count() > MAX_OPTION_CHARS {
+            return Err("an option is far longer than the rest".to_string());
+        }
+        if out.iter().any(|held: &String| same(held, &text)) {
+            return Err("two options say the same thing".to_string());
+        }
+        out.push(text);
+    }
+    Ok(out)
+}
+
+/// Whether two options would read as the same choice: case and the punctuation
+/// around them are not a difference a reader could pick between.
+fn same(a: &str, b: &str) -> bool {
+    let fold = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    fold(a) == fold(b)
+}
+
+/// The order the choices are shown in, from the card's id and the day: stable
+/// while a card is on screen and across a reload, different tomorrow, so the
+/// answer never settles into a remembered position. Returns the indices into
+/// the stored list, whose first entry is the true one.
+pub fn shuffled(count: usize, id: i64, today: &str) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    // FNV-1a over the day and the card's id, then Fisher-Yates over that —
+    // the same inputs give the same order every time. The id goes through the
+    // mixing byte by byte rather than being seeded in: two cards one apart
+    // would otherwise differ in one low bit and land on the same shuffle.
+    let mut seed = 0xcbf2_9ce4_8422_2325u64;
+    for byte in today.bytes().chain(id.to_le_bytes()) {
+        seed = (seed ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for i in (1..order.len()).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = (seed >> 33) as usize % (i + 1);
+        order.swap(i, j);
+    }
+    order
 }
 
 #[cfg(test)]
@@ -649,5 +982,91 @@ mod tests {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM cards WHERE class_id = 3", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 2);
         assert!(due_cards(&conn, "2026-09-20", 10).unwrap().iter().any(|c| c.id == mcar), "still served");
+    }
+
+    /// A set is recorded only when it is usable, and a bad one costs itself.
+    /// This is model output: three false options, none blank, none absurdly
+    /// long, none saying what another already says — a duplicate would leave
+    /// three real choices, or offer the true one twice.
+    #[test]
+    fn only_a_fair_option_set_is_recorded() {
+        let conn = crate::db::memory_db();
+        for id in 1..=6 {
+            conn.execute(
+                "INSERT INTO cards (id, class_id, scope, front, back, box)
+                 VALUES (?1, 3, 'unit:8', 'front ' || ?1, 'back ' || ?1, 1)",
+                params![id],
+            )
+            .expect("card");
+        }
+        let asked = [1, 2, 3, 4, 5, 6];
+        let answer = format!(
+            r#"[
+              {{"id": 1, "true": "the true one", "false": ["a", "b", "c"]}},
+              {{"id": 2, "true": "t", "false": ["a", "b"]}},
+              {{"id": 3, "true": "t", "false": ["a", "", "c"]}},
+              {{"id": 4, "true": "Same thing", "false": ["same thing.", "b", "c"]}},
+              {{"id": 5, "true": "{}", "false": ["a", "b", "c"]}},
+              {{"id": 99, "true": "t", "false": ["a", "b", "c"]}}
+            ]"#,
+            "x".repeat(MAX_OPTION_CHARS + 1)
+        );
+        let recorded = record_choices(&conn, 3, &asked, &answer).expect("recorded");
+        assert_eq!(recorded.written, 1, "only card 1 was fair");
+        assert_eq!(recorded.refused.len(), 5);
+        assert!(recorded.refused.iter().any(|r| r.contains("not three")), "{:?}", recorded.refused);
+        assert!(recorded.refused.iter().any(|r| r.contains("blank")), "{:?}", recorded.refused);
+        assert!(recorded.refused.iter().any(|r| r.contains("same thing")), "{:?}", recorded.refused);
+        assert!(recorded.refused.iter().any(|r| r.contains("longer")), "{:?}", recorded.refused);
+        assert!(recorded.refused.iter().any(|r| r.contains("not in this batch")), "{:?}", recorded.refused);
+
+        // The true option is stored first, whatever order it is shown in.
+        let stored: String = conn
+            .query_row("SELECT choices FROM cards WHERE id = 1", [], |r| r.get(0))
+            .expect("stored");
+        let list: Vec<String> = serde_json::from_str(&stored).expect("json");
+        assert_eq!(list[0], "the true one");
+        assert_eq!(list.len(), 4);
+
+        // And only that card counts as answerable.
+        assert_eq!(choice_counts(&conn, 3).expect("counts"), (1, 5));
+        let waiting = without_choices(&conn, 3, 10).expect("waiting");
+        assert_eq!(waiting.len(), 5);
+        assert!(waiting.iter().all(|c| c.id != 1));
+    }
+
+    /// The shuffle is a permutation, stable for a card on a day and different
+    /// on another, so the answer never settles into a remembered position.
+    #[test]
+    fn the_option_order_is_stable_for_a_day_and_moves_the_next() {
+        let today = shuffled(4, 42, "2026-09-09");
+        assert_eq!(today.len(), 4);
+        let mut seen = today.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3], "every option once");
+        assert_eq!(shuffled(4, 42, "2026-09-09"), today, "same card, same day");
+        assert_ne!(shuffled(4, 43, "2026-09-09"), today, "another card");
+        // Over a term's worth of days the true option does not sit still.
+        let places: std::collections::HashSet<usize> = (10..40)
+            .map(|day| {
+                let iso = format!("2026-09-{day:02}");
+                shuffled(4, 42, &iso).iter().position(|i| *i == 0).unwrap()
+            })
+            .collect();
+        assert!(places.len() > 1, "the answer moved between showings");
+    }
+
+    /// A pick is graded against the order the face was shown, so the index
+    /// the reader clicked means the same thing on both sides.
+    #[test]
+    fn a_pick_is_read_against_the_order_the_face_showed() {
+        let stored = ["true", "a", "b", "c"];
+        let order = shuffled(stored.len(), 7, "2026-09-09");
+        // Whatever the shuffle did, picking the position the true option
+        // landed in is the right answer, and no other position is.
+        let correct = order.iter().position(|i| *i == 0).expect("the true one");
+        for picked in 0..stored.len() {
+            assert_eq!(order[picked] == 0, picked == correct, "position {picked}");
+        }
     }
 }

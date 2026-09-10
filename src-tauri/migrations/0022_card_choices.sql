@@ -1,0 +1,19 @@
+-- SPEC §12 — the cards are answered, not self-graded.
+--
+-- Revealing the back and then judging whether you knew it is hindsight, not
+-- retrieval: the answer is on screen before the commitment is made. A card
+-- with choices asks first and marks the answer itself, so the box moves from
+-- what was picked rather than from what was claimed.
+--
+-- `choices` is a JSON array of strings with the true one FIRST; the face
+-- shuffles them per showing, so a card's answer never sits in a remembered
+-- position. The true choice is a one-line form of the answer, not the `back`
+-- itself: only six of this hub's 454 cards answer in under sixty characters
+-- and 143 run past three hundred, so offering the backs as choices would be a
+-- reading test rather than a memory one. The `back` stays, and is shown after
+-- the pick as the explanation.
+--
+-- NULL means no choices yet, and that card falls back to reveal-and-grade.
+-- The column is derived, like an extract: it is written by the `card_options`
+-- job from the card's own front and back, and losing it costs a re-run.
+ALTER TABLE cards ADD COLUMN choices TEXT;

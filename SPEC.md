@@ -438,7 +438,7 @@ files(id INTEGER PK, class_id INTEGER FK, rel_path TEXT, sha256 TEXT, size INTEG
       UNIQUE(class_id, rel_path));
 
 jobs(id INTEGER PK, kind TEXT,             -- extract|module_guide|master_guide|sort_proposal|syllabus_scan|practice|lecture_digest|
-                                           -- announcement_scan|assignment_brief|project_workbook|presentation_kit|pre_read|notes_review
+                                           -- announcement_scan|assignment_brief|project_workbook|presentation_kit|pre_read|notes_review|card_options
      class_id INTEGER NULL, scope TEXT NULL,  -- e.g. module rel path, or 'master'
      status TEXT,                          -- queued|running|succeeded|failed|cancelled
      session_id TEXT NULL,                 -- claude session id (for --resume)
@@ -535,6 +535,12 @@ cards(id INTEGER PK, class_id INTEGER FK, scope TEXT, front TEXT, back TEXT,
       source TEXT NULL, topic TEXT NULL, box INTEGER,
       due_on TEXT NULL,                    -- YYYY-MM-DD; NULL until first shown
       wrong_at INTEGER NULL,
+      -- The multiple-choice options (§12), a JSON array with the true one
+      -- FIRST; the face shuffles per showing, so the answer never settles
+      -- into a remembered position. Written by the `card_options` job from
+      -- the card's own front and back, and derived like an extract: NULL is
+      -- a card the job has yet to reach, which falls back to reveal-and-grade.
+      choices TEXT NULL,
       UNIQUE(class_id, scope, front));
 
 -- `canvas_assignment_id` is the join between a deadline, a score and the thing
@@ -695,7 +701,7 @@ claude -p <prompt>
     inert — measured 2026-09-09, `Edit(**/Briefs/**)` under `auto` let a write into `Project/`
     through with no denial recorded, and under `default` refused it while allowing the write
     into `Briefs/` — and a run has no one to prompt, so a tool outside its rules is denied.
-  - `sort_proposal`, `syllabus_scan`, `announcement_scan`, `notes_review`: allow
+  - `sort_proposal`, `syllabus_scan`, `announcement_scan`, `notes_review`, `card_options`: allow
     `Read,Glob,Grep`, and additionally deny `Write,Edit,MultiEdit,NotebookEdit` (read-only is
     only real if the writes are denied). The notes review answers with its section and the
     app appends it (§8.6): the guard fingerprints `Notes/`, and only the app can park the
@@ -1743,6 +1749,35 @@ the previous content in the audit row), with a notice whose `Undo` restores the 
 review of a note that carries the heading is refused by name, at the row and at the finalize
 alike. The shift reviews the oldest unreviewed such note, one a night.
 
+### 8.7 Card options (`card_options` job)
+
+A card is answered by picking, not by self-grading (§12), and the options are what the guides
+and digests do not write. This job writes them: a batch of forty of one class's cards that
+have none, each with its front and its back in the prompt, answering one true option and three
+false ones per card as strict JSON on stdout.
+
+The light tier, and read-only — it needs no file access at all, since the cards ride the
+prompt, so it is scoped `Read,Glob,Grep` with the writes denied like the syllabus and
+announcement scans. Measured 2026-09-09 on Fundamentals: Sonnet at medium wrote 32 cards in
+79 seconds for $0.24, where Opus at `xhigh` took 193 seconds and $0.68 for 40 — about
+three-quarters of a cent a card, so the hub's 454 are a few dollars and a dozen runs. One run
+per class at a time; `Write the options` in the Cards section starts one, and a class with
+nothing left is refused by name.
+
+**What makes an option set fair** is the whole of the prompt's contract: the true option is a
+one-line form of the back rather than the back itself, because only six of this hub's cards
+answer in under sixty characters and 143 run past three hundred — offering the backs would be
+a reading test. A false option answers the same question wrongly, in the same register and at
+the same rough length, drawn from the confusions the material invites: the neighbouring term,
+the inverted direction of a claim, the right idea at the wrong stage. Never absurd, never
+"all of the above", never arguably true. A card the model cannot write a fair set for is left
+out of the answer rather than filled with weak options, and stays as it is.
+
+Every set is checked before it is stored, and a bad one costs itself alone: exactly three
+false options, none blank, none far longer than the rest, and no two saying the same thing
+once case and punctuation are folded away — a duplicate would leave three real choices, or
+offer the true one twice. The refusals are counted in the job's summary and named on stderr.
+
 ## 9. Agent chat (direct Anthropic API)
 
 - **Transport**: Rust `reqwest` streaming SSE to `POST /v1/messages`, `stream: true`.
@@ -2142,9 +2177,19 @@ and apply it. Non-negotiable per project owner.
   sentence and `Sync Canvas`. Then **Ten cards**: the ten cards due soonest across the
   classes — the ones scheduled and due first, so a card missed yesterday comes back ahead
   of the never-shown backlog — one at a time on a card in its class's wash: the class and
-  the document it came from in meta, the front in the reading role, `Show the back`, then
-  the back with its citation and `Right` / `Wrong`; the count (`3 of 10`) counting the
-  day's answers, the day's ten holding still while they are worked through (a focus of the
+  the document it came from in meta, the front in the reading role, and **the card's four
+  options, one of which is picked**. The app marks the pick, so the box moves from what was
+  chosen rather than from a claim: revealing the answer and then judging whether you knew it
+  is hindsight, and the whole point is that the commitment comes first. The picked option
+  takes a ✓ in the class's own colour when it was right and a ✕ in the destructive colour
+  when it was not, the true one always marked, each glyph beside a word only a screen reader
+  hears so the state is never colour alone; then the card's full answer appears beneath as
+  the explanation, with its citation, and `Next card`. A card the `card_options` job has not
+  reached keeps the older face — `Show the back`, then `Right` / `Wrong` — so the deck works
+  while the options are being written and a card no fair set could be made for stays
+  answerable. Either way a line under the heading says what the answer did (`Right · box 2 of
+  3 · back tomorrow`), fading in on each one; the count (`3 of 10`) counts the
+  day's answers, the day's ten hold still while they are worked through (a focus of the
   window does not refetch them), `No cards due today` or `Done for today · 7 right, 3
   wrong` when the face is empty; the
   This week schedule grid with the next class beside its heading; Due in the next 7 days as
@@ -2202,7 +2247,8 @@ and apply it. Non-negotiable per project owner.
   files and the corpus notes' sidecars, a file no row claims left out, a class whose
   folder is not there refused rather than read as one whose sidecars are all gone, and a
   read that finds every sidecar as it was writing nothing — lists one row per document
-  with its count and offers `Export for Anki`, which writes `Study Guides/Cards/<class>.tsv` — front,
+  with its count and offers `Write the options`, which queues a `card_options` run over the
+  next batch of the class's cards that have none (§8.7), and `Export for Anki`, which writes `Study Guides/Cards/<class>.tsv` — front,
   back, tags (ClassHub, the class, the document), opening with Anki's own header lines
   (`#separator:tab`, `#html:true`, `#tags column:3`) so the import needs no dialog settings,
   a field holding a tab, a line break or a quote quoted with its quotes doubled — says where
@@ -2350,7 +2396,7 @@ and apply it. Non-negotiable per project owner.
   renames that folder: a hand-picked name is not worth a second database.
 - Tests (`cargo test`) cover the pure functions where a bug is silent: date validation,
   the streamed-escape decoder, the job-output array and object parsers, the HTML stripper,
-  the source fingerprint diff, the caption parser and cue merger (§7.1 — a transcript
+  the source fingerprint diff, the card option set's checks — three false options, none blank, none far longer, none saying what another says — and the shuffle's permutation, its stability for a card on a day and its movement the next (§8.7, §12 — an option set that gives itself away teaches nothing, and an answer that sits still is remembered by position), the caption parser and cue merger (§7.1 — a transcript
   shredded into fake speakers, or left unmerged, fails quietly and downstream), and the
   current-division resolution against the seeded syllabi (§8.5 — a wrong week on a card is
   silent), a division's identity across a rescan (§7.2 — a forked row and a shifted week

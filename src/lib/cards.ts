@@ -23,6 +23,31 @@ export interface CardInfo {
   box: number;
   /** YYYY-MM-DD; null until first shown, which is due now. */
   dueOn: string | null;
+  /**
+   * The multiple-choice options in the order to show them (SPEC §12), or null
+   * on a card nothing has written them for, which falls back to revealing the
+   * back. Which one is true is never sent — the backend marks the pick.
+   */
+  choices: string[] | null;
+}
+
+/** What a pick was worth: the app's verdict, not the reader's. */
+export interface Verdict {
+  right: boolean;
+  /** Which of the options shown was the true one. */
+  correct: number;
+  /** The card as the answer scheduled it. */
+  card: CardInfo;
+}
+
+/** Answers a card by picking one of the options it was shown. */
+export function pickCard(id: number, picked: number): Promise<Verdict> {
+  return invoke<Verdict>("pick_card", { id, picked, today: todayIso() });
+}
+
+/** Queues a run that writes options for the class's cards that have none. */
+export function runCardOptions(classId: number): Promise<number> {
+  return invoke<number>("run_card_options", { classId });
 }
 
 /** The ten cards due soonest across the classes. */

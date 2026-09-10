@@ -7071,3 +7071,96 @@ all, grouped by concern. What future sessions should know:
 - `rusqlite`'s `query_map` is lazy, so `find_map` over it stops reading at the
   first row that answers; a `LIMIT` exists to bound the work, and where the
   walk stops on its own the limit only bounds the correctness.
+
+## Cards that are answered, not self-graded (2026-09-09)
+
+A card was revealed and then self-graded: `Show the back`, read it, then
+`Right` or `Wrong`. That is hindsight rather than retrieval — the answer is on
+screen before the commitment is made — and the owner's report was the honest
+version of it: "weighing whether or not I knew the answer after literally
+seeing it". A card now offers four options and the app marks the pick.
+
+### What the card data said about the design
+
+Read before anything was written, and it settled the shape:
+
+| answer length | cards |
+| --- | --- |
+| under 60 characters | 6 |
+| 60–150 | 142 |
+| 150–300 | 163 |
+| over 300 | 143 |
+
+So these are explanation cards, not fact cards. Two consequences. Offering the
+backs as the four options would be a reading test, not a memory one — hence a
+one-line true option written alongside three false ones, with the back kept as
+the explanation shown after the pick. And distractors cannot be drawn from
+sibling cards' backs, which was the free local option considered first: a
+sibling's back answers a *different question*, so the true one is spotted
+without knowing anything and the card teaches nothing. Good options have to be
+written for the question, which means a job.
+
+### What was built
+
+- **Migration `0022`**: `cards.choices`, a JSON array with the true option
+  first. Derived, like an extract: NULL is a card the job has not reached.
+- **`card_options`** (SPEC §8.7): a light-tier, read-only job — the cards ride
+  the prompt, so it needs no file access — over a batch of forty of one
+  class's cards without options. `cards::run_options_job`, `finalize_job`,
+  `record_choices` with `checked`, `without_choices`, `choice_counts`, and
+  `prompts/card_options.md`.
+- **`cards::pick`** and the `pick_card` command: the face sends the index it
+  showed, `shuffled` reproduces the order from the card and the day, and the
+  true option's stored position decides. The reader never sends a verdict.
+- **`shuffled`**: FNV-1a over the day and the card id, then Fisher–Yates. The
+  id is folded byte by byte rather than seeded in — two cards one apart differ
+  in one low bit and landed on the same permutation when it was.
+- **The face** (`TenCards.tsx`): a `Choices` component owning pick → verdict →
+  explanation → `Next card`. A card without options keeps the old face, so the
+  deck works while the options are written.
+- Settings lists `Card options` among the per-kind pairs.
+
+### Verified
+
+- `cargo test`: 375 pass, three new — a fair set recorded and five bad ones
+  refused by name, the shuffle's permutation and its movement across days, and
+  a pick read against the order shown. `npx tsc --noEmit` clean.
+- **Two real runs on Fundamentals.** Opus at `xhigh` (the global pair): 40
+  cards, 193 s, $0.68, none refused. Sonnet at medium: 32 cards, 79 s, $0.24 —
+  two-fifths the cost and a third the time, with the quality holding, so the
+  kind's pair is set to the light tier like the other scans. About
+  three-quarters of a cent a card; the hub's 454 are a few dollars.
+- **The options are real distractors.** A sample: for "why does the source of
+  a system's behavior matter for evidence", one false option *inverts* the
+  claim — "a rule-based system is inspectable only through system-level
+  testing, while a learned model exposes its logic directly" — so the
+  direction has to be known. For the Jupyter markdown cell, one false option
+  changes only Colab's name for it. Neither is guessable by shape.
+- **On the dev build**: a wrong pick took ✕ in the destructive colour with the
+  true one marked ✓ in the class colour and the rest dimmed; a right pick took
+  ✓ alone; both then showed the card's full answer, its `00:15` citation and
+  `Next card`; the receipt read `Right · box 2 of 3 · back tomorrow`.
+- 72 of 454 cards now carry options. The four cards answered while testing
+  were restored to box one with no due date; the one card marked wrong earlier
+  in the day was left as it was.
+
+### Left as it is
+
+- The remaining 382 cards need `Write the options` pressed once per batch per
+  class. The idle shift is the natural home for that and does not run it yet.
+- Guides and digests still write their cards sidecars without options, so a
+  new guide's cards arrive needing a run. One mechanism rather than two was
+  the deliberate choice: the job covers the backfill and every future card.
+- No colour was invented. The class accent marks the true option and the
+  destructive colour a wrong pick — the two the app already uses for "this is
+  the thing" and "this went wrong" — each with a glyph so the state is never
+  colour alone.
+
+### Gotchas
+
+- `aria-pressed` on an option makes it a toggle in the accessibility tree, and
+  the driver reads it as `AXCheckBox`. A choice made once is not a toggle; the
+  mark carries a screen-reader-only word instead.
+- The stored order is the true one first, so `due_cards` shuffles before it
+  serves and `list_cards` drops the options entirely — the listing browses and
+  exports, and has no business carrying the answer.

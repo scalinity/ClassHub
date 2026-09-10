@@ -263,6 +263,26 @@ fn answer_card(
     cards::answer(&app, id, right, &today).map_err(|e| format!("{e:#}"))
 }
 
+/// SPEC §12 — answering a card by picking one of its options. `picked` is an
+/// index into the shuffled order the face showed; the app decides whether it
+/// was right.
+#[tauri::command(async)]
+fn pick_card(
+    app: tauri::AppHandle,
+    id: i64,
+    picked: usize,
+    today: String,
+) -> Result<cards::Verdict, String> {
+    cards::pick(&app, id, picked, &today).map_err(|e| format!("{e:#}"))
+}
+
+/// Queues a run that writes multiple-choice options for the class's cards
+/// that have none (SPEC §12).
+#[tauri::command(async)]
+fn run_card_options(app: tauri::AppHandle, class_id: i64) -> Result<i64, String> {
+    cards::run_options_job(&app, class_id).map_err(|e| format!("{e:#}"))
+}
+
 /// A class's cards, indexed from its sidecars on the way.
 #[tauri::command(async)]
 fn list_cards(state: tauri::State<Db>, class_id: i64) -> Result<Vec<cards::CardInfo>, String> {
@@ -1201,6 +1221,8 @@ pub fn run() {
             today_summary,
             due_cards,
             answer_card,
+            pick_card,
+            run_card_options,
             list_cards,
             export_cards,
             write_brief,

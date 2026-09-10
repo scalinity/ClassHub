@@ -2,7 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { SectionHeading } from "@/components/SectionHeading";
-import { exportCards, listCards, type CardInfo } from "@/lib/cards";
+import {
+  exportCards,
+  listCards,
+  runCardOptions,
+  type CardInfo,
+} from "@/lib/cards";
 import { revealInFinder } from "@/lib/materials";
 import { buttonText, buttonTextMuted, errorLine, meta, row } from "@/lib/styles";
 
@@ -27,6 +32,8 @@ export function CardsSection({ classId }: { classId: number }) {
   const [exported, setExported] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [queued, setQueued] = useState(false);
+  const [optionsJob, setOptionsJob] = useState<number | null>(null);
   if (loadError) {
     return (
       <section id="cards" className="mt-14 scroll-mt-20" aria-label="Cards">
@@ -44,6 +51,16 @@ export function CardsSection({ classId }: { classId: number }) {
     group.count += 1;
     groups.set(card.scope, group);
   }
+  const writeOptions = () => {
+    setQueued(true);
+    setError(null);
+    runCardOptions(classId)
+      .then((jobId) => setOptionsJob(jobId))
+      .catch((e) => {
+        setError(String(e));
+        setQueued(false);
+      });
+  };
   const run = () => {
     setBusy(true);
     setError(null);
@@ -65,6 +82,18 @@ export function CardsSection({ classId }: { classId: number }) {
         count={cards.length === 1 ? "1 card" : `${cards.length} cards`}
         actions={
           <>
+            {/* The deck is answered by picking, so a card with no options has
+                to fall back to self-grading — this is what fills them in, a
+                batch a run on the subscription. */}
+            <button
+              type="button"
+              disabled={queued}
+              title="Writes multiple-choice options for this class's cards, so they are answered rather than self-graded"
+              onClick={writeOptions}
+              className={buttonTextMuted}
+            >
+              {queued ? "Writing options…" : "Write the options"}
+            </button>
             {exported !== null && (
               <button
                 type="button"
@@ -86,7 +115,13 @@ export function CardsSection({ classId }: { classId: number }) {
           </>
         }
       >
-        {error && <p className={errorLine}>Not exported: {error}</p>}
+        {error && <p className={errorLine}>{error}</p>}
+        {optionsJob !== null && (
+          <p className={`mt-3 ${meta}`}>
+            Job #{optionsJob} is writing options for the cards that have none. The
+            Job Center says when it lands.
+          </p>
+        )}
         {exported !== null && (
           <p className={`mt-3 ${meta}`}>
             Written to {exported} · import it in Anki; a later import adds what is new.
