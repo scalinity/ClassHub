@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { SectionHeading } from "@/components/SectionHeading";
 import { answerCard, dueCardsQuery } from "@/lib/cards";
 import { CLASS_ACCENTS } from "@/lib/classes";
+import { daysUntil } from "@/lib/schedule";
 import {
   buttonText,
   buttonTextMuted,
@@ -12,6 +13,19 @@ import {
   readingText,
   washCard,
 } from "@/lib/styles";
+
+/**
+ * When an answered card comes back, in the words the receipt uses. Read off
+ * the due date the answer returned rather than recomputed from the box, so
+ * the line cannot drift from the schedule the card actually got.
+ */
+function backIn(dueOn: string | null): string {
+  if (dueOn === null) return "back soon";
+  const days = daysUntil(dueOn);
+  if (days <= 0) return "back today";
+  if (days === 1) return "back tomorrow";
+  return `back in ${days} days`;
+}
 
 /**
  * SPEC §12 — Ten cards: the ten due soonest across the classes, one at a
@@ -30,6 +44,15 @@ export function TenCards() {
   const [shown, setShown] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
+  // What the last answer did, in the words the button used. The card the
+  // reader judged is gone by the time they can look for it, so without this
+  // the only sign a click landed was a different card being there — which
+  // reads as nothing having happened at all.
+  const [receipt, setReceipt] = useState<{
+    right: boolean;
+    box: number;
+    back: string;
+  } | null>(null);
   if (error) {
     return <p className={`${errorLine} mt-12`}>The cards didn't load: {String(error)}</p>;
   }
@@ -47,8 +70,9 @@ export function TenCards() {
     setBusy(true);
     setRefused(null);
     answerCard(id, wasRight)
-      .then(() => {
+      .then((scheduled) => {
         setAnswered((prev) => new Map(prev).set(id, wasRight));
+        setReceipt({ right: wasRight, box: scheduled.box, back: backIn(scheduled.dueOn) });
         setShown(null);
         setBusy(false);
       })
@@ -64,7 +88,24 @@ export function TenCards() {
         title="Ten cards"
         count={total === 0 ? undefined : `${done} of ${total}`}
       >
-        {refused && <p className={errorLine}>Not recorded: {refused}</p>}
+        {/* One live region, so the announcement is made by a child arriving
+            inside a parent that stays — a region that mounts with its own
+            text is not reliably read out. */}
+        <div aria-live="polite">
+          {refused !== null && <p className={errorLine}>Not recorded: {refused}</p>}
+          {/* Keyed on the count, so a second `Right` in a row fades in again
+              rather than sitting there looking like the first one. Dropped on
+              the last card, where the day's tally says the same thing. */}
+          {refused === null && receipt !== null && card !== null && (
+            <p
+              key={done}
+              className={`mt-1.5 ${meta} animate-in fade-in duration-150 motion-reduce:animate-none`}
+            >
+              {receipt.right ? "Right" : "Wrong"} · box {receipt.box} of 3 ·{" "}
+              {receipt.back}
+            </p>
+          )}
+        </div>
       </SectionHeading>
       {card === null ? (
         <p className={`mt-3 ${readingText} text-muted-foreground`}>
@@ -73,9 +114,14 @@ export function TenCards() {
             : `Done for today · ${right} right, ${done - right} wrong. The ones missed come back tomorrow.`}
         </p>
       ) : (
+        // Keyed on the card, so answering one remounts the face and the next
+        // rises into place instead of the text simply being different. The
+        // motion is the app's own (SPEC §12): it answers the click and stops
+        // under reduced motion.
         <article
+          key={card.id}
           style={{ "--accent": CLASS_ACCENTS[card.classColor] ?? "var(--class-blue)" } as CSSProperties}
-          className={`${washCard} mt-4`}
+          className={`${washCard} mt-4 animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none`}
           aria-label={`Card ${done + 1} of ${total}`}
         >
           <p className={`flex flex-wrap items-baseline gap-x-2 ${meta}`}>
@@ -93,7 +139,10 @@ export function TenCards() {
               {card.source && (
                 <p className="mt-2 text-fine text-muted-foreground/70">{card.source}</p>
               )}
-              <div className="mt-5 -ml-2 flex items-center gap-1">
+              {/* Four pixels apart, these were one slip from recording the
+                  opposite of what was meant, on a control pressed ten times a
+                  day and never confirmed. */}
+              <div className="mt-5 -ml-2 flex items-center gap-4">
                 <button
                   type="button"
                   disabled={busy}
