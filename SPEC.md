@@ -372,7 +372,8 @@ designated locations below. The AIBHS root path is configurable (default `~/Docu
 │   ├── Notes/                             ← APP-MANAGED: per-class markdown notes; one
 │   │                                         titled for a meeting's date is that meeting's
 │   │                                         note, and gains `## Against the room` (§8.6)
-│   ├── _Inbox/                            ← APP-MANAGED: drop-to-sort staging
+│   ├── _Inbox/                            ← APP-MANAGED: drop-to-sort staging; a dropped
+│   │   └── Week 4 Coding Material/           folder is staged whole and keeps its shape
 │   └── .classhub/
 │       ├── extracts/                      ← APP-MANAGED: hidden extraction cache,
 │       │   ├── Module 1/Slides/Biostatistics_Module1_Slides_class2.pptx.md
@@ -1949,7 +1950,22 @@ contains it.
 ## 10. Drop-to-sort (propose-and-confirm)
 
 1. Files dropped onto a class workspace (Tauri `onDragDrop`) are **copied** into
-   `<Class>/_Inbox/` (originals untouched).
+   `<Class>/_Inbox/` (originals untouched). A dropped folder is copied whole, under a
+   free name of its own and with its structure kept — `_Inbox/Week 4 Coding Material/…`
+   — because the grouping is the professor's and the folder's name is often the only
+   thing that says which week the material is for. Its files are staged by the walk's
+   rule (no dot-entries, no symlinks), and each is an inbox file named by its path
+   inside the inbox, which is what the queue, the prompt and a destination all carry; a
+   folder holding no file is reported rather than staged as an empty shell, and an inbox
+   folder is removed once the last file under it has been filed. Where the folder's name
+   reads a week the course declares — the reading step 7 takes for a file's name, the
+   week in it and then a module where the course reads its modules as weeks, since a
+   folder arriving from outside is material the reader gathered rather than the course's
+   own module folder (§8.3) — every file under it is carded `by_name` into that week
+   folder under the folder's own name, before any job is asked to guess. Those cards are
+   a record a sort job leaves alone (step 2), so a folder that files by name costs
+   nothing and `Approve all N` files the set in one batch under one `Undo`; a file whose
+   destination a card cannot take is left to the sort job.
 2. A `sort_proposal` job (read-only tools) receives the inbox listing + the class folder tree
    and returns strict JSON on stdout:
    `[{file, destination_rel_path, create_folders: [], reasoning, confidence: high|medium|low}]`.
@@ -1976,8 +1992,9 @@ contains it.
    file, and, on a course whose divisions are weeks and that declares no numbered module, a
    file whose name carries a module (`Biostatistics_Module3_Slides_class.pptx`): such a
    course — Biostatistics, Fundamentals — numbers its Canvas `Module N` pages by week and
-   names its decks for them, so its Module 3 is its Week 3. A folder named for a module is a
-   module's folder (§8.3) and is not read so. The click is the move: the file goes into
+   names its decks for them, so its Module 3 is its Week 3. A folder in the tree named for a
+   module is the course's own module folder (§8.3) and is not read so; a dropped one is
+   (step 1). The click is the move: the file goes into
    `Weeks/<week folder>/` with an approved `by_name` row for the record, a `sort.move` audit
    row whose reason names the reading and the division that reads the folder, and a notice
    whose `Undo` puts it back and offers the row again (§6); a folder's click moves every

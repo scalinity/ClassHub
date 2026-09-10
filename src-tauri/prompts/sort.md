@@ -22,6 +22,12 @@ How to decide:
 - Filenames carry most of the signal — module/week numbers, "slides", "reading",
   "homework", file extensions. The existing tree shows this class's conventions;
   follow them rather than inventing a parallel scheme.
+- An inbox path with a folder in it — `_Inbox/Week 4 Coding Material/lab.ipynb` — was
+  dropped as that folder, and the folder is a grouping worth keeping: propose the whole
+  set into one destination, each file under the folder's own name
+  (`.../Week 4 Coding Material/lab.ipynb`), unless the files plainly belong apart. The
+  folder name is signal too, and often the strongest one about which week the material
+  is for.
 - **Name folders from the shared vocabulary above.** These classes are one library and
   should read like one: the same kind of material belongs under the same folder name in
   every class, so that looking for readings means looking in the same place each time.

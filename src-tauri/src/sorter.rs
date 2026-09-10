@@ -31,6 +31,8 @@ const PROMPT_TEMPLATE: &str = include_str!("../prompts/sort.md");
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboxFile {
+    /// Inbox-relative, so a file dropped inside a folder carries that folder:
+    /// `Week 4 Coding Material/lab.ipynb`. A loose drop is a bare name.
     pub name: String,
     pub size: i64,
     /// The user dismissed this file's proposal ("leave in inbox") and no new
@@ -87,19 +89,34 @@ pub struct SortState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StageResult {
+    /// Inbox-relative paths, a dropped folder's own name included.
     pub staged: Vec<String>,
-    pub skipped_folders: usize,
     /// Per-file staging failures ("name: reason") — the batch survives them.
     pub failed: Vec<String>,
-    /// The auto-enqueued sort job; None when one was already queued/running.
+    /// The auto-enqueued sort job; None when one was already queued/running,
+    /// and none when every staged file already has a card by name.
     pub job_id: Option<i64>,
+}
+
+/// What a drop put in the inbox, on the way to the rows a staged batch writes.
+#[derive(Default)]
+struct Staged {
+    /// Every staged file, inbox-relative — what the audit row lists and the
+    /// sort job reads, a folder's files and a loose drop's alike.
+    files: Vec<String>,
+    /// One entry per dropped folder: its name in the inbox and the files
+    /// staged under it, which is what the by-name reading files (`folder_cards`).
+    folders: Vec<(String, Vec<String>)>,
+    failed: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Staging (SPEC §10 step 1)
 
 /// Copies dropped files into `<Class>/_Inbox/` — originals untouched — and
-/// enqueues a sort job over the inbox unless one is already active.
+/// enqueues a sort job over the inbox unless one is already active. A dropped
+/// folder lands whole, its structure kept (`stage_folder`), and its name is
+/// read for a week before any job is asked to guess (`folder_cards`).
 pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<StageResult> {
     let class_dir = with_conn(app, |conn| crate::scanner::class_dir(conn, class_id))?;
     if !class_dir.is_dir() {
@@ -108,50 +125,8 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     let inbox = class_dir.join(INBOX_DIR);
     fs::create_dir_all(&inbox)?;
 
-    // A drop is a batch: one bad member costs itself, never the rest, and
-    // whatever staged is always announced and sorted.
-    let mut staged = Vec::new();
-    let mut skipped_folders = 0usize;
-    let mut failed = Vec::new();
-    for raw in paths {
-        let path = PathBuf::from(raw);
-        let name = match path.file_name() {
-            Some(name) => name.to_string_lossy().into_owned(),
-            None => {
-                failed.push(format!("{raw}: no file name"));
-                continue;
-            }
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        // fs::metadata resolves symlinks, so a link to a folder counts as a
-        // folder skip instead of failing the copy below.
-        let meta = match fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                failed.push(format!("{name}: {e}"));
-                continue;
-            }
-        };
-        if meta.is_dir() {
-            // Staging stays predictable: files only, and the skip is surfaced.
-            skipped_folders += 1;
-            continue;
-        }
-        let target = free_slot(&inbox, &name);
-        match fs::copy(&path, &target) {
-            Ok(_) => staged.push(
-                target
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            Err(e) => failed.push(format!("{name}: {e}")),
-        }
-    }
-    if staged.is_empty() && skipped_folders == 0 && failed.is_empty() {
+    let staged = stage_into_inbox(&inbox, paths);
+    if staged.files.is_empty() && staged.failed.is_empty() {
         bail!("nothing was staged");
     }
 
@@ -162,14 +137,15 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
     //
     // The inbox sits inside the write-scope guard's walk (SPEC §6), so a drop
     // during a running job is a change the guard would pin on the job; the
-    // `sort.staged` row is how it tells the app's own writes apart. Both
+    // `sort.staged` row is how it tells the app's own writes apart. All the
     // writes land as one transaction, and a failure is logged rather than
     // propagated: the files are on disk by now, and failing the drop over a
     // finished copy would earn a duplicate on the retry (the same reasoning
     // `lectures::add` states for its own row).
-    if !staged.is_empty() {
+    if !staged.files.is_empty() {
         let recorded = with_conn(app, |conn| {
             let rel_paths: Vec<String> = staged
+                .files
                 .iter()
                 .map(|name| format!("{INBOX_DIR}/{name}"))
                 .collect();
@@ -186,26 +162,171 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
                 "sort.staged",
                 json!({ "classId": class_id, "staged": rel_paths }),
             )?;
+            for (folder, files) in &staged.folders {
+                folder_cards(&tx, class_id, &class_dir, folder, files)?;
+            }
             tx.commit()?;
             Ok(())
         });
         if let Err(e) = recorded {
-            eprintln!("class {class_id}: recording a drop of {} file(s) failed: {e:#}", staged.len());
+            eprintln!(
+                "class {class_id}: recording a drop of {} file(s) failed: {e:#}",
+                staged.files.len()
+            );
         }
     }
 
-    let job_id = if staged.is_empty() {
+    // Whatever a folder's name already answered for is out of the job's scope
+    // (`recorded_placements`), so a folder that files by name costs nothing;
+    // a drop with anything left over still gets its run.
+    let job_id = if staged.files.is_empty() {
         None
     } else {
         enqueue_sort_job(app, class_id)?
     };
     emit_hub_change(app, "proposals"); // unproposed inbox files count on the card badge
     Ok(StageResult {
-        staged,
-        skipped_folders,
-        failed,
+        staged: staged.files,
+        failed: staged.failed,
         job_id,
     })
+}
+
+/// The copying half of a drop, over an inbox that already exists: no
+/// `AppHandle`, so the rule is testable against a bare folder.
+///
+/// A drop is a batch — one bad member costs itself, never the rest, and
+/// whatever staged is always announced and sorted.
+fn stage_into_inbox(inbox: &Path, paths: &[String]) -> Staged {
+    let mut staged = Staged::default();
+    for raw in paths {
+        let path = PathBuf::from(raw);
+        let name = match path.file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => {
+                staged.failed.push(format!("{raw}: no file name"));
+                continue;
+            }
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        // fs::metadata resolves symlinks, so a link to a folder is staged as
+        // the folder it points at rather than failing the copy below.
+        let meta = match fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                staged.failed.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        if meta.is_dir() {
+            stage_folder(inbox, &path, &name, &mut staged);
+            continue;
+        }
+        let target = free_slot(inbox, &name);
+        match fs::copy(&path, &target) {
+            Ok(_) => staged.files.push(slot_name(&target)),
+            Err(e) => staged.failed.push(format!("{name}: {e}")),
+        }
+    }
+    staged
+}
+
+/// A dropped folder is copied whole, under a free name of its own and with
+/// its structure kept, because the grouping is the professor's and the
+/// folder's name is often the only thing that says which week the material
+/// belongs to. Its files are staged by the scanner's rule — no dot-entries,
+/// no symlinks (`collect_files`) — and each keeps its path inside the folder,
+/// so a destination is that folder's name in the class tree.
+///
+/// A folder holding no file is reported rather than staged: an empty shell in
+/// the inbox is something the queue never shows and nothing clears.
+fn stage_folder(inbox: &Path, source: &Path, name: &str, staged: &mut Staged) {
+    let mut inside = Vec::new();
+    if let Err(e) = collect_files(source, "", &mut inside) {
+        staged.failed.push(format!("{name}: {e:#}"));
+        return;
+    }
+    if inside.is_empty() {
+        staged.failed.push(format!("{name}: holds no file"));
+        return;
+    }
+    let root = free_dir_slot(inbox, name);
+    let root_name = slot_name(&root);
+    let mut mine = Vec::new();
+    for rel in &inside {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                staged.failed.push(format!("{root_name}/{rel}: {e}"));
+                continue;
+            }
+        }
+        match fs::copy(source.join(rel), &target) {
+            Ok(_) => mine.push(format!("{root_name}/{rel}")),
+            Err(e) => staged.failed.push(format!("{root_name}/{rel}: {e}")),
+        }
+    }
+    if mine.is_empty() {
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+    staged.files.extend(mine.iter().cloned());
+    staged.folders.push((root_name, mine));
+}
+
+/// A dropped folder whose name carries a week the course declares files by
+/// that name: one `by_name` card per file under it, each to the folder's own
+/// name inside the week folder, exactly where a folder's row in Materials
+/// files its contents (SPEC §10). The reading is the one a file's name gets —
+/// the week in it, else the module where the course reads its modules as weeks
+/// — because a folder that arrives from outside is material the reader
+/// gathered, not the course's own module folder in the tree (§8.3).
+///
+/// Nothing is refused here: `free_dir_slot` named the folder, so no card can
+/// already hold one of these sources, and a destination that fails
+/// `validate_dest` is simply not carded, which leaves that file to the sort
+/// job. A destination another pending card claims is left to the approval,
+/// which re-runs the same check and names the card it could not move.
+fn folder_cards(
+    conn: &Connection,
+    class_id: i64,
+    class_dir: &Path,
+    folder: &str,
+    files: &[String],
+) -> Result<()> {
+    let modules_are_weeks = crate::units::modules_read_as_weeks(conn, class_id)?;
+    let Some((week, reading)) = crate::units::named_week_reading(folder, modules_are_weeks) else {
+        return Ok(());
+    };
+    let Some(slot) = crate::units::slot_for_week(conn, class_id, week)? else {
+        return Ok(());
+    };
+    let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+    let reasoning = week_reason(
+        &folder_reading_words(week, reading),
+        &folder_rel,
+        &slot.unit_name,
+    );
+    for rel in files {
+        // `rel` carries the folder, so the destination keeps it too.
+        let source_rel = format!("{INBOX_DIR}/{rel}");
+        let dest_rel = format!("{folder_rel}/{rel}");
+        if validate_dest(class_dir, &source_rel, &dest_rel).is_err() {
+            continue;
+        }
+        upsert_proposal(
+            conn,
+            class_id,
+            "by_name",
+            &source_rel,
+            &dest_rel,
+            &reasoning,
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// `name.pdf` → `name (2).pdf` when the folder already holds that name.
@@ -215,14 +336,25 @@ pub fn stage_files(app: &AppHandle, class_id: i64, paths: &[String]) -> Result<S
 /// `beside_existing` asks the same question of a week folder, where the answer
 /// is a proposed destination that approval re-checks before any rename.
 pub(crate) fn free_slot(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    free_named(dir, name, stem, &ext)
+}
+
+/// `free_slot` for a dropped folder, whose name has no extension to preserve:
+/// a second drop of `Week 4.1 Material` earns `Week 4.1 Material (2)` rather
+/// than a suffix pushed into the middle of its own name.
+fn free_dir_slot(dir: &Path, name: &str) -> PathBuf {
+    free_named(dir, name, name, "")
+}
+
+fn free_named(dir: &Path, name: &str, stem: &str, ext: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;
     }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
-        _ => (name.to_string(), String::new()),
-    };
     let mut n = 2;
     loop {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
@@ -231,6 +363,11 @@ pub(crate) fn free_slot(dir: &Path, name: &str) -> PathBuf {
         }
         n += 1;
     }
+}
+
+/// The name a free slot settled on — the drop's own, or the suffixed one.
+fn slot_name(slot: &Path) -> String {
+    slot.file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +651,7 @@ fn folder_filing(
     // The week folder, not the destination folder: a nested file lands deeper
     // than `dest_folder`, and the week folder is the claim true of every card.
     let reasoning = week_reason(
-        &format!("Its folder is named for Week {week}."),
+        &folder_reading_words(week, WeekReading::Week),
         &folder_rel,
         &slot.unit_name,
     );
@@ -939,6 +1076,18 @@ fn reading_words(week: i64, reading: WeekReading) -> String {
     }
 }
 
+/// `reading_words` for a file whose folder, not its own name, carried the
+/// week — a folder's row in Materials and a dropped folder's cards alike.
+fn folder_reading_words(week: i64, reading: WeekReading) -> String {
+    match reading {
+        WeekReading::Week => format!("Its folder is named for Week {week}."),
+        WeekReading::Module => format!(
+            "Its folder is named for Module {week}, and this course divides itself into \
+             weeks, so Module {week} is Week {week}."
+        ),
+    }
+}
+
 /// How every by-name reason closes: the week folder the file lands in, and
 /// the division that counts it there (SPEC §8.5).
 fn week_reason(reading: &str, folder_rel: &str, unit_name: &str) -> String {
@@ -1128,24 +1277,25 @@ fn transcript_hint(class_dir: &Path, name: &str) -> Option<String> {
     crate::transcripts::describe(&String::from_utf8_lossy(&head))
 }
 
+/// Every file in the inbox at any depth, named by its path inside it, so a
+/// dropped folder's files each carry the folder that says where they belong.
+/// An unreadable subfolder costs its own entries and not the listing:
+/// `collect_files` fills as it walks, and what it reached is what is shown.
 fn list_inbox(class_dir: &Path) -> Vec<InboxFile> {
-    let Ok(entries) = fs::read_dir(class_dir.join(INBOX_DIR)) else {
-        return Vec::new();
-    };
-    let mut files: Vec<InboxFile> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                return None;
-            }
-            let size = e.metadata().map(|m| m.len() as i64).unwrap_or(0);
-            Some(InboxFile {
+    let inbox = class_dir.join(INBOX_DIR);
+    let mut names = Vec::new();
+    let _ = collect_files(&inbox, "", &mut names);
+    let mut files: Vec<InboxFile> = names
+        .into_iter()
+        .map(|name| {
+            let size = fs::metadata(inbox.join(&name))
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
+            InboxFile {
                 name,
                 size,
                 dismissed: false, // filled in from move_proposals by the callers
-            })
+            }
         })
         .collect();
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1861,8 +2011,29 @@ fn approve_in_conn(
             extra: json!({ "batch": batch }),
         },
     )?;
+    prune_inbox_dirs(&class_dir, &source_rel);
     let name = source_rel.rsplit('/').next().unwrap_or(&source_rel).to_string();
     Ok(Some(Moved { class_id, source_rel, dest_rel, name, audit_id }))
+}
+
+/// A dropped folder's own folders in the inbox, removed once the last file
+/// under them has been filed. Staging keeps the grouping (`stage_folder`), and
+/// an empty shell left behind is something the queue never shows and nothing
+/// clears. Best-effort and outermost-last: `remove_dir` refuses a folder that
+/// still holds anything, which is the whole check. An undo puts the file back
+/// through `create_dir_all`, so the folder returns with it.
+fn prune_inbox_dirs(class_dir: &Path, source_rel: &str) {
+    let Some(inside) = source_rel.strip_prefix(&format!("{INBOX_DIR}/")) else {
+        return;
+    };
+    let inbox = class_dir.join(INBOX_DIR);
+    let mut dir = Path::new(inside).parent();
+    while let Some(rel) = dir.filter(|p| !p.as_os_str().is_empty()) {
+        if fs::remove_dir(inbox.join(rel)).is_err() {
+            return;
+        }
+        dir = rel.parent();
+    }
 }
 
 /// Approve all over a class's pending cards (SPEC §10): each the ordinary
@@ -2562,6 +2733,151 @@ mod tests {
             .expect("count");
         assert_eq!(pending, 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A dropped folder lands whole: its structure is kept, its files are the
+    /// staged batch, and each one is listed by the path that carries the
+    /// folder — which is what the folder's name can then be read against.
+    #[test]
+    fn a_dropped_folder_is_staged_whole_and_listed_by_its_path() {
+        let root = std::env::temp_dir().join(format!("classhub-drop-folder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("Downloads").join("Week 4 Coding Material");
+        fs::create_dir_all(source.join("data")).expect("source");
+        fs::write(source.join("lab.ipynb"), "notebook").expect("lab");
+        fs::write(source.join("data").join("bloodwork.csv"), "a,b").expect("csv");
+        fs::write(source.join(".DS_Store"), "junk").expect("dot file");
+        let inbox = root.join("class").join(INBOX_DIR);
+        fs::create_dir_all(&inbox).expect("inbox");
+
+        let staged = stage_into_inbox(&inbox, &[source.to_string_lossy().into_owned()]);
+        assert!(staged.failed.is_empty(), "{:?}", staged.failed);
+        assert_eq!(
+            staged.files,
+            [
+                "Week 4 Coding Material/data/bloodwork.csv",
+                "Week 4 Coding Material/lab.ipynb",
+            ],
+            "the dot-entry is left behind and the rest keep their place inside the folder"
+        );
+        // The folder entry is what `folder_cards` is handed, so it carries the
+        // same paths the batch staged — the seam between the two.
+        assert_eq!(staged.folders.len(), 1);
+        assert_eq!(staged.folders[0].0, "Week 4 Coding Material");
+        assert_eq!(staged.folders[0].1, staged.files);
+        assert!(inbox.join("Week 4 Coding Material/data/bloodwork.csv").is_file());
+        // The originals are untouched, as a drop of loose files leaves them.
+        assert!(source.join("lab.ipynb").is_file());
+
+        // A second drop of the same folder earns its own name rather than
+        // merging into the first, which is still waiting on its cards.
+        let again = stage_into_inbox(&inbox, &[source.to_string_lossy().into_owned()]);
+        assert_eq!(again.folders[0].0, "Week 4 Coding Material (2)");
+
+        // A folder with nothing in it is reported, not staged as a shell.
+        let empty = root.join("Downloads").join("Week 9 Material");
+        fs::create_dir_all(&empty).expect("empty folder");
+        let nothing = stage_into_inbox(&inbox, &[empty.to_string_lossy().into_owned()]);
+        assert!(nothing.files.is_empty() && nothing.folders.is_empty());
+        assert_eq!(nothing.failed, ["Week 9 Material: holds no file"]);
+        assert!(!inbox.join("Week 9 Material").exists());
+
+        // And the queue reads it back the way it was staged.
+        let listed: Vec<String> = list_inbox(&root.join("class"))
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(listed.contains(&"Week 4 Coding Material/lab.ipynb".to_string()), "{listed:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The whole point of keeping the folder: its name reads a week the course
+    /// declares, so every file under it is carded into that week folder under
+    /// the folder's own name, and no sort job is asked to guess. Biostatistics
+    /// reads its modules as weeks, so `Module 4 Material` reads the same way.
+    #[test]
+    fn a_dropped_folder_named_for_a_week_cards_its_files_by_name() {
+        let root = std::env::temp_dir().join(format!("classhub-folder-cards-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let conn = crate::db::memory_db();
+        crate::db::set_setting(&conn, "aibhs_root", &root.to_string_lossy()).expect("root");
+        let class_dir = crate::scanner::class_dir(&conn, 3).expect("class dir");
+        fs::create_dir_all(class_dir.join(INBOX_DIR)).expect("inbox");
+        conn.execute(
+            "INSERT INTO units (class_id, ordinal, kind, name, number, starts_on, source)
+             VALUES (3, 1, 'week', 'Week 4 — Regression', 4, '2026-09-10', 'syllabus')",
+            [],
+        )
+        .expect("week");
+        let slot = crate::units::slot_for_week(&conn, 3, 4)
+            .expect("slots")
+            .expect("the course declares a week 4");
+        let folder_rel = format!("{WEEKS_DIR}/{}", slot.folder);
+
+        let files = vec![
+            "Week 4 Coding Material/lab.ipynb".to_string(),
+            "Week 4 Coding Material/data/bloodwork.csv".to_string(),
+        ];
+        folder_cards(&conn, 3, &class_dir, "Week 4 Coding Material", &files).expect("cards");
+
+        let carded: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT source_rel_path, dest_rel_path, source FROM move_proposals
+                 WHERE class_id = 3 AND status = 'pending' ORDER BY source_rel_path",
+            )
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            carded,
+            [
+                (
+                    format!("{INBOX_DIR}/Week 4 Coding Material/data/bloodwork.csv"),
+                    format!("{folder_rel}/Week 4 Coding Material/data/bloodwork.csv"),
+                    "by_name".to_string(),
+                ),
+                (
+                    format!("{INBOX_DIR}/Week 4 Coding Material/lab.ipynb"),
+                    format!("{folder_rel}/Week 4 Coding Material/lab.ipynb"),
+                    "by_name".to_string(),
+                ),
+            ],
+            "every file lands under the folder's own name inside the week folder"
+        );
+
+        // A by-name card is a record, not a guess: the sort job leaves it be,
+        // so a folder that files by name spends nothing.
+        assert!(
+            build_prompt(&conn, 3, true).expect("prompt").is_none(),
+            "nothing is left for a job to answer for"
+        );
+
+        // The module reading, on the course that takes it.
+        let module = vec!["Module 4 Material/slides.pptx".to_string()];
+        folder_cards(&conn, 3, &class_dir, "Module 4 Material", &module).expect("module cards");
+        let reasoning: String = conn
+            .query_row(
+                "SELECT reasoning FROM move_proposals WHERE source_rel_path = ?1",
+                [format!("{INBOX_DIR}/Module 4 Material/slides.pptx")],
+                |r| r.get(0),
+            )
+            .expect("the module folder is carded too");
+        assert!(reasoning.starts_with("Its folder is named for Module 4,"), "{reasoning}");
+
+        // A week the course does not declare stays uncarded, for the job.
+        folder_cards(&conn, 3, &class_dir, "Week 44 Material", &["Week 44 Material/x.pdf".to_string()])
+            .expect("no slot");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM move_proposals WHERE source_rel_path LIKE '%Week 44%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 0);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A pending proposal whose file has left the inbox is resolved with its

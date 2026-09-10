@@ -1054,8 +1054,8 @@ export function ClassWorkspace({
           <div className="flex h-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-(--accent)">
             <p className="text-headline text-(--accent-ink)">Drop to sort</p>
             <p className="text-body text-muted-foreground">
-              Copies land in the inbox — originals stay put, and nothing moves
-              without your approval.
+              Copies land in the inbox, a folder whole — originals stay put, and
+              nothing moves without your approval.
             </p>
           </div>
         </div>
@@ -1175,8 +1175,8 @@ function EmptyMaterials({ classId }: { classId: number }) {
       <FolderOpen size={22} aria-hidden className="mx-auto text-muted-foreground/60" />
       <p className="mt-4 text-[17px] font-semibold">No material yet</p>
       <p className="mx-auto mt-1 max-w-sm text-body text-muted-foreground">
-        Drop files anywhere in this window to sort them in — or add them to the
-        class folder in Finder and rescan.
+        Drop files or a whole folder anywhere in this window to sort them in —
+        or add them to the class folder in Finder and rescan.
       </p>
       <button
         type="button"

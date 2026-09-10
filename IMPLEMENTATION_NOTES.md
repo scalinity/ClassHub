@@ -7164,3 +7164,72 @@ written for the question, which means a job.
 - The stored order is the true one first, so `due_cards` shuffles before it
   serves and `list_cards` drops the options entirely — the listing browses and
   exports, and has no business carrying the answer.
+
+## A dropped folder is staged whole (2026-09-10)
+
+Dropping `~/Downloads/Week 4 Coding Material` onto Biostatistics failed with
+"1 folder skipped — drop files, not folders". Staging took files only, and the
+inbox was flat: `list_inbox` read one level of `_Inbox/`, so there was nowhere
+for a folder to sit even if one had been copied in. That threw away the
+strongest signal the drop carried — the folder's own name says which week the
+material is for, and the app already reads exactly that on a folder's row in
+Materials (`folder_filing`, SPEC §10.7).
+
+### What was built
+
+- `stage_files` splits into `stage_into_inbox` (the copying, no `AppHandle`,
+  so the rule is testable against a bare folder) and `stage_folder`. A dropped
+  folder is copied whole under a free name of its own — `free_dir_slot`, which
+  does not split a folder name at a dot the way `free_slot` splits an
+  extension — with its structure kept, its files taken by the walk's rule
+  (`collect_files`: no dot-entries, no symlinks). A folder holding no file is
+  reported rather than staged, and a folder none of whose files copied is
+  removed again: an empty shell in the inbox is something the queue never
+  shows and nothing clears.
+- `list_inbox` walks the whole inbox and names each file by its path inside it
+  (`Week 4 Coding Material/lab.ipynb`). Every reader already built its key as
+  `_Inbox/{name}`, so the sort prompt, `sort_by_content`, the dismissal
+  bookkeeping and `move_file` took nested paths without a change.
+- `folder_cards` is the point of the whole thing: a dropped folder whose name
+  reads a week the course declares gets one `by_name` card per file under it,
+  into that week folder under the folder's own name. The reading is
+  `named_week_reading` — the week in the name, then a module where the course
+  reads its modules as weeks — because a folder arriving from outside is
+  material the reader gathered, not the course's own module folder (§8.3),
+  which is the one place this parts from the tree row's rule. `by_name` cards
+  are out of a sort job's scope already (`recorded_placements`), so a folder
+  that files by name spends nothing and `Approve all N` files the set.
+- `prune_inbox_dirs` removes an inbox folder once its last file is filed.
+  `undo_move` recreates the source's parents, so an undo brings the folder
+  back with the file.
+- `StageResult.skipped_folders` is gone, with the notice that read off it.
+- The sort prompt gains a line: a path with a folder in it was dropped as that
+  folder, and the set belongs in one destination under the folder's own name.
+- The inbox rows show the folder ahead of the file name, capped at 40% of the
+  row and in the fine muted style — the file stays what the row is about.
+
+### Verified
+
+- `cargo test`: 377 pass. Two new ones — `stage_into_inbox` over a nested
+  folder with a `.DS_Store` and a second drop of the same folder
+  (`Week 4 Coding Material (2)`), and `folder_cards` over a declared week, the
+  module reading, and a week the course does not declare (left for the job).
+- `tsc --noEmit` clean.
+
+### Left as it is
+
+- One card per file, not one card for the folder. A dropped folder is often a
+  bag rather than a unit, and per-file cards let a mixed one split across
+  folders; `Approve all N` is the one-click path when it is a unit.
+- A dropped folder is not read for a *module* on a course that declares
+  numbered modules — `modules_read_as_weeks` is false there, and the sort job
+  reads those by content as before.
+
+### Gotchas
+
+- `free_slot` splits a name at its last dot to keep an extension, which turns
+  `Week 4.1 Material` into `Week 4 (2).1 Material`. Folders go through
+  `free_dir_slot` instead; both share `free_named`.
+- `collect_files` fills its output as it walks, so `list_inbox` ignores its
+  error and keeps what was reached — an unreadable subfolder costs its own
+  entries, not the whole listing.

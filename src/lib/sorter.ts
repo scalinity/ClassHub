@@ -7,6 +7,8 @@ import { useSyncExternalStore } from "react";
 export const INBOX_DIR = "_Inbox";
 
 export interface InboxFile {
+  /** Inbox-relative, so a file dropped inside a folder carries that folder:
+   * `Week 4 Coding Material/lab.ipynb`. A loose drop is a bare name. */
   name: string;
   size: number;
   /** Its proposal was dismissed ("leave in inbox") — a decision already made:
@@ -54,8 +56,8 @@ export interface SortState {
 }
 
 export interface StageResult {
+  /** Inbox-relative paths, a dropped folder's own name included. */
   staged: string[];
-  skippedFolders: number;
   /** Per-file staging failures ("name: reason") — the batch survives them. */
   failed: string[];
   jobId: number | null;
@@ -217,17 +219,10 @@ void getCurrentWebview().onDragDropEvent((event) => {
       paths: event.payload.paths,
     })
       .then((result) => {
-        const parts: string[] = [];
-        if (result.skippedFolders > 0) {
-          parts.push(
-            result.skippedFolders === 1
-              ? "1 folder skipped — drop files, not folders"
-              : `${result.skippedFolders} folders skipped — drop files, not folders`,
-          );
-        }
-        parts.push(...result.failed);
-        if (parts.length > 0) {
-          emitDrag({ notice: { classId, message: parts.join(" · ") } });
+        if (result.failed.length > 0) {
+          emitDrag({
+            notice: { classId, message: result.failed.join(" · ") },
+          });
         }
       })
       .catch((e) => emitDrag({ notice: { classId, message: String(e) } }));

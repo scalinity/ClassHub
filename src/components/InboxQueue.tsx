@@ -253,7 +253,7 @@ export function InboxQueue({
             {unproposed.map((f) => (
               <div key={f.name} className={rowDense}>
                 <File size={14} aria-hidden className="shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate text-body">{f.name}</span>
+                <InboxName name={f.name} />
                 {active && (
                   <span className="shrink-0 text-fine text-muted-foreground">
                     awaiting a proposal
@@ -267,9 +267,7 @@ export function InboxQueue({
             {dismissed.map((f) => (
               <div key={f.name} className={`${rowDense} opacity-60`}>
                 <File size={14} aria-hidden className="shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate text-body text-muted-foreground">
-                  {f.name}
-                </span>
+                <InboxName name={f.name} muted />
                 <span
                   title="You chose to leave this file in the inbox — Sort the inbox proposes it again"
                   className="shrink-0 text-fine text-muted-foreground"
@@ -285,6 +283,30 @@ export function InboxQueue({
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * An inbox file's name. A file dropped inside a folder keeps that folder in
+ * front of it — it is where the file came from and often what says which week
+ * it belongs to — but held back, and capped, so the file itself stays the
+ * thing the row is about.
+ */
+function InboxName({ name, muted }: { name: string; muted?: boolean }) {
+  const cut = name.lastIndexOf("/");
+  return (
+    <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+      {cut !== -1 && (
+        <span className="max-w-[40%] shrink-0 truncate text-fine text-muted-foreground">
+          {name.slice(0, cut)}/
+        </span>
+      )}
+      <span
+        className={`min-w-0 flex-1 truncate text-body ${muted ? "text-muted-foreground" : ""}`}
+      >
+        {name.slice(cut + 1)}
+      </span>
+    </span>
   );
 }
 
