@@ -2950,7 +2950,7 @@ Mark the checkbox when the acceptance criteria pass.
   answers a follow-up about an earlier turn, chat approves a card and adds a lecture with their
   audit rows, and an `HH:MM` in an answer opens the transcript.
 
-- [ ] **M39 — One lecture, one file.** (`milestones/M39-one-lecture-one-file.md`)
+- [x] **M39 — One lecture, one file.** (`milestones/M39-one-lecture-one-file.md`)
   `digest_lecture` over the transcript already filed, so distilling one never means capturing it
   again; `add_lecture` refusing a second filing for a date that holds one, past which a title is
   the way; the digest on by default as the form has it; the date resolved from the course's
