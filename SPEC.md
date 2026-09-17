@@ -767,12 +767,17 @@ claude -p <prompt>
   setter audits its before and after.
 - **The latest `rate_limit_event` is kept per window**, not just its type: the CLI streams
   one near the top of every run and again after a turn crosses a window boundary, each
-  carrying `status`, `rateLimitType` and `resetsAt` (every one logged so far says
-  `allowed`), and the five-hour and seven-day windows are kept apart so an allowance on one
-  cannot clear a refusal on the other. A status other than `allowed` whose reset is still
-  ahead — or, where the event named no reset, seen within the last five hours — is what
-  the shift reads between jobs, and what the run's own progress names as `rate limit
-  reached`.
+  carrying `status`, `rateLimitType` and `resetsAt`, and the five-hour and seven-day windows
+  are kept apart so an allowance on one cannot clear a refusal on the other. **Only a refusal
+  stops a night's work** — a status that is not one of the CLI's `allowed` kinds, whose reset
+  is still ahead, or, where the event named no reset, seen within the last five hours. The
+  CLI streams `allowed_warning` from 75% of a window onward with that window's real reset
+  attached; it is an allowance, and reading it as a refusal stopped the shifts of Sept 13 and
+  Sept 15 with nothing done and every job runnable (measured: `seven_day`, `allowed_warning`,
+  utilization 0.81). A reset is reported as the time it happens — `Thursday at 11 pm` — never
+  as a countdown: the string is stored on the run that wrote it and read whenever the Job
+  Center is next opened, and run #7's "resets in 41 h 45 min", written at 05:14, was still
+  saying so at 20:14.
 - **The idle shift** (`shift.rs`) is the one thing that runs synthesis without a click. A
   thread checks once a minute and starts the night's run when the shift is on and not
   paused, the clock is inside the window (21:00–06:00 by default, filed under the date it
@@ -998,7 +1003,18 @@ and no date to resolve one against, so the form asks outright, each week's optio
 Part it feeds; left unpicked, the session goes to `_Inbox/` for the sorter, as any unresolved
 week does. A course that declares no weeks at all has nowhere to file a session and no
 week folder for the sorter to propose, so the form says so and the filing is refused before
-the capture, naming the syllabus scan as the way out. Two lectures of one Part on one date need titles of their own: a note is keyed by its
+the capture, naming the syllabus scan as the way out.
+
+**A filing asked for in chat dates itself.** The form has a date picker in front of a reader
+who knows which session this was; chat has neither, and asking costs a round of the loop for
+something the app holds — so `add_lecture` without a date takes the course's published date
+for the week where there is one, else the class's most recent meeting day on or before today
+(`meetings`, §5), and answers with the date and the rule that reached it, for the turn to state
+and `refile_lecture` to correct (§9). Never weeks counted forward from Week 1: that is the
+arithmetic this section exists to refuse, and it is right only until the first break. A class
+with neither a dated week nor a meeting day is asked outright.
+
+Two lectures of one Part on one date need titles of their own: a note is keyed by its
 division and its transcript's name (§8.5), so a filing whose note path another transcript of the
 class already holds — or whose note already exists on disk — is refused before the capture, and
 the refusal names the title as the way out.
@@ -1896,17 +1912,43 @@ contains it.
   with what changed, so a move chat approved is the move the Inbox card makes with the same
   audit row and the same notice: `approve_move(id, destination?)` and `dismiss_move(id)`,
   `approve_all_moves(class)`, `run_sort(class)`, `run_syllabus_scan(class, target?)`,
-  `approve_deadlines(ids | class)`, `add_lecture(class, source, date, week?, title?, digest?)`,
-  `run_shift()` and `undo_last()`. The write policy is that an approval is the reader asking,
+  `approve_deadlines(ids | class)`, `add_lecture(class, source, date?, week?, title?, digest?)`,
+  `digest_lecture(class, path)`, `refile_lecture(class, from, to)`, `run_shift()` and
+  `undo_last()`. The write policy is that an approval is the reader asking,
   in this conversation, for the thing approved — a proposal chat made itself in an earlier turn
   is no exception, since proposing and approving are two decisions and only one is the model's.
   Three details: `dismiss_move` writes no audit row, the decline branch only resolving the
   card, so it says it cannot be undone; `add_lecture` resolves the week from the date the way
   the form does where the course dates its weeks, since a request without one routes the
   lecture to `_Inbox/` for the sorter, and it runs under the same one-per-class claim the form
-  takes with the digest off unless asked; and `undo_last` reads the newest audit row whose
+  takes with the digest **on** unless told otherwise, as the form has it; and `undo_last` reads
+  the newest audit row whose
   action has an inverse and that no `undo.*` row already names, with every row of its batch,
   fetched by the batch's own tag — the rows the notice's own `Undo` holds (§6).
+- **One lecture, one file.** `add_lecture` captures a recording; `digest_lecture` distils one
+  already filed, over `lectures::enqueue_digest` and the path of the transcript itself. Two
+  tools, because with only the first a request to distil is answerable only by capturing the
+  recording again, which files a byte-identical second copy under ` (2)` — `add_with` never
+  overwrites (§7.1) — and points the digest at the copy, leaving the week's own transcript
+  undistilled. So `add_lecture` refuses a second filing for a class and date that already hold
+  one, naming what is there and the two ways past: `digest_lecture` for that transcript, or a
+  `title` of its own for a genuinely second session that day (§7.1). `refile_lecture` is the
+  correction when the date or the week was wrong, over the sorter's own `move_now` — the path
+  an approval takes, recorded as an approved `chat` proposal with its audit row and its Undo —
+  and it refuses a destination outside `Weeks/`, where the transcript would lose its session
+  document, its note, its flagged items and its division (§8.5). Nothing in the tool surface
+  deletes: a duplicate is moved or left, and the system prompt says so, because a model that
+  believes it can remove a file offers to.
+- **A filing dates itself.** `date` is optional: unset, `add_lecture` takes the course's own
+  published date for the week where there is one, else the class's most recent meeting day on
+  or before today from `meetings` — both what the app already holds, never weeks counted
+  forward from Week 1 (§8.5) — and the result names the date and which of the two rules
+  reached it, so the answer states it and `refile_lecture` corrects it. A class that publishes
+  no meeting day and no week date is the one case that asks. `lecture_weeks(class, date?)` is
+  the read behind the question the model cannot resolve alone: every week, its folder, the
+  division it counts toward, its published date where it has one, which weeks already hold a
+  lecture, and what a date resolves to — which for a course naming week ranges rather than
+  dates (Applied Generative AI) is the only place the choice is written down.
   Two refusals are the tools' own. `approve_deadlines` refuses an empty `ids` rather than
   reading it as the class's whole queue, since a model that sends none would otherwise get
   every waiting proposal inserted. And `add_lecture`'s source has to sit inside the library or
@@ -1946,6 +1988,15 @@ contains it.
   `## HH:MM` headings (§12) — the time takes the transcript cited before it, or the first one
   cited in the section, a heading ending the carry, and a clock time keeps its meridiem and
   stays text so a due time is never a link.
+  **An address reads as its host.** A Zoom share link is a sixty-character id that says nothing
+  and, shown whole in a 30rem panel, scrolls the conversation sideways — the message list is
+  `overflow-y-auto`, which makes the other axis scroll too. So a URL renders as its host plus
+  as much path as a 38-character budget holds, `ufl.zoom.us/rec/share/…`, in mono with the mark
+  that says it leaves for the browser, the whole of it on hover and on the click; a link the
+  model labelled in words keeps its words. The question a reader typed is linkified the same
+  way, since it never passes through markdown. And every block that can hold a long token — the
+  question, the prose, the streaming tail, the thinking summary, both halves of a tool chip —
+  breaks it rather than widening, fenced code keeping its own scroller.
 
 ## 10. Drop-to-sort (propose-and-confirm)
 
@@ -1979,6 +2030,12 @@ contains it.
    without approval; a file moves without a card only where its destination is an
    observation (step 7, and the sync's placement, §7.2), and every such move is undone from
    its notice in one.
+   **A proposal answers with its id**, read back inside the transaction that wrote it, and an
+   approval echoes the class and the paths of the row it resolved. Ids are hub-wide and most
+   name rows long resolved, so a caller with no id to hand assumes one, lands on another
+   class's old row, and reads "already resolved" as the move having happened — which is how a
+   duplicate went on sitting in its week while the turn reported it cleared. Both refusals —
+   no such id, and an id that is not waiting — name what the id actually points at.
 5. The inbox badge on the class card shows pending count.
 6. A pending proposal whose file is no longer on disk — sorted by hand in Finder, or moved
    from another build's queue — is resolved as dismissed with an audit row
@@ -2892,6 +2949,22 @@ Mark the checkbox when the acceptance criteria pass.
   five-round turn's cache reads exceed its writes from round two, a compacted session still
   answers a follow-up about an earlier turn, chat approves a card and adds a lecture with their
   audit rows, and an `HH:MM` in an answer opens the transcript.
+
+- [ ] **M39 — One lecture, one file.** (`milestones/M39-one-lecture-one-file.md`)
+  `digest_lecture` over the transcript already filed, so distilling one never means capturing it
+  again; `add_lecture` refusing a second filing for a date that holds one, past which a title is
+  the way; the digest on by default as the form has it; the date resolved from the course's
+  published week or its meeting day and stated in the result rather than asked for;
+  `lecture_weeks` listing what a course of Parts over week ranges can be filed into, and a
+  refusal carrying that listing in place of the silent inbox route; proposals answering with
+  their ids and approvals echoing the row they resolved; `refile_lecture` as the correction for
+  a wrong date or week; a system prompt that names what cannot be done and where a setting
+  lives; and addresses that wrap and read as their host instead of scrolling the panel sideways.
+  *Accepted when:* one conversation files a recording with its date stated and its session
+  document queued, is refused when the same link is filed again, is answered with Applied's
+  weeks rather than the inbox, and approves a proposal by the id the proposal itself returned;
+  and Week 4's duplicate is recovered with its corpus note, hints and cards intact and no second
+  digest run.
 
 
 ## 15. Risks & trade-offs (accepted)

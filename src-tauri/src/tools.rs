@@ -30,6 +30,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use chrono::{Datelike, Duration, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::AppHandle;
@@ -120,6 +121,8 @@ pub const WRITE_TOOLS: &[&str] = &[
     "run_syllabus_scan",
     "approve_deadlines",
     "add_lecture",
+    "digest_lecture",
+    "refile_lecture",
     "run_shift",
     "undo_last",
 ];
@@ -328,7 +331,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "propose_file_moves",
-            "description": "Propose file reorganizations. This NEVER moves anything: each entry lands in the confirm queue as a proposal awaiting explicit approval. Paths are AIBHS-root-relative (starting with the class folder name), exactly as list_material returns them; destinations may name folders that don't exist yet.",
+            "description": "Propose file reorganizations. This NEVER moves anything: each entry lands in the confirm queue as a proposal awaiting explicit approval, and the result carries the id each one was given — which is what approve_move takes. Nothing here deletes: a file can only be moved somewhere else. Paths are AIBHS-root-relative (starting with the class folder name), exactly as list_material returns them; destinations may name folders that don't exist yet.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -353,7 +356,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "approve_move",
-            "description": "Approve one waiting file-move proposal by its id, which moves the file (get_overview lists each waiting proposal with its id). Only when Daniel has asked for this one — an approval is his to give, and a proposal this conversation itself made is no exception. The move is audit-logged and a notice with Undo follows it.",
+            "description": "Approve one waiting file-move proposal by its id, which moves the file. The id comes from get_overview's waiting list or from the propose_file_moves call that made it, in this conversation — never from a guess, since ids are hub-wide and a stale one names some other class's proposal. The result echoes the class and the paths it resolved, which is what to report. Only when Daniel has asked for this one — an approval is his to give, and a proposal this conversation itself made is no exception. The move is audit-logged and a notice with Undo follows it.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -427,18 +430,58 @@ pub fn definitions() -> Value {
         },
         {
             "name": "add_lecture",
-            "description": "File a lecture into the class's Weeks folder: a caption track or recording at an absolute path, or a Zoom recording link. The transcript is normalized and indexed as source material. Takes a minute or two and, for a Zoom link, opens a window Daniel may have to sign in to. Set digest true only when he asks for the session document — it is a long subscription job. Leave week out on a course whose weeks carry dates, and the meeting date resolves it; on a course whose divisions name week ranges (Applied Generative AI) pass the week, or the file goes to the inbox for the sorter.",
+            "description": "File a lecture into the class's Weeks folder: a caption track or recording at an absolute path, or a Zoom recording link. The transcript is normalized and indexed as source material, and distilled into a session document unless digest is false. Takes a minute or two and, for a Zoom link, opens a window Daniel may have to sign in to. This files ONE transcript: to distil a lecture already filed, use digest_lecture — calling this again with the same recording would file a second copy, which it now refuses. Leave date out and the app resolves it from the course's own schedule — its published date for the week, else its most recent meeting day on or before today — and says which it used; pass one only when Daniel named a date or the course meets on no fixed day. Leave week out on a course whose weeks carry dates; on a course whose divisions name week ranges (Applied Generative AI) pass the week, which lecture_weeks lists.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "class": { "type": "string", "description": "Class name." },
                     "source": { "type": "string", "description": "Absolute path to a .vtt/.srt/.txt caption or a media file, or a Zoom recording share link." },
-                    "date": { "type": "string", "description": "The session's date, YYYY-MM-DD." },
+                    "date": { "type": "string", "description": "The session's date, YYYY-MM-DD. Optional: left out, the course's schedule resolves it and the result says which date was used." },
                     "week": { "type": "integer", "description": "The course's own week number, when it needs saying." },
-                    "title": { "type": "string", "description": "Optional title for the transcript file; defaults to 'Lecture'." },
-                    "digest": { "type": "boolean", "description": "Distil the transcript into a session document afterwards. Defaults to false — it is a long, token-heavy subscription job." }
+                    "title": { "type": "string", "description": "Optional title for the transcript file; defaults to 'Lecture'. A second, genuinely different lecture on a date that already holds one needs its own title." },
+                    "digest": { "type": "boolean", "description": "Distil the transcript into a session document afterwards. Defaults to true, as the Add lecture form does — it is a long, token-heavy subscription job, so pass false when Daniel asks to file the recording without one." }
                 },
-                "required": ["class", "source", "date"],
+                "required": ["class", "source"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "digest_lecture",
+            "description": "Distil a transcript that is ALREADY filed into its session document and its distilled note, as the Lectures section's 'Distill' button does. This is how a lecture filed without a digest gets one — never add_lecture again, which would capture the recording a second time and file a second copy. Takes the transcript's own class-relative path, as get_overview and list_material report it. Long and token-heavy on the subscription; report the job as queued, not done. Refused when one is already queued or running for that transcript.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "path": { "type": "string", "description": "The transcript's class-relative path, e.g. 'Weeks/Week 04 — Data Quality/2026-09-15 — Lecture.md'." }
+                },
+                "required": ["class", "path"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "refile_lecture",
+            "description": "Move a filed lecture to the right date or week, carrying its session document, its distilled note, what the professor flagged in it and its contribution to a division. This is the correction for a lecture filed under the wrong date or the wrong week — it re-files what is on disk and costs no capture and no digest. The destination stays inside the class's Weeks folder: a transcript that leaves it loses everything keyed to its path, so that is refused rather than done.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "from": { "type": "string", "description": "The transcript's current class-relative path." },
+                    "to": { "type": "string", "description": "Its class-relative path after the move, including the file name, under Weeks/." }
+                },
+                "required": ["class", "from", "to"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "lecture_weeks",
+            "description": "Every week a lecture can be filed into for one class: the week's number, the folder it files to, the division it counts toward, the date the course published for it where it published one, and whether a lecture is already filed in it. Read this before asking which week a recording belongs to — for a course whose divisions name week ranges rather than dates (Applied Generative AI) it is the only place the choice is written down. With a date, it also answers which week that date resolves to.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name." },
+                    "date": { "type": "string", "description": "Optional YYYY-MM-DD to resolve against the published dates." }
+                },
+                "required": ["class"],
                 "additionalProperties": false
             }
         },
@@ -501,7 +544,10 @@ pub fn execute(app: &AppHandle, name: &str, input: &Value, ctx: &ToolCtx) -> Out
         "run_sort" => run_sort(app, input),
         "run_syllabus_scan" => run_syllabus_scan(app, input, ctx),
         "approve_deadlines" => approve_deadlines(app, input),
-        "add_lecture" => add_lecture(app, input),
+        "add_lecture" => add_lecture(app, input, ctx),
+        "digest_lecture" => digest_lecture(app, input),
+        "refile_lecture" => refile_lecture(app, input),
+        "lecture_weeks" => with_conn(app, |conn| lecture_weeks(conn, input, ctx)),
         "run_shift" => run_shift(app),
         "undo_last" => undo_last(app),
         "list_hints" => with_conn(app, |conn| list_hints(conn, input)),
@@ -2407,6 +2453,13 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
         // partway through would otherwise leave the queue holding half of a
         // proposal set whose result text describes all of it.
         let tx = conn.unchecked_transaction()?;
+        // The id each row was given, read back inside the transaction that
+        // wrote it: `approve_move` takes an id, and a result that named none
+        // left the only source of one as a guess — which lands on a resolved
+        // row from another class and reads as an approval that happened.
+        // One pending row per source is the table's own rule, so the read is
+        // unambiguous.
+        let mut ids: Vec<Option<i64>> = Vec::with_capacity(validated.len());
         for mv in &validated {
             crate::sorter::upsert_proposal(
                 &tx,
@@ -2417,6 +2470,15 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
                 &mv.reason,
                 None,
             )?;
+            ids.push(
+                tx.query_row(
+                    "SELECT id FROM move_proposals
+                     WHERE class_id = ?1 AND source_rel_path = ?2 AND status = 'pending'",
+                    rusqlite::params![mv.class_id, mv.source_rel],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            );
         }
         tx.commit()?;
 
@@ -2424,12 +2486,14 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
             "{} file move(s) proposed — nothing has moved; each waits for Daniel's approval\n",
             validated.len()
         );
-        for mv in &validated {
-            text.push_str(&format!("- {} → {}\n", mv.from_display, mv.to_display));
+        for (mv, id) in validated.iter().zip(&ids) {
+            let id = id.map(|id| format!("#{id}")).unwrap_or_else(|| "#?".into());
+            text.push_str(&format!("- {id} · {} → {}\n", mv.from_display, mv.to_display));
         }
         text.push_str(
             "Each waits in the class workspace's inbox queue, where Daniel can approve, \
-             redirect, or decline it.",
+             redirect, or decline it. Approve one by the id above — never by a number that \
+             came from anywhere else.",
         );
         Ok(Outcome::ok(text))
     })?;
@@ -2447,42 +2511,60 @@ fn propose_file_moves(app: &AppHandle, input: &Value) -> Result<Outcome> {
 
 /// The proposal a chat approval is about, checked before the move so the
 /// refusal names the queue rather than a rename.
-fn pending_move(conn: &Connection, id: i64) -> Result<(i64, String, String)> {
-    let row: Option<(i64, String, String, String)> = conn
+/// The waiting proposal an id names, or a refusal that says what the id
+/// actually points at.
+///
+/// Ids are hub-wide and most of them are long resolved, so an id taken from
+/// nowhere lands on some other class's old row — and "already approved" read
+/// as "done" is how a duplicate went on sitting in Week 4 while the turn
+/// reported it cleared. The refusal names the class and the paths, so the
+/// mistake is visible in the chip rather than plausible in the answer.
+fn pending_move(conn: &Connection, id: i64) -> Result<(i64, String, String, String)> {
+    let row: Option<(i64, String, String, String, String)> = conn
         .query_row(
-            "SELECT class_id, source_rel_path, dest_rel_path, status
-             FROM move_proposals WHERE id = ?1",
+            "SELECT p.class_id, p.source_rel_path, p.dest_rel_path, p.status, c.display_name
+             FROM move_proposals p JOIN classes c ON c.id = p.class_id WHERE p.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((class_id, source, dest, status)) = row else {
-        bail!("no file-move proposal has id {id} — get_overview lists the waiting ones");
+    let Some((class_id, source, dest, status, class_name)) = row else {
+        bail!(
+            "nothing was approved: no file-move proposal has id {id}. get_overview lists every \
+             waiting proposal with its id, and propose_file_moves answers with the ids it wrote"
+        );
     };
     if status != "pending" {
-        bail!("proposal {id} is already {status} — it is no longer waiting");
+        bail!(
+            "nothing was approved: proposal {id} is already {status}, and it is not the one \
+             meant here — it names {class_name} · {source} → {dest}. Read the id from \
+             get_overview's waiting list or from the propose_file_moves call that made it, \
+             rather than assuming one"
+        );
     }
-    Ok((class_id, source, dest))
+    Ok((class_id, class_name, source, dest))
 }
 
 fn approve_move(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let id = int_arg(input, "id")?;
     let destination = opt_str_arg(input, "destination");
-    let (_, source, proposed) = with_conn(app, |conn| pending_move(conn, id))?;
+    let (_, class_name, source, proposed) = with_conn(app, |conn| pending_move(conn, id))?;
     let outcome = crate::sorter::resolve_proposal(app, id, true, destination.clone())?;
     let dest = destination.unwrap_or(proposed);
     Ok(Outcome::ok(format!(
-        "Approved — {source} → {dest}\n{outcome}\nThe move is audit-logged and the notice at \
-         the bottom of the window offers Undo."
+        "Approved proposal {id} — {class_name} · {source} → {dest}\n{outcome}\nReport this \
+         move, not the one you meant: the move is audit-logged and the notice at the bottom \
+         of the window offers Undo."
     )))
 }
 
 fn dismiss_move(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let id = int_arg(input, "id")?;
-    let (_, source, _) = with_conn(app, |conn| pending_move(conn, id))?;
+    let (_, class_name, source, _) = with_conn(app, |conn| pending_move(conn, id))?;
     crate::sorter::resolve_proposal(app, id, false, None)?;
     Ok(Outcome::ok(format!(
-        "Declined — {source} stays where it is and the card has left the queue.\nNothing \
+        "Declined proposal {id} — {class_name} · {source} stays where it is and the card has \
+         left the queue.\nNothing \
          moved, so nothing was written and this cannot be undone; the file can be proposed \
          again by sorting the inbox."
     )))
@@ -2619,15 +2701,125 @@ fn readable_source(app: &AppHandle, source: &str) -> Result<()> {
     )
 }
 
-fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
+/// Every transcript a class has filed, class-relative — `files` holds them
+/// under `Weeks/` (SPEC §4), which is also where the duplicate check looks.
+fn filed_transcripts(conn: &Connection, class_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT rel_path FROM files WHERE class_id = ?1 AND rel_path LIKE 'Weeks/%.md'
+         ORDER BY rel_path",
+    )?;
+    let filed = stmt
+        .query_map([class_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(filed)
+}
+
+/// The date a transcript's own name carries — `<YYYY-MM-DD> — <title>.md`, the
+/// shape `transcript_file_name` writes and the only place a filed lecture's
+/// date is kept.
+fn date_in_name(rel_path: &str) -> Option<String> {
+    let name = rel_path.rsplit('/').next()?;
+    let date = name.get(..10)?;
+    valid_due_at(date).then(|| date.to_string())
+}
+
+/// The date a filing uses when the caller named none (SPEC §7.1).
+///
+/// The course's own published date for the week where there is one, else the
+/// most recent day the class meets on or before today — a recording is handed
+/// over after the session it came from, and the meeting days are in
+/// `meetings`. Both come from what the app holds, never from counting weeks
+/// forward from Week 1 (SPEC §8.5). The second half of the pair is how it was
+/// reached, because a date resolved silently is a wrong date filed silently:
+/// the result says which day it used and why, and `refile_lecture` corrects it.
+fn resolve_lecture_date(
+    conn: &Connection,
+    class_id: i64,
+    week: Option<i64>,
+    today_iso: &str,
+) -> Result<(String, String)> {
+    if let Some(week) = week {
+        let slots = crate::units::week_slots(conn, class_id)?;
+        if let Some(date) = slots
+            .iter()
+            .find(|slot| slot.week == week)
+            .and_then(|slot| slot.meets_on.clone())
+        {
+            return Ok((date, format!("the date the course publishes for week {week}")));
+        }
+    }
+    let mut stmt = conn.prepare("SELECT weekday FROM meetings WHERE class_id = ?1")?;
+    let weekdays = stmt
+        .query_map([class_id], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if weekdays.is_empty() {
+        bail!(
+            "this class publishes no meeting days and the week names no date, so the session's \
+             date cannot be resolved — ask for it, and pass it as 'date'"
+        );
+    }
+    let today = NaiveDate::parse_from_str(today_iso, "%Y-%m-%d")
+        .with_context(|| format!("today is not a date: {today_iso}"))?;
+    // Back from today to the last day the class met, today included: at most a
+    // week, since a class that meets at all meets once in one.
+    let met = (0i64..7)
+        .map(|back| today - Duration::days(back))
+        .find(|day| weekdays.contains(&(day.weekday().number_from_monday() as i64)))
+        .context("no meeting day in the week before today")?;
+    let named = met.format("%A").to_string();
+    Ok((met.format("%Y-%m-%d").to_string(), format!("the class's most recent {named}")))
+}
+
+fn add_lecture(app: &AppHandle, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
-    let date = str_arg(input, "date")?;
     readable_source(app, &str_arg(input, "source")?)?;
+    let title = opt_str_arg(input, "title");
+    let week = input["week"].as_i64();
+
+    // The date, resolved here rather than asked for: the course's schedule and
+    // its meeting days are what the app already holds, and a turn spent asking
+    // for what it knows is a round of the loop that buys nothing. How it was
+    // reached rides the result so a wrong one is corrected rather than found.
+    let (date, how) = match opt_str_arg(input, "date") {
+        Some(date) => (date, String::new()),
+        None => with_conn(app, |conn| resolve_lecture_date(conn, class.id, week, ctx.today_iso))?,
+    };
+
+    // A transcript already filed for this date is almost always this same
+    // recording arriving twice — the shape that put two copies of one lecture
+    // in Week 4 and pointed its digest at the copy. A genuinely second session
+    // that day (SPEC §7.1) is filed under its own title, which is also what
+    // tells the two apart in the folder, so that is the way past.
+    if title.is_none() {
+        let same_day = with_conn(app, |conn| {
+            Ok(filed_transcripts(conn, class.id)?
+                .into_iter()
+                .filter(|rel| date_in_name(rel).as_deref() == Some(date.as_str()))
+                .collect::<Vec<_>>())
+        })?;
+        if !same_day.is_empty() {
+            let mut refusal = format!(
+                "Nothing was filed. {} already holds a lecture for {date}:\n",
+                class.display_name
+            );
+            for rel in &same_day {
+                refusal.push_str(&format!("- {rel}\n"));
+            }
+            refusal.push_str(
+                "Filing this recording again would write a second copy of the same session and \
+                 point its session document at the copy. To distil one of these, call \
+                 digest_lecture with its path. If this really is a different session on the \
+                 same day, give it a title of its own and file it again with that.",
+            );
+            bail!(refusal);
+        }
+    }
+
     // The week the form would show: for a course whose weeks carry dates the
     // nearest meeting's, resolved here rather than left to the caller, since
     // a request without one routes the lecture to the inbox for the sorter —
     // which for a dated course is a step nothing asked for.
-    let week = match input["week"].as_i64() {
+    let week = match week {
         Some(week) => Some(week),
         None => with_conn(app, |conn| {
             let slots = crate::units::week_slots(conn, class.id)?;
@@ -2642,11 +2834,12 @@ fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
         class_id: class.id,
         source: str_arg(input, "source")?,
         week,
-        date,
-        title: opt_str_arg(input, "title"),
-        // Off unless asked: a digest is a long subscription job, and the
-        // reader saying "file this lecture" has not asked for one.
-        digest: input["digest"].as_bool().unwrap_or(false),
+        date: date.clone(),
+        title,
+        // On unless told otherwise, as the Add lecture form has it: a
+        // recording is handed over to be read, and the session document is
+        // what reading it produces.
+        digest: input["digest"].as_bool().unwrap_or(true),
         recording_id: None,
     };
     // The same one-per-class claim the Add lecture form takes, so a chat
@@ -2659,7 +2852,8 @@ fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
     let mut text = if result.routed_to_inbox {
         format!(
             "Filed to the inbox — {}\nIts week could not be resolved, so it waits in \
-             {}'s inbox for a sort proposal to place it.\n",
+             {}'s inbox for a sort proposal to place it. lecture_weeks lists what this class \
+             can be filed into; refile_lecture moves it once the week is known.\n",
             result.rel_path, class.display_name
         )
     } else {
@@ -2673,6 +2867,12 @@ fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
                 .unwrap_or_default()
         )
     };
+    if !how.is_empty() {
+        text.push_str(&format!(
+            "Dated {date}, from {how} — no date was given. Say so in the answer; \
+             refile_lecture corrects it if that is the wrong day.\n"
+        ));
+    }
     if !result.speakers.is_empty() {
         text.push_str(&format!("Speakers named: {}\n", result.speakers.join(", ")));
     }
@@ -2682,9 +2882,121 @@ fn add_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
         )),
         (None, Some(error)) => text.push_str(&format!("No session document: {error}\n")),
         (None, None) => text.push_str(
-            "No session document was made. Ask for one with 'distil that lecture' if it \
-             is wanted.\n",
+            "No session document was made, as asked. digest_lecture over this path makes one \
+             later.\n",
         ),
+    }
+    Ok(Outcome::ok(text))
+}
+
+/// A path the model wrote, as a class-relative one.
+///
+/// Answers cite paths from the AIBHS root (`<class folder>/Weeks/…`) and the
+/// lecture tools take them class-relative, so both spellings arrive. Taking
+/// either costs one prefix test and saves a round of the loop correcting it.
+fn class_relative(class: &ClassRow, path: &str) -> String {
+    let path = path.trim().trim_start_matches("./");
+    path.strip_prefix(&format!("{}/", class.folder_name))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn digest_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let rel_path = class_relative(&class, &str_arg(input, "path")?);
+    if !rel_path.starts_with("Weeks/") || !rel_path.to_lowercase().ends_with(".md") {
+        bail!(
+            "'{rel_path}' is not a filed lecture — a transcript is the markdown under the \
+             class's Weeks folder, as get_overview lists it"
+        );
+    }
+    let filed = with_conn(app, |conn| filed_transcripts(conn, class.id))?;
+    if !filed.iter().any(|rel| rel == &rel_path) {
+        let mut refusal = format!(
+            "{} has no transcript at {rel_path}. What it has filed:\n",
+            class.display_name
+        );
+        for rel in filed.iter().take(20) {
+            refusal.push_str(&format!("- {rel}\n"));
+        }
+        bail!(refusal);
+    }
+    // The date the transcript's own name carries, which is the session's: the
+    // digest's header and its corpus note are keyed to it.
+    let date = date_in_name(&rel_path).with_context(|| {
+        format!("{rel_path} does not open with its date, so the session's date is unknown")
+    })?;
+    let job = crate::lectures::enqueue_digest(app, class.id, &rel_path, &date)?;
+    Ok(Outcome::ok(format!(
+        "Session document queued — job #{job}, over {rel_path} ({date}).\nIt distils this \
+         transcript into its session document and its note under the division it feeds. \
+         Report it as queued: it takes 10–30 minutes and shows in the Job Center.\n"
+    )))
+}
+
+fn refile_lecture(app: &AppHandle, input: &Value) -> Result<Outcome> {
+    let class = with_conn(app, |conn| resolve_class(conn, &str_arg(input, "class")?))?;
+    let from = class_relative(&class, &str_arg(input, "from")?);
+    let to = class_relative(&class, &str_arg(input, "to")?);
+    if !to.starts_with("Weeks/") {
+        bail!(
+            "'{to}' is outside the class's Weeks folder. A transcript that leaves it loses its \
+             session document, its distilled note, what the professor flagged in it and the \
+             division it counts toward, so this tool does not take it there — file it under a \
+             week, or propose the move and let Daniel decide."
+        );
+    }
+    if from == to {
+        bail!("'{from}' is already where this would put it");
+    }
+    let moved = crate::sorter::move_now(app, class.id, &from, &to, "refiled from chat")?;
+    Ok(Outcome::ok(format!(
+        "Refiled — {moved}\nIts session document, its distilled note, its flagged items and \
+         the division it counts toward moved with it; no capture and no digest were spent. \
+         The notice at the bottom of the window offers Undo.\n"
+    )))
+}
+
+fn lecture_weeks(conn: &Connection, input: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let class = resolve_class(conn, &str_arg(input, "class")?)?;
+    let slots = crate::units::week_slots(conn, class.id)?;
+    if slots.is_empty() {
+        bail!(
+            "{} declares no weeks, so a lecture cannot be filed into one — run a syllabus scan \
+             or a Canvas sync first",
+            class.display_name
+        );
+    }
+    let date = opt_str_arg(input, "date");
+    let filed = filed_transcripts(conn, class.id)?;
+    let dated = slots.iter().any(|slot| slot.meets_on.is_some());
+
+    let mut text = format!("{} — the weeks a lecture can be filed into:\n", class.display_name);
+    for slot in &slots {
+        let mut line = format!("- week {} · {}/ · counts toward {}", slot.week, slot.folder, slot.unit_name);
+        if let Some(meets) = &slot.meets_on {
+            line.push_str(&format!(" · the course publishes {meets}"));
+        }
+        let holds: Vec<&String> = filed
+            .iter()
+            .filter(|rel| rel.starts_with(&format!("{}/", slot.folder)))
+            .collect();
+        for rel in &holds {
+            line.push_str(&format!(" · holds {}", rel.rsplit('/').next().unwrap_or(rel)));
+        }
+        line.push('\n');
+        text.push_str(&line);
+    }
+    if let Some(date) = date.as_deref().or(Some(ctx.today_iso)) {
+        match crate::units::nearest_week(&slots, date) {
+            Some(week) => text.push_str(&format!("{date} resolves to week {week}.\n")),
+            None if !dated => text.push_str(
+                "This course publishes no dates for its weeks — it names week ranges instead, so \
+                 a date resolves to no week and add_lecture needs the week said outright. The \
+                 weeks already holding a lecture, above, are what says where the next one goes.\n",
+            ),
+            None => text.push_str(&format!("{date} resolves to no week.\n")),
+        }
     }
     Ok(Outcome::ok(text))
 }
@@ -2917,7 +3229,8 @@ pub fn format_size(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        definitions, is_write, overview_text, pending_move, resolve_scope, waiting_line, ClassRow,
+        class_relative, date_in_name, definitions, is_write, overview_text, pending_move,
+        resolve_lecture_date, resolve_scope, waiting_line, ClassRow,
         Scope,
         WRITE_TOOLS,
     };
@@ -3429,7 +3742,9 @@ mod tests {
         for name in &names {
             assert!(seen.insert(*name), "{name} is defined twice");
         }
-        assert_eq!(names.len(), WRITE_TOOLS.len() + 5);
+        // The read tools: get_overview, list_material, search_material,
+        // read_material, list_hints and lecture_weeks.
+        assert_eq!(names.len(), WRITE_TOOLS.len() + 6);
     }
 
     /// The proposal an approval names has to be there and still waiting, and
@@ -3447,18 +3762,79 @@ mod tests {
             )
             .expect("proposal");
         }
-        let (class_id, source, dest) = pending_move(&conn, 1).expect("waiting");
+        let (class_id, class_name, source, dest) = pending_move(&conn, 1).expect("waiting");
         assert_eq!(class_id, 3);
+        assert_eq!(class_name, "Biostatistics for AI");
         assert_eq!(source, "_Inbox/a.csv");
         assert_eq!(dest, "Weeks/Week 03/a.csv");
 
         let missing = pending_move(&conn, 99).expect_err("no such row");
         assert!(missing.to_string().contains("no file-move proposal has id 99"), "{missing}");
+        // A resolved id is a refusal that names what the id actually points at
+        // — the class and both paths — so a number taken from nowhere reads as
+        // wrong rather than as an approval that already happened.
         for (id, word) in [(2, "approved"), (3, "dismissed")] {
-            let refused = pending_move(&conn, id).expect_err("resolved");
-            assert!(refused.to_string().contains(word), "{refused}");
-            assert!(refused.to_string().contains("no longer waiting"), "{refused}");
+            let refused = pending_move(&conn, id).expect_err("resolved").to_string();
+            assert!(refused.contains(word), "{refused}");
+            assert!(refused.starts_with("nothing was approved"), "{refused}");
+            assert!(refused.contains("Biostatistics for AI"), "{refused}");
+            assert!(refused.contains("_Inbox/a.csv"), "{refused}");
+            assert!(refused.contains("Weeks/Week 03/a.csv"), "{refused}");
         }
+    }
+
+    /// The date a filing uses when none is given (SPEC §7.1): the course's own
+    /// published date for the week, else the last day the class met. Never
+    /// counted forward from Week 1, and never silent — `add_lecture` reports
+    /// which of the two it used.
+    #[test]
+    fn a_filing_dates_itself_from_the_course_or_the_meeting_day() {
+        let conn = fixture();
+        // Biostatistics (id 3) meets Thursday (seeded); the 16th is a Wednesday.
+        let (date, how) = resolve_lecture_date(&conn, 3, None, "2026-09-16").expect("a date");
+        assert_eq!(date, "2026-09-10", "the Thursday before Wednesday the 16th");
+        assert!(how.contains("Thursday"), "{how}");
+
+        // A week the course dated answers with that date, whatever the weekday
+        // — the fixture's Week 1 opens on a Thursday the class did not meet.
+        let (date, how) = resolve_lecture_date(&conn, 3, Some(1), "2026-09-16").expect("a date");
+        assert_eq!(date, "2026-08-20");
+        assert!(how.contains("week 1"), "{how}");
+
+        // A week the course dated none of falls back to the meeting day rather
+        // than to arithmetic over the weeks around it (SPEC §8.5).
+        let (date, _) = resolve_lecture_date(&conn, 3, Some(4), "2026-09-16").expect("a date");
+        assert_eq!(date, "2026-09-10");
+
+        // A class that meets on no published day is asked, not guessed at.
+        conn.execute("DELETE FROM meetings WHERE class_id = 2", [])
+            .expect("no meetings");
+        let refused = resolve_lecture_date(&conn, 2, None, "2026-09-16").expect_err("no meetings");
+        assert!(refused.to_string().contains("cannot be resolved"), "{refused}");
+    }
+
+    /// A transcript's own name is where its date is kept, and a path may
+    /// arrive spelled from the AIBHS root — both are what the lecture tools
+    /// read before they touch anything.
+    #[test]
+    fn a_transcript_is_read_by_its_name_and_either_spelling_of_its_path() {
+        assert_eq!(
+            date_in_name("Weeks/Week 04 — Data Quality/2026-09-15 — Lecture.md").as_deref(),
+            Some("2026-09-15")
+        );
+        assert_eq!(date_in_name("Weeks/Week 04/Lecture.md"), None);
+
+        let class = ClassRow {
+            id: 1,
+            display_name: "Fundamentals of AI in Medicine I".into(),
+            folder_name: "Fundamentals of Artificial Intelligence in Medicine I".into(),
+        };
+        let rel = "Weeks/Week 04/2026-09-15 — Lecture.md";
+        assert_eq!(class_relative(&class, rel), rel);
+        assert_eq!(
+            class_relative(&class, &format!("{}/{rel}", class.folder_name)),
+            rel
+        );
     }
 
     /// An explicitly empty `ids` is a refusal, not "approve everything for

@@ -1940,6 +1940,55 @@ pub fn resolve_proposal(
     Ok("left in place".to_string())
 }
 
+/// A move asked for outright, with no card in between — the correction
+/// affordance chat reaches for when a lecture is filed under the wrong week
+/// (SPEC §8.5), and `refile_lecture`'s one call.
+///
+/// It takes the same path an approval takes: the last checks, the rename, the
+/// index, the lecture's own refile and the audit row, recorded as a `chat`
+/// proposal already approved — so the queue's history reads as it does for
+/// every other move and the notice's `Undo` reverses this one too. Nothing
+/// here decides whether the move is wanted; that is the caller's, and for a
+/// file the reader did not put there it is a proposal instead.
+pub fn move_now(
+    app: &AppHandle,
+    class_id: i64,
+    source_rel: &str,
+    dest_rel: &str,
+    reasoning: &str,
+) -> Result<String> {
+    let (source, dest, audit_id) = with_conn(app, |conn| {
+        let class_dir = crate::scanner::class_dir(conn, class_id)?;
+        let source = clean_rel(source_rel)?;
+        let dest = clean_rel(dest_rel)?;
+        let audit_id = move_file(
+            conn,
+            class_id,
+            &class_dir,
+            &source,
+            &dest,
+            Recorded {
+                proposal: ProposalRow::New { source: "chat", reasoning },
+                proposed_by: "chat",
+                confidence: None,
+                action: "sort.move",
+                extra: json!({ "reasoning": reasoning }),
+            },
+        )?;
+        Ok((source, dest, audit_id))
+    })?;
+    emit_hub_change(app, "proposals");
+    emit_hub_change(app, "files");
+    let name = dest.rsplit('/').next().unwrap_or(&dest).to_string();
+    notify(
+        app,
+        format!("Filed {name} under {}/", folder_of(&dest)),
+        vec![audit_id],
+        Some(class_id),
+    );
+    Ok(format!("{source} → {dest}"))
+}
+
 /// What an approval moved.
 struct Moved {
     class_id: i64,

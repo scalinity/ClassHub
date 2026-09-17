@@ -27,6 +27,107 @@ function safeUrl(href: string): string | null {
   return SAFE_URL.test(clean) ? clean : null;
 }
 
+/**
+ * How much of an address is worth reading. A Zoom share link carries a
+ * sixty-character id that tells nobody anything, and shown whole it is what
+ * pushes the panel sideways — so an address renders as its host and as much
+ * path as fits, with the whole of it on the title and on the click.
+ */
+const LABEL_BUDGET = 38;
+
+/** `https://ufl.zoom.us/rec/share/v3AV…qRZ` → `ufl.zoom.us/rec/share/…`. */
+export function linkLabel(url: string): string {
+  const bare = url.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  const [addr = bare] = bare.split(/[?#]/, 1);
+  const [host = addr, ...segments] = addr.replace(/\/+$/, "").split("/");
+  let label = host;
+  // A query or a fragment is dropped outright; a path keeps whole segments
+  // while they fit, so what is shown is a real prefix of where it goes.
+  let dropped: "path" | "query" | null = addr.length < bare.length ? "query" : null;
+  for (const segment of segments) {
+    if (label.length + segment.length + 1 > LABEL_BUDGET) {
+      dropped = "path";
+      break;
+    }
+    label += `/${segment}`;
+  }
+  if (dropped === "path") return `${label}/…`;
+  if (dropped === "query") return `${label}?…`;
+  return label;
+}
+
+/** A bare URL in prose, up to the whitespace or quote that ends it. */
+const BARE_URL = /https?:\/\/[^\s<>"']+/gi;
+
+/** Punctuation that belongs to the sentence rather than to the address. */
+const TRAILING = /[.,;:!?)\]}"']+$/;
+
+export interface TextPart {
+  /** What to show: the prose as written, or an address as its label. */
+  text: string;
+  /** The whole address, when this part is one. */
+  href?: string;
+}
+
+/**
+ * Plain text split into prose and addresses — what the question a reader typed
+ * is rendered from, since it never passes through markdown.
+ */
+export function splitLinks(text: string): TextPart[] {
+  const parts: TextPart[] = [];
+  let at = 0;
+  for (const match of text.matchAll(BARE_URL)) {
+    if (match.index === undefined) continue;
+    const url = match[0].replace(TRAILING, "");
+    if (url === "") continue;
+    if (match.index > at) parts.push({ text: text.slice(at, match.index) });
+    parts.push({ text: linkLabel(url), href: url });
+    at = match.index + url.length;
+  }
+  if (at < text.length) parts.push({ text: text.slice(at) });
+  return parts;
+}
+
+/** A link that leaves the app for the browser, marked as leaving. */
+const EXTERNAL = /^https?:\/\//i;
+const LEAVES = '<span class="ext-mark" aria-hidden="true">↗</span>';
+
+/**
+ * The one place an answer's anchor is written. `addr` marks the shortened
+ * form, which is set in mono like every other address in the app; a label the
+ * model wrote in words keeps the prose face.
+ */
+function anchor(
+  url: string,
+  label: string,
+  shortened: boolean,
+  title?: string | null,
+): string {
+  const external = EXTERNAL.test(url);
+  const tip = title ?? (external ? url : null);
+  const cls = `${external ? "ext" : ""}${shortened ? " addr" : ""}`.trim();
+  return (
+    `<a href="${escapeHtml(url)}"` +
+    (cls === "" ? "" : ` class="${cls}"`) +
+    (tip === null || tip === undefined ? "" : ` title="${escapeHtml(tip)}"`) +
+    `>${label}${external ? LEAVES : ""}</a>`
+  );
+}
+
+/**
+ * Whether a link's label is its own address — every autolinked URL, and the
+ * model writing one out in full. Such a label says nothing the host does not.
+ */
+function isAddress(text: string, href: string): boolean {
+  const plain = text.trim().replace(/\/+$/, "");
+  const target = href.trim().replace(/\/+$/, "");
+  return (
+    plain === target ||
+    `https://${plain}` === target ||
+    `http://${plain}` === target
+  );
+}
+
 const md = new Marked({
   renderer: {
     /** The model's output is prose, not markup: raw HTML renders as literal text. */
@@ -37,8 +138,8 @@ const md = new Marked({
       // A rejected scheme keeps its text — dropping the label would hide from
       // the reader that the model offered a link at all.
       if (url === null) return text;
-      const attr = title ? ` title="${escapeHtml(title)}"` : "";
-      return `<a href="${escapeHtml(url)}"${attr}>${text}</a>`;
+      const bare = isAddress(decodeEntities(text), href);
+      return anchor(url, bare ? escapeHtml(linkLabel(url)) : text, bare, title);
     },
     image({ href, title, text }) {
       const url = safeUrl(href);

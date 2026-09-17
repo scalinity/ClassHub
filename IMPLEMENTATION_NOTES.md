@@ -7233,3 +7233,178 @@ Materials (`folder_filing`, SPEC §10.7).
 - `collect_files` fills its output as it walks, so `list_inbox` ignores its
   error and keeps what was reached — an unreadable subfolder costs its own
   entries, not the whole listing.
+
+## M39 — One lecture, one file (2026-09-16)
+
+### Phase 0 — measured
+
+Read off the live database and the tree on Sept 16, after chat session #6 and
+before anything changed:
+
+- **The duplicate is byte-identical and still on disk.** Both
+  `Weeks/Week 04 — Data Quality and Preparation/2026-09-15 — Lecture.md` and
+  `… — Lecture (2).md` are 81 KB and hash to
+  `fa950ae6673949243604b36e06e8411f82637234764f4f05e0cacb85ee3066fd`. The index
+  knows: the `(2)` row carries `duplicate_of` naming the first.
+- **The digest ran against the copy.** Job #366 (`lecture_digest`, scope
+  `… Lecture (2).md`) succeeded at 19:26. Week 4's corpus note, hints and cards
+  are all named `2026-09-15 — Lecture (2)`, and the session document is
+  `Study Guides/Sessions/2026-09-15 — Data Quality Control and Site Effects`.
+- **Week 4 counts two lectures.** Both transcripts hold an `applied`
+  `lecture_contributions` row against unit 26: the original's is the filing
+  placeholder (`Whole session — Week 4 …`) pointing at a corpus note that was
+  never written, the copy's the digest's own (`Data Quality Control and Site
+  Effects`).
+- **The cleanup never happened.** `move_proposals` #66 is still `pending` —
+  `… Lecture (2).md` → `Weeks/_duplicates/…`, written at 19:29. The turn called
+  `approve_move(1)`, an id from months ago; the tool answered "proposal 1 is
+  already approved — it is no longer waiting" and the answer reported the
+  duplicate cleared. Nothing moved. The destination it holds is not a declared
+  week, so approving it would run `refile_lecture` into a folder no division
+  reads and take Week 4's note with it.
+- **What the conversation cost.** Session #6 holds 38 `chat_messages` rows,
+  65,170 bytes of content, for two filings and one digest. Four of its rounds
+  were spent asking for a date the app could resolve.
+- **Every class publishes a meeting day** (`meetings`, seeded in `0001`):
+  Fundamentals and Applied Tue, Design Studio Wed, Biostatistics Thu. Applied's
+  weeks come out of its Part ranges and carry no `starts_on`, so `nearest_week`
+  answers `None` for any date — the week has to be asked for, the date does not.
+- **`job_model.lecture_digest` and `job_effort.lecture_digest` are unset**, so a
+  digest runs on the global pair. Choosing Sonnet for digests is a Settings
+  change, which is what the prompt now names.
+
+### What was built
+
+- **`digest_lecture(class, path)`** over `lectures::enqueue_digest`, which was
+  reachable only from the Lectures section's `Distill` button. It takes the
+  transcript's own path in either spelling (`class_relative` strips the class
+  folder, since answers cite paths from the AIBHS root), reads the session's
+  date out of the file name — the only place a filed lecture's date is kept —
+  and refuses a path the class has not filed, listing what it has.
+- **`add_lecture` refuses a second filing** for a class and date that already
+  hold a transcript, before the capture, naming what is there and the two ways
+  past: `digest_lecture` for that transcript, or a `title` for a genuinely
+  different session that day (M26). `title` given, the check is skipped — that
+  is what a second Tuesday lecture passes.
+- **The digest defaults on**, as `AddLecture.tsx` has it and as M38's brief
+  specified; `digest: false` is the exception, and the tool description says so.
+- **`date` became optional.** `resolve_lecture_date` takes the course's
+  published date for the week where there is one, else the most recent weekday
+  in `meetings` on or before today, and hands back the date with the rule that
+  reached it; the result line states both and points at `refile_lecture`. A
+  class with neither is a refusal that asks.
+- **`lecture_weeks(class, date?)`** as a read tool: every week, its folder, the
+  division it counts toward, its published date, what it already holds, and what
+  a date resolves to — with a line for a course that publishes no dates saying
+  the week must be said outright.
+- **`refile_lecture(class, from, to)`** over a new `sorter::move_now`, which is
+  `move_file` plus the emits and the notice — the same path an approval takes,
+  recorded as an approved `chat` proposal with its audit row and its Undo. A
+  destination outside `Weeks/` is refused rather than silently costing the
+  transcript its session document, note, hints and division (`lecture_left`).
+- **Proposals answer with their ids**, read back inside the writing transaction,
+  and `approve_move`/`dismiss_move` echo the class and the paths they resolved.
+  Both refusals name what the id actually points at, and open with "nothing was
+  approved" so a resolved id cannot read as a move that happened.
+- **The system prompt** carries the date policy, one-ask, ids are read never
+  guessed, nothing deletes, report what the tool said, stop before writing when a
+  request cannot be honoured, and Settings as the place a job's model is chosen.
+- **The panel holds its width.** Addresses render as host plus as much path as a
+  38-character budget holds, in mono with an outward mark, the whole of it on
+  hover and on the click — in an answer through `renderAnswer`'s link renderer
+  (only where the label is the address itself) and in a typed question through
+  `splitLinks`, since a question never passes through markdown. Every block that
+  can hold a long token breaks it. The composer's first line sits on the midline:
+  the row aligns to its bottom so a grown question keeps the send button at the
+  foot, which left one 23px line low in the 28px box.
+
+### Gotchas
+
+- **Identical bytes defeat the scan's move detection.** `lecture_left` refiles a
+  transcript when it finds the same content at a path the index did not hold, so
+  with two byte-identical copies the pairing is ambiguous. The recovery is
+  therefore two steps with a scan between them, never one.
+- **`morph-mcp__edit_file` rewrote SPEC.md whole** on a 2,941-line insert
+  (2,895 deletions, 2,615 insertions, restored from git). Inserts into the long
+  documents go through `head`/`tail` composition or the native editor.
+
+### Verified — the Week 4 duplicate, recovered
+
+Done on the installed build with no job running and nothing re-distilled. The
+copy was the one carrying the digest, so removing *it* would have thrown away
+job #366's work; the twin that carried nothing went instead, and the survivor
+took the clean name. Two steps, with a launch scan between them, because
+byte-identical files make `lecture_left`'s move detection ambiguous when both
+change at once:
+
+1. `2026-09-15 — Lecture.md` (the undistilled twin) moved out of the week
+   folder; relaunch. The scan dropped its `files` row and its placeholder
+   contribution, and cleared `duplicate_of` on the survivor.
+2. `2026-09-15 — Lecture (2).md` renamed to `2026-09-15 — Lecture.md`;
+   relaunch. The scan read it as a Finder move and refiled it: the contribution
+   row, the corpus note, the hints and the cards all carry the clean name, and
+   the session document's `guides` scope names it.
+
+Week 4 now holds one transcript, distilled, correctly named. Proposal #66
+resolved itself as `dismissed` once its source was gone (§10 step 6) — the
+auto-dismissal it was written for. The twin is recoverable from the session
+scratchpad until it is cleared.
+
+### The shift stopped on a warning (2026-09-16)
+
+The Job Center's overnight line read `nothing was waiting · stopped at the rate
+limit, the seven-day window resets in 41 h 45 min`. Both halves were wrong, and
+the logs say why.
+
+- **`allowed_warning` is an allowance.** Every `rate_limit_event` in the recent
+  job logs reads
+  `{"status":"allowed_warning","resetsAt":1789700400,"rateLimitType":"seven_day","utilization":0.81,"surpassedThreshold":0.75}`
+  — the CLI's notice that a window has passed 75%, streamed with that window's
+  real reset attached. `limit_reached` tested `status != "allowed"`, so the
+  notice read as a refusal: `shift_runs` #6 (night of Sept 13) and #7 (night of
+  Sept 15) both stopped with `stopped_by = rate_limit` and an empty tally, at
+  81% of a window where every job would have run. The test is now
+  `!status.starts_with("allowed")`.
+- **A stored countdown goes stale.** Run #7 started at 05:14:21 and wrote
+  "resets in 41 h 45 min", which was true then: the reset is 1789700400, i.e.
+  Thursday Sept 17 at 23:00 EDT, and 41 h 45 min before that is 05:15. The
+  string lives in `shift_runs.summary` and is rendered whenever the Job Center
+  is opened, so by 20:14 it was fifteen hours out. `RateLimit::describe` now
+  states the time — `the seven-day window resets Thursday at 11 pm` — through
+  `clock_of`, which reads today / tomorrow / the weekday / a date, in SPEC §12's
+  lowercase clock.
+
+Both the five-hour and seven-day resets in the logs check out against the
+subscription's real windows, so nothing but the reading was wrong.
+
+### Verified — on the installed build
+
+Driven through the ask panel of `/Applications/ClassHub.app` built from this
+tree, in one conversation (session 7):
+
+- **`lecture_weeks`** answered for Applied with all sixteen weeks, the Part each
+  counts toward and the three already holding a lecture; the answer repeated the
+  listing's own line that a course naming week ranges needs the week said
+  outright. This is the question the model guessed at before.
+- **A filing dates itself.** Asked to file "yesterday's Fundamentals lecture",
+  the model called `add_lecture` with a class and a source and **no date**; the
+  tool resolved 2026-09-15 — the class's most recent Tuesday — on its own.
+- **The same-date refusal holds even when told to ignore it.** The model first
+  declined by itself, reading the overview. Told "call add_lecture for it
+  anyway", it did, and the tool answered `Nothing was filed. … already holds a
+  lecture for 2026-09-15`, naming the file, `digest_lecture` and the title
+  escape. No Zoom window opened and the week folder still holds one file: the
+  refusal lands before the capture.
+- **A proposal answers with its id.** `propose_file_moves` came back with
+  `#79 · …/Week 03/CAI6734_Week03_Language_Models.pdf → …/Week 03/Slides/…`,
+  and the dismissal echoed `Declined proposal 79 — Applied Generative AI in
+  Medicine · Weeks/Week 03/…`. Nothing was left waiting.
+- **`digest_lecture`'s guard** named the class and listed every transcript it
+  has filed when handed a path that does not exist.
+- **The link form is live**: the panel's accessibility tree reads
+  `AXLink | t=ufl.zoom.us/rec/share/…` where session 6 held the raw URL.
+
+Not exercised live, deliberately: `digest_lecture`'s queueing path, which would
+spend an Opus run and overwrite a good note; `refile_lecture`, which moves a
+real transcript; and the shift's rate-limit reading, which nothing can show
+until a night runs. All three are covered by `cargo test` (380 passing).

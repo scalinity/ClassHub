@@ -19,6 +19,7 @@ import {
   formatArgs,
   renderAnswer,
   shortModel,
+  splitLinks,
 } from "@/lib/answer";
 import { classesQuery, type ClassInfo } from "@/lib/classes";
 import {
@@ -47,7 +48,7 @@ import { buttonIconNeutral, buttonTextNeutral } from "@/lib/styles";
  * anchored `button.cite` elements the markdown pass injects.
  */
 const PROSE = [
-  "text-[14px] leading-[1.6]",
+  "text-[14px] leading-[1.6] break-words",
   "[&_p]:my-2 [&_p:first-child]:mt-0",
   "[&_h1]:mt-4 [&_h1]:mb-1.5 [&_h1]:text-[16px] [&_h1]:font-semibold [&_h1]:tracking-tight",
   "[&_h2]:mt-4 [&_h2]:mb-1.5 [&_h2]:text-[15px] [&_h2]:font-semibold",
@@ -55,7 +56,11 @@ const PROSE = [
   "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-4",
   "[&_li]:my-1 [&_li]:marker:text-muted-foreground/50",
   "[&_strong]:font-semibold [&_em]:italic",
-  "[&_a]:underline [&_a]:decoration-dotted",
+  "[&_a]:cursor-pointer [&_a]:underline [&_a]:decoration-dotted [&_a]:underline-offset-2",
+  // An address shown short is set like every other address in the app, and
+  // carries the mark that says the click leaves for the browser.
+  "[&_a.addr]:rounded-sm [&_a.addr]:px-0.5 [&_a.addr]:font-mono [&_a.addr]:text-[12px] [&_a.addr]:hover:bg-muted",
+  "[&_.ext-mark]:pl-0.5 [&_.ext-mark]:text-[0.85em] [&_.ext-mark]:opacity-50",
   "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
   "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted/40 [&_pre]:p-2.5 [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:ring-1 [&_pre]:ring-border",
   "[&_:not(pre)>code]:rounded-sm [&_:not(pre)>code]:bg-muted [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[12px]",
@@ -109,6 +114,43 @@ function pickStarters(
 /** A dashed suggestion that fills in on hover — starters and follow-ups alike. */
 const suggestion =
   "group flex w-full cursor-pointer items-baseline gap-2 rounded-md border border-dashed border-border px-2.5 py-2 text-left text-body text-muted-foreground transition-colors hover:border-solid hover:bg-muted/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring";
+
+/** The shortened-address form, shared by a question's links and an answer's. */
+const ADDRESS =
+  "cursor-pointer rounded-sm px-0.5 font-mono text-[12px] underline decoration-dotted underline-offset-2 hover:bg-muted";
+
+/**
+ * A typed question renders as text, so its addresses are found here rather
+ * than by markdown: a pasted share link is shown as its host, opens in the
+ * browser, and carries the whole address on hover.
+ */
+function Linked({ text }: { text: string }) {
+  return (
+    <>
+      {splitLinks(text).map((part, index) =>
+        part.href === undefined ? (
+          part.text
+        ) : (
+          <a
+            key={index}
+            href={part.href}
+            title={part.href}
+            onClick={(e) => {
+              e.preventDefault();
+              void openUrl(part.href ?? "").catch(() => {});
+            }}
+            className={ADDRESS}
+          >
+            {part.text}
+            <span aria-hidden className="pl-0.5 text-[0.85em] opacity-50">
+              ↗
+            </span>
+          </a>
+        ),
+      )}
+    </>
+  );
+}
 
 /**
  * SPEC §9 — the ask panel: a right-edge overlay (⌘J) over whatever you were
@@ -359,7 +401,12 @@ function Panel({
                   el.style.height = "auto";
                   el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
                 }}
-                className="flex-1 resize-none bg-transparent text-[14px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
+                // `py-0.5` centres the first line against the send button: the
+                // row aligns to its bottom so a grown question keeps the button
+                // at the foot, which left a single 23px line sitting low in the
+                // 28px box. Two pixels either side put it back on the midline
+                // without making the box any taller.
+                className="flex-1 resize-none bg-transparent py-0.5 text-[14px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
               />
               {chat.streaming ? (
                 <button
@@ -481,8 +528,8 @@ const Turn = memo(function Turn({
   switch (item.kind) {
     case "question":
       return (
-        <p className="mt-5 border-l-2 border-foreground/30 pl-2.5 text-[14px] font-medium leading-snug whitespace-pre-wrap first:mt-0">
-          {item.text}
+        <p className="mt-5 border-l-2 border-foreground/30 pl-2.5 text-[14px] font-medium leading-snug break-words whitespace-pre-wrap first:mt-0">
+          <Linked text={item.text} />
         </p>
       );
     case "tool":
@@ -540,7 +587,7 @@ function Answer({
       {item.tail.length > 0 && (
         // The unparsed tail: each delta is its own element, so React only
         // ever appends — settled text never re-mounts and never re-fades.
-        <p className="my-2 whitespace-pre-wrap first:mt-0">
+        <p className="my-2 break-words whitespace-pre-wrap first:mt-0">
           {item.tail.map((chunk, index) => (
             <span
               key={index}
@@ -599,7 +646,7 @@ function ThinkingBlock({
           className="shrink-0 opacity-40 transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none"
         />
       </summary>
-      <p className="mt-1.5 mb-1 ml-1 border-l border-border pl-3 text-meta leading-relaxed whitespace-pre-wrap text-muted-foreground">
+      <p className="mt-1.5 mb-1 ml-1 border-l border-border pl-3 text-meta leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
         {item.text}
       </p>
     </details>
@@ -650,11 +697,11 @@ function ToolChip({
         />
       </summary>
       <div className="mt-1.5 mb-1 ml-1 space-y-1.5 border-l border-border pl-3">
-        <pre className="whitespace-pre-wrap font-mono text-fine leading-relaxed text-foreground/70">
+        <pre className="break-words whitespace-pre-wrap font-mono text-fine leading-relaxed text-foreground/70">
           {formatArgs(item.input)}
         </pre>
         {item.detail !== undefined && (
-          <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap font-mono text-fine leading-relaxed text-muted-foreground">
+          <pre className="max-h-56 overflow-y-auto break-words whitespace-pre-wrap font-mono text-fine leading-relaxed text-muted-foreground">
             {item.detail}
           </pre>
         )}

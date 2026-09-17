@@ -81,7 +81,8 @@ const UNSAID_RESET: i64 = 5 * 60 * 60;
 
 #[derive(Clone, Debug)]
 pub struct RateLimit {
-    /// `allowed`, or whatever the CLI says when it is not.
+    /// What the CLI called it: `allowed`, `allowed_warning` while a window
+    /// fills, or a refusal.
     pub status: String,
     /// `five_hour` or `seven_day`.
     pub window: Option<String>,
@@ -99,26 +100,50 @@ impl RateLimit {
             _ => "the subscription window",
         };
         match self.resets_at {
-            Some(at) if at > now() => {
-                let minutes = (at - now()) / 60;
-                if minutes >= 60 {
-                    format!("{window} resets in {} h {} min", minutes / 60, minutes % 60)
-                } else {
-                    format!("{window} resets in {minutes} min")
-                }
-            }
+            Some(at) if at > now() => format!("{window} resets {}", clock_of(at)),
             _ => format!("{window} is at its limit"),
         }
     }
 }
 
-/// Whether an event says the limit is reached: a status other than `allowed`
-/// whose reset, where it named one, is still ahead — and where it named none,
-/// seen within `UNSAID_RESET`. Pure, since the wrong answer is silent either
-/// way — a shift that never stops, or one that never starts on an event that
-/// lifted hours ago.
+/// A reset as the time it happens, not as a countdown.
+///
+/// This string is stored on the shift run that wrote it and read whenever the
+/// Job Center is next opened: run #7 wrote "resets in 41 h 45 min" at 05:14 and
+/// was still saying it at 20:14, fifteen hours out. An absolute time is true
+/// whenever it is read. SPEC §12's clock — `11 pm`, `9:30 pm`.
+fn clock_of(at: i64) -> String {
+    let Some(utc) = chrono::DateTime::from_timestamp(at, 0) else {
+        return "soon".to_string();
+    };
+    let local = utc.with_timezone(&chrono::Local);
+    let clock = if local.format("%M").to_string() == "00" {
+        local.format("%-I %p").to_string()
+    } else {
+        local.format("%-I:%M %p").to_string()
+    }
+    .to_lowercase();
+    match (local.date_naive() - chrono::Local::now().date_naive()).num_days() {
+        0 => format!("today at {clock}"),
+        1 => format!("tomorrow at {clock}"),
+        2..=6 => format!("{} at {clock}", local.format("%A")),
+        _ => format!("on {} at {clock}", local.format("%-d %b")),
+    }
+}
+
+/// Whether an event says the limit is reached — i.e. that the next job would be
+/// refused, which is the only thing that should stop a night's work.
+///
+/// A status is a refusal only where it is not one of the CLI's `allowed` kinds.
+/// `allowed_warning` is the one it streams from 75% of a window onward, with
+/// the window's real reset attached, and reading it as a refusal is what stopped
+/// the shift on the nights of Sept 13 and Sept 15 with nothing done: the
+/// subscription was at 81% of the seven-day window and every job would have run.
+/// A reset still ahead is required as well, and where the event named none, that
+/// it was seen within `UNSAID_RESET`. Pure, since the wrong answer is silent
+/// either way — a shift that never stops, or one that never starts.
 pub(crate) fn limit_reached(limit: &RateLimit, now: i64) -> bool {
-    limit.status != "allowed"
+    !limit.status.starts_with("allowed")
         && match limit.resets_at {
             Some(at) => at > now,
             None => now < limit.seen_at + UNSAID_RESET,
@@ -3056,12 +3081,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The shift's stop rule (SPEC §6): every event logged so far says
-    /// `allowed`, and only a status that is not — whose reset, where named,
-    /// is still ahead — is a reason to stop. An event that lifted hours ago
-    /// must not stop tonight's shift.
+    /// The shift's stop rule (SPEC §6): only a refusal — a status that is not
+    /// one of the CLI's `allowed` kinds, whose reset, where named, is still
+    /// ahead — is a reason to stop. An event that lifted hours ago must not
+    /// stop tonight's shift, and neither must a warning: `allowed_warning` is
+    /// what the CLI streams from 75% of a window onward, and reading it as a
+    /// refusal cost the nights of Sept 13 and Sept 15 with every job runnable.
     #[test]
-    fn the_rate_limit_is_reached_on_a_status_other_than_allowed_with_its_reset_ahead() {
+    fn the_rate_limit_is_reached_on_a_refusal_with_its_reset_ahead_never_on_a_warning() {
         let allowed = RateLimit {
             status: "allowed".into(),
             window: Some("five_hour".into()),
@@ -3069,6 +3096,13 @@ mod tests {
             seen_at: 500,
         };
         assert!(!limit_reached(&allowed, 1_000));
+        let warned = RateLimit {
+            status: "allowed_warning".into(),
+            window: Some("seven_day".into()),
+            resets_at: Some(2_000),
+            seen_at: 500,
+        };
+        assert!(!limit_reached(&warned, 1_000), "a warning is still an allowance");
         let reached = RateLimit {
             status: "rejected".into(),
             window: Some("five_hour".into()),
@@ -3110,6 +3144,21 @@ mod tests {
             seen_at: now(),
         });
         assert!(super::rate_limit_reached().is_none());
+    }
+
+    /// A reset reads as the time it happens. The string is stored on the shift
+    /// run that wrote it and read whenever the Job Center is next opened, so a
+    /// countdown is true for one moment and wrong from then on.
+    #[test]
+    fn a_reset_reads_as_a_time_rather_than_a_countdown() {
+        let at = chrono::Local::now() + chrono::Duration::hours(26);
+        let text = super::clock_of(at.timestamp());
+        assert!(!text.contains("resets in"), "{text}");
+        assert!(text.contains(" at "), "{text}");
+        assert!(!text.starts_with("today"), "26 hours out is never today: {text}");
+        let soon = chrono::Local::now() + chrono::Duration::minutes(40);
+        let text = super::clock_of(soon.timestamp());
+        assert!(text.contains(" at "), "{text}");
     }
 
     /// The launch gate stands on the latest verdict, not the latest success: a
