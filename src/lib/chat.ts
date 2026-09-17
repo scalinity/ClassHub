@@ -13,6 +13,13 @@ export interface ChatSettings {
   effort: string | null;
 }
 
+/**
+ * What a model does when `output_config.effort` is left unset — high, on every
+ * current model. Named here beside the ladder so the composer can say the level
+ * that will actually run rather than the word "default".
+ */
+export const EFFORT_UNSET = "high";
+
 /** SPEC §9 effort ladder, cheapest first. */
 export const EFFORT_LEVELS = [
   { id: "", label: "Model default", note: "Whatever the model does unasked — high, on current models." },

@@ -15,17 +15,24 @@ import "katex/dist/katex.min.css";
 
 import { SettingsPane } from "@/components/ChatSettingsPane";
 import { FileViewer } from "@/components/FileViewer";
+import { Picker } from "@/components/Picker";
 import {
   formatArgs,
+  modelName,
   renderAnswer,
   shortModel,
   splitLinks,
 } from "@/lib/answer";
 import { classesQuery, type ClassInfo } from "@/lib/classes";
 import {
+  chooseEffort,
+  chooseModel,
   closeChat,
+  EFFORT_LEVELS,
+  EFFORT_UNSET,
   formatSessionDate,
   isWriteTool,
+  loadModels,
   newChat,
   requestFileView,
   selectSession,
@@ -38,6 +45,7 @@ import {
   useChat,
   type ChatItem,
   type ChatSnapshot,
+  type ModelOption,
 } from "@/lib/chat";
 import { openClassId } from "@/lib/sorter";
 import { buttonIconNeutral, buttonTextNeutral } from "@/lib/styles";
@@ -382,7 +390,7 @@ function Panel({
             {chat.error && (
               <p className="mb-2 px-1 text-body text-destructive">{chat.error}</p>
             )}
-            <div className="flex items-end gap-1.5 rounded-[10px] bg-background px-2.5 py-2 ring-1 ring-border focus-within:ring-ring">
+            <div className="flex items-center gap-1.5 rounded-[10px] bg-background px-2.5 py-2 ring-1 ring-border focus-within:ring-ring">
               <textarea
                 rows={1}
                 autoFocus
@@ -401,19 +409,26 @@ function Panel({
                   el.style.height = "auto";
                   el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
                 }}
-                // `py-0.5` centres the first line against the send button: the
-                // row aligns to its bottom so a grown question keeps the button
-                // at the foot, which left a single 23px line sitting low in the
-                // 28px box. Two pixels either side put it back on the midline
-                // without making the box any taller.
-                className="flex-1 resize-none bg-transparent py-0.5 text-[14px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
+                // The first line sits on the box's midline, which takes two
+                // corrections. The row centres rather than bottom-aligns (the
+                // send button keeps the foot itself, below), and `pb-0.5`
+                // lifts the line 1px.
+                //
+                // The lift is measured against the cap band, not the ink: at
+                // 14px/1.625 the line box is 22.75px against a 17px font box,
+                // so a centred line leaves the caps 0.57px low, and the
+                // bottom-aligned row added 0.38px more. Calibrating on the ink
+                // instead reads the string — "Ask about your classes…" carries
+                // descenders and wants 1.64px, a line of caps wants none — and
+                // a correction that moves with what is typed is the wrong one.
+                className="flex-1 resize-none bg-transparent pb-0.5 text-[14px] leading-relaxed outline-none placeholder:text-muted-foreground/60"
               />
               {chat.streaming ? (
                 <button
                   type="button"
                   aria-label="Stop answering"
                   onClick={stopChat}
-                  className={buttonIconNeutral}
+                  className={`${buttonIconNeutral} self-end`}
                 >
                   <Square size={12} aria-hidden fill="currentColor" />
                 </button>
@@ -422,24 +437,129 @@ function Panel({
                   type="submit"
                   aria-label="Send"
                   disabled={draft.trim() === ""}
-                  className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground text-background transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:opacity-25"
+                  // `self-end`: the row centres its single line, and a question
+                  // grown to several keeps the button at the foot.
+                  className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center self-end rounded-md bg-foreground text-background transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:opacity-25"
                 >
                   <ArrowUp size={12} aria-hidden strokeWidth={2.5} />
                 </button>
               )}
             </div>
-            <div className="mt-1.5 flex items-center justify-between px-1 text-fine text-muted-foreground">
-              <span className="truncate">
-                {chat.settings?.model
-                  ? shortModel(chat.settings.model)
-                  : "Direct API · no model set"}
-              </span>
-              <span className="shrink-0 pl-2">⏎ send · ⇧⏎ newline</span>
+            <div className="mt-1 flex items-center gap-1 px-0.5 text-fine text-muted-foreground">
+              <WhatAnswers chat={chat} />
             </div>
           </form>
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * The models worth offering under the composer: the newest of each family, and
+ * no Haiku — a question here reads course material and cites it, which is not
+ * work for the small model.
+ *
+ * Read from the list's own order rather than from a table of names, since the
+ * API returns newest first: the first Opus is the current Opus. A table would
+ * be a second place to edit on every release, and the one that gets forgotten.
+ * The model in use is always offered, whatever it is, so the control can name
+ * what is set. Settings still lists every model the key can reach.
+ */
+function currentGeneration(
+  models: readonly ModelOption[],
+  selected: string,
+): ModelOption[] {
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    const family = m.id.replace(/^claude-/, "").split("-")[0] ?? "";
+    // The model in use claims its family like any other, or the next one down
+    // — the Sonnet before this Sonnet — would read as the family's newest.
+    if (m.id === selected) {
+      seen.add(family);
+      return true;
+    }
+    // An id that opens with a number is the older `claude-3-5-sonnet` shape,
+    // which by definition is not a current model.
+    if (family === "haiku" || family === "" || /^\d/.test(family)) return false;
+    if (seen.has(family)) return false;
+    seen.add(family);
+    return true;
+  });
+}
+
+/**
+ * What will answer the next question, changed where it is read: the model and
+ * the effort level under the composer, each opening the app's own list rather
+ * than sending the reader to the settings pane and back. Both write through
+ * the same commands the pane uses, so the two stay in step.
+ *
+ * The model list is fetched from the API, so it is loaded when the list is
+ * first opened rather than when the panel is — a panel opened to read an old
+ * answer should cost nothing.
+ */
+function WhatAnswers({ chat }: { chat: ChatSnapshot }) {
+  if (!chat.settings?.hasKey) {
+    return <span className="truncate">Direct API · no key saved</span>;
+  }
+  const current = chat.settings.model ?? "";
+  const models = chat.models
+    ? currentGeneration(chat.models.models, current).map((m) => ({
+        value: m.id,
+        label: modelName(m.displayName),
+      }))
+    : [
+        {
+          value: current,
+          label: chat.modelsLoading
+            ? "Loading models…"
+            : current
+              ? modelName(shortModel(current))
+              : "No model set",
+        },
+      ];
+  // The level that will actually run: unset means the model's own, which is
+  // high on every current model, and naming it "default" told the reader
+  // nothing about what the next question would cost.
+  const effort = chat.settings.effort ?? EFFORT_UNSET;
+
+  return (
+    <>
+      <Picker
+        neutral
+        variant="quiet"
+        drop="up"
+        label="Model"
+        value={current}
+        options={models}
+        placeholder="No model set"
+        onChange={(id) => void chooseModel(id)}
+        onOpen={() => {
+          if (chat.models === null && !chat.modelsLoading) void loadModels();
+        }}
+        className="min-w-0"
+      />
+      <Picker
+        neutral
+        variant="quiet"
+        drop="up"
+        label="Effort"
+        value={effort}
+        // Without the unset row: this control names a level, and picking one
+        // writes it. Settings keeps "Model default" for putting it back.
+        options={EFFORT_LEVELS.filter((l) => l.id !== "").map((l) => ({
+          value: l.id,
+          label: l.label,
+        }))}
+        onChange={(id) => void chooseEffort(id)}
+        className="shrink-0"
+      />
+      {chat.modelsError && (
+        <span className="min-w-0 truncate pl-1 text-destructive">
+          {chat.modelsError}
+        </span>
+      )}
+    </>
   );
 }
 

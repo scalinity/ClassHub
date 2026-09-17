@@ -7408,3 +7408,67 @@ Not exercised live, deliberately: `digest_lecture`'s queueing path, which would
 spend an Opus run and overwrite a good note; `refile_lecture`, which moves a
 real transcript; and the shift's rate-limit reading, which nothing can show
 until a night runs. All three are covered by `cargo test` (380 passing).
+
+## The composer's own line (2026-09-16)
+
+Three changes under the ask panel's input, all on the installed build.
+
+**The first line sits on the midline.** It had read low, and a first attempt
+(`py-0.5` against a bottom-aligned row) was still 2.25px out — measured off a
+window screenshot by decoding the PNG and profiling pixel rows: the box's ring
+at y=1315.5 and y=1405.5, the placeholder's ink at 1353–1377, so the ink centre
+sat 4.5 device pixels below the box centre. The cause is two separate offsets,
+and only one of them was geometry:
+
+- The row was `items-end`, so a 27px textarea bottom-aligned in a 28px row
+  (the send button's height) put the line box 0.38px low.
+- At 14px/1.625 the line box is 22.75px but the font's own box is 17px, leaving
+  2.875px of half-leading either side; the ink of a line carrying descenders
+  runs 6.58→19.46 inside that box, whose centre is 13.02 against the line box's
+  11.375. Measured with `TextMetrics.actualBoundingBox*` on the app's own font
+  stack: **1.64px** of it, and no arrangement of a centred line box removes it.
+
+So the row centres (`items-center`), the send button takes `self-end` to keep
+the foot of a question grown to several lines, and the textarea carries
+`pb-0.5` — 2px of bottom padding inside a centred box lifts the line 1px.
+
+The lift is 1px rather than 2 because it is measured against the cap band
+(0.57 + 0.38), not the ink (1.64 + 0.38). Correcting for the ink was the first
+attempt and it read the string: "Ask about your classes…" carries descenders,
+and a typed line without any then sat visibly high. The cap band does not move
+with what is typed, so a line of capitals reads 0.43px high and one with
+descenders 0.64px low — half a pixel either way, whatever is in the box.
+
+**The keyboard hint is gone.** `⏎ send · ⇧⏎ newline` sat opposite the model name
+on every turn; Enter sends, which one send teaches.
+
+**The model and the effort are chosen where they are read.** The footer's model
+name became two quiet `Picker`s that open the app's own list upward — the same
+list the settings pane uses, through the same `set_chat_model` and
+`set_chat_effort` commands, so the two surfaces cannot drift. `Picker` gained
+three props for it: `variant` (`quiet` is the bare line of text; `control` stays
+the bordered field), `drop` (`up` for a control near the bottom edge) and
+`onOpen`, which is what loads the model list the first time the list is opened
+rather than when the panel is. Every model the panel can run is Claude's, so
+`modelName` drops the word from both the control and its list — `Sonnet 5`,
+`Opus 4.8`.
+
+Found while testing it: `Picker` did not stop an Escape, so dismissing a list
+inside the chat panel closed the panel behind it. The key is consumed by the
+list now, which is also right for the Add lecture modal and the deadline form.
+
+Two more, from reading the control in use:
+
+- **The model list offers the current generation.** The newest of each family
+  and no Haiku — a question here reads course material and cites it, which is
+  not work for the small model. Taken from the list's own order (the API
+  answers newest first), not a table of names that would need editing on every
+  release, and an id opening with a digit is the older `claude-3-5-sonnet`
+  shape and is dropped. Whatever is actually set is always offered, so the
+  control can name it; that case is why the selected model claims its family
+  before the filter runs, or the Sonnet below this Sonnet read as the newest.
+  Settings still lists every model the key can reach.
+- **The effort control names a level, not a default.** Unset means the model's
+  own, which is high on every current model (`EFFORT_UNSET`), so the composer
+  reads `High` and the unset row is left to Settings. "Model default" said
+  nothing about what the next question would spend.

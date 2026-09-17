@@ -1981,7 +1981,14 @@ contains it.
   that made it is being answered. Only what is sent changes; the rows on disk keep their full
   content. The model's own answer ceiling is stored per model as `chat_max_tokens.<model id>`.
 - Sidebar UX: toggleable right panel, session list, streaming markdown, tool-call chips with
-  expandable args/results, inline confirm cards for proposals. A citation is a class-relative
+  expandable args/results, inline confirm cards for proposals.
+  **What will answer sits under the composer**: the model and the effort level, each a quiet
+  `Picker` opening the app's own list upward, writing through the same commands the settings
+  pane uses — changing either is a question's own decision, and walking to the pane and back
+  lost the question being typed. The model list loads when that list is first opened, never
+  when the panel is. Every model here is Claude's, so the word is dropped from both the
+  control and its list. The keyboard hint that sat opposite is gone: Enter sends, which one
+  send teaches. A citation is a class-relative
   path in inline code, and it opens the file in the material viewer: markdown, `.R`, `.Rmd`,
   `.py`, `.csv` and HTML. An `HH:MM` beside a transcript's citation becomes a link that opens
   the transcript at that heading, through the ids the document register gives a transcript's

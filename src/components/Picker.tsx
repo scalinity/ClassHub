@@ -23,6 +23,9 @@ export function Picker({
   disabled = false,
   neutral = false,
   className = "",
+  variant = "control",
+  drop = "down",
+  onOpen,
 }: {
   label: string;
   value: string;
@@ -35,6 +38,16 @@ export function Picker({
   neutral?: boolean;
   /** Width and placement of the control itself. */
   className?: string;
+  /**
+   * `control` is the bordered field a form wants. `quiet` is the same list
+   * hung off a line of running text — the chat footer's model and effort,
+   * where a field would be a box around a status line.
+   */
+  variant?: "control" | "quiet";
+  /** Which way the list opens; `up` for a control near the bottom edge. */
+  drop?: "down" | "up";
+  /** Called as the list opens, for a caller that loads its options lazily. */
+  onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -42,10 +55,15 @@ export function Picker({
   const trigger = useRef<HTMLButtonElement>(null);
   const selected = options.findIndex((o) => o.value === value);
   const ring = neutral ? "focus-visible:outline-ring" : "focus-visible:outline-(--accent)";
+  const face =
+    variant === "quiet"
+      ? `flex max-w-full cursor-pointer items-center gap-1 rounded-sm px-1 py-0.5 text-left text-fine text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 ${ring} disabled:pointer-events-none disabled:opacity-50`
+      : `flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-surface px-2.5 text-left text-body transition-colors hover:bg-muted/40 focus-visible:outline-2 ${ring} disabled:pointer-events-none disabled:opacity-50`;
 
   const show = () => {
     setActive(selected === -1 ? 0 : selected);
     setOpen(true);
+    onOpen?.();
   };
   // Closing hands focus back to the control, where the keyboard left it.
   const close = () => {
@@ -68,6 +86,9 @@ export function Picker({
       e.preventDefault();
       pick(active);
     } else if (e.key === "Escape" || e.key === "Tab") {
+      // Consumed here: the innermost layer takes the dismissal, or the chat
+      // panel's own Escape would close the whole panel behind the list.
+      e.stopPropagation();
       close();
     } else if (e.key.length === 1 && e.key !== " ") {
       // A typed letter jumps to the next option opening with it, the way
@@ -98,12 +119,16 @@ export function Picker({
             show();
           }
         }}
-        className={`flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-surface px-2.5 text-left text-body transition-colors hover:bg-muted/40 focus-visible:outline-2 ${ring} disabled:pointer-events-none disabled:opacity-50`}
+        className={face}
       >
         <span className={`min-w-0 truncate ${selected === -1 ? "text-muted-foreground" : ""}`}>
           {selected === -1 ? placeholder : options[selected].label}
         </span>
-        <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-muted-foreground/70" />
+        <ChevronsUpDown
+          size={variant === "quiet" ? 10 : 12}
+          aria-hidden
+          className="shrink-0 text-muted-foreground/70"
+        />
       </button>
       {open && (
         <>
@@ -117,7 +142,12 @@ export function Picker({
             tabIndex={-1}
             ref={(el) => el?.focus()}
             onKeyDown={onKey}
-            className="absolute left-0 top-full z-30 mt-1 max-h-64 min-w-full overflow-y-auto rounded-lg bg-surface p-1 shadow-lg ring-1 ring-border outline-none animate-in fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none"
+            className={
+              "absolute left-0 z-30 max-h-64 min-w-full overflow-y-auto rounded-lg bg-surface p-1 shadow-lg ring-1 ring-border outline-none animate-in fade-in duration-150 motion-reduce:animate-none " +
+              (drop === "up"
+                ? "bottom-full mb-1 slide-in-from-bottom-1"
+                : "top-full mt-1 slide-in-from-top-1")
+            }
           >
             {options.map((option, index) => (
               <li

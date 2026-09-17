@@ -425,6 +425,16 @@ export function formatArgs(json: string): string {
 }
 
 /**
+ * A model as a control names it. Every model the panel can run is Claude's, so
+ * the word carries nothing and costs a third of the line in an 11px footer.
+ * Applied to both sources — `shortModel`'s reading of an id and the API's own
+ * `display_name` — so the footer and its list agree.
+ */
+export function modelName(text: string): string {
+  return text.replace(/^claude\s+/i, "");
+}
+
+/**
  * A model id as a name: the release date dropped, each word capitalised, and
  * a trailing run of numbers joined with dots — `claude-sonnet-5` reads
  * `Claude Sonnet 5`, `claude-opus-4-1-20250805` reads `Claude Opus 4.1`.
